@@ -471,26 +471,27 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 
 	// Map organization information.
 	if accountSFID, ok := v1Data["account__c"].(string); ok && accountSFID != "" {
-		// Look up organization information from account mapping if available.
-		// For now, we'll use placeholder organization structure.
-		orgStruct := &struct {
-			Name    *string `json:"name,omitempty"`
-			Website *string `json:"website,omitempty"`
-		}{}
-
-		// Try to get organization name from mappings or use account SFID as fallback.
-		orgName := fmt.Sprintf("Organization-%s", accountSFID)
-		orgStruct.Name = &orgName
-
-		// Only set Organization if we have meaningful data (website is always nil here)
-		if orgStruct.Name != nil {
-			payload.Organization = &struct {
+		// Look up organization information from v1 Organization Service.
+		org, err := lookupOrg(ctx, accountSFID, mappingsKV)
+		if err != nil {
+			logger.With(errKey, err, "account_sfid", accountSFID).WarnContext(ctx, "failed to lookup organization, leaving empty")
+			// Organization lookup failed, leave Organization field nil.
+		} else if org.Name != "" {
+			// Successfully fetched organization data.
+			orgName := org.Name
+			orgStruct := &struct {
 				Name    *string
 				Website *string
 			}{
-				Name:    orgStruct.Name,
-				Website: orgStruct.Website,
+				Name: &orgName,
 			}
+
+			// Parse website URL from Link or Domain attributes.
+			if websiteURL := parseWebsiteURL(org.Link, org.Domain); websiteURL != "" {
+				orgStruct.Website = &websiteURL
+			}
+
+			payload.Organization = orgStruct
 		}
 	}
 
@@ -623,26 +624,27 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID, 
 
 	// Map organization information.
 	if accountSFID, ok := v1Data["account__c"].(string); ok && accountSFID != "" {
-		// Look up organization information from account mapping if available.
-		// For now, we'll use placeholder organization structure.
-		orgStruct := &struct {
-			Name    *string `json:"name,omitempty"`
-			Website *string `json:"website,omitempty"`
-		}{}
-
-		// Try to get organization name from mappings or use account SFID as fallback.
-		orgName := fmt.Sprintf("Organization-%s", accountSFID)
-		orgStruct.Name = &orgName
-
-		// Only set Organization if we have meaningful data (website is always nil here)
-		if orgStruct.Name != nil {
-			payload.Organization = &struct {
+		// Look up organization information from v1 Organization Service.
+		org, err := lookupOrg(ctx, accountSFID, mappingsKV)
+		if err != nil {
+			logger.With(errKey, err, "account_sfid", accountSFID).WarnContext(ctx, "failed to lookup organization, leaving empty")
+			// Organization lookup failed, leave Organization field nil.
+		} else if org.Name != "" {
+			// Successfully fetched organization data.
+			orgName := org.Name
+			orgStruct := &struct {
 				Name    *string
 				Website *string
 			}{
-				Name:    orgStruct.Name,
-				Website: orgStruct.Website,
+				Name: &orgName,
 			}
+
+			// Parse website URL from Link or Domain attributes.
+			if websiteURL := parseWebsiteURL(org.Link, org.Domain); websiteURL != "" {
+				orgStruct.Website = &websiteURL
+			}
+
+			payload.Organization = orgStruct
 		}
 	}
 

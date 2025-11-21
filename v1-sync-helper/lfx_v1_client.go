@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -40,11 +41,22 @@ import (
 
 const (
 	// Cache settings for user lookups
-	userCacheKeyPrefix    = "v1_user."
-	userLockKeyPrefix     = "v1_user_lock."
-	userCacheExpiry       = 1 * time.Hour    // Cache user data for 1 hour
-	userLockTimeout       = 10 * time.Second // Lock timeout for concurrent requests
-	userLockRetryInterval = 1 * time.Second  // Retry interval when lock exists
+	userCacheKeyPrefix         = "v1_user."
+	userLockKeyPrefix          = "v1_user_lock."
+	userCacheExpiry            = 10 * time.Minute // Treat user data as fresh for 10 minutes
+	userCacheStaleWhileRefresh = 6 * time.Hour    // Use stale data up to 6 hours with background refresh
+	userLockTimeout            = 10 * time.Second // Lock timeout for concurrent requests
+	userLockRetryInterval      = 1 * time.Second  // Retry interval when lock exists
+	userLockRetryAttempts      = 3                // Number of lock acquisition retry attempts
+
+	// Cache settings for organization lookups
+	orgCacheKeyPrefix         = "v1_org."
+	orgLockKeyPrefix          = "v1_org_lock."
+	orgCacheExpiry            = 30 * time.Minute // Treat org data as fresh for 30 minutes
+	orgCacheStaleWhileRefresh = 6 * time.Hour    // Use stale data up to 6 hours with background refresh
+	orgLockTimeout            = 10 * time.Second // Lock timeout for concurrent requests
+	orgLockRetryInterval      = 1 * time.Second  // Retry interval when lock exists
+	orgLockRetryAttempts      = 3                // Number of lock acquisition retry attempts
 )
 
 var (
@@ -69,6 +81,23 @@ type V1UserResponse struct {
 	Email     string `json:"Email"`
 	FirstName string `json:"FirstName"`
 	LastName  string `json:"LastName"`
+}
+
+// V1Organization represents an organization from the LFX v1 Organization Service
+type V1Organization struct {
+	ID          string    `json:"ID"`
+	Name        string    `json:"Name"`
+	Link        string    `json:"Link"`
+	Domain      string    `json:"Domains"`
+	LastFetched time.Time `json:"_last_fetched"` // Internal field for cache management
+}
+
+// V1OrganizationResponse represents the API response from v1 Organization Service
+type V1OrganizationResponse struct {
+	ID     string `json:"ID"`
+	Name   string `json:"Name"`
+	Link   string `json:"Link"`
+	Domain string `json:"Domains"`
 }
 
 // ClientCredentialsTokenSource implements oauth2.TokenSource for Auth0 private key JWT
@@ -175,6 +204,47 @@ func getUserFromV1API(ctx context.Context, platformID string) (*V1User, error) {
 	return user, nil
 }
 
+// getOrganizationFromV1API fetches organization information from the LFX v1 Organization Service
+func getOrganizationFromV1API(ctx context.Context, sfid string) (*V1Organization, error) {
+	url := fmt.Sprintf("%sorganization-service/v1/orgs/%s", cfg.LFXAPIGateway.String(), sfid)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("v1 Organization Service returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var orgResponse V1OrganizationResponse
+	if err := json.Unmarshal(body, &orgResponse); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal organization response: %w", err)
+	}
+
+	// Convert to internal organization format with cache timestamp
+	org := &V1Organization{
+		ID:          orgResponse.ID,
+		Name:        orgResponse.Name,
+		Link:        orgResponse.Link,
+		Domain:      orgResponse.Domain,
+		LastFetched: time.Now().UTC(),
+	}
+
+	return org, nil
+}
+
 // getCachedUser retrieves a user from the mappings KV cache
 func getCachedUser(ctx context.Context, platformID string, mappingsKV jetstream.KeyValue) (*V1User, error) {
 	cacheKey := userCacheKeyPrefix + platformID
@@ -205,14 +275,21 @@ func setCachedUser(ctx context.Context, platformID string, user *V1User, mapping
 	return err
 }
 
-// acquireUserLock attempts to acquire a lock for user refresh operations
-func acquireUserLock(ctx context.Context, platformID string, mappingsKV jetstream.KeyValue) (bool, error) {
+// acquireUserLock attempts to acquire a lock for user refresh operations with retries
+// Returns (acquired, waited) where waited indicates if any retry attempts were made
+func acquireUserLock(ctx context.Context, platformID string, mappingsKV jetstream.KeyValue, maxRetries int) (bool, bool) {
 	lockKey := userLockKeyPrefix + platformID
-	lockValue := strconv.FormatInt(time.Now().Unix(), 10)
+	var waited bool
 
-	// Try to create the lock (will fail if it already exists)
-	_, err := mappingsKV.Create(ctx, lockKey, []byte(lockValue))
-	if err != nil {
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		lockValue := strconv.FormatInt(time.Now().Unix(), 10)
+
+		// Try to create the lock (will fail if it already exists)
+		_, err := mappingsKV.Create(ctx, lockKey, []byte(lockValue))
+		if err == nil {
+			return true, waited // Successfully acquired lock
+		}
+
 		// Check if lock already exists and if it's stale
 		if entry, getErr := mappingsKV.Get(ctx, lockKey); getErr == nil {
 			if lockTimestamp, parseErr := strconv.ParseInt(string(entry.Value()), 10, 64); parseErr == nil {
@@ -220,15 +297,20 @@ func acquireUserLock(ctx context.Context, platformID string, mappingsKV jetstrea
 				if time.Since(lockTime) > userLockTimeout {
 					// Lock is stale, try to update it
 					if _, updateErr := mappingsKV.Put(ctx, lockKey, []byte(lockValue)); updateErr == nil {
-						return true, nil
+						return true, waited
 					}
 				}
 			}
 		}
-		return false, nil // Lock exists and is not stale
+
+		// If this isn't the last attempt, wait before retrying
+		if attempt < maxRetries {
+			waited = true
+			time.Sleep(userLockRetryInterval)
+		}
 	}
 
-	return true, nil // Successfully acquired lock
+	return false, waited // Failed to acquire lock after all attempts
 }
 
 // releaseUserLock releases a user refresh lock
@@ -241,9 +323,9 @@ func releaseUserLock(ctx context.Context, platformID string, mappingsKV jetstrea
 func refreshUserInBackground(ctx context.Context, platformID string, mappingsKV jetstream.KeyValue) {
 	go func() {
 		// Acquire lock for this refresh operation
-		acquired, err := acquireUserLock(ctx, platformID, mappingsKV)
-		if err != nil || !acquired {
-			return // Another process is already refreshing or error occurred
+		acquired, _ := acquireUserLock(ctx, platformID, mappingsKV, 1)
+		if !acquired {
+			return // Another process is already refreshing
 		}
 
 		defer func() {
@@ -284,41 +366,39 @@ func lookupUser(ctx context.Context, platformID string, mappingsKV jetstream.Key
 	// Try to get from cache first
 	cachedUser, err := getCachedUser(ctx, platformID, mappingsKV)
 	if err == nil {
-		// Check if cache is stale
-		if time.Since(cachedUser.LastFetched) > userCacheExpiry {
-			// Cache is stale, refresh in background and return stale data
-			refreshUserInBackground(ctx, platformID, mappingsKV)
-		}
-		return cachedUser, nil
-	}
-
-	// Not in cache, need to fetch fresh data
-	// Try to acquire lock for this fetch operation
-	acquired, err := acquireUserLock(ctx, platformID, mappingsKV)
-	if err != nil {
-		return nil, fmt.Errorf("failed to acquire user lookup lock: %w", err)
-	}
-
-	if !acquired {
-		// Another process is fetching, wait and check cache again
-		time.Sleep(userLockRetryInterval)
-		cachedUser, err := getCachedUser(ctx, platformID, mappingsKV)
-		if err == nil {
+		age := time.Since(cachedUser.LastFetched)
+		// See if cache is still within the "stale" window.
+		if age <= userCacheStaleWhileRefresh {
+			if age > userCacheExpiry {
+				// Cache is stale: refresh in background.
+				refreshUserInBackground(ctx, platformID, mappingsKV)
+			}
 			return cachedUser, nil
 		}
-		return nil, fmt.Errorf("user lookup timeout: concurrent fetch in progress")
+		// Fall through if cache is *too* old (past "stale" window).
 	}
 
-	defer func() {
-		if releaseErr := releaseUserLock(ctx, platformID, mappingsKV); releaseErr != nil {
-			logger.With(errKey, releaseErr, "platform_id", platformID).WarnContext(ctx, "failed to release user lookup lock")
-		}
-	}()
+	// Try to acquire lock.
+	acquired, waited := acquireUserLock(ctx, platformID, mappingsKV, userLockRetryAttempts)
 
-	// Double-check cache after acquiring lock
-	cachedUser, err = getCachedUser(ctx, platformID, mappingsKV)
-	if err == nil {
-		return cachedUser, nil
+	if acquired {
+		// We got the lock: set up defer to release it.
+		defer func() {
+			if releaseErr := releaseUserLock(ctx, platformID, mappingsKV); releaseErr != nil {
+				logger.With(errKey, releaseErr, "platform_id", platformID).WarnContext(ctx, "failed to release user lookup lock")
+			}
+		}()
+	}
+
+	// If we waited, check cache again - another process might have populated it.
+	if waited {
+		if freshUser, cacheErr := getCachedUser(ctx, platformID, mappingsKV); cacheErr == nil {
+			if time.Since(freshUser.LastFetched) <= userCacheExpiry {
+				// Cache is now fresh, return it
+				return freshUser, nil
+			}
+		}
+		// Fall through to fetch fresh data.
 	}
 
 	// Fetch from API
@@ -350,16 +430,235 @@ func lookupUser(ctx context.Context, platformID string, mappingsKV jetstream.Key
 		if cacheErr := setCachedUser(ctx, platformID, invalidUser, mappingsKV); cacheErr != nil {
 			logger.With(errKey, cacheErr, "platform_id", platformID).WarnContext(ctx, "failed to cache invalid state for user")
 		}
-		return nil, fmt.Errorf("user has empty username")
+		return nil, fmt.Errorf("user %s has invalid data (empty username)", platformID)
 	}
 
-	// Cache the valid user
+	// Cache the valid user data
 	if err := setCachedUser(ctx, platformID, user, mappingsKV); err != nil {
 		logger.With(errKey, err, "platform_id", platformID).WarnContext(ctx, "failed to cache user data")
-		// Continue anyway with the fetched user
 	}
 
 	return user, nil
+}
+
+// getCachedOrg retrieves an organization from the mappings KV cache
+func getCachedOrg(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue) (*V1Organization, error) {
+	cacheKey := orgCacheKeyPrefix + sfid
+
+	entry, err := mappingsKV.Get(ctx, cacheKey)
+	if err != nil {
+		return nil, err // No cached entry
+	}
+
+	var org V1Organization
+	if err := json.Unmarshal(entry.Value(), &org); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal cached organization: %w", err)
+	}
+
+	return &org, nil
+}
+
+// setCachedOrg stores an organization in the mappings KV cache
+func setCachedOrg(ctx context.Context, sfid string, org *V1Organization, mappingsKV jetstream.KeyValue) error {
+	cacheKey := orgCacheKeyPrefix + sfid
+
+	data, err := json.Marshal(org)
+	if err != nil {
+		return fmt.Errorf("failed to marshal organization for cache: %w", err)
+	}
+
+	_, err = mappingsKV.Put(ctx, cacheKey, data)
+	return err
+}
+
+// acquireOrgLock attempts to acquire a lock for organization refresh operations with retries
+// Returns (acquired, waited) where waited indicates if any retry attempts were made
+func acquireOrgLock(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue, maxRetries int) (bool, bool) {
+	lockKey := orgLockKeyPrefix + sfid
+	var waited bool
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		lockValue := strconv.FormatInt(time.Now().Unix(), 10)
+
+		// Try to create the lock (will fail if it already exists)
+		_, err := mappingsKV.Create(ctx, lockKey, []byte(lockValue))
+		if err == nil {
+			return true, waited // Successfully acquired lock
+		}
+
+		// Check if lock already exists and if it's stale
+		if entry, getErr := mappingsKV.Get(ctx, lockKey); getErr == nil {
+			if lockTimestamp, parseErr := strconv.ParseInt(string(entry.Value()), 10, 64); parseErr == nil {
+				lockTime := time.Unix(lockTimestamp, 0)
+				if time.Since(lockTime) > orgLockTimeout {
+					// Lock is stale, try to update it
+					if _, updateErr := mappingsKV.Put(ctx, lockKey, []byte(lockValue)); updateErr == nil {
+						return true, waited
+					}
+				}
+			}
+		}
+
+		// If this isn't the last attempt, wait before retrying
+		if attempt < maxRetries {
+			waited = true
+			time.Sleep(orgLockRetryInterval)
+		}
+	}
+
+	return false, waited // Failed to acquire lock after all attempts
+}
+
+// releaseOrgLock releases an organization refresh lock
+func releaseOrgLock(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue) error {
+	lockKey := orgLockKeyPrefix + sfid
+	return mappingsKV.Delete(ctx, lockKey)
+}
+
+// refreshOrgInBackground refreshes organization data in the background
+func refreshOrgInBackground(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue) {
+	go func() {
+		// Acquire lock for this refresh operation
+		acquired, _ := acquireOrgLock(ctx, sfid, mappingsKV, 1)
+		if !acquired {
+			return // Another process is already refreshing
+		}
+
+		defer func() {
+			if releaseErr := releaseOrgLock(ctx, sfid, mappingsKV); releaseErr != nil {
+				logger.With(errKey, releaseErr, "org_sfid", sfid).WarnContext(ctx, "failed to release organization cache lock")
+			}
+		}()
+
+		// Fetch fresh organization data
+		org, err := getOrganizationFromV1API(ctx, sfid)
+		if err != nil {
+			logger.With(errKey, err, "org_sfid", sfid).WarnContext(ctx, "background organization refresh failed")
+			return
+		}
+
+		// Update cache
+		if err := setCachedOrg(ctx, sfid, org, mappingsKV); err != nil {
+			logger.With(errKey, err, "org_sfid", sfid).WarnContext(ctx, "failed to update organization cache after refresh")
+		} else {
+			logger.With("org_sfid", sfid, "name", org.Name).DebugContext(ctx, "organization cache refreshed in background")
+		}
+	}()
+}
+
+// lookupOrg retrieves organization information with caching and refresh logic
+func lookupOrg(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue) (*V1Organization, error) {
+	if sfid == "" {
+		return nil, fmt.Errorf("organization SFID cannot be empty")
+	}
+
+	// Try to get from cache first
+	cachedOrg, err := getCachedOrg(ctx, sfid, mappingsKV)
+	if err == nil {
+		age := time.Since(cachedOrg.LastFetched)
+		// See if cache is still within the "stale" window.
+		if age <= orgCacheStaleWhileRefresh {
+			if age > orgCacheExpiry {
+				// Cache is stale: refresh in background.
+				refreshOrgInBackground(ctx, sfid, mappingsKV)
+			}
+			return cachedOrg, nil
+		}
+		// Fall through if cache is *too* old (past "stale" window).
+	}
+
+	// Try to acquire lock.
+	acquired, waited := acquireOrgLock(ctx, sfid, mappingsKV, orgLockRetryAttempts)
+
+	if acquired {
+		// We got the lock, set up defer to release it
+		defer func() {
+			if releaseErr := releaseOrgLock(ctx, sfid, mappingsKV); releaseErr != nil {
+				logger.With(errKey, releaseErr, "org_sfid", sfid).WarnContext(ctx, "failed to release organization lookup lock")
+			}
+		}()
+	}
+
+	// If we waited, check cache again - another process might have populated it
+	if waited {
+		if freshOrg, cacheErr := getCachedOrg(ctx, sfid, mappingsKV); cacheErr == nil {
+			if time.Since(freshOrg.LastFetched) <= orgCacheExpiry {
+				// Cache is now fresh, return it
+				return freshOrg, nil
+			}
+		}
+		// Fall through to fetch fresh data.
+	}
+
+	// Fetch from API
+	org, err := getOrganizationFromV1API(ctx, sfid)
+	if err != nil {
+		// Cache the error state to avoid repeated failed lookups
+		errorOrg := &V1Organization{
+			ID:          sfid,
+			Name:        "", // Empty name indicates error state
+			Link:        "",
+			Domain:      "",
+			LastFetched: time.Now().UTC(),
+		}
+		if cacheErr := setCachedOrg(ctx, sfid, errorOrg, mappingsKV); cacheErr != nil {
+			logger.With(errKey, cacheErr, "org_sfid", sfid).WarnContext(ctx, "failed to cache error state for organization")
+		}
+		return nil, err
+	}
+
+	// Validate required fields
+	if org.Name == "" {
+		logger.With("org_sfid", sfid).WarnContext(ctx, "v1 organization has empty name")
+		// Cache the invalid state
+		invalidOrg := &V1Organization{
+			ID:          sfid,
+			Name:        "", // Empty name indicates invalid state
+			Link:        "",
+			Domain:      "",
+			LastFetched: time.Now().UTC(),
+		}
+		if cacheErr := setCachedOrg(ctx, sfid, invalidOrg, mappingsKV); cacheErr != nil {
+			logger.With(errKey, cacheErr, "org_sfid", sfid).WarnContext(ctx, "failed to cache invalid state for organization")
+		}
+		return nil, fmt.Errorf("organization %s has invalid data (empty name)", sfid)
+	}
+
+	// Cache the valid organization data
+	if err := setCachedOrg(ctx, sfid, org, mappingsKV); err != nil {
+		logger.With(errKey, err, "org_sfid", sfid).WarnContext(ctx, "failed to cache organization data")
+	}
+
+	return org, nil
+}
+
+// parseWebsiteURL attempts to parse and normalize a website URL from organization data.
+// It first tries the Link attribute, then falls back to the Domains attribute.
+// Returns empty string if no valid URL can be constructed.
+func parseWebsiteURL(link, domains string) string {
+	// First, try the Link attribute
+	linkTrimmed := strings.TrimSpace(link)
+	if linkTrimmed != "" {
+		if parsedURL, err := url.Parse(linkTrimmed); err == nil {
+			// Set scheme to http if empty
+			if parsedURL.Scheme == "" {
+				parsedURL.Scheme = "http"
+			}
+			return parsedURL.String()
+		}
+	}
+
+	// Fall back to Domain attribute
+	domainTrimmed := strings.TrimSpace(domains)
+	if domainTrimmed != "" {
+		// The Domain attribute typically contains just a domain name
+		domainURL := "http://" + domainTrimmed
+		if parsedURL, err := url.Parse(domainURL); err == nil {
+			return parsedURL.String()
+		}
+	}
+
+	return ""
 }
 
 // getUserInfoFromV1 converts a Platform ID to LFX username and email using v1 API with caching
