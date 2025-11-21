@@ -368,8 +368,9 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 	}
 
 	payload := &committeeservice.CreateCommitteeMemberPayload{
-		UID:   committeeUID,
-		Email: email,
+		UID:     committeeUID,
+		Email:   email,
+		Version: "1",
 	}
 
 	// Map contact information.
@@ -521,6 +522,7 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID, 
 	payload := &committeeservice.UpdateCommitteeMemberPayload{
 		UID:       committeeUID,
 		MemberUID: memberUID,
+		Version:   "1",
 		Email:     email,
 	}
 

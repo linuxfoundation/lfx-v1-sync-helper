@@ -130,6 +130,7 @@ func fetchCommitteeMember(ctx context.Context, committeeUID, memberUID string) (
 		BearerToken: &token,
 		UID:         committeeUID,
 		MemberUID:   memberUID,
+		Version:     "1",
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to fetch committee member: %w", err)
