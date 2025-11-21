@@ -486,8 +486,8 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 				Name: &orgName,
 			}
 
-			// Parse website URL from Link or Domain attributes.
-			if websiteURL := parseWebsiteURL(org.Link, org.Domain); websiteURL != "" {
+			// Parse website URL from Domain attribute.
+			if websiteURL := parseWebsiteURL(org.Domain); websiteURL != "" {
 				orgStruct.Website = &websiteURL
 			}
 
@@ -639,8 +639,8 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID, 
 				Name: &orgName,
 			}
 
-			// Parse website URL from Link or Domain attributes.
-			if websiteURL := parseWebsiteURL(org.Link, org.Domain); websiteURL != "" {
+			// Parse website URL from Domain attribute.
+			if websiteURL := parseWebsiteURL(org.Domain); websiteURL != "" {
 				orgStruct.Website = &websiteURL
 			}
 

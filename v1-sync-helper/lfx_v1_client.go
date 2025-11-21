@@ -87,7 +87,6 @@ type V1UserResponse struct {
 type V1Organization struct {
 	ID          string    `json:"ID"`
 	Name        string    `json:"Name"`
-	Link        string    `json:"Link"`
 	Domain      string    `json:"Domains"`
 	LastFetched time.Time `json:"_last_fetched"` // Internal field for cache management
 }
@@ -96,7 +95,6 @@ type V1Organization struct {
 type V1OrganizationResponse struct {
 	ID     string `json:"ID"`
 	Name   string `json:"Name"`
-	Link   string `json:"Link"`
 	Domain string `json:"Domains"`
 }
 
@@ -237,7 +235,6 @@ func getOrganizationFromV1API(ctx context.Context, sfid string) (*V1Organization
 	org := &V1Organization{
 		ID:          orgResponse.ID,
 		Name:        orgResponse.Name,
-		Link:        orgResponse.Link,
 		Domain:      orgResponse.Domain,
 		LastFetched: time.Now().UTC(),
 	}
@@ -597,7 +594,6 @@ func lookupOrg(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue) 
 		errorOrg := &V1Organization{
 			ID:          sfid,
 			Name:        "", // Empty name indicates error state
-			Link:        "",
 			Domain:      "",
 			LastFetched: time.Now().UTC(),
 		}
@@ -614,7 +610,6 @@ func lookupOrg(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue) 
 		invalidOrg := &V1Organization{
 			ID:          sfid,
 			Name:        "", // Empty name indicates invalid state
-			Link:        "",
 			Domain:      "",
 			LastFetched: time.Now().UTC(),
 		}
@@ -632,28 +627,14 @@ func lookupOrg(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue) 
 	return org, nil
 }
 
-// parseWebsiteURL attempts to parse and normalize a website URL from organization data.
-// It first tries the Link attribute, then falls back to the Domains attribute.
+// parseWebsiteURL attempts to parse and normalize a website URL from organization website data.
 // Returns empty string if no valid URL can be constructed.
-func parseWebsiteURL(link, domains string) string {
-	// First, try the Link attribute
-	linkTrimmed := strings.TrimSpace(link)
-	if linkTrimmed != "" {
-		if parsedURL, err := url.Parse(linkTrimmed); err == nil {
-			// Set scheme to http if empty
-			if parsedURL.Scheme == "" {
-				parsedURL.Scheme = "http"
-			}
-			return parsedURL.String()
-		}
-	}
-
-	// Fall back to Domain attribute
-	domainTrimmed := strings.TrimSpace(domains)
-	if domainTrimmed != "" {
-		// The Domain attribute typically contains just a domain name
-		domainURL := "http://" + domainTrimmed
-		if parsedURL, err := url.Parse(domainURL); err == nil {
+func parseWebsiteURL(website string) string {
+	websiteTrimmed := strings.TrimSpace(website)
+	if websiteTrimmed != "" {
+		// The website attribute typically contains just a domain name
+		websiteURL := "http://" + websiteTrimmed
+		if parsedURL, err := url.Parse(websiteURL); err == nil {
 			return parsedURL.String()
 		}
 	}
