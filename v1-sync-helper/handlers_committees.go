@@ -36,6 +36,71 @@ var allowedCommitteeCategories = map[string]bool{
 	"Working Group":                                              true,
 }
 
+// allowedAppointedByValues defines the valid values for appointed_by__c mapping to appointed_by.
+var allowedAppointedByValues = map[string]bool{
+	"Community":                          true,
+	"Membership Entitlement":             true,
+	"Vote of End User Member Class":      true,
+	"Vote of TSC Committee":              true,
+	"Vote of TAC Committee":              true,
+	"Vote of Academic Member Class":      true,
+	"Vote of Lab Member Class":           true,
+	"Vote of Marketing Committee":        true,
+	"Vote of Governing Board":            true,
+	"Vote of General Member Class":       true,
+	"Vote of End User Committee":         true,
+	"Vote of TOC Committee":              true,
+	"Vote of Gold Member Class":          true,
+	"Vote of Silver Member Class":        true,
+	"Vote of Strategic Membership Class": true,
+	"None":                               true,
+}
+
+// allowedRoleNames defines the valid values for role__c mapping to role name.
+var allowedRoleNames = map[string]bool{
+	"Chair":                  true,
+	"Counsel":                true,
+	"Developer Seat":         true,
+	"TAC/TOC Representative": true,
+	"Director":               true,
+	"Lead":                   true,
+	"None":                   true,
+	"Secretary":              true,
+	"Treasurer":              true,
+	"Vice Chair":             true,
+	"LF Staff":               true,
+}
+
+// mapRoleNameToValidValue filters and maps role__c to a valid role name value.
+func mapRoleNameToValidValue(ctx context.Context, roleName string) string {
+	if roleName == "" {
+		return "None"
+	}
+
+	if allowedRoleNames[roleName] {
+		return roleName
+	}
+
+	// If the value is not in the allowed list, use None as fallback.
+	logger.With("original_role_name", roleName, "fallback_role_name", "None").WarnContext(ctx, "role name value not in allowed list, using fallback")
+	return "None"
+}
+
+// mapAppointedByToValidValue filters and maps appointed_by__c to a valid appointed_by value.
+func mapAppointedByToValidValue(ctx context.Context, appointedBy string) string {
+	if appointedBy == "" {
+		return "None"
+	}
+
+	if allowedAppointedByValues[appointedBy] {
+		return appointedBy
+	}
+
+	// If the value is not in the allowed list, use None as fallback.
+	logger.With("original_appointed_by", appointedBy, "fallback_appointed_by", "None").WarnContext(ctx, "appointed_by value not in allowed list, using fallback")
+	return "None"
+}
+
 // mapTypeToCategory filters and maps type__c to category.
 func mapTypeToCategory(ctx context.Context, typeVal string) *string {
 	if typeVal == "" {
@@ -277,6 +342,16 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 		return
 	}
 
+	// Check for blank email and skip with warning.
+	email := ""
+	if contactEmail, ok := v1Data["contactemail__c"].(string); ok && contactEmail != "" {
+		email = contactEmail
+	}
+	if email == "" {
+		logger.With("sfid", sfid).WarnContext(ctx, "skipping committee member with blank email")
+		return
+	}
+
 	// Extract collaboration_name__c to get committee UID.
 	collaborationNameV1, ok := v1Data["collaboration_name__c"].(string)
 	if !ok || collaborationNameV1 == "" {
@@ -357,14 +432,10 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 
 // mapV1DataToCommitteeMemberCreatePayload converts V1 platform-community__c data to a CreateCommitteeMemberPayload.
 func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID string, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*committeeservice.CreateCommitteeMemberPayload, error) {
-	// Extract required fields.
+	// Extract email field (already validated by caller).
 	email := ""
 	if contactEmail, ok := v1Data["contactemail__c"].(string); ok && contactEmail != "" {
 		email = contactEmail
-	}
-
-	if email == "" {
-		return nil, fmt.Errorf("missing required email field")
 	}
 
 	payload := &committeeservice.CreateCommitteeMemberPayload{
@@ -392,7 +463,7 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 			StartDate *string `json:"start_date,omitempty"`
 			EndDate   *string `json:"end_date,omitempty"`
 		}{
-			Name: role,
+			Name: mapRoleNameToValidValue(ctx, role),
 		}
 
 		if startDate, ok := v1Data["start_date__c"].(string); ok && startDate != "" {
@@ -421,10 +492,10 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 	}
 
 	// Map appointed by.
-	if appointedBy, ok := v1Data["appointed_by__c"].(string); ok && appointedBy != "" {
-		payload.AppointedBy = appointedBy
+	if appointedBy, ok := v1Data["appointed_by__c"].(string); ok {
+		payload.AppointedBy = mapAppointedByToValidValue(ctx, appointedBy)
 	} else {
-		payload.AppointedBy = "Unknown" // Default value.
+		payload.AppointedBy = "None" // Default value.
 	}
 
 	// Map status.
@@ -500,21 +571,17 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 
 // mapV1DataToCommitteeMemberUpdatePayload converts V1 platform-community__c data to an UpdateCommitteeMemberPayload.
 func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID, memberUID string, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*committeeservice.UpdateCommitteeMemberPayload, error) {
-	// Extract required fields.
+	// Extract email field (already validated by caller).
 	email := ""
 	if contactEmail, ok := v1Data["contactemail__c"].(string); ok && contactEmail != "" {
 		email = contactEmail
 	}
 
-	if email == "" {
-		return nil, fmt.Errorf("missing required email field")
-	}
-
 	payload := &committeeservice.UpdateCommitteeMemberPayload{
 		UID:       committeeUID,
 		MemberUID: memberUID,
-		Version:   "1",
 		Email:     email,
+		Version:   "1",
 	}
 
 	// Map contact information.
@@ -536,7 +603,7 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID, 
 			StartDate *string `json:"start_date,omitempty"`
 			EndDate   *string `json:"end_date,omitempty"`
 		}{
-			Name: role,
+			Name: mapRoleNameToValidValue(ctx, role),
 		}
 
 		if startDate, ok := v1Data["start_date__c"].(string); ok && startDate != "" {
@@ -565,10 +632,10 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID, 
 	}
 
 	// Map appointed by.
-	if appointedBy, ok := v1Data["appointed_by__c"].(string); ok && appointedBy != "" {
-		payload.AppointedBy = appointedBy
+	if appointedBy, ok := v1Data["appointed_by__c"].(string); ok {
+		payload.AppointedBy = mapAppointedByToValidValue(ctx, appointedBy)
 	} else {
-		payload.AppointedBy = "Unknown" // Default value.
+		payload.AppointedBy = "None" // Default value.
 	}
 
 	// Map status.

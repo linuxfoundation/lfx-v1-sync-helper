@@ -1,4 +1,4 @@
-module demo-v1-sync-helper
+module v1-sync-helper
 
 go 1.25.4
 
