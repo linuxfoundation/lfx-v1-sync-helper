@@ -7,7 +7,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 	"github.com/nats-io/nats.go/jetstream"
