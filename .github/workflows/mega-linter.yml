@@ -36,7 +36,7 @@ jobs:
         uses: oxsecurity/megalinter/flavors/cupcake@5a91fb06c83d0e69fbd23756d47438aa723b4a5a  # 8.7.0
         env:
           # All available variables are described in documentation
-          # https://megalinter.io/configuration/
+          # https://megalinter.io/latest/configuration/
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Allow GITHUB_TOKEN for working around rate limits (aquasecurity/trivy#7668).
           REPOSITORY_TRIVY_UNSECURED_ENV_VARIABLES: GITHUB_TOKEN

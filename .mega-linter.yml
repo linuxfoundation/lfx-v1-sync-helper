@@ -3,6 +3,8 @@
 ---
 GITHUB_COMMENT_REPORTER: false
 DISABLE_LINTERS:
+  # Prefer Revive only for now.
+  - GO_GOLANGCI_LINT
   # We are setting KUBERNETES_DIRECTORY to the helm chart so the
   # KUBERNETES_HELM linter can find the chart, but then this linter expects to
   # find raw Kubernetes manifests in this directory, which isn't the case.
@@ -31,5 +33,3 @@ SPELL_CSPELL_ANALYZE_FILE_NAMES: false
 # Ignore YAML files with templating macros; these typically fail linting and/or
 # schema checking.
 FILTER_REGEX_EXCLUDE: '(templates/.*\.yml|templates/.*\.yaml)'
-KUBERNETES_DIRECTORY: charts/lfx-platform
-KUBERNETES_HELM_ARGUMENTS: charts/lfx-platform

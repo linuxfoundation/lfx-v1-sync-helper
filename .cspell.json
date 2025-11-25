@@ -2,7 +2,27 @@
   "language": "en",
   "dictionaries": ["companies", "filetypes", "fullstack", "softwareTerms"],
   "words": [
-    "lfx"
+    "autojoin",
+    "chainguard",
+    "committeeservice",
+    "goahttp",
+    "goarch",
+    "golangci",
+    "jetstream",
+    "jwksurl",
+    "meltano",
+    "meltanolabs",
+    "lastmodifiedbyid",
+    "lfid",
+    "lfx",
+    "linuxfoundation",
+    "livez",
+    "patrickmn",
+    "pkcs",
+    "projectservice",
+    "readyz",
+    "sfid",
+    "trimpath"
   ],
   "flagWords": [
     "abort: cancel, end, fail, halt, stop, terminate",

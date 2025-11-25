@@ -107,7 +107,7 @@ indexer service).
 - **Subject**: `{client_id}` (without @clients suffix)
 - **Email**: Not included
 
-**User Impersonation** (when V1 `lastmodified` is User Service platform ID):
+**User Impersonation** (when V1 `lastmodifiedbyid` is User Service platform ID):
 - Looks up user via LFX v1 User Service API: `GET /v1/users/{platformID}`
 - **Principal**: `{username}` (from API response)
 - **Subject**: `{username}` (same as principal)
