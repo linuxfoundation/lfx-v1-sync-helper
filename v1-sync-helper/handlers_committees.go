@@ -145,7 +145,7 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		// Update existing committee.
 		logger.With("committee_uid", existingUID, "sfid", sfid).InfoContext(ctx, "updating existing committee")
 
-		// Map V1 data to update payload.
+		// Map v1 data to update payload.
 		var payload *committeeservice.UpdateCommitteeBasePayload
 		payload, err = mapV1DataToCommitteeUpdateBasePayload(ctx, existingUID, v1Data, mappingsKV)
 		if err != nil {
@@ -159,7 +159,7 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		// Create new committee.
 		logger.With("sfid", sfid).InfoContext(ctx, "creating new committee")
 
-		// Map V1 data to create payload.
+		// Map v1 data to create payload.
 		var payload *committeeservice.CreateCommitteePayload
 		payload, err = mapV1DataToCommitteeCreatePayload(ctx, v1Data, mappingsKV)
 		if err != nil {
@@ -189,7 +189,7 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 	logger.With("committee_uid", uid, "sfid", sfid).InfoContext(ctx, "successfully synced committee")
 }
 
-// mapV1DataToCommitteeCreatePayload converts V1 committee data to a CreateCommitteePayload.
+// mapV1DataToCommitteeCreatePayload converts v1 committee data to a CreateCommitteePayload.
 func mapV1DataToCommitteeCreatePayload(ctx context.Context, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*committeeservice.CreateCommitteePayload, error) {
 	// Extract required fields.
 	name := ""
@@ -263,7 +263,7 @@ func mapV1DataToCommitteeCreatePayload(ctx context.Context, v1Data map[string]an
 	return payload, nil
 }
 
-// mapV1DataToCommitteeUpdateBasePayload converts V1 committee data to an UpdateCommitteeBasePayload.
+// mapV1DataToCommitteeUpdateBasePayload converts v1 committee data to an UpdateCommitteeBasePayload.
 func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID string, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*committeeservice.UpdateCommitteeBasePayload, error) {
 	// Extract required fields.
 	name := ""
@@ -385,7 +385,7 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 		// Update existing committee member.
 		logger.With("member_uid", existingMemberUID, "sfid", sfid, "committee_uid", committeeUID).InfoContext(ctx, "updating existing committee member")
 
-		// Map V1 data to update payload.
+		// Map v1 data to update payload.
 		var payload *committeeservice.UpdateCommitteeMemberPayload
 		payload, err = mapV1DataToCommitteeMemberUpdatePayload(ctx, committeeUID, existingMemberUID, v1Data, mappingsKV)
 		if err != nil {
@@ -399,7 +399,7 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 		// Create new committee member.
 		logger.With("sfid", sfid, "committee_uid", committeeUID).InfoContext(ctx, "creating new committee member")
 
-		// Map V1 data to create payload.
+		// Map v1 data to create payload.
 		var payload *committeeservice.CreateCommitteeMemberPayload
 		payload, err = mapV1DataToCommitteeMemberCreatePayload(ctx, committeeUID, v1Data, mappingsKV)
 		if err != nil {
@@ -429,7 +429,7 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 	logger.With("member_uid", memberUID, "sfid", sfid, "committee_uid", committeeUID).InfoContext(ctx, "successfully synced committee member")
 }
 
-// mapV1DataToCommitteeMemberCreatePayload converts V1 platform-community__c data to a CreateCommitteeMemberPayload.
+// mapV1DataToCommitteeMemberCreatePayload converts v1 platform-community__c data to a CreateCommitteeMemberPayload.
 func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID string, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*committeeservice.CreateCommitteeMemberPayload, error) {
 	// Extract email field (already validated by caller).
 	email := ""
@@ -593,7 +593,7 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 	return payload, nil
 }
 
-// mapV1DataToCommitteeMemberUpdatePayload converts V1 platform-community__c data to an UpdateCommitteeMemberPayload.
+// mapV1DataToCommitteeMemberUpdatePayload converts v1 platform-community__c data to an UpdateCommitteeMemberPayload.
 func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID, memberUID string, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*committeeservice.UpdateCommitteeMemberPayload, error) {
 	// Extract email field (already validated by caller).
 	email := ""

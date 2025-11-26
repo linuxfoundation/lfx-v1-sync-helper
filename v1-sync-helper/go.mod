@@ -1,4 +1,6 @@
-module v1-sync-helper
+// Copyright The Linux Foundation and each contributor to LFX.
+// SPDX-License-Identifier: MIT
+module github.com/linuxfoundation/lfx-v1-sync-helper
 
 go 1.25.4
 

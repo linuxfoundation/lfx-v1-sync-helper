@@ -6,7 +6,7 @@ The LFX v1 Sync Helper is a Go microservice that synchronizes v1 data from NATS 
 
 ### Key implementation decisions
 
-1. **KV Bucket Watcher**: Instead of consuming NATS messages directly from streaming data sources, this service watches a NATS KV bucket (`v1-objects`) where V1 data is written by replication jobs (e.g. Meltano)
+1. **KV Bucket Watcher**: Instead of consuming NATS messages directly from streaming data sources, this service watches a NATS KV bucket (`v1-objects`) where v1 data is written by replication jobs (e.g. Meltano)
 2. **Direct API Calls**: With the exception of Meetings data, all data is routed into the LFX One platform via the appropriate API services, rather than the v1 Sync Helper writing directly to databases or platform-service queues.
 3. **JWT Authentication**: Reuses Heimdall's signing key to create JWT tokens for secure API authentication, supporting user impersonation while also bypassing LFX One permissions—as Heimdall tokens are not just proof of authentication, but are of *authorization*.
 4. **Mapping Storage**: Maintains v1-to-v2 ID mappings in a dedicated NATS KV bucket to track state and to avoid introducing "legacy ID" fields in LFX One data models.
@@ -107,7 +107,7 @@ indexer service).
 - **Subject**: `{client_id}` (without @clients suffix)
 - **Email**: Not included
 
-**User Impersonation** (when V1 `lastmodifiedbyid` is User Service platform ID):
+**User Impersonation** (when v1 `lastmodifiedbyid` is User Service platform ID):
 - Looks up user via LFX v1 User Service API: `GET /v1/users/{platformID}`
 - **Principal**: `{username}` (from API response)
 - **Subject**: `{username}` (same as principal)
@@ -200,7 +200,7 @@ The service uses structured JSON logging with the following levels:
 - `operation`: KV operation type (PUT, DELETE)
 - `slug`/`sfid`: Object identifiers
 - `project_uid`/`committee_uid`: Generated V2 UUIDs
-- `username`: Extracted from V1 `lastmodifiedbyid`
+- `username`: Extracted from v1 `lastmodifiedbyid`
 
 ## License
 
