@@ -52,6 +52,28 @@ plugins:
           # No timestamp field for this table.
           replication-key: ""
       use_aws_env_vars: true
+    schema:
+      # Override auto-detected schema for alternate columns and datatypes that
+      # weren't seen in the sample data.
+      itx-zoom-meetings-registrants-v2:
+        occurrence:
+          type: ["string", "null"]
+      itx-zoom-meetings-v2:
+        # Matches both `.recurrence` and `.updated_occurrences[].recurrence`.
+        "*recurrence.monthly_day":
+          type: ["integer", "null"]
+        "*recurrence.end_times":
+          type: ["integer", "null"]
+        use_unique_ics_uid:
+          type: ["string", "null"]
+      itx-zoom-past-meetings:
+        "*recurrence.monthly_day":
+          type: ["integer", "null"]
+        "*recurrence.end_times":
+          type: ["integer", "null"]
+      itx-zoom-past-meetings-attendees:
+        is_auto_matched:
+          type: ["boolean", "null"]
   loaders:
   - name: target-nats-kv
     namespace: target_nats_kv
