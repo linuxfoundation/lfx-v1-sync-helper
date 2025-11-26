@@ -10,7 +10,7 @@ name: Publish Tagged Release
 
 env:
   COSIGN_VERSION: v2.6.1
-  HELM_VERSION: v4.0.1
+  HELM_VERSION: 4.0.1
 
 permissions:
   contents: read
