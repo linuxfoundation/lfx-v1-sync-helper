@@ -55,7 +55,7 @@ func shouldSkipSync(ctx context.Context, v1Data map[string]any) bool {
 	return false
 }
 
-// extractUserInfo extracts user information from V1 data for API calls and JWT impersonation.
+// extractUserInfo extracts user information from v1 data for API calls and JWT impersonation.
 func extractUserInfo(ctx context.Context, v1Data map[string]any, mappingsKV jetstream.KeyValue) UserInfo {
 	// Extract platform ID from lastmodifiedbyid
 	if lastModifiedBy, ok := v1Data["lastmodifiedbyid"].(string); ok && lastModifiedBy != "" {

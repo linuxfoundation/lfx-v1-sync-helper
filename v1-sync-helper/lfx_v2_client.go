@@ -289,8 +289,8 @@ func generateCachedJWTToken(audience string, userInfo UserInfo) (string, error) 
 //  2. Fallback Client: If no user info is provided, uses v1_sync_helper client credentials
 //     with principal="v1_sync_helper@clients" and sub="v1_sync_helper"
 //
-// The impersonation approach allows V1 sync operations to be attributed to the actual
-// user who made the changes in V1, rather than a generic service account.
+// The impersonation approach allows v1 sync operations to be attributed to the actual
+// user who made the changes in v1, rather than a generic service account.
 func generateJWTToken(audience string, userInfo UserInfo) (string, error) {
 	now := time.Now()
 

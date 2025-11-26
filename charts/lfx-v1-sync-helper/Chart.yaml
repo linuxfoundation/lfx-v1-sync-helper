@@ -3,7 +3,6 @@
 ---
 apiVersion: v2
 name: lfx-v1-sync-helper
-description: LFX Platform V1 Sync Helper chart
+description: LFX Platform v1 Sync Helper chart
 type: application
 version: 0.1.0
-appVersion: "latest"

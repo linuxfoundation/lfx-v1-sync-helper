@@ -100,7 +100,7 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any,
 		// Update existing project.
 		logger.With("project_uid", existingUID, "sfid", sfid, "slug", slug).InfoContext(ctx, "updating existing project")
 
-		// Map V1 data to update payload.
+		// Map v1 data to update payload.
 		var payload *projectservice.UpdateProjectBasePayload
 		payload, err = mapV1DataToProjectUpdateBasePayload(ctx, existingUID, v1Data, mappingsKV)
 		if err != nil {
@@ -108,7 +108,7 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any,
 			return
 		}
 
-		// Map V1 data to settings payload.
+		// Map v1 data to settings payload.
 		var settingsPayload *projectservice.UpdateProjectSettingsPayload
 		settingsPayload, err = mapV1DataToProjectUpdateSettingsPayload(ctx, existingUID, v1Data)
 		if err != nil {
@@ -122,7 +122,7 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any,
 		// Create new project.
 		logger.With("sfid", sfid, "slug", slug).InfoContext(ctx, "creating new project")
 
-		// Map V1 data to create payload.
+		// Map v1 data to create payload.
 		var payload *projectservice.CreateProjectPayload
 		payload, err = mapV1DataToProjectCreatePayload(ctx, v1Data, mappingsKV)
 		if err != nil {
@@ -152,7 +152,7 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any,
 	logger.With("project_uid", uid, "sfid", sfid, "slug", slug).InfoContext(ctx, "successfully synced project")
 }
 
-// mapV1DataToProjectCreatePayload converts V1 project data to a CreateProjectPayload.
+// mapV1DataToProjectCreatePayload converts v1 project data to a CreateProjectPayload.
 func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*projectservice.CreateProjectPayload, error) {
 	// Extract required fields.
 	name, nameOK := v1Data["name"].(string)
@@ -285,7 +285,7 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any,
 	var checkPublicParentUID string
 
 	if parentProjectID != "" {
-		// Project has a parent in V1, look up the parent's V2 UID from SFID mappings.
+		// Project has a parent in v1, look up the parent's V2 UID from SFID mappings.
 		parentMappingKey := fmt.Sprintf("project.sfid.%s", parentProjectID)
 		if entry, err := mappingsKV.Get(ctx, parentMappingKey); err == nil {
 			payload.ParentUID = string(entry.Value())
@@ -300,7 +300,7 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any,
 			return nil, fmt.Errorf("could not find project parent UID in mappings for SFID %s", parentProjectID)
 		}
 	} else {
-		// Project has no parent in V1, so it should be a child of ROOT in V2.
+		// Project has no parent in v1, so it should be a child of ROOT in V2.
 		rootUID, err := getRootProjectUID(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get ROOT project UID: %w", err)
@@ -324,7 +324,7 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any,
 	return payload, nil
 }
 
-// mapV1DataToProjectUpdateBasePayload converts V1 project data to an UpdateProjectBasePayload.
+// mapV1DataToProjectUpdateBasePayload converts v1 project data to an UpdateProjectBasePayload.
 func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*projectservice.UpdateProjectBasePayload, error) {
 	// Extract required fields.
 	name, nameOK := v1Data["name"].(string)
@@ -447,7 +447,7 @@ func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string,
 	var checkPublicParentUID string
 
 	if parentProjectID != "" {
-		// Project has a parent in V1, look up the parent's V2 UID from SFID mappings.
+		// Project has a parent in v1, look up the parent's V2 UID from SFID mappings.
 		parentMappingKey := fmt.Sprintf("project.sfid.%s", parentProjectID)
 		if entry, err := mappingsKV.Get(ctx, parentMappingKey); err == nil {
 			payload.ParentUID = string(entry.Value())
@@ -462,7 +462,7 @@ func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string,
 			return nil, fmt.Errorf("could not find project parent UID in mappings for SFID %s", parentProjectID)
 		}
 	} else {
-		// Project has no parent in V1, so it should be a child of ROOT in V2.
+		// Project has no parent in v1, so it should be a child of ROOT in V2.
 		rootUID, err := getRootProjectUID(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get ROOT project UID: %w", err)
@@ -486,7 +486,7 @@ func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string,
 	return payload, nil
 }
 
-// mapV1DataToProjectUpdateSettingsPayload converts V1 project data to an UpdateProjectSettingsPayload.
+// mapV1DataToProjectUpdateSettingsPayload converts v1 project data to an UpdateProjectSettingsPayload.
 func mapV1DataToProjectUpdateSettingsPayload(_ context.Context, projectUID string, v1Data map[string]any) (*projectservice.UpdateProjectSettingsPayload, error) {
 	payload := &projectservice.UpdateProjectSettingsPayload{
 		UID: &projectUID,
