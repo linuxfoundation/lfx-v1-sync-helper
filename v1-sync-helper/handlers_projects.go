@@ -301,7 +301,7 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any,
 		}
 	} else {
 		// Project has no parent in v1, so it should be a child of ROOT in V2.
-		rootUID, err := getRootProjectUID(ctx)
+		rootUID, err := getProjectUIDBySlug(ctx, "ROOT")
 		if err != nil {
 			return nil, fmt.Errorf("failed to get ROOT project UID: %w", err)
 		}
@@ -463,7 +463,7 @@ func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string,
 		}
 	} else {
 		// Project has no parent in v1, so it should be a child of ROOT in V2.
-		rootUID, err := getRootProjectUID(ctx)
+		rootUID, err := getProjectUIDBySlug(ctx, "ROOT")
 		if err != nil {
 			return nil, fmt.Errorf("failed to get ROOT project UID: %w", err)
 		}
