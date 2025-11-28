@@ -31,3 +31,28 @@ func getProjectUIDBySlug(ctx context.Context, slug string) (string, error) {
 	logger.With("project_uid", projectUID).With("slug", slug).DebugContext(ctx, "successfully retrieved project UID")
 	return projectUID, nil
 }
+
+// getProjectSlugByUID looks up a project slug from a project UID via NATS.
+// This is used to get the slug of a parent project to determine allowlist filtering rules.
+func getProjectSlugByUID(ctx context.Context, projectUID string) (string, error) {
+	// Create context with timeout for the NATS request.
+	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	logger.With("project_uid", projectUID).DebugContext(ctx, "requesting project slug via NATS")
+
+	// Make a NATS request to the get_slug subject.
+	resp, err := natsConn.RequestWithContext(requestCtx, "lfx.projects-api.get_slug", []byte(projectUID))
+	if err != nil {
+		return "", fmt.Errorf("failed to request project slug for UID %s: %w", projectUID, err)
+	}
+
+	// The response should be the slug string.
+	projectSlug := strings.TrimSpace(string(resp.Data))
+	if projectSlug == "" {
+		return "", fmt.Errorf("empty project slug response for UID %s", projectUID)
+	}
+
+	logger.With("project_uid", projectUID).With("slug", projectSlug).DebugContext(ctx, "successfully retrieved project slug")
+	return projectSlug, nil
+}

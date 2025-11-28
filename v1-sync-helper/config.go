@@ -10,6 +10,16 @@ import (
 	"os"
 )
 
+// ProjectAllowlist contains the list of project slugs that are allowed to be synced.
+var ProjectAllowlist = []string{
+	"tlf",
+	"lfprojects",
+	"jdf",
+	"jdf-llc",
+	"tazama",
+	"korg",
+}
+
 // Config holds all configuration values for the v1-sync-helper service
 type Config struct {
 	// JWT/Heimdall configuration for LFX v2 services
