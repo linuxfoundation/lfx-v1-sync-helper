@@ -98,7 +98,7 @@ func isProjectAllowed(ctx context.Context, v1Data map[string]any, mappingsKV jet
 	parentSlug = strings.ToLower(parentSlug)
 
 	// Check if parent is one of the "overarching" grouping projects.
-	overarchingProjects := []string{"tlf", "lf-charities", "lfprojects", "jdf", "jdf-llc", "jdf-international"}
+	overarchingProjects := []string{"tlf", "lf-charities", "lfprojects", "jdf", "jdf-llc", "jdf-international", "lfenergy"}
 	if slices.Contains(overarchingProjects, parentSlug) {
 		// For children of overarching projects, only allow if child slug is in allowlist.
 		return false, fmt.Sprintf("child of overarching project %s but child slug not in allowlist", parentSlug)

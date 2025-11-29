@@ -19,6 +19,7 @@ var ProjectAllowlist = []string{
 	"jdf",
 	"jdf-llc",
 	"jdf-international",
+	"lfenergy",
 	"tazama",
 	"chiplet",
 	"cnab",
