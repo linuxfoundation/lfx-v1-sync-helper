@@ -48,7 +48,7 @@ func kvHandler(entry jetstream.KeyValueEntry, v1KV jetstream.KeyValue, mappingsK
 }
 
 // handleKVPut processes a KV put operation (create/update)
-func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry, _ jetstream.KeyValue, mappingsKV jetstream.KeyValue) {
+func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry, v1KV jetstream.KeyValue, mappingsKV jetstream.KeyValue) {
 	key := entry.Key()
 
 	// Parse the JSON data
@@ -70,6 +70,25 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry, _ jetstream
 		handleCommitteeUpdate(ctx, key, v1Data, mappingsKV)
 	} else if strings.HasPrefix(key, "platform-community__c.") {
 		handleCommitteeMemberUpdate(ctx, key, v1Data, mappingsKV)
+	} else if key == "itx-zoom-meetings-v2" { // gitleaks:allow
+		handleZoomMeetingUpdate(ctx, key, v1Data, mappingsKV)
+	} else if key == "itx-zoom-meetings-registrants-v2" {
+		handleZoomMeetingRegistrantUpdate(ctx, key, v1Data, mappingsKV)
+	} else if key == "itx-zoom-meetings-mappings-v2" {
+		handleZoomMeetingMappingUpdate(ctx, key, v1Data, v1KV, mappingsKV)
+	} else if key == "itx-zoom-past-meetings" {
+		handleZoomPastMeetingUpdate(ctx, key, v1Data, mappingsKV)
+	} else if key == "itx-zoom-past-meetings-attendees" {
+		handleZoomPastMeetingAttendeeUpdate(ctx, key, v1Data, v1KV, mappingsKV)
+	} else if key == "itx-zoom-past-meetings-invitees" {
+		handleZoomPastMeetingInviteeUpdate(ctx, key, v1Data, v1KV, mappingsKV)
+	} else if key == "itx-zoom-past-meetings-mappings" {
+		//handleZoomPastMeetingMappingUpdate(ctx, key, v1Data, mappingsKV) TODO: implement this
+		logger.With("key", key).DebugContext(ctx, "zoom past meeting mappings handler not yet implemented")
+	} else if key == "itx-zoom-past-meetings-recordings" {
+		handleZoomPastMeetingRecordingUpdate(ctx, key, v1Data, mappingsKV)
+	} else if key == "itx-zoom-past-meetings-summaries" {
+		handleZoomPastMeetingSummaryUpdate(ctx, key, v1Data, v1KV, mappingsKV)
 	} else {
 		logger.With("key", key).DebugContext(ctx, "unknown object type, ignoring")
 	}

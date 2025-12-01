@@ -8,6 +8,7 @@ require (
 	github.com/auth0/go-auth0 v1.32.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
+	github.com/linuxfoundation-it/itx-service-zoom v0.0.17
 	github.com/linuxfoundation/lfx-v2-committee-service v0.2.14
 	github.com/linuxfoundation/lfx-v2-project-service v0.5.3
 	github.com/nats-io/nats.go v1.47.0
