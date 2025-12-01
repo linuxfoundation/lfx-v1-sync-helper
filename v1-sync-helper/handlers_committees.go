@@ -156,6 +156,15 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		err = updateCommittee(ctx, payload, userInfo)
 		uid = existingUID
 	} else {
+		// Check if parent project exists in mappings before creating new committee.
+		if projectSFID, ok := v1Data["project_name__c"].(string); ok && projectSFID != "" {
+			projectMappingKey := fmt.Sprintf("project.sfid.%s", projectSFID)
+			if _, err := mappingsKV.Get(ctx, projectMappingKey); err != nil {
+				logger.With("project_sfid", projectSFID, "committee_sfid", sfid).InfoContext(ctx, "skipping committee creation - parent project not found in mappings")
+				return
+			}
+		}
+
 		// Create new committee.
 		logger.With("sfid", sfid).InfoContext(ctx, "creating new committee")
 
@@ -358,17 +367,18 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 		return
 	}
 
-	// Look up committee UID from collaboration_name__c mapping.
-	// Note: collaboration_name__c points to the v1 SFID of the committee.
-	committeeUID := ""
+	// Check if parent committee exists in mappings before proceeding.
 	committeeMappingKey := fmt.Sprintf("committee.sfid.%s", collaborationNameV1)
-	if entry, err := mappingsKV.Get(ctx, committeeMappingKey); err == nil {
-		committeeUID = string(entry.Value())
-		logger.With("collaboration_sfid", collaborationNameV1, "committee_uid", committeeUID).DebugContext(ctx, "found committee UID from committee SFID mapping")
-	} else {
-		logger.With("collaboration_sfid", collaborationNameV1, errKey, err).WarnContext(ctx, "could not find committee UID in mappings for committee member")
+	committeeEntry, committeeLookupErr := mappingsKV.Get(ctx, committeeMappingKey)
+	if committeeLookupErr != nil {
+		logger.With("collaboration_sfid", collaborationNameV1, "member_sfid", sfid).InfoContext(ctx, "skipping committee member sync - parent committee not found in mappings")
 		return
 	}
+
+	// Look up committee UID from collaboration_name__c mapping.
+	// Note: collaboration_name__c points to the v1 SFID of the committee.
+	committeeUID := string(committeeEntry.Value())
+	logger.With("collaboration_sfid", collaborationNameV1, "committee_uid", committeeUID).DebugContext(ctx, "found committee UID from committee SFID mapping")
 
 	// Check if we have an existing member mapping.
 	memberMappingKey := fmt.Sprintf("committee_member.sfid.%s", sfid)

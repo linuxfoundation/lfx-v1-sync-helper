@@ -7,38 +7,10 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
-	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
-
-// getRootProjectUID makes a NATS request to get the ROOT project UID.
-func getRootProjectUID(ctx context.Context) (string, error) {
-	// Create context with timeout for the NATS request.
-	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	logger.DebugContext(ctx, "requesting ROOT project UID via NATS")
-
-	// Make a NATS request to the slug_to_uid subject.
-	resp, err := natsConn.RequestWithContext(requestCtx, "lfx.projects-api.slug_to_uid", []byte("ROOT"))
-	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to request ROOT project UID")
-		return "", fmt.Errorf("failed to request ROOT project UID: %w", err)
-	}
-
-	// The response should be the UUID string.
-	rootUID := strings.TrimSpace(string(resp.Data))
-	if rootUID == "" {
-		logger.ErrorContext(ctx, "received empty ROOT project UID response")
-		return "", fmt.Errorf("empty ROOT project UID response")
-	}
-
-	logger.With("root_uid", rootUID).DebugContext(ctx, "successfully retrieved ROOT project UID")
-	return rootUID, nil
-}
 
 // shouldSkipSync checks if the record was last modified by this service and
 // should be skipped, because it originated in v2, and therefore does not need

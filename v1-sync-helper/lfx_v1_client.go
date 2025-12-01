@@ -155,7 +155,7 @@ func initV1Client(cfg *Config) error {
 		audience:   cfg.LFXAPIGateway.String(),
 	}
 
-	v1HTTPClient = oauth2.NewClient(nil, tokenSource)
+	v1HTTPClient = oauth2.NewClient(context.Background(), tokenSource)
 
 	return nil
 }
