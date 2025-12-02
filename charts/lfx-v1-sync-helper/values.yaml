@@ -19,9 +19,6 @@ app:
     # NATS_URL is required
     NATS_URL:
       value: nats://lfx-platform-nats.lfx.svc.cluster.local:4222
-    # LOG_LEVEL is optional
-    LOG_LEVEL:
-      value: info
     # DEBUG is optional
     DEBUG:
       value: "false"
@@ -155,6 +152,6 @@ auth0:
     # name of the secret containing Auth0 client ID and private key
     name: v1-sync-helper-auth0-credentials
     # key in the secret which contains the Auth0 client ID
-    clientIdKey: client-id
+    clientIdKey: client_id
     # key in the secret which contains the Auth0 private key
-    privateKeyKey: private-key
+    privateKeyKey: client_private_key

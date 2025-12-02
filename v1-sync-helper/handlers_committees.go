@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 	"github.com/nats-io/nats.go/jetstream"
@@ -26,13 +27,14 @@ var allowedCommitteeCategories = map[string]bool{
 	"Marketing Committee/Sub Committee": true,
 	"Marketing Mailing List":            true,
 	"Marketing Oversight Committee/Marketing Advisory Committee": true,
-	"Other":                  true,
-	"Product Security":       true,
-	"Special Interest Group": true,
-	"Technical Mailing List": true,
-	"Technical Oversight Committee/Technical Advisory Committee": true,
-	"Technical Steering Committee":                               true,
-	"Working Group":                                              true,
+	"Other":                         true,
+	"Product Security":              true,
+	"Special Interest Group":        true,
+	"Technical Advisory Committee":  true,
+	"Technical Mailing List":        true,
+	"Technical Oversight Committee": true,
+	"Technical Steering Committee":  true,
+	"Working Group":                 true,
 }
 
 // allowedAppointedByValues defines the valid values for appointed_by__c mapping to appointed_by.
@@ -101,9 +103,23 @@ func mapAppointedByToValidValue(ctx context.Context, appointedBy string) string 
 }
 
 // mapTypeToCategory filters and maps type__c to category.
-func mapTypeToCategory(ctx context.Context, typeVal string) *string {
+func mapTypeToCategory(ctx context.Context, typeVal, committeeName string) *string {
 	if typeVal == "" {
 		return nil
+	}
+
+	if typeVal == "Technical Oversight Committee/Technical Advisory Committee" {
+		// Special case mapping.
+		if strings.Contains(strings.ToLower(committeeName), "advisory") {
+			mapped := "Technical Advisory Committee"
+			return &mapped
+		}
+		if strings.Contains(strings.ToLower(committeeName), "tac") {
+			mapped := "Technical Advisory Committee"
+			return &mapped
+		}
+		mapped := "Technical Oversight Committee"
+		return &mapped
 	}
 
 	if allowedCommitteeCategories[typeVal] {
@@ -233,7 +249,7 @@ func mapV1DataToCommitteeCreatePayload(ctx context.Context, v1Data map[string]an
 	}
 
 	if typeVal, ok := v1Data["type__c"].(string); ok && typeVal != "" {
-		if category := mapTypeToCategory(ctx, typeVal); category != nil {
+		if category := mapTypeToCategory(ctx, typeVal, name); category != nil {
 			payload.Category = *category // Map Type to Category with validation.
 		}
 	}
@@ -308,7 +324,7 @@ func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID str
 	}
 
 	if typeVal, ok := v1Data["type__c"].(string); ok && typeVal != "" {
-		if category := mapTypeToCategory(ctx, typeVal); category != nil {
+		if category := mapTypeToCategory(ctx, typeVal, name); category != nil {
 			payload.Category = *category // Map Type to Category with validation.
 		}
 	}

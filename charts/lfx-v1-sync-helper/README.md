@@ -62,7 +62,7 @@ EOF
 
 # Install from the OCI registry
 helm install -n lfx lfx-v1-sync-helper \
-    oci://ghcr.io/linuxfoundation/lfx-v1-sync-helper/chart \
+    oci://ghcr.io/linuxfoundation/lfx-v1-sync-helper/chart/lfx-v1-sync-helper \
     -f values.yaml
 ```
 

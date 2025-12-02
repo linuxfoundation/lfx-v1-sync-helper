@@ -61,8 +61,8 @@ func isProjectAllowed(ctx context.Context, v1Data map[string]any, mappingsKV jet
 	slug, _ := v1Data["slug__c"].(string)
 	slug = strings.ToLower(slug)
 
-	// Check if the project's slug is in the allowlist.
-	if slices.Contains(ProjectAllowlist, slug) {
+	// Check if the project's slug is in either allowlist.
+	if slices.Contains(projectAllowlist, slug) || slices.Contains(projectFamilyAllowlist, slug) {
 		return true, "project slug is in allowlist"
 	}
 
@@ -97,15 +97,15 @@ func isProjectAllowed(ctx context.Context, v1Data map[string]any, mappingsKV jet
 	}
 	parentSlug = strings.ToLower(parentSlug)
 
-	// Check if parent is one of the "overarching" grouping projects.
-	overarchingProjects := []string{"tlf", "lf-charities", "lfprojects", "jdf", "jdf-llc", "jdf-international", "lfenergy"}
-	if slices.Contains(overarchingProjects, parentSlug) {
+	// Check if parent is one of the "overarching" grouping projects which does
+	// not allow all children.
+	if slices.Contains(projectAllowlist, parentSlug) {
 		// For children of overarching projects, only allow if child slug is in allowlist.
 		return false, fmt.Sprintf("child of overarching project %s but child slug not in allowlist", parentSlug)
 	}
 
-	// Parent is not an overarching project, so this is a child of an allowlisted project.
-	// These are always allowed.
+	// Parent is not an overarching project, so this is a "descendant" of an
+	// allowlisted project "family".
 	return true, fmt.Sprintf("child of allowlisted project %s", parentSlug)
 }
 
