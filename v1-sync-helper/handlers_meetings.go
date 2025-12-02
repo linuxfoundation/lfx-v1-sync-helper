@@ -143,7 +143,7 @@ func sendAccessMessage(ctx context.Context, subject string, messageBytes []byte)
 // MeetingAccessMessage is the schema for the data in the message sent to the fga-sync service.
 // These are the fields that the fga-sync service needs in order to update the OpenFGA permissions.
 type MeetingAccessMessage struct {
-	UID        string   `json:"uid"`
+	UID        string   `json:"meeting_id"`
 	Public     bool     `json:"public"`
 	ProjectUID string   `json:"project_uid"`
 	Organizers []string `json:"organizers"`
@@ -151,7 +151,7 @@ type MeetingAccessMessage struct {
 }
 
 // convertMapToInputMeeting converts a map[string]any to an InputMeeting struct.
-func convertMapToInputMeeting(ctx context.Context, v1Data map[string]any) (*meetingInput, error) {
+func convertMapToInputMeeting(ctx context.Context, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*meetingInput, error) {
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
@@ -166,9 +166,29 @@ func convertMapToInputMeeting(ctx context.Context, v1Data map[string]any) (*meet
 		return nil, fmt.Errorf("failed to unmarshal JSON into InputMeeting: %w", err)
 	}
 
+	// We need to populate the ID for the v2 system
 	if meetingID, ok := v1Data["meeting_id"].(string); ok && meetingID != "" {
 		meeting.ID = meetingID
 	}
+
+	// Convert the v1 project ID since the json key is different,
+	// then use that to get the v2 project UID.
+	if projectSFID, ok := v1Data["proj_id"].(string); ok && projectSFID != "" {
+		meeting.ProjectSFID = projectSFID
+	}
+
+	// Take the v1 project salesforce ID and look up the v2 project UID.
+	projectMappingKey := fmt.Sprintf("project.sfid.%s", meeting.ProjectSFID)
+	if entry, err := mappingsKV.Get(ctx, projectMappingKey); err == nil {
+		meeting.ProjectID = string(entry.Value())
+	}
+
+	occurrences, err := CalculateOccurrences(ctx, meeting, false, false, 100)
+	if err != nil {
+		logger.With(errKey, err, "meeting_id", meeting.ID).ErrorContext(ctx, "failed to calculate occurrences")
+		return nil, fmt.Errorf("failed to calculate occurrences: %w", err)
+	}
+	meeting.Occurrences = occurrences
 
 	return &meeting, nil
 }
@@ -177,7 +197,7 @@ func getMeetingTags(meeting *meetingInput) []string {
 	tags := []string{
 		fmt.Sprintf("%s", meeting.ID),
 		fmt.Sprintf("meeting_uid:%s", meeting.ID),
-		fmt.Sprintf("project_uid:%s", meeting.ProjectUID),
+		fmt.Sprintf("project_uid:%s", meeting.ProjectID),
 		fmt.Sprintf("title:%s", meeting.Topic),
 		fmt.Sprintf("meeting_type:%s", meeting.MeetingType),
 	}
@@ -197,7 +217,7 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 	logger.With("key", key).DebugContext(ctx, "processing zoom meeting update")
 
 	// Convert v1Data map to InputMeeting struct
-	meeting, err := convertMapToInputMeeting(ctx, v1Data)
+	meeting, err := convertMapToInputMeeting(ctx, v1Data, mappingsKV)
 	if err != nil {
 		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert v1Data to InputMeeting")
 		return
@@ -254,7 +274,7 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 	accessMsg := MeetingAccessMessage{
 		UID:        uid,
 		Public:     meeting.Visibility == "public",
-		ProjectUID: meeting.ProjectUID,
+		ProjectUID: meeting.ProjectID,
 		Organizers: []string{},
 		Committees: committees,
 	}
@@ -352,7 +372,7 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 	}
 
 	// Convert meeting data to typed struct
-	meeting, err := convertMapToInputMeeting(ctx, meetingData)
+	meeting, err := convertMapToInputMeeting(ctx, meetingData, mappingsKV)
 	if err != nil {
 		logger.With(errKey, err, "meeting_id", meetingID).ErrorContext(ctx, "failed to convert meeting data")
 		return
@@ -396,7 +416,7 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 		accessMsg := MeetingAccessMessage{
 			UID:        meetingID,
 			Public:     meeting.Visibility == "public",
-			ProjectUID: meeting.ProjectUID,
+			ProjectUID: meeting.ProjectID,
 			Organizers: []string{},
 			Committees: committees,
 		}

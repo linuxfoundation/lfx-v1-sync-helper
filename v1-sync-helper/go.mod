@@ -12,6 +12,7 @@ require (
 	github.com/linuxfoundation/lfx-v2-project-service v0.5.3
 	github.com/nats-io/nats.go v1.47.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
+	github.com/teambition/rrule-go v1.8.2
 	goa.design/goa/v3 v3.22.6
 	golang.org/x/oauth2 v0.33.0
 )

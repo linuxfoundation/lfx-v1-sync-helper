@@ -4,7 +4,9 @@
 // Package main provides data models and structures for meeting-related operations.
 package main
 
-import "time"
+import (
+	"time"
+)
 
 // CreatedBy represents the user that created a resource.
 type CreatedBy struct {
@@ -20,26 +22,69 @@ type UpdatedBy struct {
 	Email    string `json:"email,omitempty" dynamodbav:"email,omitempty"`
 }
 
-// ZoomMeetingRecurrence represents the recurrence pattern of a meeting.
+// ZoomMeetingRecurrence is the schema for a meeting recurrence
 type ZoomMeetingRecurrence struct {
-	Type           string `json:"type,omitempty" dynamodbav:"type,omitempty"`
-	RepeatInterval string `json:"repeat_interval,omitempty" dynamodbav:"repeat_interval,omitempty"`
-	WeeklyDays     string `json:"weekly_days,omitempty" dynamodbav:"weekly_days,omitempty"`
-	MonthlyWeek    string `json:"monthly_week,omitempty" dynamodbav:"monthly_week,omitempty"`
+	// Type is the type of recurrence.
+	Type string `json:"type" dynamodbav:"type"`
+
+	// RepeatInterval is the interval of the recurrence.
+	// For example, if the recurrence type is daily, the repeat interval is the number of days between occurrences.
+	RepeatInterval string `json:"repeat_interval" dynamodbav:"repeat_interval"`
+
+	// WeeklyDays is the days of the week that the recurrence occurs on.
+	// This is only relevant for type 2 (weekly) meetings.
+	WeeklyDays string `json:"weekly_days,omitempty" dynamodbav:"weekly_days,omitempty"`
+
+	// MonthlyDay is the day of the month that the recurrence occurs on.
+	// This is only relevant for type 3 (monthly) meetings.
+	MonthlyDay string `json:"monthly_day,omitempty" dynamodbav:"monthly_day,omitempty"`
+
+	// MonthlyWeek is the week of the month that the recurrence occurs on.
+	// This is only relevant for type 3 (monthly) meetings and should not be paired with [MonthlyDay].
+	MonthlyWeek string `json:"monthly_week,omitempty" dynamodbav:"monthly_week,omitempty"`
+
+	// MonthlyWeekDay is the day of the week that the recurrence occurs on.
+	// This is only relevant for type 3 (monthly) meetings and it is paired with [MonthlyWeek].
 	MonthlyWeekDay string `json:"monthly_week_day,omitempty" dynamodbav:"monthly_week_day,omitempty"`
-	EndDateTime    string `json:"end_date_time,omitempty" dynamodbav:"end_date_time,omitempty"`
+
+	// EndTimes is the number of times to repeat the recurrence pattern.
+	// For example, if set to 30 for a daily recurring meeting, then 30 occurrences will be created.
+	EndTimes string `json:"end_times,omitempty" dynamodbav:"end_times,omitempty"`
+
+	// EndDateTime is the date and time in RFC3339 format that the recurrence pattern will end.
+	EndDateTime string `json:"end_date_time,omitempty" dynamodbav:"end_date_time,omitempty"`
 }
 
-// UpdatedOccurrence represents an occurrence that has been updated.
+// UpdatedOccurrence is the schema for an updated meeting occurrence
 type UpdatedOccurrence struct {
-	OldOccurrenceID string                 `json:"old_occurrence_id,omitempty" dynamodbav:"old_occurrence_id,omitempty"`
-	NewOccurrenceID string                 `json:"new_occurrence_id,omitempty" dynamodbav:"new_occurrence_id,omitempty"`
-	AllFollowing    bool                   `json:"all_following,omitempty" dynamodbav:"all_following,omitempty"`
-	Topic           string                 `json:"topic,omitempty" dynamodbav:"topic,omitempty"`
-	Agenda          string                 `json:"agenda,omitempty" dynamodbav:"agenda,omitempty"`
-	Duration        string                 `json:"duration,omitempty" dynamodbav:"duration,omitempty"`
-	Timezone        string                 `json:"timezone,omitempty" dynamodbav:"timezone,omitempty"`
-	Recurrence      *ZoomMeetingRecurrence `json:"recurrence,omitempty" dynamodbav:"recurrence,omitempty"`
+	// OldOccurrenceID is the original occurrence ID, which is the original start time of the occurrence
+	// as unix timestamp
+	OldOccurrenceID string `json:"old_occurrence_id" dynamodbav:"old_occurrence_id"`
+
+	// NewOccurrenceID is the new occurrence ID, which is the new start time of the occurrence
+	// as unix timestamp.
+	// If the start time of the updated occurrence did not change, then the new occurrence ID is the same as the old one.
+	NewOccurrenceID string `json:"new_occurrence_id" dynamodbav:"new_occurrence_id"`
+
+	// Timezone is the updated timezone
+	Timezone string `json:"timezone" dynamodbav:"timezone"`
+
+	// Duration is the updated duration of occurrence in minutes
+	Duration string `json:"duration" dynamodbav:"duration"`
+
+	// Topic is the updated topic of the occurrence
+	Topic string `json:"topic" dynamodbav:"topic"`
+
+	// Agenda is the updated agenda of the occurrence
+	Agenda string `json:"agenda" dynamodbav:"agenda"`
+
+	// Recurrence is the updated recurrence pattern for the occurrence
+	Recurrence *ZoomMeetingRecurrence `json:"recurrence" dynamodbav:"recurrence,omitempty"`
+
+	// AllFollowing is a flag that indicates if the updated occurrence changes should be applied to all following occurrences.
+	// If this is set to true, then occurrences after this updated occurrence will used these values up until the next
+	// occurrence that is also updated to a new set of values.
+	AllFollowing bool `json:"all_following" dynamodbav:"all_following"`
 }
 
 // Committee represents a committee with optional filters.
@@ -56,92 +101,221 @@ type meetingInput struct {
 	// MeetingID is the numeric Zoom meeting ID
 	MeetingID string `json:"meeting_id"`
 
-	// Topic is the topic/title of the meeting
-	Topic string `json:"topic"`
+	// ProjectSFID is the salesforce ID of the LF project
+	ProjectSFID string `json:"project_sfid"`
 
-	// Visibility is the visibility level of the meeting (public, private, etc.)
-	Visibility string `json:"visibility"`
+	// ProjectID is the ID of the LF project
+	// This is the v2 project UID.
+	ProjectID string `json:"project_id"`
 
-	// Agenda is the meeting agenda
-	Agenda string `json:"agenda,omitempty"`
+	// Committee is the ID of the committee
+	// It is a Global Secondary Index on the meeting table.
+	Committee string `dynamodbav:"committee"`
+
+	// CommitteeFilters is the list of filters associated with the committee
+	CommitteeFilters []string `dynamodbav:"committee_filters"`
 
 	// Committees is the list of committees associated with this meeting
 	Committees []Committee `json:"committees,omitempty"`
 
-	// Restricted indicates if the meeting is restricted to invited users only
-	Restricted bool `json:"restricted"`
+	// User is the ID of the Zoom user that is set to host the meeting (who the meeting is scheduled for)
+	// It is a Global Secondary Index on the meeting table.
+	User string `dynamodbav:"user_id"`
 
-	// Password is the UUID password for the meeting join page
-	Password string `json:"password,omitempty"`
+	// Topic is the topic of the meeting - this field exists in Zoom for a meeting
+	Topic string `dynamodbav:"topic"`
 
-	// Recurrence is the recurrence pattern of the meeting
-	Recurrence *ZoomMeetingRecurrence `json:"recurrence,omitempty"`
+	// Agenda is the agenda of the meeting - this field exists in Zoom for a meeting
+	Agenda string `dynamodbav:"agenda,omitempty"`
 
-	// ZoomAIEnabled indicates if Zoom AI companion is enabled
-	ZoomAIEnabled bool `json:"zoom_ai_enabled,omitempty"`
+	// Visibility is the visibility of the meeting on the LFX platform
+	Visibility string `dynamodbav:"visibility"`
 
-	// HostKey is the 6-digit host key PIN
-	HostKey string `json:"host_key,omitempty"`
+	// MeetingType is the type of meeting - this field exists in Zoom for a meeting
+	MeetingType string `dynamodbav:"meeting_type"`
 
-	// TranscriptEnabled indicates if transcript is enabled
-	TranscriptEnabled bool `json:"transcript_enabled"`
+	// StartTime is the start time of the meeting in RFC3339 format.
+	// If the meeting is a recurring meeting, this is the start time of the first occurrence.
+	StartTime string `json:"start_time" dynamodbav:"start_time"`
 
-	// EarlyJoinTime is the time in minutes users can join early
-	EarlyJoinTime int `json:"early_join_time,omitempty"`
+	// Timezone is the timezone of the meeting.
+	// The value should be from the IANA Timezone Database (e.g. "America/Los_Angeles").
+	Timezone string `dynamodbav:"timezone"`
 
-	// RecordingEnabled indicates if recording is enabled
-	RecordingEnabled bool `json:"recording_enabled"`
+	// Duration is the duration of the meeting in minutes.
+	Duration string `dynamodbav:"duration"`
 
-	// Duration is the meeting duration in minutes
-	Duration int `json:"duration"`
+	// EarlyJoinTime is the time in minutes before the meeting start time that the user can join the meeting.
+	// This is needed because these meetings are scheduled on shared Zoom users and thus the meeting scheduler
+	// needs to account for this early join time buffer.
+	EarlyJoinTime string `dynamodbav:"early_join_time"` // in minutes
 
-	// RecordingAccess is the access level for recordings
-	RecordingAccess string `json:"recording_access,omitempty"`
+	// LastEndTime is the end time of the last occurrence of the meeting in unix timestamp format.
+	// If the meeting is a non-recurring meeting, this is the end time of the one-time meeting.
+	LastEndTime string `dynamodbav:"last_end_time"`
 
-	// RequireAISummaryApproval indicates if AI summary requires approval
-	RequireAISummaryApproval bool `json:"require_ai_summary_approval,omitempty"`
+	// HostKey is the host key of the Zoom user hosting the meeting.
+	// It is a six-digit PIN that is rotated weekly by our change-host-keys cron job.
+	// This host key is needed to be able to claim host during a meeting.
+	HostKey string `dynamodbav:"host_key"`
 
-	// CreatedAt is the creation timestamp in RFC3339 format
-	CreatedAt string `json:"created_at"`
+	// JoinUrl is the URL to the meeting join page maintained by the PCC team.
+	// The URL is specific to the meeting ID and the password.
+	// (e.g. https://zoom-lfx.dev.platform.linuxfoundation.org/meeting/93699735000?password=111)
+	JoinURL string `dynamodbav:"join_url"`
 
-	// MeetingType is the type of meeting (e.g., "Board", "Committee")
-	MeetingType string `json:"meeting_type,omitempty"`
+	// ZoomPasscode is the passcode of the meeting in Zoom that is used to join the meeting.
+	// This is generated from Zoom when the meeting is created.
+	ZoomPasscode string `dynamodbav:"passcode"`
 
-	// JoinURL is the URL to join the meeting
-	JoinURL string `json:"join_url"`
+	// Password is a UUID that is generated by us when a meeting is created in this service.
+	// It is used for the meeting join page to make it hard to find the URL without knowing the password.
+	Password string `dynamodbav:"password"`
 
-	// TranscriptAccess is the access level for transcripts
-	TranscriptAccess string `json:"transcript_access,omitempty"`
+	// Restricted is a flag that indicates if the meeting is restricted to only invited users of a meeting.
+	// If restricted is false, then the meeting can be joined by anyone with the meeting ID and password.
+	Restricted bool `dynamodbav:"restricted"`
 
-	// StartTime is the meeting start time in RFC3339 format
+	// RecordingEnabled is a flag that indicates if the meeting is recorded.
+	// If set to true, recording is enabled in Zoom since the recording is managed by Zoom.
+	RecordingEnabled bool `dynamodbav:"recording_enabled"`
+
+	// TranscriptEnabled is a flag that indicates if the meeting transcript is enabled.
+	// If set to true, recording is enabled in Zoom since the transcript is managed by Zoom.
+	TranscriptEnabled bool `dynamodbav:"transcript_enabled"`
+
+	// RecordingAccess is the access level of the meeting recording within the LFX platform.
+	RecordingAccess string `dynamodbav:"recording_access"`
+
+	// TranscriptAccess is the access level of the meeting transcript within the LFX platform.
+	TranscriptAccess string `dynamodbav:"transcript_access"`
+
+	// CreatedAt is the timestamp of when the meeting was created in RFC3339 format.
+	CreatedAt string `dynamodbav:"created_at"`
+
+	// ModifiedAt is the timestamp of when the meeting was last modified in RFC3339 format.
+	ModifiedAt string `dynamodbav:"modified_at"`
+
+	// CreatedBy is the user that created the meeting.
+	CreatedBy CreatedBy `dynamodbav:"created_by"`
+
+	// UpdatedBy is the user that last updated the meeting.
+	UpdatedBy UpdatedBy `dynamodbav:"updated_by"`
+
+	// UpdatedByList is a list of users that have updated the meeting.
+	UpdatedByList []UpdatedBy `dynamodbav:"updated_by_list,omitempty"`
+
+	// UseNewInviteEmailAddress is a flag that indicates if the meeting should use the new invite email address.
+	// In January 2024, we switched to using a new email address as the organizer for meeting invites.
+	// We needed to keep the old email address for existing meetings to avoid calendar issues.
+	UseNewInviteEmailAddress bool `dynamodbav:"use_new_invite_email_address"`
+
+	// Recurrence is the recurrence pattern of the meeting.
+	// This is managed by this service and not by Zoom. In Zoom, all meetings are scheduled as recurring with
+	// no fixed time (type 3).
+	Recurrence *ZoomMeetingRecurrence `dynamodbav:"recurrence,omitempty"`
+
+	// Occurrences is a list of [ZoomMeetingOccurrence] objects that represent the occurrences of the meeting.
+	Occurrences []ZoomMeetingOccurrence `json:"occurrences,omitempty"`
+
+	// CancelledOccurrences is a list of IDs of occurrences that have been cancelled.
+	CancelledOccurrences []string `dynamodbav:"cancelled_occurrences,omitempty"`
+
+	// UpdatedOccurrences is a list of [UpdatedOccurrence] objects that represent the occurrences that have been updated
+	// to a new set of values. Every occurrence has details that can be specific to that occurrence or those that follow,
+	// such as the start time, duration, topic, and agenda.
+	UpdatedOccurrences []UpdatedOccurrence `dynamodbav:"updated_occurrences,omitempty"`
+
+	// IcsUIDTimezone is a field that is used to store the timezone of a meeting that is used to
+	// generate the calendar UID. This was needed because if a meeting's timezone changed, the calendar UID
+	// would change if we didn't anchor the UID to the timezone.
+	IcsUIDTimezone string `dynamodbav:"ics_uid_timezone,omitempty"`
+
+	// IcsAdditionalUids is a list of additional calendar event UIDs that are used in the invites sent to registrants
+	// for the meeting. All meetings have one UID that is the meeting ID to represent the initial recurrence pattern,
+	// but for each updated occurrence that affects all of the following occurrences, another calendar event UID is needed
+	// to represent that sequence of occurrences in ICS. Those UIDs are stored in the database to keep track of them.
+	IcsAdditionalUids []string `dynamodbav:"ics_additional_uids,omitempty"`
+
+	// ZoomAIEnabled is a flag that indicates if the meeting is hosted on a zoom user with Zoom AI companion enabled
+	// (Zoom users with AI companion enabled are in a different Zoom group).
+	ZoomAIEnabled bool `dynamodbav:"zoom_ai_enabled,omitempty"`
+
+	// RequireAISummaryApproval is a flag that indicates if the meeting requires approval of the AI summary.
+	// This is only relevant if [ZoomAIEnabled] is true.
+	RequireAISummaryApproval *bool `dynamodbav:"require_ai_summary_approval,omitempty"`
+
+	// AISummaryAccess is the access level of the meeting AI summary within the LFX platform.
+	// This is only relevant if [ZoomAIEnabled] is true.
+	AISummaryAccess string `dynamodbav:"ai_summary_access,omitempty"`
+
+	// YoutubeUploadEnabled is a flag that indicates if the meeting's recording should be uploaded to Youtube
+	YoutubeUploadEnabled bool `dynamodbav:"youtube_upload_enabled,omitempty"`
+
+	// ConcurrentZoomUserEnabled is a flag that indicates if the meeting is hosted on a zoom user with concurrent zoom licenses
+	// enabled (which means it is hosted on a different set of pooled users).
+	// TODO: remove the above ConcurrentZoomUserEnabled flag once all meetings have been moved to start using concurrent zoom licenses
+	ConcurrentZoomUserEnabled bool `dynamodbav:"concurrent_zoom_user_enabled,omitempty"`
+
+	// LastBulkRegistrantJobStatus is the status of the last bulk insert job that was run to insert registrants
+	LastBulkRegistrantJobStatus string `json:"last_bulk_registrant_job_status" dynamodbav:"last_bulk_registrant_job_status,omitempty"`
+
+	// LastBulkRegistrantsJobFailedCount is the total number of failed records in the last bulk insert job that was run to insert registrants
+	LastBulkRegistrantsJobFailedCount string `json:"last_bulk_registrants_job_failed_count" dynamodbav:"last_bulk_registrants_job_failed_count,omitempty"`
+
+	// LastBulkRegistrantsJobWarningCount is the total number of passed records with warnings in the last bulk insert job that was run to insert registrants
+	LastBulkRegistrantsJobWarningCount string `json:"last_bulk_registrants_job_warning_count" dynamodbav:"last_bulk_registrants_job_warning_count,omitempty"`
+
+	// LastMailingListMembersSyncJobStatus is the status of the last bulk insert job that was run to insert registrants
+	LastMailingListMembersSyncJobStatus string `json:"last_mailing_list_members_sync_job_status" dynamodbav:"last_mailing_list_members_sync_job_status,omitempty"`
+
+	// LastMailingListMembersSyncJobFailedCount is the total number of failed records in the last bulk insert job that was run to insert registrants
+	LastMailingListMembersSyncJobFailedCount string `json:"last_mailing_list_members_sync_job_failed_count" dynamodbav:"last_mailing_list_members_sync_job_failed_count,omitempty"`
+
+	// MailingListGroupIDs is a list of group IDs that the meeting is associated with
+	MailingListGroupIDs []string `json:"mailing_list_group_ids" dynamodbav:"mailing_list_group_ids,omitempty"`
+
+	// LastMailingListMembersSyncJobWarningCount is the total number of passed records with warnings in the last bulk insert job that was run to insert registrants
+	LastMailingListMembersSyncJobWarningCount string `json:"last_mailing_list_members_sync_job_warning_count" dynamodbav:"last_mailing_list_members_sync_job_warning_count,omitempty"`
+	// UseUniqueICSUID is a flag that indicates if the meeting should use a unique event ID for the calendar event.
+	// Apply manually (generate uuid and store in this field) when a meeting has calendar issues, and we wish to use a separate unique uuid instead of the meeting ID.
+	UseUniqueICSUID string `json:"use_unique_ics_uid" dynamodbav:"use_unique_ics_uid,omitempty"` // this is a uuid
+}
+
+// ZoomMeetingOccurrence is the schema for a meeting occurrence
+// Note that occurrences only exist in this system and not in Zoom. Since meetings are scheduled as
+// recurring non-fixed meetings in Zoom, we need to track the occurrences in this system to be able to
+// manage the occurrences.
+type ZoomMeetingOccurrence struct {
+	// OccurrenceID is the start of the occurrence in unix timestamp format
+	OccurrenceID string `json:"occurrence_id"`
+
+	// StartTime is the start time of the occurrence in RFC3339 format
 	StartTime string `json:"start_time"`
 
-	// ProjectUID is the UID of the associated LFX project
-	ProjectUID string `json:"project_uid,omitempty"`
+	// Duration is the meeting duration in minutes
+	Duration string `json:"duration"`
 
-	// ModifiedAt is the last modification timestamp in RFC3339 format
-	ModifiedAt string `json:"modified_at"`
+	// Status is the status of the occurrence
+	Status string `json:"status"`
 
-	// LastEndTime is the end time of the last occurrence (unix timestamp)
-	LastEndTime int64 `json:"last_end_time"`
+	// Topic is the topic of the occurrence
+	Topic string `json:"topic"`
 
-	// UserID is the Zoom user ID hosting the meeting
-	UserID string `json:"user_id"`
+	// Agenda is the agenda of the occurrence
+	Agenda string `json:"agenda"`
 
-	// Timezone is the meeting timezone (IANA format, e.g., "America/Los_Angeles")
-	Timezone string `json:"timezone"`
+	// Recurrence is the recurrence pattern for the occurrence
+	Recurrence *ZoomMeetingRecurrence `json:"recurrence,omitempty"`
 
-	// AISummaryAccess is the access level for AI summaries
-	AISummaryAccess string `json:"ai_summary_access,omitempty"`
+	// ResponseCountYes is the number of invites that have been accepted for the occurrence
+	ResponseCountYes string `json:"response_count_yes"`
 
-	// Passcode is the 6-digit numeric passcode for the meeting
-	Passcode string `json:"passcode,omitempty"`
+	// ResponseCountNo is the number of invites that have been declined for the occurrence
+	ResponseCountNo string `json:"response_count_no"`
 
-	// CancelledOccurrences is a list of cancelled occurrence IDs
-	CancelledOccurrences []string `json:"cancelled_occurrences,omitempty"`
-
-	// YoutubeUploadEnabled indicates if recordings should be uploaded to YouTube
-	YoutubeUploadEnabled bool `json:"youtube_upload_enabled,omitempty"`
+	// RegistrantCount is the number of registrants for the occurrence
+	RegistrantCount string `json:"registrant_count"`
 }
 
 // ZoomMeetingMappingDB is the schema for a meeting mapping in DynamoDB table.
@@ -308,7 +482,7 @@ type pastMeetingInput struct {
 	Agenda string `json:"agenda" dynamodbav:"agenda"`
 
 	// Duration is the duration of the past meeting
-	Duration int `json:"duration" dynamodbav:"duration"`
+	Duration string `json:"duration" dynamodbav:"duration"`
 
 	// MeetingID is the ID of the meeting associated with the past meeting
 	MeetingID string `json:"meeting_id" dynamodbav:"meeting_id"`
@@ -351,7 +525,7 @@ type pastMeetingInput struct {
 	TranscriptEnabled bool `json:"transcript_enabled" dynamodbav:"transcript_enabled"`
 
 	// Type is the type of the past meeting
-	Type int `json:"type" dynamodbav:"type"`
+	Type string `json:"type" dynamodbav:"type"`
 
 	// Visibility is the visibility of the past meeting
 	Visibility string `json:"visibility" dynamodbav:"visibility"`
@@ -377,7 +551,7 @@ type pastMeetingInput struct {
 	RequireAISummaryApproval *bool `json:"require_ai_summary_approval,omitempty" dynamodbav:"require_ai_summary_approval,omitempty"`
 
 	// EarlyJoinTime is the number of minutes before the scheduled start time that participants can join the meeting
-	EarlyJoinTime int `json:"early_join_time,omitempty" dynamodbav:"early_join_time,omitempty"`
+	EarlyJoinTime string `json:"early_join_time,omitempty" dynamodbav:"early_join_time,omitempty"`
 
 	// Artifacts is the list of artifacts for the past meeting
 	Artifacts []ZoomPastMeetingArtifact `json:"artifacts" dynamodbav:"artifacts"`
@@ -663,7 +837,7 @@ type PastMeetingAttendeeInput struct {
 
 	// AverageAttendance is the average attendance of the attendee as a percentage.
 	// This is the average of the [Sessions] field.
-	AverageAttendance int `json:"average_attendance,omitempty"`
+	AverageAttendance string `json:"average_attendance,omitempty"`
 
 	// Sessions is the list of sessions associated with the attendee
 	Sessions []ZoomPastMeetingAttendeeSession `json:"sessions" dynamodbav:"sessions"`
@@ -775,7 +949,7 @@ type PastMeetingRecordingInput struct {
 	// A recording record can have many files due to there being multiple sessions of the same meeting,
 	// and the fact that each session has an MP4 file, M4A file, and optionally a VTT and JSON file
 	// if there is a transcript available.
-	RecordingCount int `json:"recording_count" dynamodbav:"recording_count"`
+	RecordingCount string `json:"recording_count" dynamodbav:"recording_count"`
 
 	// RecordingFiles is the list of files in the recording.
 	RecordingFiles []ZoomPastMeetingRecordingFile `json:"recording_files" dynamodbav:"recording_files"`
@@ -789,7 +963,7 @@ type PastMeetingRecordingInput struct {
 	StartTime string `json:"start_time" dynamodbav:"start_time"`
 
 	// TotalSize is the total size of the recording in bytes.
-	TotalSize int `json:"total_size" dynamodbav:"total_size"`
+	TotalSize string `json:"total_size" dynamodbav:"total_size"`
 
 	// CreatedAt is the creation time of the recording in RFC3339 format.
 	CreatedAt string `json:"created_at" dynamodbav:"created_at"`
@@ -814,7 +988,7 @@ type ZoomPastMeetingRecordingSession struct {
 	ShareURL string `json:"share_url" dynamodbav:"share_url"`
 
 	// TotalSize is the total size of the session in bytes.
-	TotalSize int `json:"total_size" dynamodbav:"total_size"`
+	TotalSize string `json:"total_size" dynamodbav:"total_size"`
 
 	// StartTime is the start time of the session in RFC3339 format.
 	StartTime string `json:"start_time" dynamodbav:"start_time"`
@@ -832,7 +1006,7 @@ type ZoomPastMeetingRecordingFile struct {
 	FileExtension string `json:"file_extension" dynamodbav:"file_extension"`
 
 	// FileSize is the size of the file in bytes.
-	FileSize int `json:"file_size" dynamodbav:"file_size"`
+	FileSize string `json:"file_size" dynamodbav:"file_size"`
 
 	// FileType is the type of the file.
 	FileType string `json:"file_type" dynamodbav:"file_type"`
