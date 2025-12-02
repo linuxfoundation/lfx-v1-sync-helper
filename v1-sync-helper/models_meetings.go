@@ -1,3 +1,6 @@
+// Copyright The Linux Foundation and each contributor to LFX.
+// SPDX-License-Identifier: MIT
+
 package main
 
 import "time"
@@ -385,6 +388,34 @@ type PastMeetingInput struct {
 
 	// UpdatedBy is the user who last updated the past meeting
 	UpdatedBy UpdatedBy `json:"updated_by" dynamodbav:"updated_by"`
+}
+
+// ZoomPastMeetingMappingDB is the schema for a past meeting mapping in DynamoDB table.
+// It stores a mapping between a past meeting and its associated project and committee.
+// There can be many mappings for a single past meeting, for a past meeting can have many
+// committees associated with it.
+type ZoomPastMeetingMappingDB struct {
+	// ID is the partition key of the mapping (it is a UUID)
+	ID string `json:"id" dynamodbav:"id"`
+
+	// MeetingAndOccurrenceID is the ID of the past meeting that the mapping is associated with.
+	MeetingAndOccurrenceID string `json:"meeting_and_occurrence_id" dynamodbav:"meeting_and_occurrence_id"`
+
+	// MeetingID is the ID of the meeting that the mapping is associated with.
+	MeetingID string `json:"meeting_id" dynamodbav:"meeting_id"`
+
+	// ProjectID is the ID of the project that the mapping is associated with.
+	ProjectID string `json:"project_id" dynamodbav:"project_id"`
+
+	// CommitteeID is the ID of the committee that the mapping is associated with.
+	CommitteeID string `json:"committee_id" dynamodbav:"committee_id"`
+
+	// CommitteeFilters is a list of committee voting statuses that the meeting is associated with.
+	// This is only relevant if the [CommitteeID] field is not empty. When this field is empty and the
+	// [CommitteeID] field is not empty, the meeting is associated with all committee voting statuses.
+	// An LF committee can have voting statuses to determine the voting representation of the committee.
+	// Hence this field essentially stores who have these committee members can attend the meeting.
+	CommitteeFilters []string `dynamodbav:"committee_filters"`
 }
 
 // ZoomPastMeetingInviteeDatabase is the schema for a past meeting invitee in DynamoDB.

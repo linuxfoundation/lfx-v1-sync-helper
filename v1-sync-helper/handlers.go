@@ -81,8 +81,7 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry, v1KV jetstr
 	} else if strings.HasPrefix(key, "itx-zoom-past-meetings-invitees.") {
 		handleZoomPastMeetingInviteeUpdate(ctx, key, v1Data, v1KV, mappingsKV)
 	} else if strings.HasPrefix(key, "itx-zoom-past-meetings-mappings.") {
-		//handleZoomPastMeetingMappingUpdate(ctx, key, v1Data, mappingsKV) TODO: implement this
-		logger.With("key", key).DebugContext(ctx, "zoom past meeting mappings handler not yet implemented")
+		handleZoomPastMeetingMappingUpdate(ctx, key, v1Data, v1KV, mappingsKV)
 	} else if strings.HasPrefix(key, "itx-zoom-past-meetings-recordings.") {
 		handleZoomPastMeetingRecordingUpdate(ctx, key, v1Data, mappingsKV)
 	} else if strings.HasPrefix(key, "itx-zoom-past-meetings-summaries.") {
