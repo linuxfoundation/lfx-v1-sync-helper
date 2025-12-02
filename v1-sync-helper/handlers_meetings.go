@@ -266,7 +266,7 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 	}
 
 	tags := getMeetingTags(meeting)
-	if err := sendIndexerMessage(ctx, IndexV1MeetingSubject, indexerAction, v1Data, tags); err != nil {
+	if err := sendIndexerMessage(ctx, IndexV1MeetingSubject, indexerAction, meeting, tags); err != nil {
 		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send meeting indexer message")
 		return
 	}
