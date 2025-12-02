@@ -172,6 +172,20 @@ func convertMapToInputMeeting(ctx context.Context, v1Data map[string]any) (*Meet
 	return &meeting, nil
 }
 
+func getMeetingTags(meeting *MeetingInput) []string {
+	tags := []string{
+		fmt.Sprintf("%s", meeting.ID),
+		fmt.Sprintf("meeting_uid:%s", meeting.ID),
+		fmt.Sprintf("project_uid:%s", meeting.ProjectUID),
+		fmt.Sprintf("title:%s", meeting.Topic),
+		fmt.Sprintf("meeting_type:%s", meeting.MeetingType),
+	}
+	for _, committee := range meeting.Committees {
+		tags = append(tags, fmt.Sprintf("committee_uid:%s", committee.UID))
+	}
+	return tags
+}
+
 // handleZoomMeetingUpdate processes a zoom meeting update from itx-zoom-meetings-v2 records.
 func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]any, mappingsKV jetstream.KeyValue) {
 	// Check if we should skip this sync operation.
@@ -192,18 +206,6 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 	uid := meeting.ID
 	if uid == "" {
 		logger.With("key", key).ErrorContext(ctx, "missing or invalid uid in v1 meeting data")
-		return
-	}
-
-	mappingKey := fmt.Sprintf("v1_meetings.%s", uid)
-	indexerAction := MessageActionCreated
-	if _, err := mappingsKV.Get(ctx, mappingKey); err == nil {
-		indexerAction = MessageActionUpdated
-	}
-
-	tags := []string{fmt.Sprintf("topic:%s", meeting.Topic)}
-	if err := sendIndexerMessage(ctx, IndexV1MeetingSubject, indexerAction, v1Data, tags); err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send meeting indexer message")
 		return
 	}
 
@@ -234,6 +236,18 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 				}
 			}
 		}
+	}
+
+	mappingKey := fmt.Sprintf("v1_meetings.%s", uid)
+	indexerAction := MessageActionCreated
+	if _, err := mappingsKV.Get(ctx, mappingKey); err == nil {
+		indexerAction = MessageActionUpdated
+	}
+
+	tags := getMeetingTags(meeting)
+	if err := sendIndexerMessage(ctx, IndexV1MeetingSubject, indexerAction, v1Data, tags); err != nil {
+		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send meeting indexer message")
+		return
 	}
 
 	accessMsg := MeetingAccessMessage{
@@ -370,7 +384,7 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 		}
 
 		// Send meeting indexer message with the meeting data
-		tags := []string{fmt.Sprintf("topic:%s", meeting.Topic)}
+		tags := getMeetingTags(meeting)
 		if err := sendIndexerMessage(ctx, IndexV1MeetingSubject, indexerAction, meetingData, tags); err != nil {
 			logger.With(errKey, err, "meeting_id", meetingID, "key", key).ErrorContext(ctx, "failed to send meeting indexer message")
 			return
@@ -457,6 +471,22 @@ type MeetingRegistrantAccessMessage struct {
 	Host      bool   `json:"host"`
 }
 
+func getRegistrantTags(registrant *RegistrantInput) []string {
+	tags := []string{
+		fmt.Sprintf("%s", registrant.ID),
+		fmt.Sprintf("registrant_uid:%s", registrant.ID),
+		fmt.Sprintf("meeting_uid:%s", registrant.MeetingID),
+		fmt.Sprintf("committee_uid:%s", registrant.CommitteeID),
+		fmt.Sprintf("first_name:%s", registrant.FirstName),
+		fmt.Sprintf("last_name:%s", registrant.LastName),
+		fmt.Sprintf("email:%s", registrant.Email),
+	}
+	if registrant.Username != "" {
+		tags = append(tags, fmt.Sprintf("username:%s", registrant.Username))
+	}
+	return tags
+}
+
 // handleZoomMeetingRegistrantUpdate processes a zoom meeting registrant update from itx-zoom-meetings-registrants-v2 records.
 func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data map[string]any, mappingsKV jetstream.KeyValue) {
 	// Check if we should skip this sync operation.
@@ -486,7 +516,8 @@ func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data m
 		indexerAction = MessageActionUpdated
 	}
 
-	if err := sendIndexerMessage(ctx, IndexV1MeetingRegistrantSubject, indexerAction, v1Data, []string{}); err != nil {
+	tags := getRegistrantTags(registrant)
+	if err := sendIndexerMessage(ctx, IndexV1MeetingRegistrantSubject, indexerAction, registrant, tags); err != nil {
 		logger.With(errKey, err, "id", registrantID, "key", key).ErrorContext(ctx, "failed to send registrant indexer message")
 		return
 	}
@@ -551,6 +582,21 @@ func convertMapToInputPastMeeting(ctx context.Context, v1Data map[string]any) (*
 	return &pastMeeting, nil
 }
 
+func getPastMeetingTags(pastMeeting *PastMeetingInput) []string {
+	tags := []string{
+		fmt.Sprintf("%s", pastMeeting.MeetingAndOccurrenceID),
+		fmt.Sprintf("past_meeting_uid:%s", pastMeeting.MeetingAndOccurrenceID),
+		fmt.Sprintf("meeting_uid:%s", pastMeeting.MeetingID),
+		fmt.Sprintf("project_uid:%s", pastMeeting.ProjectID),
+		fmt.Sprintf("occurrence_id:%s", pastMeeting.OccurrenceID),
+		fmt.Sprintf("title:%d", pastMeeting.Topic),
+	}
+	for _, committee := range pastMeeting.Committees {
+		tags = append(tags, fmt.Sprintf("committee_uid:%s", committee.UID))
+	}
+	return tags
+}
+
 // handleZoomPastMeetingUpdate processes a zoom past meeting update from itx-zoom-past-meetings-v2 records.
 func handleZoomPastMeetingUpdate(ctx context.Context, key string, v1Data map[string]any, mappingsKV jetstream.KeyValue) {
 	// Check if we should skip this sync operation.
@@ -580,18 +626,36 @@ func handleZoomPastMeetingUpdate(ctx context.Context, key string, v1Data map[str
 		indexerAction = MessageActionUpdated
 	}
 
-	if err := sendIndexerMessage(ctx, IndexV1PastMeetingSubject, indexerAction, v1Data, []string{}); err != nil {
+	tags := getPastMeetingTags(pastMeeting)
+	if err := sendIndexerMessage(ctx, IndexV1PastMeetingSubject, indexerAction, v1Data, tags); err != nil {
 		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send past meeting indexer message")
 		return
 	}
 
-	// Extract committees from the v1Data if present
+	// Try to get committee mappings from the index first
 	var committees []string
-	if committeesData, ok := v1Data["committees"].([]any); ok {
-		for _, c := range committeesData {
-			if committee, ok := c.(map[string]any); ok {
-				if committeeUID, ok := committee["uid"].(string); ok && committeeUID != "" {
-					committees = append(committees, committeeUID)
+	committeeMappings := make(map[string]MappingCommittee)
+	indexKey := fmt.Sprintf("v1-mappings.past-meeting-mappings.%s", uid)
+	indexEntry, err := mappingsKV.Get(ctx, indexKey)
+	if err == nil && indexEntry != nil {
+		if err := json.Unmarshal(indexEntry.Value(), &committeeMappings); err != nil {
+			logger.With(errKey, err, "meeting_and_occurrence_id", uid, "key", key).WarnContext(ctx, "failed to unmarshal past meeting mapping index")
+		} else {
+			// Extract committee IDs from the mappings
+			for committeeID := range committeeMappings {
+				committees = append(committees, committeeID)
+			}
+		}
+	}
+
+	// Fallback: Extract committees from v1Data if no mappings found
+	if len(committees) == 0 {
+		if committeesData, ok := v1Data["committees"].([]any); ok {
+			for _, c := range committeesData {
+				if committee, ok := c.(map[string]any); ok {
+					if committeeUID, ok := committee["uid"].(string); ok && committeeUID != "" {
+						committees = append(committees, committeeUID)
+					}
 				}
 			}
 		}
@@ -721,7 +785,8 @@ func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data 
 		}
 
 		// Send past meeting indexer message with the past meeting data
-		if err := sendIndexerMessage(ctx, IndexV1PastMeetingSubject, indexerAction, pastMeetingData, []string{}); err != nil {
+		tags := getPastMeetingTags(pastMeeting)
+		if err := sendIndexerMessage(ctx, IndexV1PastMeetingSubject, indexerAction, pastMeetingData, tags); err != nil {
 			logger.With(errKey, err, "meeting_and_occurrence_id", meetingAndOccurrenceID, "key", key).ErrorContext(ctx, "failed to send past meeting indexer message")
 			return
 		}
@@ -807,6 +872,22 @@ func convertMapToInputPastMeetingInvitee(ctx context.Context, v1Data map[string]
 	return &invitee, nil
 }
 
+func getPastMeetingParticipantTags(participant *V2PastMeetingParticipant) []string {
+	tags := []string{
+		fmt.Sprintf("%s", participant.UID),
+		fmt.Sprintf("past_meeting_participant_uid:%s", participant.UID),
+		fmt.Sprintf("past_meeting_uid:%s", participant.PastMeetingUID),
+		fmt.Sprintf("meeting_uid:%s", participant.MeetingUID),
+		fmt.Sprintf("first_name:%s", participant.FirstName),
+		fmt.Sprintf("last_name:%s", participant.LastName),
+		fmt.Sprintf("email:%s", participant.Email),
+	}
+	if participant.Username != "" {
+		tags = append(tags, fmt.Sprintf("username:%s", participant.Username))
+	}
+	return tags
+}
+
 // handleZoomPastMeetingInviteeUpdate processes a zoom past meeting invitee update from itx-zoom-past-meetings-invitees-v2 records.
 func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data map[string]any, v1KV jetstream.KeyValue, mappingsKV jetstream.KeyValue) {
 	// Check if we should skip this sync operation.
@@ -853,13 +934,20 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 		}
 	}
 
+	v2Participant, err := convertInviteeToV2Participant(ctx, invitee, isHost)
+	if err != nil {
+		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert invitee to V2 participant")
+		return
+	}
+
 	mappingKey := fmt.Sprintf("v1_past_meeting_invitees.%s", inviteeID)
 	indexerAction := MessageActionCreated
 	if _, err := mappingsKV.Get(ctx, mappingKey); err == nil {
 		indexerAction = MessageActionUpdated
 	}
 
-	if err := sendIndexerMessage(ctx, IndexV1PastMeetingParticipantSubject, indexerAction, invitee, []string{}); err != nil {
+	tags := getPastMeetingParticipantTags(v2Participant)
+	if err := sendIndexerMessage(ctx, IndexV1PastMeetingParticipantSubject, indexerAction, v2Participant, tags); err != nil {
 		logger.With(errKey, err, "id", inviteeID, "key", key).ErrorContext(ctx, "failed to send invitee indexer message")
 		return
 	}
@@ -1004,7 +1092,14 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 		indexerAction = MessageActionUpdated
 	}
 
-	if err := sendIndexerMessage(ctx, IndexV1PastMeetingParticipantSubject, indexerAction, v1Data, []string{}); err != nil {
+	v2Participant, err := convertAttendeeToV2Participant(ctx, attendee, isHost, isRegistrant)
+	if err != nil {
+		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert attendee to V2 participant")
+		return
+	}
+
+	tags := getPastMeetingParticipantTags(v2Participant)
+	if err := sendIndexerMessage(ctx, IndexV1PastMeetingParticipantSubject, indexerAction, v2Participant, tags); err != nil {
 		logger.With(errKey, err, "id", attendeeID, "key", key).ErrorContext(ctx, "failed to send attendee indexer message")
 		return
 	}
@@ -1132,6 +1227,37 @@ func convertMapToInputPastMeetingRecording(ctx context.Context, v1Data map[strin
 	return &recording, nil
 }
 
+func getPastMeetingRecordingTags(recording *PastMeetingRecordingInput) []string {
+	tags := []string{
+		fmt.Sprintf("%s", recording.MeetingAndOccurrenceID),
+		fmt.Sprintf("past_meeting_recording_uid:%s", recording.MeetingAndOccurrenceID),
+		fmt.Sprintf("past_meeting_uid:%s", recording.MeetingAndOccurrenceID),
+		"platform:Zoom",
+		fmt.Sprintf("platform_meeting_id:%s", recording.MeetingID),
+	}
+	for _, session := range recording.Sessions {
+		tags = append(tags, fmt.Sprintf("platform_meeting_instance_id:%s", session.UUID))
+	}
+	return tags
+}
+
+// Note: the input and tags are almost the exact same as [getPastMeetingRecordingTags]
+// because the source for the transcript record is the same as the recording record.
+// Ultimately they are indexed as separate records, so they need their own tags.
+func getPastMeetingTranscriptTags(recording *PastMeetingRecordingInput) []string {
+	tags := []string{
+		fmt.Sprintf("%s", recording.MeetingAndOccurrenceID),
+		fmt.Sprintf("past_meeting_transcript_uid:%s", recording.MeetingAndOccurrenceID),
+		fmt.Sprintf("past_meeting_uid:%s", recording.MeetingAndOccurrenceID),
+		"platform:Zoom",
+		fmt.Sprintf("platform_meeting_id:%s", recording.MeetingID),
+	}
+	for _, session := range recording.Sessions {
+		tags = append(tags, fmt.Sprintf("platform_meeting_instance_id:%s", session.UUID))
+	}
+	return tags
+}
+
 // handleZoomPastMeetingRecordingUpdate handles the v1 past meeting recording update event.
 // It sends NATS messages for both recording and transcript indexing and access control.
 func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Data map[string]any, mappingsKV jetstream.KeyValue) {
@@ -1164,7 +1290,8 @@ func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Dat
 	}
 
 	// Send recording indexer message
-	if err := sendIndexerMessage(ctx, IndexV1PastMeetingRecordingSubject, indexerAction, recordingInput, nil); err != nil {
+	recordingTags := getPastMeetingRecordingTags(recordingInput)
+	if err := sendIndexerMessage(ctx, IndexV1PastMeetingRecordingSubject, indexerAction, recordingInput, recordingTags); err != nil {
 		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send recording indexer message")
 		return
 	}
@@ -1190,7 +1317,8 @@ func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Dat
 	}
 
 	// Send transcript indexer message
-	if err := sendIndexerMessage(ctx, IndexV1PastMeetingTranscriptSubject, indexerAction, recordingInput, nil); err != nil {
+	transcriptTags := getPastMeetingTranscriptTags(recordingInput)
+	if err := sendIndexerMessage(ctx, IndexV1PastMeetingTranscriptSubject, indexerAction, recordingInput, transcriptTags); err != nil {
 		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send transcript indexer message")
 		return
 	}
@@ -1251,6 +1379,18 @@ func convertMapToInputPastMeetingSummary(ctx context.Context, v1Data map[string]
 	return &summary, nil
 }
 
+func getPastMeetingSummaryTags(summary *PastMeetingSummaryInput) []string {
+	tags := []string{
+		fmt.Sprintf("%s", summary.ID),
+		fmt.Sprintf("past_meeting_summary_uid:%s", summary.ID),
+		fmt.Sprintf("past_meeting_uid:%s", summary.MeetingAndOccurrenceID),
+		fmt.Sprintf("meeting_uid:%s", summary.MeetingID),
+		"platform:Zoom",
+		fmt.Sprintf("title:%s", summary.SummaryTitle),
+	}
+	return tags
+}
+
 // handleZoomPastMeetingSummaryUpdate handles the v1 past meeting summary update event.
 // It sends NATS messages for summary indexing and access control.
 func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data map[string]any, v1KV jetstream.KeyValue, mappingsKV jetstream.KeyValue) {
@@ -1283,7 +1423,8 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 	}
 
 	// Send summary indexer message
-	if err := sendIndexerMessage(ctx, IndexV1PastMeetingSummarySubject, indexerAction, summaryInput, nil); err != nil {
+	tags := getPastMeetingSummaryTags(summaryInput)
+	if err := sendIndexerMessage(ctx, IndexV1PastMeetingSummarySubject, indexerAction, summaryInput, tags); err != nil {
 		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send summary indexer message")
 		return
 	}

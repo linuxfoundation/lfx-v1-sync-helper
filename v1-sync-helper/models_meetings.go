@@ -296,6 +296,10 @@ type PastMeetingInput struct {
 	// CommitteeFilters is the list of filters associated with the committee
 	CommitteeFilters []string `json:"committee_filters" dynamodbav:"committee_filters"`
 
+	// Committees is the list of committees associated with the past meeting
+	// This is a v2 attribute
+	Committees []Committee `json:"committees" dynamodbav:"committees"`
+
 	// Agenda is the agenda of the past meeting
 	Agenda string `json:"agenda" dynamodbav:"agenda"`
 
