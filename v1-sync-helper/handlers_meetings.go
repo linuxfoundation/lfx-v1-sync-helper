@@ -1147,13 +1147,23 @@ func convertAttendeeToV2Participant(ctx context.Context, attendee *PastMeetingAt
 		return nil, fmt.Errorf("failed to parse modified_at: %w", err)
 	}
 
+	var firstName, lastName string
+	namesSplit := strings.Split(attendee.Name, " ")
+	if len(namesSplit) >= 2 {
+		firstName = namesSplit[0]
+		lastName = strings.Join(namesSplit[1:], " ")
+	} else if len(namesSplit) == 1 {
+		firstName = namesSplit[0]
+		lastName = ""
+	}
+
 	pastMeetingParticipant := V2PastMeetingParticipant{
 		UID:                attendee.ID,
 		PastMeetingUID:     attendee.MeetingAndOccurrenceID,
 		MeetingUID:         attendee.MeetingID,
 		Email:              attendee.Email,
-		FirstName:          strings.Split(attendee.Name, " ")[0],
-		LastName:           strings.Split(attendee.Name, " ")[1],
+		FirstName:          firstName,
+		LastName:           lastName,
 		Host:               isHost,
 		JobTitle:           attendee.JobTitle,
 		OrgName:            attendee.Org,
