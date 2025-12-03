@@ -1087,7 +1087,7 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 		}
 	}
 
-	logger.With("id", inviteeID, "meeting_and_occurrence_id", invitee.ID, "key", key).InfoContext(ctx, "successfully sent invitee indexer and access messages")
+	logger.With("id", inviteeID, "meeting_and_occurrence_id", invitee.MeetingAndOccurrenceID, "key", key).InfoContext(ctx, "successfully sent invitee indexer and access messages")
 }
 
 func convertInviteeToV2Participant(ctx context.Context, invitee *ZoomPastMeetingInviteeDatabase, isHost bool) (*V2PastMeetingParticipant, error) {
