@@ -29,16 +29,15 @@ plugins:
     config:
       aws_default_region: us-west-2
       tables:
-        - itx-zoom-meetings-invite-responses-v2
         - itx-zoom-meetings-mappings-v2
-        - itx-zoom-meetings-registrants-v2
         - itx-zoom-meetings-v2
+        - itx-zoom-past-meetings-mappings
         - itx-zoom-past-meetings
         - itx-zoom-past-meetings-attendees
         - itx-zoom-past-meetings-invitees
-        - itx-zoom-past-meetings-mappings
         - itx-zoom-past-meetings-recordings
         - itx-zoom-past-meetings-summaries
+        - itx-zoom-meetings-registrants-v2
       metadata:
         '*':
           # Setting the replication key allows conditional loads for
