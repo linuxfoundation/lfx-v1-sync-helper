@@ -228,6 +228,15 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 		return
 	}
 
+	// Check if parent project exists in mappings before proceeding.
+	if meeting.ProjectID != "" {
+		projectMappingKey := fmt.Sprintf("project.sfid.%s", meeting.ProjectSFID)
+		if _, err := mappingsKV.Get(ctx, projectMappingKey); err != nil {
+			logger.With("project_sfid", meeting.ProjectSFID, "meeting_id", uid).InfoContext(ctx, "skipping meeting sync - parent project not found in mappings")
+			return
+		}
+	}
+
 	// Try to get committee mappings from the index first
 	var committees []string
 	committeeMappings := make(map[string]mappingCommittee)
@@ -530,6 +539,15 @@ func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data m
 		return
 	}
 
+	// Check if parent meeting exists in mappings before proceeding.
+	if registrant.MeetingID != "" {
+		meetingMappingKey := fmt.Sprintf("v1_meetings.%s", registrant.MeetingID)
+		if _, err := mappingsKV.Get(ctx, meetingMappingKey); err != nil {
+			logger.With("meeting_id", registrant.MeetingID, "registrant_id", registrantID).InfoContext(ctx, "skipping meeting registrant sync - parent meeting not found in mappings")
+			return
+		}
+	}
+
 	mappingKey := fmt.Sprintf("v1_meeting_registrants.%s", registrantID)
 	indexerAction := MessageActionCreated
 	if _, err := mappingsKV.Get(ctx, mappingKey); err == nil {
@@ -657,6 +675,15 @@ func handleZoomPastMeetingUpdate(ctx context.Context, key string, v1Data map[str
 	if uid == "" {
 		logger.With("key", key).ErrorContext(ctx, "missing or invalid meeting_and_occurrence_id in v1 past meeting data")
 		return
+	}
+
+	// Check if parent meeting exists in mappings before proceeding.
+	if pastMeeting.MeetingID != "" {
+		meetingMappingKey := fmt.Sprintf("v1_meetings.%s", pastMeeting.MeetingID)
+		if _, err := mappingsKV.Get(ctx, meetingMappingKey); err != nil {
+			logger.With("meeting_id", pastMeeting.MeetingID, "past_meeting_id", uid).InfoContext(ctx, "skipping past meeting sync - parent meeting not found in mappings")
+			return
+		}
 	}
 
 	mappingKey := fmt.Sprintf("v1_past_meetings.%s", uid)
@@ -950,6 +977,15 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 		return
 	}
 
+	// Check if parent past meeting exists in mappings before proceeding.
+	if invitee.MeetingAndOccurrenceID != "" {
+		pastMeetingMappingKey := fmt.Sprintf("v1_past_meetings.%s", invitee.MeetingAndOccurrenceID)
+		if _, err := mappingsKV.Get(ctx, pastMeetingMappingKey); err != nil {
+			logger.With("past_meeting_id", invitee.MeetingAndOccurrenceID, "invitee_id", inviteeID).InfoContext(ctx, "skipping past meeting invitee sync - parent past meeting not found in mappings")
+			return
+		}
+	}
+
 	// Determine if this invitee is a host by looking up their registrant record
 	isHost := false
 	registrantID := invitee.RegistrantID
@@ -1106,6 +1142,15 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 	if attendeeID == "" {
 		logger.With("key", key).ErrorContext(ctx, "missing or invalid id in v1 past meeting attendee data")
 		return
+	}
+
+	// Check if parent past meeting exists in mappings before proceeding.
+	if attendee.MeetingAndOccurrenceID != "" {
+		pastMeetingMappingKey := fmt.Sprintf("v1_past_meetings.%s", attendee.MeetingAndOccurrenceID)
+		if _, err := mappingsKV.Get(ctx, pastMeetingMappingKey); err != nil {
+			logger.With("past_meeting_id", attendee.MeetingAndOccurrenceID, "attendee_id", attendeeID).InfoContext(ctx, "skipping past meeting attendee sync - parent past meeting not found in mappings")
+			return
+		}
 	}
 
 	// Determine if this attendee is a host by looking up their registrant record
@@ -1347,6 +1392,15 @@ func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Dat
 		return
 	}
 
+	// Check if parent past meeting exists in mappings before proceeding.
+	if uid != "" {
+		pastMeetingMappingKey := fmt.Sprintf("v1_past_meetings.%s", uid)
+		if _, err := mappingsKV.Get(ctx, pastMeetingMappingKey); err != nil {
+			logger.With("past_meeting_id", uid).InfoContext(ctx, "skipping past meeting recording sync - parent past meeting not found in mappings")
+			return
+		}
+	}
+
 	// Determine action based on mapping existence
 	mappingKey := fmt.Sprintf("v1_past_meeting_recordings.%s", uid)
 	indexerAction := MessageActionCreated
@@ -1478,6 +1532,15 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 	if uid == "" {
 		logger.With("key", key).ErrorContext(ctx, "missing id in past meeting summary data")
 		return
+	}
+
+	// Check if parent past meeting exists in mappings before proceeding.
+	if summaryInput.MeetingAndOccurrenceID != "" {
+		pastMeetingMappingKey := fmt.Sprintf("v1_past_meetings.%s", summaryInput.MeetingAndOccurrenceID)
+		if _, err := mappingsKV.Get(ctx, pastMeetingMappingKey); err != nil {
+			logger.With("past_meeting_id", summaryInput.MeetingAndOccurrenceID, "summary_id", uid).InfoContext(ctx, "skipping past meeting summary sync - parent past meeting not found in mappings")
+			return
+		}
 	}
 
 	// Determine action based on mapping existence
