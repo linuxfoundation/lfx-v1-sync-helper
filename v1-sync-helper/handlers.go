@@ -96,7 +96,7 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) {
 	case "itx-zoom-past-meetings":
 		handleZoomPastMeetingUpdate(ctx, key, v1Data)
 	default:
-		logger.With("key", key).DebugContext(ctx, "unknown object type, ignoring")
+		logger.With("key", key).WarnContext(ctx, "unknown object type, ignoring")
 	}
 }
 
