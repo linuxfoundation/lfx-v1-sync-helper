@@ -25,8 +25,8 @@ kubectl create namespace lfx
 
 # Create Auth0 secret with required credentials
 kubectl create secret generic v1-sync-helper-auth0-credentials \
-    --from-literal=client-id=your-auth0-client-id \
-    --from-literal=private-key="$(cat auth0-private-key.pem)" \
+    --from-literal=client_id=your-auth0-client-id \
+    --from-literal=client_private_key="$(cat auth0-private-key.pem)" \
     -n lfx
 
 # Install the chart with required image tag and AUTH0_TENANT
@@ -48,8 +48,8 @@ kubectl create namespace lfx
 
 # Create Auth0 secret with required credentials
 kubectl create secret generic v1-sync-helper-auth0-credentials \
-    --from-literal=client-id=your-auth0-client-id \
-    --from-literal=private-key="$(cat auth0-private-key.pem)" \
+    --from-literal=client_id=your-auth0-client-id \
+    --from-literal=client_private_key="$(cat auth0-private-key.pem)" \
     -n lfx
 
 # Create values.yaml with required AUTH0_TENANT
@@ -91,8 +91,8 @@ The chart requires the following secrets to be created before installation (if t
 2. **Auth0 credentials** (default name: `v1-sync-helper-auth0-credentials`):
    ```bash
    kubectl create secret generic v1-sync-helper-auth0-credentials \
-       --from-literal=client-id=your-auth0-client-id \
-       --from-literal=private-key="$(cat auth0-private-key.pem)" \
+       --from-literal=client_id=your-auth0-client-id \
+       --from-literal=client_private_key="$(cat auth0-private-key.pem)" \
        -n lfx
    ```
 
