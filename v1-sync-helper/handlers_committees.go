@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // allowedCommitteeCategories defines the valid values for type__c mapping to category.
@@ -133,7 +132,7 @@ func mapTypeToCategory(ctx context.Context, typeVal, committeeName string) *stri
 }
 
 // handleCommitteeUpdate processes a committee update from the KV bucket.
-func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]any, mappingsKV jetstream.KeyValue) {
+func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]any) {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return
@@ -169,13 +168,13 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 
 		// Map v1 data to update payload.
 		var payload *committeeservice.UpdateCommitteeBasePayload
-		payload, err = mapV1DataToCommitteeUpdateBasePayload(ctx, existingUID, v1Data, mappingsKV)
+		payload, err = mapV1DataToCommitteeUpdateBasePayload(ctx, existingUID, v1Data)
 		if err != nil {
 			logger.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to map v1 data to update payload")
 			return
 		}
 
-		err = updateCommittee(ctx, payload, v1Principal, mappingsKV)
+		err = updateCommittee(ctx, payload, v1Principal)
 		uid = existingUID
 	} else {
 		// Check if parent project exists in mappings before creating new committee.
@@ -192,14 +191,14 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 
 		// Map v1 data to create payload.
 		var payload *committeeservice.CreateCommitteePayload
-		payload, err = mapV1DataToCommitteeCreatePayload(ctx, v1Data, mappingsKV)
+		payload, err = mapV1DataToCommitteeCreatePayload(ctx, v1Data)
 		if err != nil {
 			logger.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to map v1 data to create payload")
 			return
 		}
 
 		var response *committeeservice.CommitteeFullWithReadonlyAttributes
-		response, err = createCommittee(ctx, payload, v1Principal, mappingsKV)
+		response, err = createCommittee(ctx, payload, v1Principal)
 		if response != nil && response.UID != nil {
 			uid = *response.UID
 		}
@@ -221,7 +220,7 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 }
 
 // mapV1DataToCommitteeCreatePayload converts v1 committee data to a CreateCommitteePayload.
-func mapV1DataToCommitteeCreatePayload(ctx context.Context, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*committeeservice.CreateCommitteePayload, error) {
+func mapV1DataToCommitteeCreatePayload(ctx context.Context, v1Data map[string]any) (*committeeservice.CreateCommitteePayload, error) {
 	// Extract required fields.
 	name := ""
 	if mailingList, ok := v1Data["mailing_list__c"].(string); ok {
@@ -295,7 +294,7 @@ func mapV1DataToCommitteeCreatePayload(ctx context.Context, v1Data map[string]an
 }
 
 // mapV1DataToCommitteeUpdateBasePayload converts v1 committee data to an UpdateCommitteeBasePayload.
-func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID string, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*committeeservice.UpdateCommitteeBasePayload, error) {
+func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID string, v1Data map[string]any) (*committeeservice.UpdateCommitteeBasePayload, error) {
 	// Extract required fields.
 	name := ""
 	if mailingList, ok := v1Data["mailing_list__c"].(string); ok {
@@ -359,7 +358,7 @@ func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID str
 }
 
 // handleCommitteeMemberUpdate processes a committee member update from platform-community__c records.
-func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[string]any, mappingsKV jetstream.KeyValue) {
+func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[string]any) {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return
@@ -425,13 +424,13 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 
 		// Map v1 data to update payload.
 		var payload *committeeservice.UpdateCommitteeMemberPayload
-		payload, err = mapV1DataToCommitteeMemberUpdatePayload(ctx, committeeUID, existingMemberUID, v1Data, mappingsKV)
+		payload, err = mapV1DataToCommitteeMemberUpdatePayload(ctx, committeeUID, existingMemberUID, v1Data)
 		if err != nil {
 			logger.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to map v1 data to committee member update payload")
 			return
 		}
 
-		err = updateCommitteeMember(ctx, payload, v1Principal, mappingsKV)
+		err = updateCommitteeMember(ctx, payload, v1Principal)
 		memberUID = existingMemberUID
 	} else {
 		// Create new committee member.
@@ -439,14 +438,14 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 
 		// Map v1 data to create payload.
 		var payload *committeeservice.CreateCommitteeMemberPayload
-		payload, err = mapV1DataToCommitteeMemberCreatePayload(ctx, committeeUID, v1Data, mappingsKV)
+		payload, err = mapV1DataToCommitteeMemberCreatePayload(ctx, committeeUID, v1Data)
 		if err != nil {
 			logger.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to map v1 data to committee member create payload")
 			return
 		}
 
 		var response *committeeservice.CommitteeMemberFullWithReadonlyAttributes
-		response, err = createCommitteeMember(ctx, payload, v1Principal, mappingsKV)
+		response, err = createCommitteeMember(ctx, payload, v1Principal)
 		if response != nil && response.UID != nil {
 			memberUID = *response.UID
 		}
@@ -468,7 +467,7 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 }
 
 // mapV1DataToCommitteeMemberCreatePayload converts v1 platform-community__c data to a CreateCommitteeMemberPayload.
-func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID string, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*committeeservice.CreateCommitteeMemberPayload, error) {
+func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID string, v1Data map[string]any) (*committeeservice.CreateCommitteeMemberPayload, error) {
 	// Extract email field (already validated by caller).
 	email := ""
 	if contactEmail, ok := v1Data["contactemail__c"].(string); ok && contactEmail != "" {
@@ -484,11 +483,13 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 	// Map contact information.
 	if contactNameV1, ok := v1Data["contact_name__c"].(string); ok && contactNameV1 != "" {
 		// Look up user information from v1 API using the SFID.
-		user, err := lookupV1User(ctx, contactNameV1, mappingsKV)
+		user, err := lookupV1User(ctx, contactNameV1)
 		if err != nil {
 			logger.With(errKey, err, "contact_name_sfid", contactNameV1).WarnContext(ctx, "failed to lookup user from v1 API, leaving user fields unset")
 		} else {
-			payload.Username = &user.Username
+			// Map username to Auth0 "sub" format for v2 compatibility.
+			authSub := mapUsernameToAuthSub(user.Username)
+			payload.Username = &authSub
 			if user.FirstName != "" {
 				payload.FirstName = &user.FirstName
 			}
@@ -590,7 +591,7 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 	// Map organization information.
 	if accountSFID, ok := v1Data["account__c"].(string); ok && accountSFID != "" {
 		// Look up organization information from v1 Organization Service.
-		org, err := lookupV1Org(ctx, accountSFID, mappingsKV)
+		org, err := lookupV1Org(ctx, accountSFID)
 		if err != nil {
 			logger.With(errKey, err, "account_sfid", accountSFID).WarnContext(ctx, "failed to lookup organization, leaving empty")
 			// Organization lookup failed, leave Organization field nil.
@@ -632,7 +633,7 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 }
 
 // mapV1DataToCommitteeMemberUpdatePayload converts v1 platform-community__c data to an UpdateCommitteeMemberPayload.
-func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID, memberUID string, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*committeeservice.UpdateCommitteeMemberPayload, error) {
+func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID string, memberUID string, v1Data map[string]any) (*committeeservice.UpdateCommitteeMemberPayload, error) {
 	// Extract email field (already validated by caller).
 	email := ""
 	if contactEmail, ok := v1Data["contactemail__c"].(string); ok && contactEmail != "" {
@@ -649,11 +650,13 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID, 
 	// Map contact information.
 	if contactNameV1, ok := v1Data["contact_name__c"].(string); ok && contactNameV1 != "" {
 		// Look up user information from v1 API using the SFID.
-		user, err := lookupV1User(ctx, contactNameV1, mappingsKV)
+		user, err := lookupV1User(ctx, contactNameV1)
 		if err != nil {
 			logger.With(errKey, err, "contact_name_sfid", contactNameV1).WarnContext(ctx, "failed to lookup user from v1 API, leaving user fields unset")
 		} else {
-			payload.Username = &user.Username
+			// Map username to Auth0 "sub" format for v2 compatibility.
+			authSub := mapUsernameToAuthSub(user.Username)
+			payload.Username = &authSub
 			if user.FirstName != "" {
 				payload.FirstName = &user.FirstName
 			}
@@ -764,7 +767,7 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID, 
 	// Map organization information.
 	if accountSFID, ok := v1Data["account__c"].(string); ok && accountSFID != "" {
 		// Look up organization information from v1 Organization Service.
-		org, err := lookupV1Org(ctx, accountSFID, mappingsKV)
+		org, err := lookupV1Org(ctx, accountSFID)
 		if err != nil {
 			logger.With(errKey, err, "account_sfid", accountSFID).WarnContext(ctx, "failed to lookup organization, leaving empty")
 			// Organization lookup failed, leave Organization field nil.

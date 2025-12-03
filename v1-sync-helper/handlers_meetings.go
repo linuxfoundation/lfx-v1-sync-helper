@@ -10,8 +10,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // MessageAction represents the type of action being performed on a resource.
@@ -151,7 +149,7 @@ type MeetingAccessMessage struct {
 }
 
 // convertMapToInputMeeting converts a map[string]any to an InputMeeting struct.
-func convertMapToInputMeeting(ctx context.Context, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*meetingInput, error) {
+func convertMapToInputMeeting(ctx context.Context, v1Data map[string]any) (*meetingInput, error) {
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
@@ -208,7 +206,7 @@ func getMeetingTags(meeting *meetingInput) []string {
 }
 
 // handleZoomMeetingUpdate processes a zoom meeting update from itx-zoom-meetings-v2 records.
-func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]any, mappingsKV jetstream.KeyValue) {
+func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]any) {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return
@@ -217,7 +215,7 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 	logger.With("key", key).DebugContext(ctx, "processing zoom meeting update")
 
 	// Convert v1Data map to InputMeeting struct
-	meeting, err := convertMapToInputMeeting(ctx, v1Data, mappingsKV)
+	meeting, err := convertMapToInputMeeting(ctx, v1Data)
 	if err != nil {
 		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert v1Data to InputMeeting")
 		return
@@ -326,7 +324,7 @@ type mappingCommittee struct {
 
 // handleZoomMeetingMappingUpdate processes a zoom meeting mapping update from itx-zoom-meetings-mappings-v2 records.
 // When a mapping is created/updated, we need to fetch the associated meeting and trigger a re-index with updated committees.
-func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[string]any, v1KV jetstream.KeyValue, mappingsKV jetstream.KeyValue) {
+func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[string]any) {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return
@@ -372,7 +370,7 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 	}
 
 	// Convert meeting data to typed struct
-	meeting, err := convertMapToInputMeeting(ctx, meetingData, mappingsKV)
+	meeting, err := convertMapToInputMeeting(ctx, meetingData)
 	if err != nil {
 		logger.With(errKey, err, "meeting_id", meetingID).ErrorContext(ctx, "failed to convert meeting data")
 		return
@@ -510,7 +508,7 @@ func getRegistrantTags(registrant *registrantInput) []string {
 }
 
 // handleZoomMeetingRegistrantUpdate processes a zoom meeting registrant update from itx-zoom-meetings-registrants-v2 records.
-func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data map[string]any, mappingsKV jetstream.KeyValue) {
+func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data map[string]any) {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return
@@ -546,10 +544,12 @@ func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data m
 
 	// We only send the access message if the registrant has a username.
 	if registrant.Username != "" {
+		// Map username to Auth0 "sub" format for v2 compatibility.
+		authSub := mapUsernameToAuthSub(registrant.Username)
 		accessMsg := MeetingRegistrantAccessMessage{
 			ID:        registrantID,
 			MeetingID: registrant.MeetingID,
-			Username:  registrant.Username,
+			Username:  authSub,
 			Host:      *registrant.Host,
 		}
 
@@ -637,7 +637,7 @@ func getPastMeetingTags(pastMeeting *pastMeetingInput) []string {
 }
 
 // handleZoomPastMeetingUpdate processes a zoom past meeting update from itx-zoom-past-meetings-v2 records.
-func handleZoomPastMeetingUpdate(ctx context.Context, key string, v1Data map[string]any, mappingsKV jetstream.KeyValue) {
+func handleZoomPastMeetingUpdate(ctx context.Context, key string, v1Data map[string]any) {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return
@@ -749,7 +749,7 @@ func convertMapToInputPastMeetingMapping(ctx context.Context, v1Data map[string]
 
 // handleZoomPastMeetingMappingUpdate processes a zoom past meeting mapping update from itx-zoom-past-meetings-mappings records.
 // When a mapping is created/updated, we need to fetch the associated past meeting and trigger a re-index with updated committees.
-func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data map[string]any, v1KV jetstream.KeyValue, mappingsKV jetstream.KeyValue) {
+func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data map[string]any) {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return
@@ -928,7 +928,7 @@ func getPastMeetingParticipantTags(participant *V2PastMeetingParticipant) []stri
 }
 
 // handleZoomPastMeetingInviteeUpdate processes a zoom past meeting invitee update from itx-zoom-past-meetings-invitees-v2 records.
-func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data map[string]any, v1KV jetstream.KeyValue, mappingsKV jetstream.KeyValue) {
+func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data map[string]any) {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return
@@ -993,8 +993,10 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 
 	if invitee.LFSSO != "" {
 		// For invitees, is_invited is always true since they are invitees
+		// Map username to Auth0 "sub" format for v2 compatibility.
+		authSub := mapUsernameToAuthSub(invitee.LFSSO)
 		accessMsg := PastMeetingParticipantAccessMessage{
-			Username:   invitee.LFSSO,
+			Username:   authSub,
 			Host:       isHost,
 			IsInvited:  true,
 			IsAttended: false, // TODO: we need to ensure that the invitee event is handled before the attendee event so that this value doesn't get reset if the order is reversed
@@ -1047,7 +1049,7 @@ func convertInviteeToV2Participant(ctx context.Context, invitee *ZoomPastMeeting
 		OrgIsMember:        *invitee.OrgIsMember,
 		OrgIsProjectMember: *invitee.OrgIsProjectMember,
 		AvatarURL:          invitee.ProfilePicture,
-		Username:           invitee.LFSSO,
+		Username:           mapUsernameToAuthSub(invitee.LFSSO),
 		IsInvited:          true,
 		IsAttended:         false,                  // TODO: we need to ensure that the invitee event is handled before the attendee event so that this value doesn't get reset if the order is reversed
 		Sessions:           []ParticipantSession{}, // TODO: we need to determine the sessions for the invitee from the attendee event
@@ -1078,7 +1080,7 @@ func convertMapToInputPastMeetingAttendee(ctx context.Context, v1Data map[string
 }
 
 // handleZoomPastMeetingAttendeeUpdate processes a zoom past meeting attendee update from itx-zoom-past-meetings-attendees-v2 records.
-func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data map[string]any, v1KV jetstream.KeyValue, mappingsKV jetstream.KeyValue) {
+func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data map[string]any) {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return
@@ -1145,8 +1147,10 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 
 	if attendee.LFSSO != "" {
 		// For attendees, is_attended is always true since they attended the meeting
+		// Map username to Auth0 "sub" format for v2 compatibility.
+		authSub := mapUsernameToAuthSub(attendee.LFSSO)
 		accessMsg := PastMeetingParticipantAccessMessage{
-			Username:   attendee.LFSSO,
+			Username:   authSub,
 			Host:       isHost,
 			IsInvited:  isRegistrant,
 			IsAttended: true,
@@ -1209,7 +1213,7 @@ func convertAttendeeToV2Participant(ctx context.Context, attendee *PastMeetingAt
 		OrgIsMember:        *attendee.OrgIsMember,
 		OrgIsProjectMember: *attendee.OrgIsProjectMember,
 		AvatarURL:          attendee.ProfilePicture,
-		Username:           attendee.LFSSO,
+		Username:           mapUsernameToAuthSub(attendee.LFSSO),
 		IsInvited:          isRegistrant,
 		IsAttended:         true,
 		Sessions:           []ParticipantSession{}, // TODO: we need to determine the sessions for the invitee from the attendee event
@@ -1309,7 +1313,7 @@ func getPastMeetingTranscriptTags(recording *PastMeetingRecordingInput) []string
 
 // handleZoomPastMeetingRecordingUpdate handles the v1 past meeting recording update event.
 // It sends NATS messages for both recording and transcript indexing and access control.
-func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Data map[string]any, mappingsKV jetstream.KeyValue) {
+func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Data map[string]any) {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return
@@ -1442,7 +1446,7 @@ func getPastMeetingSummaryTags(summary *PastMeetingSummaryInput) []string {
 
 // handleZoomPastMeetingSummaryUpdate handles the v1 past meeting summary update event.
 // It sends NATS messages for summary indexing and access control.
-func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data map[string]any, v1KV jetstream.KeyValue, mappingsKV jetstream.KeyValue) {
+func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data map[string]any) {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return

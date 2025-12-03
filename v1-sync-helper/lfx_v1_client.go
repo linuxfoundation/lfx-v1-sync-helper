@@ -35,7 +35,6 @@ import (
 
 	"github.com/auth0/go-auth0/authentication"
 	"github.com/auth0/go-auth0/authentication/oauth"
-	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/oauth2"
 )
 
@@ -243,7 +242,7 @@ func getV1OrganizationFromOrgSvc(ctx context.Context, sfid string) (*V1Organizat
 }
 
 // getCachedUser retrieves a user from the mappings KV cache
-func getCachedV1User(ctx context.Context, platformID string, mappingsKV jetstream.KeyValue) (*V1User, error) {
+func getCachedV1User(ctx context.Context, platformID string) (*V1User, error) {
 	cacheKey := userCacheKeyPrefix + platformID
 
 	entry, err := mappingsKV.Get(ctx, cacheKey)
@@ -260,7 +259,7 @@ func getCachedV1User(ctx context.Context, platformID string, mappingsKV jetstrea
 }
 
 // setCachedUser stores a user in the mappings KV cache
-func setCachedV1User(ctx context.Context, platformID string, user *V1User, mappingsKV jetstream.KeyValue) error {
+func setCachedV1User(ctx context.Context, platformID string, user *V1User) error {
 	cacheKey := userCacheKeyPrefix + platformID
 
 	data, err := json.Marshal(user)
@@ -274,7 +273,7 @@ func setCachedV1User(ctx context.Context, platformID string, user *V1User, mappi
 
 // acquireUserLock attempts to acquire a lock for user refresh operations with retries
 // Returns (acquired, waited) where waited indicates if any retry attempts were made
-func acquireV1UserLock(ctx context.Context, platformID string, mappingsKV jetstream.KeyValue, maxRetries int) (bool, bool) {
+func acquireV1UserLock(ctx context.Context, platformID string, maxRetries int) (bool, bool) {
 	lockKey := userLockKeyPrefix + platformID
 	var waited bool
 
@@ -311,22 +310,22 @@ func acquireV1UserLock(ctx context.Context, platformID string, mappingsKV jetstr
 }
 
 // releaseUserLock releases a user refresh lock
-func releaseV1UserLock(ctx context.Context, platformID string, mappingsKV jetstream.KeyValue) error {
+func releaseV1UserLock(ctx context.Context, platformID string) error {
 	lockKey := userLockKeyPrefix + platformID
 	return mappingsKV.Delete(ctx, lockKey)
 }
 
 // refreshUserInBackground refreshes user data in the background
-func refreshV1UserInBackground(ctx context.Context, platformID string, mappingsKV jetstream.KeyValue) {
+func refreshV1UserInBackground(ctx context.Context, platformID string) {
 	go func() {
 		// Acquire lock for this refresh operation
-		acquired, _ := acquireV1UserLock(ctx, platformID, mappingsKV, 1)
+		acquired, _ := acquireV1UserLock(ctx, platformID, 1)
 		if !acquired {
 			return // Another process is already refreshing
 		}
 
 		defer func() {
-			if releaseErr := releaseV1UserLock(ctx, platformID, mappingsKV); releaseErr != nil {
+			if releaseErr := releaseV1UserLock(ctx, platformID); releaseErr != nil {
 				logger.With(errKey, releaseErr, "platform_id", platformID).WarnContext(ctx, "failed to release user cache lock")
 			}
 		}()
@@ -339,8 +338,9 @@ func refreshV1UserInBackground(ctx context.Context, platformID string, mappingsK
 		}
 
 		// Update cache
-		if err := setCachedV1User(ctx, platformID, user, mappingsKV); err != nil {
-			logger.With(errKey, err, "platform_id", platformID).WarnContext(ctx, "failed to update user cache after refresh")
+		// Update cache with fresh data
+		if cacheErr := setCachedV1User(ctx, platformID, user); cacheErr != nil {
+			logger.With(errKey, cacheErr, "platform_id", platformID).WarnContext(ctx, "failed to update user cache")
 		} else {
 			logger.With("platform_id", platformID, "username", user.Username).DebugContext(ctx, "user cache refreshed in background")
 		}
@@ -348,16 +348,16 @@ func refreshV1UserInBackground(ctx context.Context, platformID string, mappingsK
 }
 
 // lookupUser retrieves user information with caching and refresh logic
-func lookupV1User(ctx context.Context, platformID string, mappingsKV jetstream.KeyValue) (*V1User, error) {
+func lookupV1User(ctx context.Context, platformID string) (*V1User, error) {
 	// Try to get from cache first
-	cachedUser, err := getCachedV1User(ctx, platformID, mappingsKV)
+	cachedUser, err := getCachedV1User(ctx, platformID)
 	if err == nil {
 		age := time.Since(cachedUser.LastFetched)
 		// See if cache is still within the "stale" window.
 		if age <= userCacheStaleWhileRefresh {
 			if age > userCacheExpiry {
 				// Cache is stale: refresh in background.
-				refreshV1UserInBackground(ctx, platformID, mappingsKV)
+				refreshV1UserInBackground(ctx, platformID)
 			}
 			return cachedUser, nil
 		}
@@ -365,20 +365,20 @@ func lookupV1User(ctx context.Context, platformID string, mappingsKV jetstream.K
 	}
 
 	// Try to acquire lock.
-	acquired, waited := acquireV1UserLock(ctx, platformID, mappingsKV, userLockRetryAttempts)
+	acquired, waited := acquireV1UserLock(ctx, platformID, userLockRetryAttempts)
 
 	if acquired {
 		// We got the lock: set up defer to release it.
 		defer func() {
-			if releaseErr := releaseV1UserLock(ctx, platformID, mappingsKV); releaseErr != nil {
-				logger.With(errKey, releaseErr, "platform_id", platformID).WarnContext(ctx, "failed to release user lookup lock")
+			if releaseErr := releaseV1UserLock(ctx, platformID); releaseErr != nil {
+				logger.With(errKey, releaseErr, "platform_id", platformID).WarnContext(ctx, "failed to release user cache lock")
 			}
 		}()
 	}
 
 	// If we waited, check cache again - another process might have populated it.
 	if waited {
-		if freshUser, cacheErr := getCachedV1User(ctx, platformID, mappingsKV); cacheErr == nil {
+		if freshUser, cacheErr := getCachedV1User(ctx, platformID); cacheErr == nil {
 			if time.Since(freshUser.LastFetched) <= userCacheExpiry {
 				// Cache is now fresh, return it
 				return freshUser, nil
@@ -397,7 +397,7 @@ func lookupV1User(ctx context.Context, platformID string, mappingsKV jetstream.K
 			Email:       "",
 			LastFetched: time.Now().UTC(),
 		}
-		if cacheErr := setCachedV1User(ctx, platformID, errorUser, mappingsKV); cacheErr != nil {
+		if cacheErr := setCachedV1User(ctx, platformID, errorUser); cacheErr != nil {
 			logger.With(errKey, cacheErr, "platform_id", platformID).WarnContext(ctx, "failed to cache error state for user")
 		}
 		return nil, err
@@ -413,14 +413,14 @@ func lookupV1User(ctx context.Context, platformID string, mappingsKV jetstream.K
 			Email:       "",
 			LastFetched: time.Now().UTC(),
 		}
-		if cacheErr := setCachedV1User(ctx, platformID, invalidUser, mappingsKV); cacheErr != nil {
+		if cacheErr := setCachedV1User(ctx, platformID, invalidUser); cacheErr != nil {
 			logger.With(errKey, cacheErr, "platform_id", platformID).WarnContext(ctx, "failed to cache invalid state for user")
 		}
 		return nil, fmt.Errorf("user %s has invalid data (empty username)", platformID)
 	}
 
 	// Cache the valid user data
-	if err := setCachedV1User(ctx, platformID, user, mappingsKV); err != nil {
+	if err := setCachedV1User(ctx, platformID, user); err != nil {
 		logger.With(errKey, err, "platform_id", platformID).WarnContext(ctx, "failed to cache user data")
 	}
 
@@ -428,7 +428,7 @@ func lookupV1User(ctx context.Context, platformID string, mappingsKV jetstream.K
 }
 
 // getCachedOrg retrieves an organization from the mappings KV cache
-func getCachedV1Org(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue) (*V1Organization, error) {
+func getCachedV1Org(ctx context.Context, sfid string) (*V1Organization, error) {
 	cacheKey := orgCacheKeyPrefix + sfid
 
 	entry, err := mappingsKV.Get(ctx, cacheKey)
@@ -445,7 +445,7 @@ func getCachedV1Org(ctx context.Context, sfid string, mappingsKV jetstream.KeyVa
 }
 
 // setCachedOrg stores an organization in the mappings KV cache
-func setCachedV1Org(ctx context.Context, sfid string, org *V1Organization, mappingsKV jetstream.KeyValue) error {
+func setCachedV1Org(ctx context.Context, sfid string, org *V1Organization) error {
 	cacheKey := orgCacheKeyPrefix + sfid
 
 	data, err := json.Marshal(org)
@@ -459,7 +459,7 @@ func setCachedV1Org(ctx context.Context, sfid string, org *V1Organization, mappi
 
 // acquireOrgLock attempts to acquire a lock for organization refresh operations with retries
 // Returns (acquired, waited) where waited indicates if any retry attempts were made
-func acquireV1OrgLock(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue, maxRetries int) (bool, bool) {
+func acquireV1OrgLock(ctx context.Context, sfid string, maxRetries int) (bool, bool) {
 	lockKey := orgLockKeyPrefix + sfid
 	var waited bool
 
@@ -496,22 +496,22 @@ func acquireV1OrgLock(ctx context.Context, sfid string, mappingsKV jetstream.Key
 }
 
 // releaseOrgLock releases an organization refresh lock
-func releaseV1OrgLock(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue) error {
+func releaseV1OrgLock(ctx context.Context, sfid string) error {
 	lockKey := orgLockKeyPrefix + sfid
 	return mappingsKV.Delete(ctx, lockKey)
 }
 
 // refreshOrgInBackground refreshes organization data in the background
-func refreshV1OrgInBackground(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue) {
+func refreshV1OrgInBackground(ctx context.Context, sfid string) {
 	go func() {
 		// Acquire lock for this refresh operation
-		acquired, _ := acquireV1OrgLock(ctx, sfid, mappingsKV, 1)
+		acquired, _ := acquireV1OrgLock(ctx, sfid, 1)
 		if !acquired {
 			return // Another process is already refreshing
 		}
 
 		defer func() {
-			if releaseErr := releaseV1OrgLock(ctx, sfid, mappingsKV); releaseErr != nil {
+			if releaseErr := releaseV1OrgLock(ctx, sfid); releaseErr != nil {
 				logger.With(errKey, releaseErr, "org_sfid", sfid).WarnContext(ctx, "failed to release organization cache lock")
 			}
 		}()
@@ -524,7 +524,7 @@ func refreshV1OrgInBackground(ctx context.Context, sfid string, mappingsKV jetst
 		}
 
 		// Update cache
-		if err := setCachedV1Org(ctx, sfid, org, mappingsKV); err != nil {
+		if err := setCachedV1Org(ctx, sfid, org); err != nil {
 			logger.With(errKey, err, "org_sfid", sfid).WarnContext(ctx, "failed to update organization cache after refresh")
 		} else {
 			logger.With("org_sfid", sfid, "name", org.Name).DebugContext(ctx, "organization cache refreshed in background")
@@ -533,20 +533,20 @@ func refreshV1OrgInBackground(ctx context.Context, sfid string, mappingsKV jetst
 }
 
 // lookupOrg retrieves organization information with caching and refresh logic
-func lookupV1Org(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue) (*V1Organization, error) {
+func lookupV1Org(ctx context.Context, sfid string) (*V1Organization, error) {
 	if sfid == "" {
 		return nil, fmt.Errorf("organization SFID cannot be empty")
 	}
 
 	// Try to get from cache first
-	cachedOrg, err := getCachedV1Org(ctx, sfid, mappingsKV)
+	cachedOrg, err := getCachedV1Org(ctx, sfid)
 	if err == nil {
 		age := time.Since(cachedOrg.LastFetched)
 		// See if cache is still within the "stale" window.
 		if age <= orgCacheStaleWhileRefresh {
 			if age > orgCacheExpiry {
 				// Cache is stale: refresh in background.
-				refreshV1OrgInBackground(ctx, sfid, mappingsKV)
+				refreshV1OrgInBackground(ctx, sfid)
 			}
 			return cachedOrg, nil
 		}
@@ -554,12 +554,12 @@ func lookupV1Org(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue
 	}
 
 	// Try to acquire lock.
-	acquired, waited := acquireV1OrgLock(ctx, sfid, mappingsKV, orgLockRetryAttempts)
+	acquired, waited := acquireV1OrgLock(ctx, sfid, orgLockRetryAttempts)
 
 	if acquired {
 		// We got the lock, set up defer to release it
 		defer func() {
-			if releaseErr := releaseV1OrgLock(ctx, sfid, mappingsKV); releaseErr != nil {
+			if releaseErr := releaseV1OrgLock(ctx, sfid); releaseErr != nil {
 				logger.With(errKey, releaseErr, "org_sfid", sfid).WarnContext(ctx, "failed to release organization lookup lock")
 			}
 		}()
@@ -567,7 +567,7 @@ func lookupV1Org(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue
 
 	// If we waited, check cache again - another process might have populated it
 	if waited {
-		if freshOrg, cacheErr := getCachedV1Org(ctx, sfid, mappingsKV); cacheErr == nil {
+		if freshOrg, cacheErr := getCachedV1Org(ctx, sfid); cacheErr == nil {
 			if time.Since(freshOrg.LastFetched) <= orgCacheExpiry {
 				// Cache is now fresh, return it
 				return freshOrg, nil
@@ -586,7 +586,7 @@ func lookupV1Org(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue
 			Domain:      "",
 			LastFetched: time.Now().UTC(),
 		}
-		if cacheErr := setCachedV1Org(ctx, sfid, errorOrg, mappingsKV); cacheErr != nil {
+		if cacheErr := setCachedV1Org(ctx, sfid, errorOrg); cacheErr != nil {
 			logger.With(errKey, cacheErr, "org_sfid", sfid).WarnContext(ctx, "failed to cache error state for organization")
 		}
 		return nil, err
@@ -602,14 +602,14 @@ func lookupV1Org(ctx context.Context, sfid string, mappingsKV jetstream.KeyValue
 			Domain:      "",
 			LastFetched: time.Now().UTC(),
 		}
-		if cacheErr := setCachedV1Org(ctx, sfid, invalidOrg, mappingsKV); cacheErr != nil {
+		if cacheErr := setCachedV1Org(ctx, sfid, invalidOrg); cacheErr != nil {
 			logger.With(errKey, cacheErr, "org_sfid", sfid).WarnContext(ctx, "failed to cache invalid state for organization")
 		}
 		return nil, fmt.Errorf("organization %s has invalid data (empty name)", sfid)
 	}
 
 	// Cache the valid organization data
-	if err := setCachedV1Org(ctx, sfid, org, mappingsKV); err != nil {
+	if err := setCachedV1Org(ctx, sfid, org); err != nil {
 		logger.With(errKey, err, "org_sfid", sfid).WarnContext(ctx, "failed to cache organization data")
 	}
 
@@ -629,49 +629,4 @@ func parseWebsiteURL(website string) string {
 	}
 
 	return ""
-}
-
-// getUserInfoFromV1 converts a Platform ID to LFX username and email using v1 API with caching
-func getUserInfoFromV1Principal(ctx context.Context, platformID string, mappingsKV jetstream.KeyValue) UserInfo {
-	if platformID == "" {
-		return UserInfo{}
-	}
-
-	if platformID == "platform" {
-		return UserInfo{}
-	}
-
-	// Check for Salesforce principals that should fallback immediately.
-	if strings.HasPrefix(platformID, "00") && !strings.HasPrefix(platformID, "003") && !strings.HasPrefix(platformID, "00Q") {
-		// This is a Salesforce principal that will be unknown to the LFX v1 User Service.
-		return UserInfo{}
-	}
-
-	// Check if this is a machine user with @clients suffix.
-	if strings.HasSuffix(platformID, "@clients") {
-		// Machine user - pass through with @clients only on principal.
-		return UserInfo{
-			Username:  strings.TrimSuffix(platformID, "@clients"), // Subject without @clients.
-			Email:     "",                                         // No email for machine users.
-			Principal: platformID,                                 // Principal includes @clients.
-		}
-	}
-
-	user, err := lookupV1User(ctx, platformID, mappingsKV)
-	if err != nil {
-		logger.With(errKey, err, "platform_id", platformID).WarnContext(ctx, "failed to lookup user from v1 API, falling back to service account")
-		return UserInfo{} // Return empty to trigger fallback
-	}
-
-	// Check for cached error/invalid states
-	if user.Username == "" {
-		logger.With("platform_id", platformID).WarnContext(ctx, "user has empty username, falling back to service account")
-		return UserInfo{} // Return empty to trigger fallback
-	}
-
-	// Return user info for JWT impersonation
-	return UserInfo{
-		Username: user.Username,
-		Email:    user.Email,
-	}
 }

@@ -16,11 +16,11 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/patrickmn/go-cache"
 	goahttp "goa.design/goa/v3/http"
 
@@ -260,7 +260,7 @@ func getKeyID(cfg *Config) (string, error) {
 }
 
 // generateCachedJWTToken generates or retrieves a cached JWT token for the specified audience and v1 principal.
-func generateCachedJWTToken(audience string, v1Principal string, mappingsKV jetstream.KeyValue) (string, error) {
+func generateCachedJWTToken(ctx context.Context, audience string, v1Principal string) (string, error) {
 	// Create cache key based on audience and v1 principal.
 	cacheKey := fmt.Sprintf("jwt-%s-%s", audience, v1Principal)
 
@@ -271,11 +271,8 @@ func generateCachedJWTToken(audience string, v1Principal string, mappingsKV jets
 		}
 	}
 
-	// Get user info for JWT generation.
-	userInfo := getUserInfoFromV1Principal(context.Background(), v1Principal, mappingsKV)
-
 	// Generate new token.
-	token, err := generateJWTToken(audience, userInfo)
+	token, err := generateJWTToken(ctx, audience, v1Principal)
 	if err != nil {
 		return "", err
 	}
@@ -289,38 +286,57 @@ func generateCachedJWTToken(audience string, v1Principal string, mappingsKV jets
 // generateJWTToken generates a JWT token for API authentication with optional user impersonation.
 //
 // This function implements a dual authentication strategy:
-//  1. User Impersonation: If userInfo contains a username, the JWT will impersonate that user
-//     with principal=username, sub=username, and email (if available)
-//  2. Fallback Client: If no user info is provided, uses v1_sync_helper client credentials
+//  1. User Impersonation: If v1Principal is provided and can be looked up, the JWT will impersonate that user
+//     with principal=auth0|{userID}, sub=auth0|{userID}, and email (if available)
+//  2. Fallback Client: If no v1Principal is provided or lookup fails, uses v1_sync_helper client credentials
 //     with principal="v1_sync_helper@clients" and sub="v1_sync_helper"
 //
 // The impersonation approach allows v1 sync operations to be attributed to the actual
 // user who made the changes in v1, rather than a generic service account.
-func generateJWTToken(audience string, userInfo UserInfo) (string, error) {
+// Usernames are mapped to Auth0 "sub" format using mapUsernameToAuthSub().
+func generateJWTToken(ctx context.Context, audience string, v1Principal string) (string, error) {
 	now := time.Now()
 
-	var principal, subject string
+	var principal, email string
 
-	// If we have user info with a username, impersonate that user.
-	if userInfo.Username != "" {
-		// Use Principal if set (for machine users with @clients), otherwise use Username.
-		if userInfo.Principal != "" {
-			principal = userInfo.Principal // Machine user with @clients suffix.
-		} else {
-			principal = userInfo.Username // Regular user.
-		}
-		subject = userInfo.Username // Subject is always without @clients suffix.
-		logger.With("username", userInfo.Username, "principal", principal, "email", userInfo.Email, "audience", audience).Debug("generating JWT token with user impersonation")
-	} else {
-		// Fallback to v1_sync_helper client ID.
+	switch {
+	case v1Principal == "" || v1Principal == "platform":
+		// Empty or platform principal - use client authentication.
 		principal = jwtClientID + "@clients"
-		subject = jwtClientID
-		logger.With("client_id", jwtClientID, "audience", audience).Debug("generating JWT token with fallback client authentication")
+		logger.With("client_id", jwtClientID, "audience", audience).Debug("generating JWT token with client authentication for empty/platform principal")
+
+	case strings.HasSuffix(v1Principal, "@clients"):
+		// Machine user - use v1Principal as-is.
+		principal = v1Principal
+		username := strings.TrimSuffix(v1Principal, "@clients")
+		logger.With("machine_user", username, "principal", principal, "audience", audience).Debug("generating JWT token with machine user impersonation")
+
+	case strings.HasPrefix(v1Principal, "00") && !strings.HasPrefix(v1Principal, "003") && !strings.HasPrefix(v1Principal, "00Q"):
+		// Salesforce principal that will be unknown to the LFX v1 User Service - fallback to client authentication.
+		logger.With("platform_id", v1Principal).WarnContext(ctx, "Salesforce principal unknown to v1 User Service, falling back to service account")
+		principal = jwtClientID + "@clients"
+
+	default:
+		// User principal - attempt lookup.
+		user, err := lookupV1User(ctx, v1Principal)
+		if err != nil {
+			logger.With(errKey, err, "platform_id", v1Principal).WarnContext(ctx, "failed to lookup user from v1 API, falling back to service account")
+			principal = jwtClientID + "@clients"
+		} else if user.Username == "" {
+			logger.With("platform_id", v1Principal).WarnContext(ctx, "user has empty username, falling back to service account")
+			principal = jwtClientID + "@clients"
+		} else {
+			// Map username to Auth0 "sub" format for v2 compatibility.
+			principal = mapUsernameToAuthSub(user.Username)
+			email = user.Email
+			logger.With("username", user.Username, "principal", principal, "email", email, "audience", audience).Debug("generating JWT token with user impersonation")
+		}
 	}
 
+	// Build MapClaims with common fields.
 	claims := jwt.MapClaims{
 		"iss":       "heimdall",
-		"sub":       subject,
+		"sub":       principal,
 		"aud":       audience,
 		"iat":       now.Unix(),
 		"exp":       now.Add(5 * time.Minute).Unix(),   // Token expires in 5 minutes.
@@ -329,9 +345,9 @@ func generateJWTToken(audience string, userInfo UserInfo) (string, error) {
 		"principal": principal,
 	}
 
-	// Add email if available and we're impersonating a user.
-	if userInfo.Username != "" && userInfo.Email != "" {
-		claims["email"] = userInfo.Email
+	// Only add email if it's not empty.
+	if email != "" {
+		claims["email"] = email
 	}
 
 	// Create token with PS256 algorithm and kid header.
@@ -375,11 +391,4 @@ func stringToTime(s string) time.Time {
 		return time.Time{}
 	}
 	return t
-}
-
-// UserInfo holds user information for authentication and impersonation.
-type UserInfo struct {
-	Username  string `json:"username"`
-	Email     string `json:"email"`
-	Principal string `json:"principal"`
 }

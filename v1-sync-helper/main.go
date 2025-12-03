@@ -67,10 +67,12 @@ const (
 )
 
 var (
-	logger    *slog.Logger
-	cfg       *Config
-	natsConn  *nats.Conn
-	jsContext jetstream.JetStream
+	logger     *slog.Logger
+	cfg        *Config
+	natsConn   *nats.Conn
+	jsContext  jetstream.JetStream
+	v1KV       jetstream.KeyValue
+	mappingsKV jetstream.KeyValue
 )
 
 // main parses optional flags and starts the NATS subscribers.
@@ -220,14 +222,14 @@ func main() {
 	}
 
 	// Create KV bucket connections for v1 objects (from Meltano)
-	v1KV, err := jsContext.KeyValue(ctx, "v1-objects")
+	v1KV, err = jsContext.KeyValue(ctx, "v1-objects")
 	if err != nil {
 		logger.With(errKey, err).Error("error accessing v1-objects KV bucket")
 		os.Exit(1)
 	}
 
 	// Create v1 mappings KV bucket for storing v1 ID mappings
-	mappingsKV, err := jsContext.KeyValue(ctx, "v1-mappings")
+	mappingsKV, err = jsContext.KeyValue(ctx, "v1-mappings")
 	if err != nil {
 		logger.With(errKey, err).Error("error accessing v1-mappings KV bucket")
 		os.Exit(1)
@@ -305,7 +307,7 @@ func main() {
 					}
 
 					// Process the KV entry
-					kvHandler(entry, v1KV, mappingsKV)
+					kvHandler(entry)
 
 					// Acknowledge the message
 					if err := msg.Ack(); err != nil {
