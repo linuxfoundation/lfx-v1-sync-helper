@@ -1046,8 +1046,6 @@ func convertInviteeToV2Participant(ctx context.Context, invitee *ZoomPastMeeting
 		Host:               isHost,
 		JobTitle:           invitee.JobTitle,
 		OrgName:            invitee.Org,
-		OrgIsMember:        *invitee.OrgIsMember,
-		OrgIsProjectMember: *invitee.OrgIsProjectMember,
 		AvatarURL:          invitee.ProfilePicture,
 		Username:           mapUsernameToAuthSub(invitee.LFSSO),
 		IsInvited:          true,
@@ -1055,6 +1053,14 @@ func convertInviteeToV2Participant(ctx context.Context, invitee *ZoomPastMeeting
 		Sessions:           []ParticipantSession{}, // TODO: we need to determine the sessions for the invitee from the attendee event
 		CreatedAt:          &createdAt,
 		UpdatedAt:          &modifiedAt,
+	}
+
+	if invitee.OrgIsMember != nil {
+		pastMeetingParticipant.OrgIsMember = *invitee.OrgIsMember
+	}
+
+	if invitee.OrgIsProjectMember != nil {
+		pastMeetingParticipant.OrgIsProjectMember = *invitee.OrgIsProjectMember
 	}
 
 	return &pastMeetingParticipant, nil
@@ -1210,8 +1216,6 @@ func convertAttendeeToV2Participant(ctx context.Context, attendee *PastMeetingAt
 		Host:               isHost,
 		JobTitle:           attendee.JobTitle,
 		OrgName:            attendee.Org,
-		OrgIsMember:        *attendee.OrgIsMember,
-		OrgIsProjectMember: *attendee.OrgIsProjectMember,
 		AvatarURL:          attendee.ProfilePicture,
 		Username:           mapUsernameToAuthSub(attendee.LFSSO),
 		IsInvited:          isRegistrant,
@@ -1219,6 +1223,14 @@ func convertAttendeeToV2Participant(ctx context.Context, attendee *PastMeetingAt
 		Sessions:           []ParticipantSession{}, // TODO: we need to determine the sessions for the invitee from the attendee event
 		CreatedAt:          &createdAt,
 		UpdatedAt:          &modifiedAt,
+	}
+
+	if attendee.OrgIsMember != nil {
+		pastMeetingParticipant.OrgIsMember = *attendee.OrgIsMember
+	}
+
+	if attendee.OrgIsProjectMember != nil {
+		pastMeetingParticipant.OrgIsProjectMember = *attendee.OrgIsProjectMember
 	}
 
 	for _, session := range attendee.Sessions {
