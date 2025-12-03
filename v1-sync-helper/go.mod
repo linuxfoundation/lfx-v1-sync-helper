@@ -5,27 +5,27 @@ module github.com/linuxfoundation/lfx-v1-sync-helper
 go 1.25.4
 
 require (
+	github.com/akamensky/base58 v0.0.0-20210829145138-ce8bf8802e8f
 	github.com/auth0/go-auth0 v1.32.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
-	github.com/linuxfoundation/lfx-v2-committee-service v0.2.14
+	github.com/linuxfoundation/lfx-v2-committee-service v0.2.16
 	github.com/linuxfoundation/lfx-v2-project-service v0.5.3
 	github.com/nats-io/nats.go v1.47.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/teambition/rrule-go v1.8.2
-	goa.design/goa/v3 v3.22.6
+	goa.design/goa/v3 v3.23.2
 	golang.org/x/oauth2 v0.33.0
 )
 
 require (
 	github.com/PuerkitoBio/rehttp v1.4.0 // indirect
-	github.com/akamensky/base58 v0.0.0-20210829145138-ce8bf8802e8f // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
 	github.com/go-chi/chi/v5 v5.2.3 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/klauspost/compress v1.18.1 // indirect
+	github.com/klauspost/compress v1.18.2 // indirect
 	github.com/lestrrat-go/blackmagic v1.0.4 // indirect
 	github.com/lestrrat-go/httpcc v1.0.1 // indirect
 	github.com/lestrrat-go/httprc v1.0.6 // indirect
