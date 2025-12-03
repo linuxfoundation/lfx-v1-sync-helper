@@ -9,12 +9,11 @@ import (
 	"fmt"
 
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // fetchCommitteeBase fetches an existing committee base from the Committee Service API.
 func fetchCommitteeBase(ctx context.Context, committeeUID string) (*committeeservice.CommitteeBaseWithReadonlyAttributes, string, error) {
-	token, err := generateCachedJWTToken(committeeServiceAudience, "", nil)
+	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, "")
 	if err != nil {
 		return nil, "", err
 	}
@@ -36,8 +35,8 @@ func fetchCommitteeBase(ctx context.Context, committeeUID string) (*committeeser
 }
 
 // createCommittee creates a new committee via the Committee Service API.
-func createCommittee(ctx context.Context, payload *committeeservice.CreateCommitteePayload, v1Principal string, mappingsKV jetstream.KeyValue) (*committeeservice.CommitteeFullWithReadonlyAttributes, error) {
-	token, err := generateCachedJWTToken(committeeServiceAudience, v1Principal, mappingsKV)
+func createCommittee(ctx context.Context, payload *committeeservice.CreateCommitteePayload, v1Principal string) (*committeeservice.CommitteeFullWithReadonlyAttributes, error) {
+	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, v1Principal)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +52,7 @@ func createCommittee(ctx context.Context, payload *committeeservice.CreateCommit
 }
 
 // updateCommittee updates a committee by separately handling base and settings if there are changes.
-func updateCommittee(ctx context.Context, payload *committeeservice.UpdateCommitteeBasePayload, v1Principal string, mappingsKV jetstream.KeyValue) error {
+func updateCommittee(ctx context.Context, payload *committeeservice.UpdateCommitteeBasePayload, v1Principal string) error {
 	// Fetch current committee base.
 	currentBase, baseETag, err := fetchCommitteeBase(ctx, *payload.UID)
 	if err != nil {
@@ -74,7 +73,7 @@ func updateCommittee(ctx context.Context, payload *committeeservice.UpdateCommit
 	baseChanged := !committeeBasesEqual(currentBase, updatedBase)
 
 	if baseChanged {
-		token, err := generateCachedJWTToken(committeeServiceAudience, v1Principal, mappingsKV)
+		token, err := generateCachedJWTToken(ctx, committeeServiceAudience, v1Principal)
 		if err != nil {
 			return fmt.Errorf("failed to generate token for committee base update: %w", err)
 		}
@@ -104,8 +103,8 @@ func committeeBasesEqual(a, b *committeeservice.CommitteeBaseWithReadonlyAttribu
 }
 
 // createCommitteeMember creates a new committee member via the Committee Service API.
-func createCommitteeMember(ctx context.Context, payload *committeeservice.CreateCommitteeMemberPayload, v1Principal string, mappingsKV jetstream.KeyValue) (*committeeservice.CommitteeMemberFullWithReadonlyAttributes, error) {
-	token, err := generateCachedJWTToken(committeeServiceAudience, v1Principal, mappingsKV)
+func createCommitteeMember(ctx context.Context, payload *committeeservice.CreateCommitteeMemberPayload, v1Principal string) (*committeeservice.CommitteeMemberFullWithReadonlyAttributes, error) {
+	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, v1Principal)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +121,7 @@ func createCommitteeMember(ctx context.Context, payload *committeeservice.Create
 
 // fetchCommitteeMember fetches an existing committee member from the Committee Service API.
 func fetchCommitteeMember(ctx context.Context, committeeUID, memberUID string) (*committeeservice.CommitteeMemberFullWithReadonlyAttributes, string, error) {
-	token, err := generateCachedJWTToken(committeeServiceAudience, "", nil)
+	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, "")
 	if err != nil {
 		return nil, "", err
 	}
@@ -146,7 +145,7 @@ func fetchCommitteeMember(ctx context.Context, committeeUID, memberUID string) (
 }
 
 // updateCommitteeMember updates an existing committee member via the Committee Service API.
-func updateCommitteeMember(ctx context.Context, payload *committeeservice.UpdateCommitteeMemberPayload, v1Principal string, mappingsKV jetstream.KeyValue) error {
+func updateCommitteeMember(ctx context.Context, payload *committeeservice.UpdateCommitteeMemberPayload, v1Principal string) error {
 	// Fetch current committee member for comparison.
 	currentMember, etag, err := fetchCommitteeMember(ctx, payload.UID, payload.MemberUID)
 	if err != nil {
@@ -157,7 +156,7 @@ func updateCommitteeMember(ctx context.Context, payload *committeeservice.Update
 	memberChanged := !committeeMembersEqual(currentMember, payload)
 
 	if memberChanged {
-		token, err := generateCachedJWTToken(committeeServiceAudience, v1Principal, mappingsKV)
+		token, err := generateCachedJWTToken(ctx, committeeServiceAudience, v1Principal)
 		if err != nil {
 			return fmt.Errorf("failed to generate token for committee member update: %w", err)
 		}

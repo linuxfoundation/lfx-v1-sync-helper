@@ -9,12 +9,11 @@ import (
 	"fmt"
 
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // fetchProjectBase fetches an existing project base from the Project Service API.
 var fetchProjectBase = func(ctx context.Context, projectUID string) (*projectservice.ProjectBase, string, error) {
-	token, err := generateCachedJWTToken(projectServiceAudience, "", nil)
+	token, err := generateCachedJWTToken(ctx, projectServiceAudience, "")
 	if err != nil {
 		return nil, "", err
 	}
@@ -37,7 +36,7 @@ var fetchProjectBase = func(ctx context.Context, projectUID string) (*projectser
 
 // fetchProjectSettings fetches an existing project settings from the Project Service API.
 func fetchProjectSettings(ctx context.Context, projectUID string) (*projectservice.ProjectSettings, string, error) {
-	token, err := generateCachedJWTToken(projectServiceAudience, "", nil)
+	token, err := generateCachedJWTToken(ctx, projectServiceAudience, "")
 	if err != nil {
 		return nil, "", err
 	}
@@ -59,8 +58,8 @@ func fetchProjectSettings(ctx context.Context, projectUID string) (*projectservi
 }
 
 // createProject creates a new project via the Project Service API.
-func createProject(ctx context.Context, payload *projectservice.CreateProjectPayload, v1Principal string, mappingsKV jetstream.KeyValue) (*projectservice.ProjectFull, error) {
-	token, err := generateCachedJWTToken(projectServiceAudience, v1Principal, mappingsKV)
+func createProject(ctx context.Context, payload *projectservice.CreateProjectPayload, v1Principal string) (*projectservice.ProjectFull, error) {
+	token, err := generateCachedJWTToken(ctx, projectServiceAudience, v1Principal)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +75,7 @@ func createProject(ctx context.Context, payload *projectservice.CreateProjectPay
 }
 
 // updateProject updates a project by separately handling base and settings if there are changes.
-func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjectBasePayload, settingsPayload *projectservice.UpdateProjectSettingsPayload, v1Principal string, mappingsKV jetstream.KeyValue) error {
+func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjectBasePayload, settingsPayload *projectservice.UpdateProjectSettingsPayload, v1Principal string) error {
 	// Fetch current project base.
 	currentBase, baseETag, err := fetchProjectBase(ctx, *basePayload.UID)
 	if err != nil {
@@ -114,7 +113,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 	baseChanged := !projectBasesEqual(currentBase, updatedBase)
 
 	if baseChanged {
-		token, err := generateCachedJWTToken(projectServiceAudience, v1Principal, mappingsKV)
+		token, err := generateCachedJWTToken(ctx, projectServiceAudience, v1Principal)
 		if err != nil {
 			return fmt.Errorf("failed to generate token for base update: %w", err)
 		}
@@ -157,7 +156,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 		}
 
 		if settingsChanged {
-			token, err := generateCachedJWTToken(projectServiceAudience, v1Principal, mappingsKV)
+			token, err := generateCachedJWTToken(ctx, projectServiceAudience, v1Principal)
 			if err != nil {
 				return fmt.Errorf("failed to generate token for settings update: %w", err)
 			}

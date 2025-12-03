@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // isValidURL checks if a URL value is non-empty and not "nil".
@@ -56,7 +55,7 @@ var allowedCategories = map[string]bool{
 
 // isProjectAllowed determines if a project should be allowed to sync in based on allowlist rules.
 // Returns (allowed, reason) where allowed indicates if the project should be synced and reason explains why.
-func isProjectAllowed(ctx context.Context, v1Data map[string]any, mappingsKV jetstream.KeyValue) (bool, string) {
+func isProjectAllowed(ctx context.Context, v1Data map[string]any) (bool, string) {
 	// Extract project slug.
 	slug, _ := v1Data["slug__c"].(string)
 	slug = strings.ToLower(slug)
@@ -125,7 +124,7 @@ func mapAdminCategoryToCategory(adminCategory string) *string {
 }
 
 // handleProjectUpdate processes a project update from the KV bucket.
-func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any, mappingsKV jetstream.KeyValue) {
+func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any) {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return
@@ -164,7 +163,7 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any,
 
 		// Map v1 data to update payload.
 		var payload *projectservice.UpdateProjectBasePayload
-		payload, err = mapV1DataToProjectUpdateBasePayload(ctx, existingUID, v1Data, mappingsKV)
+		payload, err = mapV1DataToProjectUpdateBasePayload(ctx, existingUID, v1Data)
 		if err != nil {
 			logger.With(errKey, err, "sfid", sfid, "slug", slug).ErrorContext(ctx, "failed to map v1 data to update payload")
 			return
@@ -178,11 +177,11 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any,
 			return
 		}
 
-		err = updateProject(ctx, payload, settingsPayload, v1Principal, mappingsKV)
+		err = updateProject(ctx, payload, settingsPayload, v1Principal)
 		uid = existingUID
 	} else {
 		// Check allowlist before creating new project.
-		allowed, reason := isProjectAllowed(ctx, v1Data, mappingsKV)
+		allowed, reason := isProjectAllowed(ctx, v1Data)
 		if !allowed {
 			logger.With("sfid", sfid, "slug", slug, "reason", reason).InfoContext(ctx, "skipping project creation - not in allowlist")
 			return
@@ -193,14 +192,14 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any,
 
 		// Map v1 data to create payload.
 		var payload *projectservice.CreateProjectPayload
-		payload, err = mapV1DataToProjectCreatePayload(ctx, v1Data, mappingsKV)
+		payload, err = mapV1DataToProjectCreatePayload(ctx, v1Data)
 		if err != nil {
 			logger.With(errKey, err, "sfid", sfid, "slug", slug).ErrorContext(ctx, "failed to map v1 data to create payload")
 			return
 		}
 
 		var response *projectservice.ProjectFull
-		response, err = createProject(ctx, payload, v1Principal, mappingsKV)
+		response, err = createProject(ctx, payload, v1Principal)
 		if response != nil && response.UID != nil {
 			uid = *response.UID
 		}
@@ -222,7 +221,7 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any,
 }
 
 // mapV1DataToProjectCreatePayload converts v1 project data to a CreateProjectPayload.
-func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*projectservice.CreateProjectPayload, error) {
+func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any) (*projectservice.CreateProjectPayload, error) {
 	// Extract required fields.
 	name, nameOK := v1Data["name"].(string)
 	slug, slugOK := v1Data["slug__c"].(string)
@@ -394,7 +393,7 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any,
 }
 
 // mapV1DataToProjectUpdateBasePayload converts v1 project data to an UpdateProjectBasePayload.
-func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*projectservice.UpdateProjectBasePayload, error) {
+func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string, v1Data map[string]any) (*projectservice.UpdateProjectBasePayload, error) {
 	// Extract required fields.
 	name, nameOK := v1Data["name"].(string)
 	slug, slugOK := v1Data["slug__c"].(string)
