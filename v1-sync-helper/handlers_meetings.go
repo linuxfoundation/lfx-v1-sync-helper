@@ -586,7 +586,7 @@ type PastMeetingAccessMessage struct {
 }
 
 // convertMapToInputPastMeeting converts a map[string]any to a PastMeetingInput struct.
-func convertMapToInputPastMeeting(ctx context.Context, v1Data map[string]any, mappingsKV jetstream.KeyValue) (*pastMeetingInput, error) {
+func convertMapToInputPastMeeting(ctx context.Context, v1Data map[string]any) (*pastMeetingInput, error) {
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
@@ -628,7 +628,7 @@ func getPastMeetingTags(pastMeeting *pastMeetingInput) []string {
 		fmt.Sprintf("meeting_uid:%s", pastMeeting.MeetingID),
 		fmt.Sprintf("project_uid:%s", pastMeeting.ProjectID),
 		fmt.Sprintf("occurrence_id:%s", pastMeeting.OccurrenceID),
-		fmt.Sprintf("title:%d", pastMeeting.Topic),
+		fmt.Sprintf("title:%s", pastMeeting.Topic),
 	}
 	for _, committee := range pastMeeting.Committees {
 		tags = append(tags, fmt.Sprintf("committee_uid:%s", committee.UID))
@@ -646,7 +646,7 @@ func handleZoomPastMeetingUpdate(ctx context.Context, key string, v1Data map[str
 	logger.With("key", key).DebugContext(ctx, "processing zoom past meeting update")
 
 	// Convert v1Data map to PastMeetingInput struct
-	pastMeeting, err := convertMapToInputPastMeeting(ctx, v1Data, mappingsKV)
+	pastMeeting, err := convertMapToInputPastMeeting(ctx, v1Data)
 	if err != nil {
 		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert v1Data to pastMeetingInput")
 		return
@@ -795,7 +795,7 @@ func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data 
 	}
 
 	// Convert past meeting data to typed struct
-	pastMeeting, err := convertMapToInputPastMeeting(ctx, pastMeetingData, mappingsKV)
+	pastMeeting, err := convertMapToInputPastMeeting(ctx, pastMeetingData)
 	if err != nil {
 		logger.With(errKey, err, "meeting_and_occurrence_id", meetingAndOccurrenceID).ErrorContext(ctx, "failed to convert past meeting data")
 		return
