@@ -119,7 +119,7 @@ func sendIndexerMessage(ctx context.Context, subject string, action MessageActio
 		return fmt.Errorf("failed to publish indexer message to subject %s: %w", subject, err)
 	}
 
-	logger.With("subject", subject).DebugContext(ctx, "successfully published indexer message")
+	logger.With("subject", subject).InfoContext(ctx, "successfully published indexer message")
 	return nil
 }
 
@@ -134,7 +134,7 @@ func sendAccessMessage(ctx context.Context, subject string, messageBytes []byte)
 		return fmt.Errorf("failed to publish message to subject %s: %w", subject, err)
 	}
 
-	logger.With("subject", subject).DebugContext(ctx, "successfully published message")
+	logger.With("subject", subject).InfoContext(ctx, "successfully published message")
 	return nil
 }
 
@@ -303,7 +303,7 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 		}
 	}
 
-	logger.With("uid", uid, "key", key).DebugContext(ctx, "successfully sent meeting indexer and access messages")
+	logger.With("uid", uid, "key", key).InfoContext(ctx, "successfully sent meeting indexer and access messages")
 }
 
 // convertMapToInputMeeting converts a map[string]any to an InputMeeting struct.
@@ -465,7 +465,7 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 		}
 	}
 
-	logger.With("meeting_id", meetingID, "committee_id", committeeID, "key", key).DebugContext(ctx, "successfully triggered meeting re-index with updated committees")
+	logger.With("meeting_id", meetingID, "committee_id", committeeID, "key", key).InfoContext(ctx, "successfully triggered meeting re-index with updated committees")
 }
 
 // convertMapToInputRegistrant converts a map[string]any to a RegistrantInput struct.
@@ -591,7 +591,7 @@ func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data m
 		}
 	}
 
-	logger.With("id", registrantID, "meeting_id", registrant.MeetingID, "key", key).DebugContext(ctx, "successfully sent registrant indexer and put messages")
+	logger.With("id", registrantID, "meeting_id", registrant.MeetingID, "key", key).InfoContext(ctx, "successfully sent registrant indexer and put messages")
 }
 
 // PastMeetingAccessMessage is the schema for the data in the message sent to the fga-sync service.
@@ -756,7 +756,7 @@ func handleZoomPastMeetingUpdate(ctx context.Context, key string, v1Data map[str
 		}
 	}
 
-	logger.With("uid", uid, "meeting_id", pastMeeting.MeetingID, "key", key).DebugContext(ctx, "successfully sent past meeting indexer and access messages")
+	logger.With("uid", uid, "meeting_id", pastMeeting.MeetingID, "key", key).InfoContext(ctx, "successfully sent past meeting indexer and access messages")
 }
 
 // convertMapToInputPastMeetingMapping converts a map[string]any to a ZoomPastMeetingMappingDB struct.
@@ -907,7 +907,7 @@ func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data 
 		}
 	}
 
-	logger.With("meeting_and_occurrence_id", meetingAndOccurrenceID, "committee_id", committeeID, "key", key).DebugContext(ctx, "successfully triggered past meeting re-index with updated committees")
+	logger.With("meeting_and_occurrence_id", meetingAndOccurrenceID, "committee_id", committeeID, "key", key).InfoContext(ctx, "successfully triggered past meeting re-index with updated committees")
 }
 
 // PastMeetingParticipantAccessMessage is the schema for the data in the message sent to the fga-sync service.
@@ -1062,7 +1062,7 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 		}
 	}
 
-	logger.With("id", inviteeID, "meeting_and_occurrence_id", invitee.ID, "key", key).DebugContext(ctx, "successfully sent invitee indexer and access messages")
+	logger.With("id", inviteeID, "meeting_and_occurrence_id", invitee.ID, "key", key).InfoContext(ctx, "successfully sent invitee indexer and access messages")
 }
 
 func convertInviteeToV2Participant(ctx context.Context, invitee *ZoomPastMeetingInviteeDatabase, isHost bool) (*V2PastMeetingParticipant, error) {
@@ -1233,7 +1233,7 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 		}
 	}
 
-	logger.With("id", attendeeID, "meeting_and_occurrence_id", attendee.MeetingAndOccurrenceID, "key", key).DebugContext(ctx, "successfully sent attendee indexer and access messages")
+	logger.With("id", attendeeID, "meeting_and_occurrence_id", attendee.MeetingAndOccurrenceID, "key", key).InfoContext(ctx, "successfully sent attendee indexer and access messages")
 }
 
 func convertAttendeeToV2Participant(ctx context.Context, attendee *PastMeetingAttendeeInput, isHost bool, isRegistrant bool) (*V2PastMeetingParticipant, error) {
@@ -1478,7 +1478,7 @@ func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Dat
 		}
 	}
 
-	logger.With("uid", uid, "key", key).DebugContext(ctx, "successfully sent recording and transcript indexer and access messages")
+	logger.With("uid", uid, "key", key).InfoContext(ctx, "successfully sent recording and transcript indexer and access messages")
 }
 
 // PastMeetingSummaryAccessMessage is the schema for the data in the message sent to the fga-sync service.
@@ -1612,5 +1612,5 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 		}
 	}
 
-	logger.With("uid", uid, "meeting_and_occurrence_id", summaryInput.MeetingAndOccurrenceID, "key", key).DebugContext(ctx, "successfully sent summary indexer and access messages")
+	logger.With("uid", uid, "meeting_and_occurrence_id", summaryInput.MeetingAndOccurrenceID, "key", key).InfoContext(ctx, "successfully sent summary indexer and access messages")
 }
