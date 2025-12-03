@@ -925,10 +925,11 @@ func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data 
 // PastMeetingParticipantAccessMessage is the schema for the data in the message sent to the fga-sync service.
 // These are the fields that the fga-sync service needs in order to update the OpenFGA permissions.
 type PastMeetingParticipantAccessMessage struct {
-	Username   string `json:"username"`
-	Host       bool   `json:"host"`
-	IsInvited  bool   `json:"is_invited"`
-	IsAttended bool   `json:"is_attended"`
+	MeetingAndOccurrenceID string `json:"meeting_and_occurrence_id"`
+	Username               string `json:"username"`
+	Host                   bool   `json:"host"`
+	IsInvited              bool   `json:"is_invited"`
+	IsAttended             bool   `json:"is_attended"`
 }
 
 // convertMapToInputPastMeetingInvitee converts a map[string]any to a ZoomPastMeetingInviteeDatabase struct.
@@ -1063,10 +1064,11 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 		// Map username to Auth0 "sub" format for v2 compatibility.
 		authSub := mapUsernameToAuthSub(invitee.LFSSO)
 		accessMsg := PastMeetingParticipantAccessMessage{
-			Username:   authSub,
-			Host:       isHost,
-			IsInvited:  true,
-			IsAttended: false, // TODO: we need to ensure that the invitee event is handled before the attendee event so that this value doesn't get reset if the order is reversed
+			MeetingAndOccurrenceID: invitee.MeetingAndOccurrenceID,
+			Username:               authSub,
+			Host:                   isHost,
+			IsInvited:              true,
+			IsAttended:             false, // TODO: we need to ensure that the invitee event is handled before the attendee event so that this value doesn't get reset if the order is reversed
 		}
 
 		accessMsgBytes, err := json.Marshal(accessMsg)
@@ -1247,10 +1249,11 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 		// Map username to Auth0 "sub" format for v2 compatibility.
 		authSub := mapUsernameToAuthSub(attendee.LFSSO)
 		accessMsg := PastMeetingParticipantAccessMessage{
-			Username:   authSub,
-			Host:       isHost,
-			IsInvited:  isRegistrant,
-			IsAttended: true,
+			MeetingAndOccurrenceID: attendee.MeetingAndOccurrenceID,
+			Username:               authSub,
+			Host:                   isHost,
+			IsInvited:              isRegistrant,
+			IsAttended:             true,
 		}
 
 		accessMsgBytes, err := json.Marshal(accessMsg)
