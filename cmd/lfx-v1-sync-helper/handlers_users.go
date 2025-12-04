@@ -8,7 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -39,7 +39,7 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 
 	// Process the update in a goroutine to avoid blocking other handlers.
 	go func() {
-		updateUserAlternateEmails(ctx, leadorcontactid, emailSfid, isDeleted)
+		updateUserAlternateEmails(context.WithoutCancel(ctx), leadorcontactid, emailSfid, isDeleted)
 	}()
 }
 
@@ -51,7 +51,7 @@ func updateUserAlternateEmails(ctx context.Context, userSfid, emailSfid string, 
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		// Add random splay time up to 1 second to reduce collision chances.
-		splayTime := time.Duration(rand.Intn(1000)) * time.Millisecond
+		splayTime := time.Duration(rand.IntN(1000)) * time.Millisecond
 		time.Sleep(splayTime)
 
 		// Get current mapping record.
