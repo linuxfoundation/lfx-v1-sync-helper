@@ -100,34 +100,6 @@ nats:
     # compression is a boolean to determine if the KV bucket should be compressed
     compression: true
 
-  # consumer is the configuration for the NATS JetStream consumer that processes v1-objects KV bucket changes
-  consumer:
-    # creation is a boolean to determine if the consumer should be created via the helm chart
-    # set it to false if you want to use an existing consumer
-    creation: true
-    # keep is a boolean to determine if the consumer should be preserved during helm uninstall
-    # set it to false if you want the consumer to be deleted when the chart is uninstalled
-    keep: true
-    # name is the name of the consumer
-    name: v1-sync-helper-kv-consumer
-    # streamName is the name of the JetStream stream that contains the KV bucket
-    streamName: KV_v1-objects
-
-    # ackPolicy determines how messages are acknowledged
-    ackPolicy: explicit
-    # deliverPolicy determines which messages to deliver
-    # uncomment "lastPerSubject" when it's fixed upstream in NACK
-    # deliverPolicy: lastPerSubject
-    deliverPolicy: all
-    # maxDeliver is the maximum number of delivery attempts
-    maxDeliver: 3
-    # ackWait is how long to wait for an acknowledgment
-    ackWait: 30s
-    # maxAckPending is the maximum number of unacknowledged messages
-    maxAckPending: 1000
-    # filterSubject allows filtering specific keys (use ">" for all)
-    filterSubject: "$KV.v1-objects.>"
-
 # heimdall is the configuration for JWT impersonation of Heimdall-authorized
 # principals for v1 data ingest.
 heimdall:

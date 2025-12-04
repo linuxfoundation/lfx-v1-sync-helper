@@ -241,17 +241,15 @@ func main() {
 	streamName := "KV_v1-objects"
 
 	consumer, err := jsContext.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
-		Name:    consumerName,
-		Durable: consumerName,
-		// Uncomment when ready in the chart (see comments in charts/lfx-v1-sync-helper/values.yaml)
-		// DeliverPolicy: jetstream.DeliverLastPerSubjectPolicy,
-		DeliverPolicy: jetstream.DeliverAllPolicy,
+		Name:          consumerName,
+		Durable:       consumerName,
+		DeliverPolicy: jetstream.DeliverLastPerSubjectPolicy,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		FilterSubject: "$KV.v1-objects.>",
 		MaxDeliver:    3,
 		AckWait:       30 * time.Second,
 		MaxAckPending: 1000,
-		Description:   "Pull consumer for v1-sync-helper to process v1-objects KV bucket changes with load balancing",
+		Description:   "durable/shared KV bucket watcher for v1-sync-helper pods",
 	})
 	if err != nil {
 		logger.With(errKey, err, "consumer", consumerName, "stream", streamName).Error("error creating JetStream pull consumer")
