@@ -65,7 +65,7 @@ This repository contains three main components:
 ### [Meltano](./meltano/README.md)
 Data extraction and loading pipeline that extracts data from LFX v1 sources (DynamoDB for meetings, PostgreSQL for projects/committees) and loads it into NATS KV stores for processing by the v2 platform.
 
-### [v1-sync-helper](./v1-sync-helper/README.md)
+### [v1-sync-helper](./cmd/lfx-v1-sync-helper/README.md)
 Go service that monitors NATS KV stores for replicated v1 data and synchronizes it with the LFX v2 platform APIs, handling data transformation and conflict resolution.
 
 ### [Helm charts](./charts/lfx-v1-sync-helper/README.md)

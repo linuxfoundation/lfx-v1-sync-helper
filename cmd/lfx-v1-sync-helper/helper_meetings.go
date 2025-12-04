@@ -1,7 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
-// package main is the main package for the v1-sync-helper service.
+// The lfx-v1-sync-helper service.
 package main
 
 import (

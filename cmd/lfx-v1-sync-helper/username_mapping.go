@@ -1,11 +1,13 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
+// The lfx-v1-sync-helper service.
+package main
+
 // Username mapping utility for converting usernames to Auth0 "sub" format.
 //
-// This module handles the conversion of usernames to the "sub" claim format
+// This file handles the conversion of usernames to the "sub" claim format
 // expected by v2 services, which uses "auth0|{ldap exported safe ID}" format.
-package main
 
 import (
 	"crypto/sha512"

@@ -1,7 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
-// Package main provides HTTP handlers for meeting-related operations.
+// The lfx-v1-sync-helper service.
 package main
 
 import (

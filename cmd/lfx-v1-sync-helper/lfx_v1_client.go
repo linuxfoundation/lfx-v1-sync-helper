@@ -1,6 +1,9 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
+// The lfx-v1-sync-helper service.
+package main
+
 // Auth0 authentication and HTTP client for LFX v1 API Gateway calls
 //
 // This client handles:
@@ -20,7 +23,6 @@
 // - Machine users: platform IDs with "@clients" suffix (no API lookup)
 // - Platform users: regular platform IDs requiring v1 API lookup
 // - Invalid users: empty usernames or API errors (cached to prevent retries)
-package main
 
 import (
 	"context"

@@ -111,7 +111,7 @@ The following environment variables have defaults configured in the chart's `app
 | `PORT` | `8080` | HTTP server port |
 | `BIND` | `*` | Interface to bind on |
 
-For a complete list of all supported environment variables, including required ones like `AUTH0_TENANT`, see the [v1-sync-helper README](../../v1-sync-helper/README.md#environment-variables).
+For a complete list of all supported environment variables, including required ones like `AUTH0_TENANT`, see the [v1-sync-helper README](../../cmd/lfx-v1-sync-helper/README.md#environment-variables).
 
 ### Additional Configuration
 

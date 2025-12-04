@@ -45,7 +45,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5.4.0
         with:
-          go-version-file: v1-sync-helper/go.mod
+          go-version-file: go.mod
 
       - name: Setup Ko
         uses: ko-build/setup-ko@d006021bd0c28d1ce33a07e7943d48b079944c8d  # v0.9
@@ -53,9 +53,8 @@ jobs:
           version: v0.18.0
 
       - name: Build and publish container image
-        working-directory: ./v1-sync-helper
         run: |
-          ko build github.com/linuxfoundation/lfx-v1-sync-helper \
+          ko build github.com/linuxfoundation/lfx-v1-sync-helper/cmd/lfx-v1-sync-helper \
             -B \
             --platform linux/amd64,linux/arm64 \
             -t ${{ github.ref_name }} \
