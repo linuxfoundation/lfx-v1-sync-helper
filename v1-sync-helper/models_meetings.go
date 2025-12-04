@@ -916,6 +916,10 @@ type ParticipantSession struct {
 
 // PastMeetingRecordingInput is the schema for a past meeting recording in DynamoDB.
 type PastMeetingRecordingInput struct {
+	// ID is the recording record ID in the v2 system.
+	// It is the same as the [MeetingAndOccurrenceID] field, but with the json tag to match what the v2 system expects.
+	ID string `json:"id" dynamodbav:"id"`
+
 	// MeetingAndOccurrenceID is the ID of the meeting and occurrence associated with the recording.
 	// This is the primary key of the recording table since there is only one recording record for a past meeting.
 	MeetingAndOccurrenceID string `json:"meeting_and_occurrence_id" dynamodbav:"meeting_and_occurrence_id"`

@@ -414,7 +414,7 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 
 		// Send meeting indexer message with the meeting data
 		tags := getMeetingTags(meeting)
-		if err := sendIndexerMessage(ctx, IndexV1MeetingSubject, indexerAction, meetingData, tags); err != nil {
+		if err := sendIndexerMessage(ctx, IndexV1MeetingSubject, indexerAction, meeting, tags); err != nil {
 			logger.With(errKey, err, "meeting_id", meetingID, "key", key).ErrorContext(ctx, "failed to send meeting indexer message")
 			return
 		}
@@ -868,7 +868,7 @@ func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data 
 
 		// Send past meeting indexer message with the past meeting data
 		tags := getPastMeetingTags(pastMeeting)
-		if err := sendIndexerMessage(ctx, IndexV1PastMeetingSubject, indexerAction, pastMeetingData, tags); err != nil {
+		if err := sendIndexerMessage(ctx, IndexV1PastMeetingSubject, indexerAction, pastMeeting, tags); err != nil {
 			logger.With(errKey, err, "meeting_and_occurrence_id", meetingAndOccurrenceID, "key", key).ErrorContext(ctx, "failed to send past meeting indexer message")
 			return
 		}
@@ -1093,18 +1093,6 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 }
 
 func convertInviteeToV2Participant(ctx context.Context, invitee *ZoomPastMeetingInviteeDatabase, isHost bool) (*V2PastMeetingParticipant, error) {
-	createdAt, err := time.Parse(time.RFC3339, invitee.CreatedAt)
-	if err != nil {
-		logger.With(errKey, err, "created_at", invitee.CreatedAt).ErrorContext(ctx, "failed to parse created_at")
-		return nil, fmt.Errorf("failed to parse created_at: %w", err)
-	}
-
-	modifiedAt, err := time.Parse(time.RFC3339, invitee.ModifiedAt)
-	if err != nil {
-		logger.With(errKey, err, "modified_at", invitee.ModifiedAt).ErrorContext(ctx, "failed to parse modified_at")
-		return nil, fmt.Errorf("failed to parse modified_at: %w", err)
-	}
-
 	pastMeetingParticipant := V2PastMeetingParticipant{
 		UID:            invitee.ID,
 		PastMeetingUID: invitee.MeetingAndOccurrenceID,
@@ -1120,10 +1108,25 @@ func convertInviteeToV2Participant(ctx context.Context, invitee *ZoomPastMeeting
 		IsInvited:      true,
 		IsAttended:     false,                  // TODO: we need to ensure that the invitee event is handled before the attendee event so that this value doesn't get reset if the order is reversed
 		Sessions:       []ParticipantSession{}, // TODO: we need to determine the sessions for the invitee from the attendee event
-		CreatedAt:      &createdAt,
-		UpdatedAt:      &modifiedAt,
 	}
 
+	if invitee.CreatedAt != "" {
+		createdAt, err := time.Parse(time.RFC3339, invitee.CreatedAt)
+		if err != nil {
+			logger.With(errKey, err, "created_at", invitee.CreatedAt).ErrorContext(ctx, "failed to parse created_at")
+			return nil, fmt.Errorf("failed to parse created_at: %w", err)
+		}
+		pastMeetingParticipant.CreatedAt = &createdAt
+	}
+
+	if invitee.ModifiedAt != "" {
+		modifiedAt, err := time.Parse(time.RFC3339, invitee.ModifiedAt)
+		if err != nil {
+			logger.With(errKey, err, "modified_at", invitee.ModifiedAt).ErrorContext(ctx, "failed to parse modified_at")
+			return nil, fmt.Errorf("failed to parse modified_at: %w", err)
+		}
+		pastMeetingParticipant.UpdatedAt = &modifiedAt
+	}
 	if invitee.OrgIsMember != nil {
 		pastMeetingParticipant.OrgIsMember = *invitee.OrgIsMember
 	}
@@ -1278,18 +1281,6 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 }
 
 func convertAttendeeToV2Participant(ctx context.Context, attendee *PastMeetingAttendeeInput, isHost bool, isRegistrant bool) (*V2PastMeetingParticipant, error) {
-	createdAt, err := time.Parse(time.RFC3339, attendee.CreatedAt)
-	if err != nil {
-		logger.With(errKey, err, "created_at", attendee.CreatedAt).ErrorContext(ctx, "failed to parse created_at")
-		return nil, fmt.Errorf("failed to parse created_at: %w", err)
-	}
-
-	modifiedAt, err := time.Parse(time.RFC3339, attendee.ModifiedAt)
-	if err != nil {
-		logger.With(errKey, err, "modified_at", attendee.ModifiedAt).ErrorContext(ctx, "failed to parse modified_at")
-		return nil, fmt.Errorf("failed to parse modified_at: %w", err)
-	}
-
 	var firstName, lastName string
 	namesSplit := strings.Split(attendee.Name, " ")
 	if len(namesSplit) >= 2 {
@@ -1315,8 +1306,24 @@ func convertAttendeeToV2Participant(ctx context.Context, attendee *PastMeetingAt
 		IsInvited:      isRegistrant,
 		IsAttended:     true,
 		Sessions:       []ParticipantSession{}, // TODO: we need to determine the sessions for the invitee from the attendee event
-		CreatedAt:      &createdAt,
-		UpdatedAt:      &modifiedAt,
+	}
+
+	if attendee.CreatedAt != "" {
+		createdAt, err := time.Parse(time.RFC3339, attendee.CreatedAt)
+		if err != nil {
+			logger.With(errKey, err, "created_at", attendee.CreatedAt).ErrorContext(ctx, "failed to parse created_at")
+			return nil, fmt.Errorf("failed to parse created_at: %w", err)
+		}
+		pastMeetingParticipant.CreatedAt = &createdAt
+	}
+
+	if attendee.ModifiedAt != "" {
+		modifiedAt, err := time.Parse(time.RFC3339, attendee.ModifiedAt)
+		if err != nil {
+			logger.With(errKey, err, "modified_at", attendee.ModifiedAt).ErrorContext(ctx, "failed to parse modified_at")
+			return nil, fmt.Errorf("failed to parse modified_at: %w", err)
+		}
+		pastMeetingParticipant.UpdatedAt = &modifiedAt
 	}
 
 	if attendee.OrgIsMember != nil {
@@ -1328,24 +1335,30 @@ func convertAttendeeToV2Participant(ctx context.Context, attendee *PastMeetingAt
 	}
 
 	for _, session := range attendee.Sessions {
-		joinTime, err := time.Parse(time.RFC3339, session.JoinTime)
-		if err != nil {
-			logger.With(errKey, err, "join_time", session.JoinTime).ErrorContext(ctx, "failed to parse join_time")
-			return nil, fmt.Errorf("failed to parse join_time: %w", err)
-		}
-
-		leaveTime, err := time.Parse(time.RFC3339, session.LeaveTime)
-		if err != nil {
-			logger.With(errKey, err, "leave_time", session.LeaveTime).ErrorContext(ctx, "failed to parse leave_time")
-			return nil, fmt.Errorf("failed to parse leave_time: %w", err)
-		}
-
-		pastMeetingParticipant.Sessions = append(pastMeetingParticipant.Sessions, ParticipantSession{
+		participantSession := ParticipantSession{
 			UID:         session.ParticipantUUID,
-			JoinTime:    joinTime,
-			LeaveTime:   &leaveTime,
 			LeaveReason: session.LeaveReason,
-		})
+		}
+
+		if session.JoinTime != "" {
+			joinTime, err := time.Parse(time.RFC3339, session.JoinTime)
+			if err != nil {
+				logger.With(errKey, err, "join_time", session.JoinTime).ErrorContext(ctx, "failed to parse join_time")
+				return nil, fmt.Errorf("failed to parse join_time: %w", err)
+			}
+			participantSession.JoinTime = &joinTime
+		}
+
+		if session.LeaveTime != "" {
+			leaveTime, err := time.Parse(time.RFC3339, session.LeaveTime)
+			if err != nil {
+				logger.With(errKey, err, "leave_time", session.LeaveTime).ErrorContext(ctx, "failed to parse leave_time")
+				return nil, fmt.Errorf("failed to parse leave_time: %w", err)
+			}
+			participantSession.LeaveTime = &leaveTime
+		}
+
+		pastMeetingParticipant.Sessions = append(pastMeetingParticipant.Sessions, participantSession)
 	}
 
 	return &pastMeetingParticipant, nil
@@ -1381,6 +1394,35 @@ func convertMapToInputPastMeetingRecording(ctx context.Context, v1Data map[strin
 	if err := json.Unmarshal(jsonBytes, &recording); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into PastMeetingRecordingInput")
 		return nil, fmt.Errorf("failed to unmarshal JSON into PastMeetingRecordingInput: %w", err)
+	}
+
+	// Populate the ID for the v2 system with the partition key from v1.
+	if meetingAndOccurrenceID, ok := v1Data["meeting_and_occurrence_id"].(string); ok && meetingAndOccurrenceID != "" {
+		recording.ID = meetingAndOccurrenceID
+	}
+
+	// We should set a default recording access if it is not set, to ensure it can have its access relationships
+	// created by the fga-sync service, which requires it to be set.
+	if recording.RecordingAccess == "" {
+		// This recording access comes from the enum for the field: [public, meeting_hosts, meeting_participants]
+		// We want to default to meeting hosts only access to keep it as restrictive as possible.
+		recording.RecordingAccess = "meeting_hosts"
+	}
+
+	// Check if the recording has a transcript and set the transcript enabled and access if it does
+	// and wasn't already populated from the v1 data.
+	var hasTranscript = false
+	for _, file := range recording.RecordingFiles {
+		if file.FileType == "TRANSCRIPT" || file.FileType == "TIMELINE" {
+			hasTranscript = true
+			break
+		}
+	}
+	if hasTranscript && !recording.TranscriptEnabled {
+		recording.TranscriptEnabled = true
+	}
+	if hasTranscript && recording.TranscriptAccess == "" {
+		recording.TranscriptAccess = "meeting_hosts"
 	}
 
 	return &recording, nil
