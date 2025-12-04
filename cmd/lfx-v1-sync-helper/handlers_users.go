@@ -154,12 +154,11 @@ func updateEmailsList(currentEmails []string, emailSfid string, isDeleted bool) 
 		}
 		// Email not in list, nothing to remove.
 		return currentEmails
-	} else {
-		// Add to list if it doesn't exist.
-		if index == -1 {
-			return append(currentEmails, emailSfid)
-		}
-		// Email already in list, nothing to add.
-		return currentEmails
 	}
+	// Add to list if it doesn't exist.
+	if index == -1 {
+		return append(currentEmails, emailSfid)
+	}
+	// Email already in list, nothing to add.
+	return currentEmails
 }
