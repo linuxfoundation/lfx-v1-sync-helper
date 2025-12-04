@@ -909,7 +909,7 @@ type V2PastMeetingParticipant struct {
 // Participants can have multiple sessions if they join and leave multiple times
 type ParticipantSession struct {
 	UID         string     `json:"uid"`
-	JoinTime    time.Time  `json:"join_time"`
+	JoinTime    *time.Time `json:"join_time,omitempty"`
 	LeaveTime   *time.Time `json:"leave_time,omitempty"`
 	LeaveReason string     `json:"leave_reason,omitempty"`
 }
