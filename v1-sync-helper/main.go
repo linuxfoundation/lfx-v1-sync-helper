@@ -249,7 +249,7 @@ func main() {
 		MaxDeliver:    3,
 		AckWait:       30 * time.Second,
 		MaxAckPending: 1000,
-		Description:   "Pull consumer for v1-sync-helper to process v1-objects KV bucket changes with load balancing",
+		Description:   "durable/shared KV bucket watcher for v1-sync-helper pods",
 	})
 	if err != nil {
 		logger.With(errKey, err, "consumer", consumerName, "stream", streamName).Error("error creating JetStream pull consumer")
