@@ -83,6 +83,8 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) {
 		handleZoomMeetingRegistrantUpdate(ctx, key, v1Data)
 	case "itx-zoom-meetings-mappings-v2":
 		handleZoomMeetingMappingUpdate(ctx, key, v1Data)
+	case "itx-zoom-meetings-invite-responses-v2":
+		handleZoomMeetingInviteResponseUpdate(ctx, key, v1Data)
 	case "itx-zoom-past-meetings-attendees":
 		handleZoomPastMeetingAttendeeUpdate(ctx, key, v1Data)
 	case "itx-zoom-past-meetings-invitees":

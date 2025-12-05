@@ -38,6 +38,9 @@ const (
 	// V1MeetingRegistrantPutSubject is the subject for adding v1 meeting registrants.
 	V1MeetingRegistrantPutSubject = "lfx.put_registrant.v1_meeting"
 
+	// IndexV1MeetingInviteResponseSubject is the subject for the v1 meeting invite response indexing.
+	IndexV1MeetingInviteResponseSubject = "lfx.index.v1_meeting_rsvp"
+
 	// IndexV1PastMeetingSubject is the subject for the v1 past meeting indexing.
 	IndexV1PastMeetingSubject = "lfx.index.v1_past_meeting"
 
@@ -604,6 +607,94 @@ func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data m
 	}
 
 	logger.With("id", registrantID, "meeting_id", registrant.MeetingID, "key", key).InfoContext(ctx, "successfully sent registrant indexer and put messages")
+}
+
+func convertMapToInputInviteResponse(ctx context.Context, v1Data map[string]any) (*inviteResponseInput, error) {
+	// Convert map to JSON bytes
+	jsonBytes, err := json.Marshal(v1Data)
+	if err != nil {
+		logger.With(errKey, err).ErrorContext(ctx, "failed to marshal v1Data to JSON")
+		return nil, fmt.Errorf("failed to marshal v1Data to JSON: %w", err)
+	}
+
+	// Unmarshal JSON bytes into InviteResponseInput struct
+	var inviteResponse inviteResponseInput
+	if err := json.Unmarshal(jsonBytes, &inviteResponse); err != nil {
+		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into InviteResponseInput")
+		return nil, fmt.Errorf("failed to unmarshal JSON into InviteResponseInput: %w", err)
+	}
+
+	return &inviteResponse, nil
+}
+
+func getInviteResponseTags(inviteResponse *inviteResponseInput) []string {
+	tags := []string{
+		fmt.Sprintf("%s", inviteResponse.ID),
+		fmt.Sprintf("invite_response_uid:%s", inviteResponse.ID),
+		fmt.Sprintf("meeting_uid:%s", inviteResponse.MeetingID),
+		fmt.Sprintf("registrant_uid:%s", inviteResponse.RegistrantID),
+		fmt.Sprintf("email:%s", inviteResponse.Email),
+	}
+	return tags
+}
+
+func handleZoomMeetingInviteResponseUpdate(ctx context.Context, key string, v1Data map[string]any) {
+	// Check if we should skip this sync operation.
+	if shouldSkipSync(ctx, v1Data) {
+		return
+	}
+
+	logger.With("key", key).DebugContext(ctx, "processing zoom meeting invite response update")
+
+	// Convert v1Data map to InviteResponseInput struct
+	inviteResponse, err := convertMapToInputInviteResponse(ctx, v1Data)
+	if err != nil {
+		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert v1Data to inviteResponseInput")
+		return
+	}
+
+	// Skip sync for Mailer Daemon email addresses.
+	if inviteResponse.Email == "MAILER-DAEMON@us-west-2.amazonses.com" {
+		return
+	}
+
+	// Extract the invite response ID
+	inviteResponseID := inviteResponse.ID
+	if inviteResponseID == "" {
+		logger.With("key", key).ErrorContext(ctx, "missing or invalid id in v1 invite response data")
+		return
+	}
+
+	// Check if parent meeting exists in mappings before proceeding.
+	if inviteResponse.MeetingID == "" {
+		logger.With("invite_response_id", inviteResponseID).ErrorContext(ctx, "invite response missing required parent meeting ID")
+		return
+	}
+	meetingMappingKey := fmt.Sprintf("v1_meetings.%s", inviteResponse.MeetingID)
+	if _, err := mappingsKV.Get(ctx, meetingMappingKey); err != nil {
+		logger.With("meeting_id", inviteResponse.MeetingID, "invite_response_id", inviteResponseID).InfoContext(ctx, "skipping invite response sync - parent meeting not found in mappings")
+		return
+	}
+
+	mappingKey := fmt.Sprintf("v1_invite_responses.%s", inviteResponseID)
+	indexerAction := MessageActionCreated
+	if _, err := mappingsKV.Get(ctx, mappingKey); err == nil {
+		indexerAction = MessageActionUpdated
+	}
+
+	tags := getInviteResponseTags(inviteResponse)
+	if err := sendIndexerMessage(ctx, IndexV1MeetingInviteResponseSubject, indexerAction, inviteResponse, tags); err != nil {
+		logger.With(errKey, err, "id", inviteResponseID, "key", key).ErrorContext(ctx, "failed to send invite response indexer message")
+		return
+	}
+
+	if inviteResponseID != "" {
+		if _, err := mappingsKV.Put(ctx, mappingKey, []byte("1")); err != nil {
+			logger.With(errKey, err, "id", inviteResponseID).WarnContext(ctx, "failed to store invite response mapping")
+		}
+	}
+
+	logger.With("id", inviteResponseID, "meeting_id", inviteResponse.MeetingID, "key", key).InfoContext(ctx, "successfully sent invite response indexer message")
 }
 
 // PastMeetingAccessMessage is the schema for the data in the message sent to the fga-sync service.
