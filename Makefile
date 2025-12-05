@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: MIT
 
 # Binary name
-BINARY_NAME=v1-sync-helper
+BINARY_NAME=lfx-v1-sync-helper
 BINARY_PATH=bin/$(BINARY_NAME)
+CMD_PATH=cmd/lfx-v1-sync-helper
 
 # Go parameters
 GOCMD=go
@@ -28,13 +29,13 @@ all: clean deps fmt lint test build
 build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p bin
-	$(GOBUILD) $(BUILD_FLAGS) -o $(BINARY_PATH) .
+	$(GOBUILD) $(BUILD_FLAGS) -o $(BINARY_PATH) ./$(CMD_PATH)
 
 # Build with debug symbols and race detection
 debug:
 	@echo "Building $(BINARY_NAME) with debug symbols..."
 	@mkdir -p bin
-	$(GOBUILD) $(DEBUG_FLAGS) -o $(BINARY_PATH) .
+	$(GOBUILD) $(DEBUG_FLAGS) -o $(BINARY_PATH) ./$(CMD_PATH)
 
 # Clean build artifacts
 clean:
@@ -101,20 +102,17 @@ run-debug: debug
 # Build Docker image
 docker-build:
 	@echo "Building Docker image..."
-	docker build -t ghcr.io/linuxfoundation/lfx-v1-sync-helper/$(BINARY_NAME):latest .
+	docker build -f docker/Dockerfile.v1-sync-helper -t ghcr.io/linuxfoundation/lfx-v1-sync-helper/$(BINARY_NAME):latest .
 
 # Run Docker container
 docker-run: docker-build
 	@echo "Running Docker container..."
+	@if [ ! -f .env ]; then \
+		echo "Error: .env file not found. Please create one from cmd/lfx-v1-sync-helper/config.example.env"; \
+		exit 1; \
+	fi
 	docker run --rm -p 8080:8080 \
-		-e NATS_URL=nats://localhost:4222 \
-		-e PROJECT_SERVICE_URL=http://localhost:8080 \
-		-e HEIMDALL_CLIENT_ID=v1_sync_helper \
-		-e HEIMDALL_PRIVATE_KEY="$(shell cat /path/to/heimdall-private-key.pem)" \
-		-e AUTH0_TENANT=linuxfoundation-dev \
-		-e AUTH0_CLIENT_ID=your-auth0-client-id \
-		-e AUTH0_PRIVATE_KEY="$(shell cat /path/to/auth0-private-key.pem)" \
-		-e LFX_API_GW=https://api-gw.dev.platform.linuxfoundation.org/ \
+		--env-file .env \
 		ghcr.io/linuxfoundation/lfx-v1-sync-helper/$(BINARY_NAME):latest
 
 # Update dependencies
@@ -141,6 +139,6 @@ help:
 	@echo "  run          - Build and run the application"
 	@echo "  run-debug    - Build with debug and run the application"
 	@echo "  docker-build - Build Docker image"
-	@echo "  docker-run   - Build and run Docker container"
+	@echo "  docker-run   - Build and run Docker container (requires .env file)"
 	@echo "  update-deps  - Update all dependencies"
 	@echo "  help         - Show this help message"

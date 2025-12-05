@@ -19,8 +19,39 @@ plugins:
     - platform-collaboration__c.*
     - platform-community__c.*
     - salesforce-project__c.*
+    - salesforce-alternate_email__c.*
+    - salesforce-merged_user.sfid
+    - salesforce-merged_user.isdeleted
+    - salesforce-merged_user.lastname
+    - salesforce-merged_user.firstname
+    - salesforce-merged_user.salutation
+    - salesforce-merged_user.middlename
+    - salesforce-merged_user.suffix
+    - salesforce-merged_user.name
+    - salesforce-merged_user.title
+    - salesforce-merged_user.photourl
+    - salesforce-merged_user.description
+    - salesforce-merged_user.createddate
+    - salesforce-merged_user.lastmodifieddate
+    - salesforce-merged_user.username__c
+    - salesforce-merged_user.facebook_id__c
+    - salesforce-merged_user.github_id__c
+    - salesforce-merged_user.linkedin_id__c
+    - salesforce-merged_user.twitter_id__c
+    - salesforce-merged_user.gitlab_id__c
+    - salesforce-merged_user.bio__c
+    - salesforce-merged_user.photo_url__c
+    - salesforce-merged_user.technology__c
+    - salesforce-merged_user.timezone__c
+    - salesforce-merged_user.company
+    - salesforce-merged_user.website
+    - salesforce-merged_user.preferred_language__c
+    - salesforce-merged_user.accountid
+    - salesforce-merged_user.sfid_b2b
+    - salesforce-merged_user.createdbyid
+    - salesforce-merged_user.lastmodifiedbyid
     metadata:
-      '*':
+      "*":
         replication-method: INCREMENTAL
         replication-key: lastmodifieddate
   - name: tap-dynamodb
@@ -29,17 +60,17 @@ plugins:
     config:
       aws_default_region: us-west-2
       tables:
-        - itx-zoom-meetings-mappings-v2
-        - itx-zoom-meetings-v2
-        - itx-zoom-past-meetings-mappings
-        - itx-zoom-past-meetings
-        - itx-zoom-past-meetings-attendees
-        - itx-zoom-past-meetings-invitees
-        - itx-zoom-past-meetings-recordings
-        - itx-zoom-past-meetings-summaries
-        - itx-zoom-meetings-registrants-v2
+      - itx-zoom-meetings-mappings-v2
+      - itx-zoom-meetings-v2
+      - itx-zoom-past-meetings-mappings
+      - itx-zoom-past-meetings
+      - itx-zoom-past-meetings-attendees
+      - itx-zoom-past-meetings-invitees
+      - itx-zoom-past-meetings-recordings
+      - itx-zoom-past-meetings-summaries
+      - itx-zoom-meetings-registrants-v2
       metadata:
-        '*':
+        "*":
           # Setting the replication key allows conditional loads for
           # target-nats-kv, even though Meltano's tap-dynamodb doesn't support
           # INCREMENTAL or LOG_BASED replication methods.
@@ -81,7 +112,6 @@ plugins:
     settings:
     - name: url
       value: nats://lfx-platform-nats.lfx.svc.cluster.local:4222
-      alias: host
     - name: bucket
       value: v1-objects
     - name: user

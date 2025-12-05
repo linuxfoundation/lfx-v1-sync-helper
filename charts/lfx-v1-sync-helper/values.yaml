@@ -73,9 +73,9 @@ nats:
     # storage is the storage type for the KV bucket
     storage: file
     # maxValueSize is the maximum size of a value in the KV bucket
-    maxValueSize: 10485760 # 10MB
+    maxValueSize: 10485760  # 10MB
     # maxBytes is the maximum number of bytes in the KV bucket
-    maxBytes: 10737418240 # 10GB
+    maxBytes: 10737418240  # 10GB
     # compression is a boolean to determine if the KV bucket should be compressed
     compression: true
 
@@ -94,9 +94,9 @@ nats:
     # storage is the storage type for the KV bucket
     storage: file
     # maxValueSize is the maximum size of a value in the KV bucket
-    maxValueSize: 10485760 # 10MB
+    maxValueSize: 10485760  # 10MB
     # maxBytes is the maximum number of bytes in the KV bucket
-    maxBytes: 2147483648 # 2GB
+    maxBytes: 2147483648  # 2GB
     # compression is a boolean to determine if the KV bucket should be compressed
     compression: true
 

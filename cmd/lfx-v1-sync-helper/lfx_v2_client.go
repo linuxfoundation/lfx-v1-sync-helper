@@ -1,8 +1,10 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
-// JWT authentication and HTTP client for LFX v2 service calls with user impersonation
+// The lfx-v1-sync-helper service.
 package main
+
+// JWT authentication and HTTP client for LFX v2 service calls with user impersonation
 
 import (
 	"context"

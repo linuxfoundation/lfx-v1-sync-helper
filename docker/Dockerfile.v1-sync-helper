@@ -20,10 +20,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 # Copy the code into the container
-COPY . .
+COPY cmd/lfx-v1-sync-helper/ ./cmd/lfx-v1-sync-helper/
 
 # Build the application
-RUN go build -o /go/bin/v1-sync-helper -trimpath -ldflags="-w -s" .
+RUN go build -o /go/bin/lfx-v1-sync-helper -trimpath -ldflags="-w -s" ./cmd/lfx-v1-sync-helper
 
 # Run our go binary standalone
 FROM cgr.dev/chainguard/static:latest
@@ -31,6 +31,6 @@ FROM cgr.dev/chainguard/static:latest
 # Implicit with base image; setting explicitly for linters.
 USER nonroot
 
-COPY --from=builder /go/bin/v1-sync-helper /v1-sync-helper
+COPY --from=builder /go/bin/lfx-v1-sync-helper /lfx-v1-sync-helper
 
-ENTRYPOINT ["/v1-sync-helper"]
+ENTRYPOINT ["/lfx-v1-sync-helper"]

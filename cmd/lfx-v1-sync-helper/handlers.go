@@ -1,7 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
-// The v1-sync-helper service.
+// The lfx-v1-sync-helper service.
 package main
 
 import (
@@ -95,6 +95,10 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) {
 		handleZoomPastMeetingSummaryUpdate(ctx, key, v1Data)
 	case "itx-zoom-past-meetings":
 		handleZoomPastMeetingUpdate(ctx, key, v1Data)
+	case "salesforce-merged_user":
+		logger.With("key", key).DebugContext(ctx, "salesforce-merged_user sync not yet implemented")
+	case "salesforce-alternate_email__c":
+		handleAlternateEmailUpdate(ctx, key, v1Data)
 	default:
 		logger.With("key", key).WarnContext(ctx, "unknown object type, ignoring")
 	}

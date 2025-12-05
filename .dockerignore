@@ -1,6 +1,15 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
 
+.git
+.gitignore
+.dockerignore
+/bin/
+*.sh
+*.pem
+.env
+*.env
+
 # Helm chart dependencies
 /charts/*/charts/
 *.tgz
@@ -11,9 +20,6 @@
 .vscode/
 *.swp
 *~
-.env
-*.env
-*.pem
 
 # Rendered templates
 **/templates/*.rendered
@@ -23,11 +29,20 @@
 # MegaLinter reports
 /megalinter-reports/
 
-# Python environment for meltano.
+# Python environment for meltano
 .venv/
 __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# Go build artifacts
-/bin/
+# Documentation
+README.md
+*.md
+LICENSE*
+
+# Test files
+*_test.go
+testdata/
+
+# Development files
+Makefile

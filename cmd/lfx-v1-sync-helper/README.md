@@ -13,7 +13,7 @@ The LFX v1 Sync Helper is a Go microservice that synchronizes v1 data from NATS 
 
 ### Data Flow
 
-For a more detail view, see the root [README.md](../README.md) diagrams.
+For a more detail view, see the root [README.md](../../README.md) diagrams.
 
 ```mermaid
 flowchart LR

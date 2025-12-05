@@ -8,9 +8,11 @@ ignore: |
   styles
   venv
   .venv
-  charts
-  meltano
+  charts/lfx-v1-sync-helper/templates
 rules:
   line-length:
     max: 120
     level: warning
+  indentation:
+    # Meltano doesn't indent sequences, but we otherwise do.
+    indent-sequences: whatever

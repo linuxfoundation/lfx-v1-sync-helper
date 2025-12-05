@@ -1,7 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
-// Package main provides data models and structures for meeting-related operations.
+// The lfx-v1-sync-helper service.
 package main
 
 import (
@@ -909,7 +909,7 @@ type V2PastMeetingParticipant struct {
 // Participants can have multiple sessions if they join and leave multiple times
 type ParticipantSession struct {
 	UID         string     `json:"uid"`
-	JoinTime    time.Time  `json:"join_time"`
+	JoinTime    *time.Time `json:"join_time,omitempty"`
 	LeaveTime   *time.Time `json:"leave_time,omitempty"`
 	LeaveReason string     `json:"leave_reason,omitempty"`
 }
