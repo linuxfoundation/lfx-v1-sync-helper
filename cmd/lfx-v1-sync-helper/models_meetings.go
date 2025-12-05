@@ -454,6 +454,66 @@ type registrantInput struct {
 	UpdatedBy UpdatedBy `json:"updated_by" dynamodbav:"updated_by"`
 }
 
+type inviteResponseInput struct {
+	// ID is the partition key of the invite response (it is a UUID)
+	ID string `json:"id" dynamodbav:"id"`
+
+	// MeetingAndOccurrenceID is the ID of the combined meeting and occurrence associated with the invite response
+	MeetingAndOccurrenceID string `json:"meeting_and_occurrence_id" dynamodbav:"meeting_and_occurrence_id"`
+
+	// MeetingID is the ID of the meeting that the invite response is associated with.
+	// It is a Global Secondary Index on the invite response table.
+	MeetingID string `json:"meeting_id" dynamodbav:"meeting_id"`
+
+	// OccurrenceID is the ID of the occurrence that the invite response is associated with.
+	OccurrenceID string `json:"occurrence_id" dynamodbav:"occurrence_id"`
+
+	// RegistrantID is the ID of the registrant that the invite response is associated with.
+	// It is a Global Secondary Index on the invite response table.
+	RegistrantID string `json:"registrant_id" dynamodbav:"registrant_id"`
+
+	// Email is the email of the registrant that the invite response is associated with.
+	// It is a Global Secondary Index on the invite response table.
+	Email string `json:"email" dynamodbav:"email"`
+
+	// Name is the name of the registrant that the invite response is associated with.
+	Name string `json:"name" dynamodbav:"name"`
+
+	// UserID is the ID of the user that the invite response is associated with.
+	UserID string `json:"user_id" dynamodbav:"user_id"`
+
+	// Org is the organization of the registrant that the invite response is associated with.
+	Org string `json:"org" dynamodbav:"org"`
+
+	// JobTitle is the job title of the registrant that the invite response is associated with.
+	JobTitle string `json:"job_title" dynamodbav:"job_title"`
+
+	// Response is the response of the registrant that the invite response is associated with.
+	// It is a Global Secondary Index on the invite response table.
+	Response string `json:"response" dynamodbav:"response"`
+
+	// ResponseDate is the date of the invite response from the registrant.
+	ResponseDate string `json:"response_date" dynamodbav:"response_date"`
+
+	// IsResponseRecurring is a flag that indicates if the response is recurring.
+	IsResponseRecurring bool `json:"is_response_recurring" dynamodbav:"is_response_recurring"`
+
+	// SESMessageID is the SES message ID of the invite response.
+	SESMessageID string `json:"ses_message_id" dynamodbav:"ses_message_id"`
+
+	// EmailSubject is the subject of the invite response email.
+	EmailSubject string `json:"email_subject" dynamodbav:"email_subject"`
+
+	// EmailText is the text of the invite response email.
+	EmailText string `json:"email_text" dynamodbav:"email_text"`
+
+	// CreatedAt is the timestamp in RFC3339 format of when the invite response was created.
+	CreatedAt string `json:"created_at" dynamodbav:"created_at"`
+
+	// ModifiedAt is the timestamp in RFC3339 format of when the invite response was last modified.
+	ModifiedAt string `json:"modified_at" dynamodbav:"modified_at"`
+}
+
 // pastMeetingInput represents input data for past meeting records.
 type pastMeetingInput struct {
 	// ID is the partition key of the past meeting table
