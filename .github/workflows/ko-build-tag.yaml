@@ -9,7 +9,7 @@ name: Publish Tagged Release
       - v*
 
 env:
-  COSIGN_VERSION: v2.6.1
+  COSIGN_VERSION: v3.0.2
   HELM_VERSION: 4.0.1
 
 permissions:
@@ -116,8 +116,10 @@ jobs:
       actions: read
       id-token: write
       packages: write
-    uses: >-  # v2.1.0
-      slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a
+    # Note, this action *cannot* be pinned to a ref: see the project's
+    # explanation at "Referencing SLSA builders and generators" in their
+    # README.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
     with:
       image: ${{ needs.release-helm-chart.outputs.image_name }}
       digest: ${{ needs.release-helm-chart.outputs.digest }}
