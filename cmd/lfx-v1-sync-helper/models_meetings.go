@@ -506,6 +506,10 @@ type inviteResponseInput struct {
 	// UserID is the ID of the user that the invite response is associated with.
 	UserID string `json:"user_id" dynamodbav:"user_id"`
 
+	// Username is the LF username of the registrant that the invite response is associated with.
+	// This is a v2 only attribute, meaning the username is for an LF user in the v2 system.
+	Username string `json:"username"`
+
 	// Org is the organization of the registrant that the invite response is associated with.
 	Org string `json:"org" dynamodbav:"org"`
 

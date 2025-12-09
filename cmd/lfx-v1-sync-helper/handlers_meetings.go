@@ -686,6 +686,18 @@ func handleZoomMeetingInviteResponseUpdate(ctx context.Context, key string, v1Da
 		return
 	}
 
+	// If username is blank but we have a v1 Platform ID (user_id), lookup the username.
+	if inviteResponse.Username == "" && inviteResponse.UserID != "" {
+		if v1User, lookupErr := lookupV1User(ctx, inviteResponse.UserID); lookupErr == nil && v1User != nil && v1User.Username != "" {
+			inviteResponse.Username = mapUsernameToAuthSub(v1User.Username)
+			logger.With("user_id", inviteResponse.UserID, "username", v1User.Username).DebugContext(ctx, "looked up username for invite response")
+		} else {
+			if lookupErr != nil {
+				logger.With(errKey, lookupErr, "user_id", inviteResponse.UserID).WarnContext(ctx, "failed to lookup v1 user for invite response")
+			}
+		}
+	}
+
 	// Extract the invite response ID
 	inviteResponseID := inviteResponse.ID
 	if inviteResponseID == "" {
