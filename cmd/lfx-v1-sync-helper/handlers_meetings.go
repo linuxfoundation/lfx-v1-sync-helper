@@ -624,6 +624,34 @@ func convertMapToInputInviteResponse(ctx context.Context, v1Data map[string]any)
 		return nil, fmt.Errorf("failed to unmarshal JSON into InviteResponseInput: %w", err)
 	}
 
+	// Convert the v1 response type to the v2 response type.
+	inviteResponse.Response = "" // reset the response to an empty string to avoid keeping the v1 value.
+	if response, ok := v1Data["response"].(string); ok {
+		// There are technically other response types in v1, but they are very rare and the v2 system
+		// doesn't care about the other types so they can be ignored.
+		switch response {
+		case "ACCEPTED":
+			inviteResponse.Response = RSVPResponseAccepted
+		case "TENTATIVE":
+			inviteResponse.Response = RSVPResponseMaybe
+		case "DECLINED":
+			inviteResponse.Response = RSVPResponseDeclined
+		}
+	}
+
+	// Convert the v1 scope type to the v2 scope type.
+	// The conversion is based on the occurrence_id and is_response_recurring fields,
+	// which helps indicate whether the response is for one occurrence, recurring from an occurrence onward, or for all occurrences.
+	if _, ok := v1Data["occurrence_id"].(string); ok {
+		if isResponseRecurring, ok := v1Data["is_response_recurring"].(bool); ok && isResponseRecurring {
+			inviteResponse.Scope = RSVPScopeThisAndFollowing
+		} else {
+			inviteResponse.Scope = RSVPScopeSingle
+		}
+	} else {
+		inviteResponse.Scope = RSVPScopeAll
+	}
+
 	return &inviteResponse, nil
 }
 
@@ -684,17 +712,15 @@ func handleZoomMeetingInviteResponseUpdate(ctx context.Context, key string, v1Da
 
 	tags := getInviteResponseTags(inviteResponse)
 	if err := sendIndexerMessage(ctx, IndexV1MeetingInviteResponseSubject, indexerAction, inviteResponse, tags); err != nil {
-		logger.With(errKey, err, "id", inviteResponseID, "key", key).ErrorContext(ctx, "failed to send invite response indexer message")
+		logger.With(errKey, err, "invite_response_id", inviteResponseID, "key", key).ErrorContext(ctx, "failed to send invite response indexer message")
 		return
 	}
 
-	if inviteResponseID != "" {
-		if _, err := mappingsKV.Put(ctx, mappingKey, []byte("1")); err != nil {
-			logger.With(errKey, err, "id", inviteResponseID).WarnContext(ctx, "failed to store invite response mapping")
-		}
+	if _, err := mappingsKV.Put(ctx, mappingKey, []byte("1")); err != nil {
+		logger.With(errKey, err, "invite_response_id", inviteResponseID).WarnContext(ctx, "failed to store invite response mapping")
 	}
 
-	logger.With("id", inviteResponseID, "meeting_id", inviteResponse.MeetingID, "key", key).InfoContext(ctx, "successfully sent invite response indexer message")
+	logger.With("invite_response_id", inviteResponseID, "meeting_id", inviteResponse.MeetingID, "key", key).InfoContext(ctx, "successfully sent invite response indexer message")
 }
 
 // PastMeetingAccessMessage is the schema for the data in the message sent to the fga-sync service.

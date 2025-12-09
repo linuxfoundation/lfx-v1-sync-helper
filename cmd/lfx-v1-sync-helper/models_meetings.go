@@ -454,6 +454,30 @@ type registrantInput struct {
 	UpdatedBy UpdatedBy `json:"updated_by" dynamodbav:"updated_by"`
 }
 
+// RSVPResponseType represents the type of RSVP response
+type RSVPResponseType string
+
+const (
+	// RSVPResponseAccepted indicates the registrant will attend
+	RSVPResponseAccepted RSVPResponseType = "accepted"
+	// RSVPResponseMaybe indicates the registrant might attend
+	RSVPResponseMaybe RSVPResponseType = "maybe"
+	// RSVPResponseDeclined indicates the registrant will not attend
+	RSVPResponseDeclined RSVPResponseType = "declined"
+)
+
+// RSVPScope represents the scope of an RSVP response
+type RSVPScope string
+
+const (
+	// RSVPScopeSingle indicates the RSVP applies to a single occurrence
+	RSVPScopeSingle RSVPScope = "single"
+	// RSVPScopeAll indicates the RSVP applies to all occurrences in the series
+	RSVPScopeAll RSVPScope = "all"
+	// RSVPScopeThisAndFollowing indicates the RSVP applies to a specific occurrence and all following ones
+	RSVPScopeThisAndFollowing RSVPScope = "this_and_following"
+)
+
 type inviteResponseInput struct {
 	// ID is the partition key of the invite response (it is a UUID)
 	ID string `json:"id" dynamodbav:"id"`
@@ -490,13 +514,14 @@ type inviteResponseInput struct {
 
 	// Response is the response of the registrant that the invite response is associated with.
 	// It is a Global Secondary Index on the invite response table.
-	Response string `json:"response" dynamodbav:"response"`
+	Response RSVPResponseType `json:"response" dynamodbav:"response"`
+
+	// Scope is the scope of the response (single/all/this_and_following)
+	// This is only a v2 attribute.
+	Scope RSVPScope `json:"scope"`
 
 	// ResponseDate is the date of the invite response from the registrant.
 	ResponseDate string `json:"response_date" dynamodbav:"response_date"`
-
-	// IsResponseRecurring is a flag that indicates if the response is recurring.
-	IsResponseRecurring bool `json:"is_response_recurring" dynamodbav:"is_response_recurring"`
 
 	// SESMessageID is the SES message ID of the invite response.
 	SESMessageID string `json:"ses_message_id" dynamodbav:"ses_message_id"`
