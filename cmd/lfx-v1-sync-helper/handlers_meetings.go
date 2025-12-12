@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -164,9 +165,11 @@ func convertMapToInputMeeting(ctx context.Context, v1Data map[string]any) (*meet
 		return nil, fmt.Errorf("failed to unmarshal JSON into InputMeeting: %w", err)
 	}
 
+	logger.With("v1_data", v1Data, "meeting", meeting).InfoContext(ctx, "converted v1Data to InputMeeting")
+
 	// We need to populate the ID for the v2 system
 	if meetingID, ok := v1Data["meeting_id"].(string); ok && meetingID != "" {
-		meeting.ID = meetingID
+		meeting.UID = meetingID
 	}
 
 	// Convert the v1 project ID since the json key is different,
@@ -177,13 +180,164 @@ func convertMapToInputMeeting(ctx context.Context, v1Data map[string]any) (*meet
 		// Take the v1 project salesforce ID and look up the v2 project UID.
 		projectMappingKey := fmt.Sprintf("project.sfid.%s", meeting.ProjectSFID)
 		if entry, err := mappingsKV.Get(ctx, projectMappingKey); err == nil {
-			meeting.ProjectID = string(entry.Value())
+			meeting.ProjectUID = string(entry.Value())
+		}
+	}
+
+	// Convert v1 named fields to v2 named fields.
+	if title, ok := v1Data["topic"].(string); ok && title != "" {
+		meeting.Title = title
+	}
+	if description, ok := v1Data["agenda"].(string); ok && description != "" {
+		meeting.Description = description
+	}
+
+	// Convert string fields to integers for v2 system
+	if durationStr, ok := v1Data["duration"].(string); ok && durationStr != "" {
+		if duration, err := strconv.Atoi(durationStr); err == nil {
+			meeting.Duration = duration
+		}
+	}
+	if earlyJoinTimeStr, ok := v1Data["early_join_time"].(string); ok && earlyJoinTimeStr != "" {
+		if earlyJoinTime, err := strconv.Atoi(earlyJoinTimeStr); err == nil {
+			meeting.EarlyJoinTime = earlyJoinTime
+		}
+	}
+	if lastEndTimeStr, ok := v1Data["last_end_time"].(string); ok && lastEndTimeStr != "" {
+		if lastEndTime, err := strconv.ParseInt(lastEndTimeStr, 10, 64); err == nil {
+			meeting.LastEndTime = lastEndTime
+		}
+	}
+	// Use the recording access value to set the artifact visibility.
+	// Otherwise, fallback to the transcript or summary access values.
+	// And as a last resort, fallback to the default value of "meeting_hosts".
+	if recordingAccess, ok := v1Data["recording_access"].(string); ok && recordingAccess != "" {
+		meeting.ArtifactVisibility = recordingAccess
+	} else if transcriptAccess, ok := v1Data["transcript_access"].(string); ok && transcriptAccess != "" {
+		meeting.ArtifactVisibility = transcriptAccess
+	} else if summaryAccess, ok := v1Data["ai_summary_access"].(string); ok && summaryAccess != "" {
+		meeting.ArtifactVisibility = summaryAccess
+	} else {
+		meeting.ArtifactVisibility = "meeting_hosts"
+	}
+	if meetingID, ok := v1Data["meeting_id"].(string); ok && meetingID != "" {
+		meeting.ZoomConfig.MeetingID = meetingID
+	}
+	if passcode, ok := v1Data["passcode"].(string); ok && passcode != "" {
+		meeting.ZoomConfig.Passcode = passcode
+	}
+	if aiCompanionEnabled, ok := v1Data["zoom_ai_enabled"].(bool); ok {
+		meeting.ZoomConfig.AICompanionEnabled = aiCompanionEnabled
+	}
+	if aiSummaryRequireApproval, ok := v1Data["ai_summary_require_approval"].(bool); ok {
+		meeting.ZoomConfig.AISummaryRequireApproval = aiSummaryRequireApproval
+	}
+	// Map v1 topic and agenda fields to v2 title and description in updated_occurrences
+	// Also convert duration from string to int
+	if updatedOccurrencesData, ok := v1Data["updated_occurrences"].([]any); ok {
+		for i, occData := range updatedOccurrencesData {
+			if occMap, ok := occData.(map[string]any); ok && i < len(meeting.UpdatedOccurrences) {
+				// Map v1 topic field to v2 title field
+				if topic, ok := occMap["topic"].(string); ok {
+					meeting.UpdatedOccurrences[i].Title = topic
+				}
+				// Map v1 agenda field to v2 description field
+				if agenda, ok := occMap["agenda"].(string); ok {
+					meeting.UpdatedOccurrences[i].Description = agenda
+				}
+				// Convert duration from string to int
+				if durationStr, ok := occMap["duration"].(string); ok && durationStr != "" {
+					if duration, err := strconv.Atoi(durationStr); err == nil {
+						meeting.UpdatedOccurrences[i].Duration = duration
+					}
+				}
+				// Convert recurrence integer fields from strings
+				if recurrenceData, ok := occMap["recurrence"].(map[string]any); ok {
+					// Ensure recurrence object exists (should be created during unmarshal, but create if missing)
+					if meeting.UpdatedOccurrences[i].Recurrence == nil {
+						meeting.UpdatedOccurrences[i].Recurrence = &ZoomMeetingRecurrence{}
+					}
+
+					if typeStr, ok := recurrenceData["type"].(string); ok && typeStr != "" {
+						if recType, err := strconv.Atoi(typeStr); err == nil {
+							meeting.UpdatedOccurrences[i].Recurrence.Type = recType
+						}
+					}
+					if repeatIntervalStr, ok := recurrenceData["repeat_interval"].(string); ok && repeatIntervalStr != "" {
+						if repeatInterval, err := strconv.Atoi(repeatIntervalStr); err == nil {
+							meeting.UpdatedOccurrences[i].Recurrence.RepeatInterval = repeatInterval
+						}
+					}
+					if monthlyDayStr, ok := recurrenceData["monthly_day"].(string); ok && monthlyDayStr != "" {
+						if monthlyDay, err := strconv.Atoi(monthlyDayStr); err == nil {
+							meeting.UpdatedOccurrences[i].Recurrence.MonthlyDay = monthlyDay
+						}
+					}
+					if monthlyWeekStr, ok := recurrenceData["monthly_week"].(string); ok && monthlyWeekStr != "" {
+						if monthlyWeek, err := strconv.Atoi(monthlyWeekStr); err == nil {
+							meeting.UpdatedOccurrences[i].Recurrence.MonthlyWeek = monthlyWeek
+						}
+					}
+					if monthlyWeekDayStr, ok := recurrenceData["monthly_week_day"].(string); ok && monthlyWeekDayStr != "" {
+						if monthlyWeekDay, err := strconv.Atoi(monthlyWeekDayStr); err == nil {
+							meeting.UpdatedOccurrences[i].Recurrence.MonthlyWeekDay = monthlyWeekDay
+						}
+					}
+					if endTimesStr, ok := recurrenceData["end_times"].(string); ok && endTimesStr != "" {
+						if endTimes, err := strconv.Atoi(endTimesStr); err == nil {
+							meeting.UpdatedOccurrences[i].Recurrence.EndTimes = endTimes
+						}
+					}
+				}
+			}
+		}
+	}
+	if updatedAt, ok := v1Data["modified_at"].(string); ok && updatedAt != "" {
+		meeting.UpdatedAt = updatedAt
+	}
+
+	// Convert recurrence integer fields from strings
+	if recurrenceData, ok := v1Data["recurrence"].(map[string]any); ok {
+		// Ensure recurrence object exists (should be created during unmarshal, but create if missing)
+		if meeting.Recurrence == nil {
+			meeting.Recurrence = &ZoomMeetingRecurrence{}
+		}
+
+		if typeStr, ok := recurrenceData["type"].(string); ok && typeStr != "" {
+			if recType, err := strconv.Atoi(typeStr); err == nil {
+				meeting.Recurrence.Type = recType
+			}
+		}
+		if repeatIntervalStr, ok := recurrenceData["repeat_interval"].(string); ok && repeatIntervalStr != "" {
+			if repeatInterval, err := strconv.Atoi(repeatIntervalStr); err == nil {
+				meeting.Recurrence.RepeatInterval = repeatInterval
+			}
+		}
+		if monthlyDayStr, ok := recurrenceData["monthly_day"].(string); ok && monthlyDayStr != "" {
+			if monthlyDay, err := strconv.Atoi(monthlyDayStr); err == nil {
+				meeting.Recurrence.MonthlyDay = monthlyDay
+			}
+		}
+		if monthlyWeekStr, ok := recurrenceData["monthly_week"].(string); ok && monthlyWeekStr != "" {
+			if monthlyWeek, err := strconv.Atoi(monthlyWeekStr); err == nil {
+				meeting.Recurrence.MonthlyWeek = monthlyWeek
+			}
+		}
+		if monthlyWeekDayStr, ok := recurrenceData["monthly_week_day"].(string); ok && monthlyWeekDayStr != "" {
+			if monthlyWeekDay, err := strconv.Atoi(monthlyWeekDayStr); err == nil {
+				meeting.Recurrence.MonthlyWeekDay = monthlyWeekDay
+			}
+		}
+		if endTimesStr, ok := recurrenceData["end_times"].(string); ok && endTimesStr != "" {
+			if endTimes, err := strconv.Atoi(endTimesStr); err == nil {
+				meeting.Recurrence.EndTimes = endTimes
+			}
 		}
 	}
 
 	occurrences, err := calculateOccurrences(ctx, meeting, false, false, 100)
 	if err != nil {
-		logger.With(errKey, err, "meeting_id", meeting.ID).ErrorContext(ctx, "failed to calculate occurrences")
+		logger.With(errKey, err, "meeting_id", meeting.UID).ErrorContext(ctx, "failed to calculate occurrences")
 		return nil, fmt.Errorf("failed to calculate occurrences: %w", err)
 	}
 	meeting.Occurrences = occurrences
@@ -193,10 +347,10 @@ func convertMapToInputMeeting(ctx context.Context, v1Data map[string]any) (*meet
 
 func getMeetingTags(meeting *meetingInput) []string {
 	tags := []string{
-		fmt.Sprintf("%s", meeting.ID),
-		fmt.Sprintf("meeting_uid:%s", meeting.ID),
-		fmt.Sprintf("project_uid:%s", meeting.ProjectID),
-		fmt.Sprintf("title:%s", meeting.Topic),
+		fmt.Sprintf("%s", meeting.UID),
+		fmt.Sprintf("meeting_uid:%s", meeting.UID),
+		fmt.Sprintf("project_uid:%s", meeting.ProjectUID),
+		fmt.Sprintf("title:%s", meeting.Title),
 		fmt.Sprintf("meeting_type:%s", meeting.MeetingType),
 	}
 	for _, committee := range meeting.Committees {
@@ -222,7 +376,7 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 	}
 
 	// Extract the meeting UID
-	uid := meeting.ID
+	uid := meeting.UID
 	if uid == "" {
 		logger.With("key", key).ErrorContext(ctx, "missing or invalid uid in v1 meeting data")
 		return
@@ -232,7 +386,7 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 	// convertMapToInputMeeting has already looked up the SFID project ID
 	// mapping, we don't need to do it again: we can just check if ProjectID (v2
 	// UID) is set.
-	if meeting.ProjectID == "" {
+	if meeting.ProjectUID == "" {
 		logger.With("project_sfid", meeting.ProjectSFID, "meeting_id", uid).InfoContext(ctx, "skipping meeting sync - parent project not found in mappings")
 		return
 	}
@@ -281,7 +435,7 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 	accessMsg := MeetingAccessMessage{
 		UID:        uid,
 		Public:     meeting.Visibility == "public",
-		ProjectUID: meeting.ProjectID,
+		ProjectUID: meeting.ProjectUID,
 		Organizers: []string{},
 		Committees: committees,
 	}
@@ -401,8 +555,8 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 		for _, committee := range committeeMappings {
 			committees = append(committees, committee.CommitteeID)
 			meeting.Committees = append(meeting.Committees, Committee{
-				UID:     committee.CommitteeID,
-				Filters: committee.CommitteeFilters,
+				UID:                   committee.CommitteeID,
+				AllowedVotingStatuses: committee.CommitteeFilters,
 			})
 		}
 
@@ -423,7 +577,7 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 		accessMsg := MeetingAccessMessage{
 			UID:        meetingID,
 			Public:     meeting.Visibility == "public",
-			ProjectUID: meeting.ProjectID,
+			ProjectUID: meeting.ProjectUID,
 			Organizers: []string{},
 			Committees: committees,
 		}
@@ -650,6 +804,61 @@ func convertMapToInputPastMeeting(ctx context.Context, v1Data map[string]any) (*
 		pastMeeting.ProjectID = string(entry.Value())
 	}
 
+	// Convert duration from string to int
+	if durationStr, ok := v1Data["duration"].(string); ok && durationStr != "" {
+		if duration, err := strconv.Atoi(durationStr); err == nil {
+			pastMeeting.Duration = duration
+		}
+	}
+
+	// Convert early join time from string to int
+	if earlyJoinTimeStr, ok := v1Data["early_join_time"].(string); ok && earlyJoinTimeStr != "" {
+		if earlyJoinTime, err := strconv.Atoi(earlyJoinTimeStr); err == nil {
+			pastMeeting.EarlyJoinTime = earlyJoinTime
+		}
+	}
+
+	// Convert type from string to int
+	if typeStr, ok := v1Data["type"].(string); ok && typeStr != "" {
+		if typeInt, err := strconv.Atoi(typeStr); err == nil {
+			pastMeeting.Type = typeInt
+		}
+	}
+
+	// Convert recurrence integer fields from strings
+	if recurrenceData, ok := v1Data["recurrence"].(map[string]any); ok && pastMeeting.Recurrence != nil {
+		if typeStr, ok := recurrenceData["type"].(string); ok && typeStr != "" {
+			if recType, err := strconv.Atoi(typeStr); err == nil {
+				pastMeeting.Recurrence.Type = recType
+			}
+		}
+		if repeatIntervalStr, ok := recurrenceData["repeat_interval"].(string); ok && repeatIntervalStr != "" {
+			if repeatInterval, err := strconv.Atoi(repeatIntervalStr); err == nil {
+				pastMeeting.Recurrence.RepeatInterval = repeatInterval
+			}
+		}
+		if monthlyDayStr, ok := recurrenceData["monthly_day"].(string); ok && monthlyDayStr != "" {
+			if monthlyDay, err := strconv.Atoi(monthlyDayStr); err == nil {
+				pastMeeting.Recurrence.MonthlyDay = monthlyDay
+			}
+		}
+		if monthlyWeekStr, ok := recurrenceData["monthly_week"].(string); ok && monthlyWeekStr != "" {
+			if monthlyWeek, err := strconv.Atoi(monthlyWeekStr); err == nil {
+				pastMeeting.Recurrence.MonthlyWeek = monthlyWeek
+			}
+		}
+		if monthlyWeekDayStr, ok := recurrenceData["monthly_week_day"].(string); ok && monthlyWeekDayStr != "" {
+			if monthlyWeekDay, err := strconv.Atoi(monthlyWeekDayStr); err == nil {
+				pastMeeting.Recurrence.MonthlyWeekDay = monthlyWeekDay
+			}
+		}
+		if endTimesStr, ok := recurrenceData["end_times"].(string); ok && endTimesStr != "" {
+			if endTimes, err := strconv.Atoi(endTimesStr); err == nil {
+				pastMeeting.Recurrence.EndTimes = endTimes
+			}
+		}
+	}
+
 	return &pastMeeting, nil
 }
 
@@ -660,7 +869,7 @@ func getPastMeetingTags(pastMeeting *pastMeetingInput) []string {
 		fmt.Sprintf("meeting_uid:%s", pastMeeting.MeetingID),
 		fmt.Sprintf("project_uid:%s", pastMeeting.ProjectID),
 		fmt.Sprintf("occurrence_id:%s", pastMeeting.OccurrenceID),
-		fmt.Sprintf("title:%s", pastMeeting.Topic),
+		fmt.Sprintf("title:%s", pastMeeting.Title),
 	}
 	for _, committee := range pastMeeting.Committees {
 		tags = append(tags, fmt.Sprintf("committee_uid:%s", committee.UID))
@@ -933,7 +1142,7 @@ type PastMeetingParticipantAccessMessage struct {
 }
 
 // convertMapToInputPastMeetingInvitee converts a map[string]any to a ZoomPastMeetingInviteeDatabase struct.
-func convertMapToInputPastMeetingInvitee(ctx context.Context, v1Data map[string]any) (*ZoomPastMeetingInviteeDatabase, error) {
+func convertMapToInputPastMeetingInvitee(ctx context.Context, v1Data map[string]any) (*pastMeetingInviteeInput, error) {
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
@@ -942,7 +1151,7 @@ func convertMapToInputPastMeetingInvitee(ctx context.Context, v1Data map[string]
 	}
 
 	// Unmarshal JSON bytes into ZoomPastMeetingInviteeDatabase struct
-	var invitee ZoomPastMeetingInviteeDatabase
+	var invitee pastMeetingInviteeInput
 	if err := json.Unmarshal(jsonBytes, &invitee); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into ZoomPastMeetingInviteeDatabase")
 		return nil, fmt.Errorf("failed to unmarshal JSON into ZoomPastMeetingInviteeDatabase: %w", err)
@@ -1092,7 +1301,7 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 	logger.With("id", inviteeID, "meeting_and_occurrence_id", invitee.MeetingAndOccurrenceID, "key", key).InfoContext(ctx, "successfully sent invitee indexer and access messages")
 }
 
-func convertInviteeToV2Participant(ctx context.Context, invitee *ZoomPastMeetingInviteeDatabase, isHost bool) (*V2PastMeetingParticipant, error) {
+func convertInviteeToV2Participant(ctx context.Context, invitee *pastMeetingInviteeInput, isHost bool) (*V2PastMeetingParticipant, error) {
 	pastMeetingParticipant := V2PastMeetingParticipant{
 		UID:            invitee.ID,
 		PastMeetingUID: invitee.MeetingAndOccurrenceID,
@@ -1147,7 +1356,7 @@ func convertInviteeToV2Participant(ctx context.Context, invitee *ZoomPastMeeting
 }
 
 // convertMapToInputPastMeetingAttendee converts a map[string]any to a PastMeetingAttendeeInput struct.
-func convertMapToInputPastMeetingAttendee(ctx context.Context, v1Data map[string]any) (*PastMeetingAttendeeInput, error) {
+func convertMapToInputPastMeetingAttendee(ctx context.Context, v1Data map[string]any) (*pastMeetingAttendeeInput, error) {
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
@@ -1156,10 +1365,17 @@ func convertMapToInputPastMeetingAttendee(ctx context.Context, v1Data map[string
 	}
 
 	// Unmarshal JSON bytes into PastMeetingAttendeeInput struct
-	var attendee PastMeetingAttendeeInput
+	var attendee pastMeetingAttendeeInput
 	if err := json.Unmarshal(jsonBytes, &attendee); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into PastMeetingAttendeeInput")
 		return nil, fmt.Errorf("failed to unmarshal JSON into PastMeetingAttendeeInput: %w", err)
+	}
+
+	// Convert average_attendance from string to int
+	if avgAttendanceStr, ok := v1Data["average_attendance"].(string); ok && avgAttendanceStr != "" {
+		if avgAttendance, err := strconv.Atoi(avgAttendanceStr); err == nil {
+			attendee.AverageAttendance = avgAttendance
+		}
 	}
 
 	return &attendee, nil
@@ -1288,7 +1504,7 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 	logger.With("id", attendeeID, "meeting_and_occurrence_id", attendee.MeetingAndOccurrenceID, "key", key).InfoContext(ctx, "successfully sent attendee indexer and access messages")
 }
 
-func convertAttendeeToV2Participant(ctx context.Context, attendee *PastMeetingAttendeeInput, isHost bool, isRegistrant bool) (*V2PastMeetingParticipant, error) {
+func convertAttendeeToV2Participant(ctx context.Context, attendee *pastMeetingAttendeeInput, isHost bool, isRegistrant bool) (*V2PastMeetingParticipant, error) {
 	var firstName, lastName string
 	namesSplit := strings.Split(attendee.Name, " ")
 	if len(namesSplit) >= 2 {
@@ -1405,7 +1621,7 @@ type PastMeetingTranscriptAccessMessage struct {
 }
 
 // convertMapToInputPastMeetingRecording converts a map[string]any to a PastMeetingRecordingInput struct.
-func convertMapToInputPastMeetingRecording(ctx context.Context, v1Data map[string]any) (*PastMeetingRecordingInput, error) {
+func convertMapToInputPastMeetingRecording(ctx context.Context, v1Data map[string]any) (*pastMeetingRecordingInput, error) {
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
@@ -1414,7 +1630,7 @@ func convertMapToInputPastMeetingRecording(ctx context.Context, v1Data map[strin
 	}
 
 	// Unmarshal JSON bytes into PastMeetingRecordingInput struct
-	var recording PastMeetingRecordingInput
+	var recording pastMeetingRecordingInput
 	if err := json.Unmarshal(jsonBytes, &recording); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into PastMeetingRecordingInput")
 		return nil, fmt.Errorf("failed to unmarshal JSON into PastMeetingRecordingInput: %w", err)
@@ -1449,10 +1665,56 @@ func convertMapToInputPastMeetingRecording(ctx context.Context, v1Data map[strin
 		recording.TranscriptAccess = "meeting_hosts"
 	}
 
+	// Convert recording_count from string to int
+	if recordingCountStr, ok := v1Data["recording_count"].(string); ok && recordingCountStr != "" {
+		if recordingCount, err := strconv.Atoi(recordingCountStr); err == nil {
+			recording.RecordingCount = recordingCount
+		}
+	}
+
+	// Convert total_size from string to int64
+	if totalSizeStr, ok := v1Data["total_size"].(string); ok && totalSizeStr != "" {
+		if totalSize, err := strconv.Atoi(totalSizeStr); err == nil {
+			recording.TotalSize = totalSize
+		}
+	}
+
+	// Convert integer fields in RecordingSessions (if they exist)
+	if sessionsData, ok := v1Data["recording_sessions"].([]any); ok {
+		for i, sessionData := range sessionsData {
+			if sessionMap, ok := sessionData.(map[string]any); ok {
+				if i < len(recording.Sessions) {
+					// Convert total_size from string to int64 for session
+					if totalSizeStr, ok := sessionMap["total_size"].(string); ok && totalSizeStr != "" {
+						if totalSize, err := strconv.Atoi(totalSizeStr); err == nil {
+							recording.Sessions[i].TotalSize = totalSize
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Convert integer fields in RecordingFiles (if they exist)
+	if filesData, ok := v1Data["recording_files"].([]any); ok {
+		for i, fileData := range filesData {
+			if fileMap, ok := fileData.(map[string]any); ok {
+				if i < len(recording.RecordingFiles) {
+					// Convert file_size from string to int64
+					if fileSizeStr, ok := fileMap["file_size"].(string); ok && fileSizeStr != "" {
+						if fileSize, err := strconv.Atoi(fileSizeStr); err == nil {
+							recording.RecordingFiles[i].FileSize = fileSize
+						}
+					}
+				}
+			}
+		}
+	}
+
 	return &recording, nil
 }
 
-func getPastMeetingRecordingTags(recording *PastMeetingRecordingInput) []string {
+func getPastMeetingRecordingTags(recording *pastMeetingRecordingInput) []string {
 	tags := []string{
 		fmt.Sprintf("%s", recording.MeetingAndOccurrenceID),
 		fmt.Sprintf("past_meeting_recording_uid:%s", recording.MeetingAndOccurrenceID),
@@ -1469,7 +1731,7 @@ func getPastMeetingRecordingTags(recording *PastMeetingRecordingInput) []string 
 // Note: the input and tags are almost the exact same as [getPastMeetingRecordingTags]
 // because the source for the transcript record is the same as the recording record.
 // Ultimately they are indexed as separate records, so they need their own tags.
-func getPastMeetingTranscriptTags(recording *PastMeetingRecordingInput) []string {
+func getPastMeetingTranscriptTags(recording *pastMeetingRecordingInput) []string {
 	tags := []string{
 		fmt.Sprintf("%s", recording.MeetingAndOccurrenceID),
 		fmt.Sprintf("past_meeting_transcript_uid:%s", recording.MeetingAndOccurrenceID),
@@ -1597,7 +1859,7 @@ type PastMeetingSummaryAccessMessage struct {
 }
 
 // convertMapToInputPastMeetingSummary converts a map[string]any to a PastMeetingSummaryInput struct.
-func convertMapToInputPastMeetingSummary(ctx context.Context, v1Data map[string]any) (*PastMeetingSummaryInput, error) {
+func convertMapToInputPastMeetingSummary(ctx context.Context, v1Data map[string]any) (*pastMeetingSummaryInput, error) {
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
@@ -1606,21 +1868,80 @@ func convertMapToInputPastMeetingSummary(ctx context.Context, v1Data map[string]
 	}
 
 	// Unmarshal JSON bytes into PastMeetingSummaryInput struct
-	var summary PastMeetingSummaryInput
+	var summary pastMeetingSummaryInput
 	if err := json.Unmarshal(jsonBytes, &summary); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into PastMeetingSummaryInput")
 		return nil, fmt.Errorf("failed to unmarshal JSON into PastMeetingSummaryInput: %w", err)
 	}
 
+	logger.With(errKey, err, "v1_data", v1Data, "summary", summary).InfoContext(ctx, "converted v1Data to PastMeetingSummaryInput")
+
+	if summaryID, ok := v1Data["id"].(string); ok && summaryID != "" {
+		summary.UID = summaryID
+	}
+	if pastMeetingUID, ok := v1Data["meeting_and_occurrence_id"].(string); ok && pastMeetingUID != "" {
+		summary.PastMeetingUID = pastMeetingUID
+	}
+	if meetingID, ok := v1Data["meeting_id"].(string); ok && meetingID != "" {
+		summary.MeetingUID = meetingID
+		summary.ZoomConfig.MeetingID = meetingID
+	}
+	if meetingUUID, ok := v1Data["zoom_meeting_uuid"].(string); ok && meetingUUID != "" {
+		summary.ZoomConfig.MeetingUUID = meetingUUID
+	}
+	summary.Platform = "Zoom"
+
+	// Construct the content (one field) for the v2 data from the different sparse fields in the v1 data.
+	summaryContent := ""
+	if summary.SummaryOverview != "" {
+		summaryContent += fmt.Sprintf("## Overview\n%s", summary.SummaryOverview)
+	}
+	if len(summary.SummaryDetails) > 0 {
+		summaryContent += "## Key Topics\n"
+		for _, detail := range summary.SummaryDetails {
+			summaryContent += fmt.Sprintf("### %s\n%s", detail.Label, detail.Summary)
+		}
+	}
+	if len(summary.NextSteps) > 0 {
+		summaryContent += "## Next Steps\n"
+		for _, nextStep := range summary.NextSteps {
+			summaryContent += fmt.Sprintf("- %s", nextStep)
+		}
+	}
+	summary.Content = summaryContent
+
+	// Edited summary content
+	editedSummaryContent := ""
+	if summary.EditedSummaryOverview != "" {
+		editedSummaryContent += fmt.Sprintf("## Overview\n%s", summary.EditedSummaryOverview)
+	}
+	if len(summary.EditedSummaryDetails) > 0 {
+		editedSummaryContent += "## Key Topics\n"
+		for _, detail := range summary.EditedSummaryDetails {
+			editedSummaryContent += fmt.Sprintf("### %s\n%s", detail.Label, detail.Summary)
+		}
+	}
+	if len(summary.EditedNextSteps) > 0 {
+		editedSummaryContent += "## Next Steps\n"
+		for _, nextStep := range summary.EditedNextSteps {
+			editedSummaryContent += fmt.Sprintf("- %s", nextStep)
+		}
+	}
+	summary.EditedContent = editedSummaryContent
+
+	if modifiedAt, ok := v1Data["modified_at"].(string); ok && modifiedAt != "" {
+		summary.UpdatedAt = modifiedAt
+	}
+
 	return &summary, nil
 }
 
-func getPastMeetingSummaryTags(summary *PastMeetingSummaryInput) []string {
+func getPastMeetingSummaryTags(summary *pastMeetingSummaryInput) []string {
 	tags := []string{
-		fmt.Sprintf("%s", summary.ID),
-		fmt.Sprintf("past_meeting_summary_uid:%s", summary.ID),
-		fmt.Sprintf("past_meeting_uid:%s", summary.MeetingAndOccurrenceID),
-		fmt.Sprintf("meeting_uid:%s", summary.MeetingID),
+		fmt.Sprintf("%s", summary.UID),
+		fmt.Sprintf("past_meeting_summary_uid:%s", summary.UID),
+		fmt.Sprintf("past_meeting_uid:%s", summary.PastMeetingUID),
+		fmt.Sprintf("meeting_uid:%s", summary.MeetingUID),
 		"platform:Zoom",
 		fmt.Sprintf("title:%s", summary.SummaryTitle),
 	}
@@ -1645,20 +1966,20 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 	}
 
 	// Extract the UID (ID)
-	uid := summaryInput.ID
+	uid := summaryInput.UID
 	if uid == "" {
 		logger.With("key", key).ErrorContext(ctx, "missing id in past meeting summary data")
 		return
 	}
 
 	// Check if parent past meeting exists in mappings before proceeding.
-	if summaryInput.MeetingAndOccurrenceID == "" {
+	if summaryInput.PastMeetingUID == "" {
 		logger.With("summary_id", uid).ErrorContext(ctx, "past meeting summary missing required parent past meeting ID")
 		return
 	}
-	pastMeetingMappingKey := fmt.Sprintf("v1_past_meetings.%s", summaryInput.MeetingAndOccurrenceID)
+	pastMeetingMappingKey := fmt.Sprintf("v1_past_meetings.%s", summaryInput.PastMeetingUID)
 	if _, err := mappingsKV.Get(ctx, pastMeetingMappingKey); err != nil {
-		logger.With("past_meeting_id", summaryInput.MeetingAndOccurrenceID, "summary_id", uid).InfoContext(ctx, "skipping past meeting summary sync - parent past meeting not found in mappings")
+		logger.With("past_meeting_id", summaryInput.PastMeetingUID, "summary_id", uid).InfoContext(ctx, "skipping past meeting summary sync - parent past meeting not found in mappings")
 		return
 	}
 
@@ -1677,8 +1998,8 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 	}
 
 	aiSummaryAccess := ""
-	if summaryInput.MeetingAndOccurrenceID != "" {
-		pastMeetingKey := fmt.Sprintf("itx-zoom-past-meetings.%s", summaryInput.MeetingAndOccurrenceID)
+	if summaryInput.PastMeetingUID != "" {
+		pastMeetingKey := fmt.Sprintf("itx-zoom-past-meetings.%s", summaryInput.PastMeetingUID)
 		pastMeetingEntry, err := v1KV.Get(ctx, pastMeetingKey)
 		if err == nil && pastMeetingEntry != nil {
 			var pastMeetingData map[string]any
@@ -1687,16 +2008,16 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 					aiSummaryAccess = aiSummaryAccessValue
 				}
 			} else {
-				logger.With(errKey, err, "meeting_and_occurrence_id", summaryInput.MeetingAndOccurrenceID).WarnContext(ctx, "failed to unmarshal past meeting data")
+				logger.With(errKey, err, "past_meeting_uid", summaryInput.PastMeetingUID).WarnContext(ctx, "failed to unmarshal past meeting data")
 			}
 		} else {
-			logger.With(errKey, err, "meeting_and_occurrence_id", summaryInput.MeetingAndOccurrenceID).WarnContext(ctx, "failed to fetch past meeting from KV bucket")
+			logger.With(errKey, err, "past_meeting_uid", summaryInput.PastMeetingUID).WarnContext(ctx, "failed to fetch past meeting from KV bucket")
 		}
 	}
 
 	summaryAccessMsg := PastMeetingSummaryAccessMessage{
 		ID:             uid,
-		PastMeetingUID: summaryInput.MeetingAndOccurrenceID,
+		PastMeetingUID: summaryInput.PastMeetingUID,
 		SummaryAccess:  aiSummaryAccess,
 	}
 
@@ -1719,5 +2040,5 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 		}
 	}
 
-	logger.With("uid", uid, "meeting_and_occurrence_id", summaryInput.MeetingAndOccurrenceID, "key", key).InfoContext(ctx, "successfully sent summary indexer and access messages")
+	logger.With("uid", uid, "past_meeting_uid", summaryInput.PastMeetingUID, "key", key).InfoContext(ctx, "successfully sent summary indexer and access messages")
 }
