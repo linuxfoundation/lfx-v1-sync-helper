@@ -99,7 +99,7 @@ Common environment variables that may need to be set:
 - `TAP_POSTGRES_USER`: PostgreSQL username (default: `lfit`)
 - `TAP_POSTGRES_DATABASE`: PostgreSQL database name (default: `sfdc`)
 
-For additional PostgreSQL extractor settings, see the [tap-postgres documentation](https://hub.meltano.com/extractors/tap-postgres).
+For additional PostgreSQL extractor settings, see the [tap-postgres documentation](https://hub.meltano.com/extractors/tap-postgres/).
 
 #### NATS Configuration
 
