@@ -34,8 +34,7 @@ func calculateOccurrences(ctx context.Context, meeting meetingInput, pastOccurre
 
 	meetingStartTime, err := time.Parse(time.RFC3339, meeting.StartTime)
 	if err != nil {
-		logger.With(errKey, err, "meeting_id", meeting.ID, "start_time", meeting.StartTime).ErrorContext(ctx, "failed to parse meeting start_time")
-		return nil, err
+		return nil, fmt.Errorf("failed to parse meeting start_time %s: %w", meeting.StartTime, err)
 	}
 
 	location := time.UTC
@@ -71,8 +70,7 @@ func calculateOccurrences(ctx context.Context, meeting meetingInput, pastOccurre
 				// Convert occurrence start time to timeRFC3339 format to make the time easier to read in the logs
 				occurrenceStartTimeUnixInt, err := strconv.ParseInt(occurrenceStartTimeUnix, 10, 64)
 				if err != nil {
-					logger.With(errKey, err, "meeting_id", meeting.ID, "occurrence_id", occurrenceStartTimeUnix, "occurrence_start_time", occurrenceStartTimeFmt).ErrorContext(ctx, "failed to parse occurrence start_time")
-					return nil, err
+					return nil, fmt.Errorf("failed to convert occurrence start time %s to int: %w", occurrenceStartTimeUnix, err)
 				}
 				occurrenceStartTimeFmt = time.Unix(occurrenceStartTimeUnixInt, 0).Format(time.RFC3339)
 			}
@@ -113,8 +111,7 @@ func calculateOccurrences(ctx context.Context, meeting meetingInput, pastOccurre
 		if occurrencePatternIdx < len(occurrencesPattern)-1 && occurrencesPattern[occurrencePatternIdx+1].OccurrenceID != "" {
 			nextRecurrenceTimeUnix, err = strconv.ParseInt(occurrencesPattern[occurrencePatternIdx+1].OccurrenceID, 10, 64)
 			if err != nil {
-				logger.With(errKey, err, "meeting_id", meeting.ID, "next_recurrence_occurrence_id", occurrencesPattern[occurrencePatternIdx+1].OccurrenceID, "next_recurrence_start_time", occurrencesPattern[occurrencePatternIdx+1].StartTime).ErrorContext(ctx, "failed to parse next recurrence start_time")
-				return nil, err
+				return nil, fmt.Errorf("failed to convert next recurrence start time %s to int: %w", occurrencesPattern[occurrencePatternIdx+1].OccurrenceID, err)
 			}
 		}
 		logger.With("meeting_id", meeting.ID, "current_recurrence", occurrencePattern, "next_recurrence_start_time_unix", nextRecurrenceTimeUnix, "next_recurrence_start_time", time.Unix(nextRecurrenceTimeUnix, 0).Format(time.RFC3339)).DebugContext(ctx, "next recurrence start time")
@@ -130,8 +127,7 @@ func calculateOccurrences(ctx context.Context, meeting meetingInput, pastOccurre
 		// Convert unix string start time into time.Time object
 		unixStartTime, err := strconv.ParseInt(occurrencePattern.OccurrenceID, 10, 64)
 		if err != nil {
-			logger.With(errKey, err, "meeting_id", meeting.ID, "recurrence_occurrence_id", occurrencePattern.OccurrenceID, "recurrence_start_time", occurrencePattern.StartTime).ErrorContext(ctx, "failed to parse recurrence start_time")
-			return nil, err
+			return nil, fmt.Errorf("failed to convert recurrence start time %s to int: %w", occurrencePattern.OccurrenceID, err)
 		}
 		recStartTime := time.Unix(unixStartTime, 0)
 		recStartTime, err = timeInLocation(recStartTime, meeting.Timezone)
@@ -142,8 +138,7 @@ func calculateOccurrences(ctx context.Context, meeting meetingInput, pastOccurre
 		// Get occurrences based on reccurrence pattern and start time
 		occurrences, err := getRRuleOccurrences(recStartTime, meeting.Timezone, occurrencePattern.Recurrence, nil)
 		if err != nil {
-			logger.With(errKey, err, "meeting_id", meeting.ID, "start_time", recStartTime, "recurrence_rrule", occurrencePattern.Recurrence).ErrorContext(ctx, "failed to get recurrence rule")
-			return nil, err
+			return nil, fmt.Errorf("failed to get recurrence rule: %w", err)
 		}
 		occurrencesInLog := occurrences
 		// only show the first 100 occurrences to avoid spamming the logs
@@ -201,8 +196,7 @@ func calculateOccurrences(ctx context.Context, meeting meetingInput, pastOccurre
 					currentAgenda = updatedOcc.Agenda
 					unixStartTime, err := strconv.ParseInt(updatedOcc.NewOccurrenceID, 10, 64)
 					if err != nil {
-						logger.With(errKey, err, "meeting_id", meeting.ID, "occurrence", updatedOcc).ErrorContext(ctx, "failed to parse updated occurrence start_time")
-						return nil, err
+						return nil, fmt.Errorf("failed to convert updated occurrence start time %s to int: %w", updatedOcc.NewOccurrenceID, err)
 					}
 					currentStartTime = time.Unix(unixStartTime, 0).In(location)
 					logger.With("meeting_id", meeting.ID, "current_start_time", currentStartTime, "occurrence", updatedOcc).DebugContext(ctx, "current start time changed")
@@ -233,8 +227,7 @@ func calculateOccurrences(ctx context.Context, meeting meetingInput, pastOccurre
 				// Skip past occurrences if no past occurrences are expected
 				unixStartTime, err := strconv.ParseInt(updatedOcc.NewOccurrenceID, 10, 64)
 				if err != nil {
-					logger.With(errKey, err, "meeting_id", meeting.ID, "occurrence_id", o.Unix(), "updated_occ", updatedOcc).ErrorContext(ctx, "failed to parse updated occurrence start_time")
-					return nil, err
+					return nil, fmt.Errorf("failed to convert updated occurrence start time %s to int: %w", updatedOcc.NewOccurrenceID, err)
 				}
 
 				// If updated occurrence does not have a duration, use meeting duration
@@ -441,8 +434,7 @@ func getRRule(reccurrence ZoomMeetingRecurrence, endTime *time.Time) (string, er
 			reccurrence.EndTimes = "0"
 			t, err := time.Parse(time.RFC3339, reccurrence.EndDateTime)
 			if err != nil {
-				logger.With(errKey, err, "recurrence", reccurrence).Error("error parsing recurrence end_date_time")
-				return "", err
+				return "", fmt.Errorf("failed to parse recurrence end_date_time %s: %w", reccurrence.EndDateTime, err)
 			}
 			rrule.WriteString(fmt.Sprintf("UNTIL=%s;", t.Format("20060102T150405Z")))
 		}

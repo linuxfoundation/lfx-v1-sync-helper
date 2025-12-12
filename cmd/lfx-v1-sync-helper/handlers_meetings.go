@@ -110,34 +110,27 @@ func sendIndexerMessage(ctx context.Context, subject string, action MessageActio
 
 	messageBytes, err := json.Marshal(message)
 	if err != nil {
-		logger.With(errKey, err, "subject", subject).ErrorContext(ctx, "failed to marshal indexer message")
-		return fmt.Errorf("failed to marshal indexer message: %w", err)
+		return fmt.Errorf("failed to marshal indexer message for subject %s: %w", subject, err)
 	}
 
 	logger.With("subject", subject, "action", action, "tags_count", len(tags)).DebugContext(ctx, "constructed indexer message")
 
 	// Publish the message to NATS
 	if err := natsConn.Publish(subject, messageBytes); err != nil {
-		logger.With(errKey, err, "subject", subject).ErrorContext(ctx, "failed to publish indexer message")
 		return fmt.Errorf("failed to publish indexer message to subject %s: %w", subject, err)
 	}
 
-	logger.With("subject", subject).InfoContext(ctx, "successfully published indexer message")
 	return nil
 }
 
 // sendAccessMessage sends a pre-marshalled message to the NATS server.
 // This is a generic function that can be used for access control updates, put operations, etc.
 func sendAccessMessage(ctx context.Context, subject string, messageBytes []byte) error {
-	logger.With("subject", subject, "message_size", len(messageBytes)).DebugContext(ctx, "publishing message")
-
 	// Publish the message to NATS
 	if err := natsConn.Publish(subject, messageBytes); err != nil {
-		logger.With(errKey, err, "subject", subject).ErrorContext(ctx, "failed to publish message")
 		return fmt.Errorf("failed to publish message to subject %s: %w", subject, err)
 	}
 
-	logger.With("subject", subject).InfoContext(ctx, "successfully published message")
 	return nil
 }
 
@@ -156,15 +149,13 @@ func convertMapToInputMeeting(ctx context.Context, v1Data map[string]any) (*meet
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to marshal v1Data to JSON")
-		return nil, fmt.Errorf("failed to marshal v1Data to JSON: %w", err)
+		return nil, fmt.Errorf("failed to marshal v1Data to JSON for meeting: %w", err)
 	}
 
 	// Unmarshal JSON bytes into InputMeeting struct
 	var meeting meetingInput
 	if err := json.Unmarshal(jsonBytes, &meeting); err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into InputMeeting")
-		return nil, fmt.Errorf("failed to unmarshal JSON into InputMeeting: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal JSON into meetingInput: %w", err)
 	}
 
 	// We need to populate the ID for the v2 system
@@ -186,8 +177,7 @@ func convertMapToInputMeeting(ctx context.Context, v1Data map[string]any) (*meet
 
 	occurrences, err := calculateOccurrences(ctx, meeting, false, false, 100)
 	if err != nil {
-		logger.With(errKey, err, "meeting_id", meeting.ID).ErrorContext(ctx, "failed to calculate occurrences")
-		return nil, fmt.Errorf("failed to calculate occurrences: %w", err)
+		return nil, fmt.Errorf("failed to calculate occurrences for meeting %s: %w", meeting.ID, err)
 	}
 	meeting.Occurrences = occurrences
 
@@ -215,28 +205,31 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 		return
 	}
 
-	logger.With("key", key).DebugContext(ctx, "processing zoom meeting update")
+	funcLogger := logger.With("key", key)
+
+	funcLogger.DebugContext(ctx, "processing zoom meeting update")
 
 	// Convert v1Data map to InputMeeting struct
 	meeting, err := convertMapToInputMeeting(ctx, v1Data)
 	if err != nil {
-		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert v1Data to InputMeeting")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to InputMeeting")
 		return
 	}
 
 	// Extract the meeting UID
 	uid := meeting.ID
 	if uid == "" {
-		logger.With("key", key).ErrorContext(ctx, "missing or invalid uid in v1 meeting data")
+		funcLogger.ErrorContext(ctx, "missing or invalid uid in v1 meeting data")
 		return
 	}
+	funcLogger = funcLogger.With("meeting_id", uid)
 
 	// Check if parent project exists in mappings before proceeding. Because
 	// convertMapToInputMeeting has already looked up the SFID project ID
 	// mapping, we don't need to do it again: we can just check if ProjectID (v2
 	// UID) is set.
 	if meeting.ProjectID == "" {
-		logger.With("project_sfid", meeting.ProjectSFID, "meeting_id", uid).InfoContext(ctx, "skipping meeting sync - parent project not found in mappings")
+		funcLogger.With("project_sfid", meeting.ProjectSFID).InfoContext(ctx, "skipping meeting sync - parent project not found in mappings")
 		return
 	}
 
@@ -247,7 +240,7 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 	indexEntry, err := mappingsKV.Get(ctx, indexKey)
 	if err == nil && indexEntry != nil {
 		if err := json.Unmarshal(indexEntry.Value(), &committeeMappings); err != nil {
-			logger.With(errKey, err, "meeting_id", uid, "key", key).WarnContext(ctx, "failed to unmarshal meeting mapping index")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to unmarshal meeting mapping index")
 		} else {
 			// Extract committee IDs from the mappings
 			for committeeID := range committeeMappings {
@@ -277,7 +270,7 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 
 	tags := getMeetingTags(meeting)
 	if err := sendIndexerMessage(ctx, IndexV1MeetingSubject, indexerAction, meeting, tags); err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send meeting indexer message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send meeting indexer message")
 		return
 	}
 
@@ -291,22 +284,22 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 
 	accessMsgBytes, err := json.Marshal(accessMsg)
 	if err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to marshal access message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal access message")
 		return
 	}
 
 	if err := sendAccessMessage(ctx, UpdateAccessV1MeetingSubject, accessMsgBytes); err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send meeting access message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send meeting access message")
 		return
 	}
 
 	if uid != "" {
 		if _, err := mappingsKV.Put(ctx, mappingKey, []byte("1")); err != nil {
-			logger.With(errKey, err, "uid", uid).WarnContext(ctx, "failed to store meeting mapping")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to store meeting mapping")
 		}
 	}
 
-	logger.With("uid", uid, "key", key).InfoContext(ctx, "successfully sent meeting indexer and access messages")
+	funcLogger.InfoContext(ctx, "successfully sent meeting indexer and access messages")
 }
 
 // convertMapToInputMeeting converts a map[string]any to an InputMeeting struct.
@@ -314,14 +307,12 @@ func convertMapToInputMeetingMapping(ctx context.Context, v1Data map[string]any)
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to marshal v1Data to JSON")
-		return nil, fmt.Errorf("failed to marshal v1Data to JSON: %w", err)
+		return nil, fmt.Errorf("failed to marshal v1Data to JSON for meeting mapping: %w", err)
 	}
 
 	// Unmarshal JSON bytes into ZoomMeetingMappingDB struct
 	var mapping ZoomMeetingMappingDB
 	if err := json.Unmarshal(jsonBytes, &mapping); err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into ZoomMeetingMappingDB")
 		return nil, fmt.Errorf("failed to unmarshal JSON into ZoomMeetingMappingDB: %w", err)
 	}
 
@@ -342,19 +333,21 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 		return
 	}
 
-	logger.With("key", key).DebugContext(ctx, "processing zoom meeting mapping update")
+	funcLogger := logger.With("key", key)
+
+	funcLogger.DebugContext(ctx, "processing zoom meeting mapping update")
 
 	// Convert v1Data map to ZoomMeetingMappingDB struct
 	mapping, err := convertMapToInputMeetingMapping(ctx, v1Data)
 	if err != nil {
-		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert v1Data to ZoomMeetingMappingDB")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to ZoomMeetingMappingDB")
 		return
 	}
 
 	// Extract the meeting ID from the mapping
 	meetingID := mapping.MeetingID
 	if meetingID == "" {
-		logger.With("key", key).ErrorContext(ctx, "missing meeting_id in mapping data")
+		funcLogger.ErrorContext(ctx, "missing meeting_id in mapping data")
 		return
 	}
 	mappingKey := fmt.Sprintf("v1_meetings.%s", meetingID)
@@ -362,7 +355,7 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 	// Extract the committee ID from the mapping
 	committeeID := mapping.CommitteeID
 	if committeeID == "" {
-		logger.With("key", key, "meeting_id", meetingID).WarnContext(ctx, "mapping has no committee_id")
+		funcLogger.With("meeting_id", meetingID).WarnContext(ctx, "mapping has no committee_id")
 		return
 	}
 
@@ -370,21 +363,21 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 	meetingKey := fmt.Sprintf("itx-zoom-meetings-v2.%s", meetingID)
 	meetingEntry, err := v1KV.Get(ctx, meetingKey)
 	if err != nil {
-		logger.With(errKey, err, "meeting_id", meetingID, "key", key).WarnContext(ctx, "failed to fetch meeting from KV bucket, cannot trigger re-index")
+		funcLogger.With(errKey, err, "meeting_id", meetingID).WarnContext(ctx, "failed to fetch meeting from KV bucket, cannot trigger re-index")
 		return
 	}
 
 	// Parse the meeting data
 	var meetingData map[string]any
 	if err := json.Unmarshal(meetingEntry.Value(), &meetingData); err != nil {
-		logger.With(errKey, err, "meeting_id", meetingID).ErrorContext(ctx, "failed to unmarshal meeting data")
+		funcLogger.With(errKey, err, "meeting_id", meetingID).ErrorContext(ctx, "failed to unmarshal meeting data")
 		return
 	}
 
 	// Convert meeting data to typed struct
 	meeting, err := convertMapToInputMeeting(ctx, meetingData)
 	if err != nil {
-		logger.With(errKey, err, "meeting_id", meetingID).ErrorContext(ctx, "failed to convert meeting data")
+		funcLogger.With(errKey, err, "meeting_id", meetingID).ErrorContext(ctx, "failed to convert meeting data")
 		return
 	}
 
@@ -393,7 +386,7 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 	indexEntry, _ := mappingsKV.Get(ctx, indexKey)
 	if indexEntry != nil {
 		if err := json.Unmarshal(indexEntry.Value(), &committeeMappings); err != nil {
-			logger.With(errKey, err, "meeting_id", meetingID, "key", key).WarnContext(ctx, "failed to unmarshal meeting mapping index")
+			funcLogger.With(errKey, err, "meeting_id", meetingID).WarnContext(ctx, "failed to unmarshal meeting mapping index")
 			return
 		}
 	}
@@ -418,7 +411,7 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 		// Send meeting indexer message with the meeting data
 		tags := getMeetingTags(meeting)
 		if err := sendIndexerMessage(ctx, IndexV1MeetingSubject, indexerAction, meeting, tags); err != nil {
-			logger.With(errKey, err, "meeting_id", meetingID, "key", key).ErrorContext(ctx, "failed to send meeting indexer message")
+			funcLogger.With(errKey, err, "meeting_id", meetingID).ErrorContext(ctx, "failed to send meeting indexer message")
 			return
 		}
 
@@ -433,12 +426,12 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 
 		accessMsgBytes, err := json.Marshal(accessMsg)
 		if err != nil {
-			logger.With(errKey, err, "meeting_id", meetingID, "key", key).ErrorContext(ctx, "failed to marshal access message")
+			funcLogger.With(errKey, err, "meeting_id", meetingID).ErrorContext(ctx, "failed to marshal access message")
 			return
 		}
 
 		if err := sendAccessMessage(ctx, UpdateAccessV1MeetingSubject, accessMsgBytes); err != nil {
-			logger.With(errKey, err, "meeting_id", meetingID, "key", key).ErrorContext(ctx, "failed to send meeting access message")
+			funcLogger.With(errKey, err, "meeting_id", meetingID).ErrorContext(ctx, "failed to send meeting access message")
 			return
 		}
 	}
@@ -446,7 +439,7 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 	// Store the mapping
 	if meetingID != "" {
 		if _, err := mappingsKV.Put(ctx, mappingKey, []byte("1")); err != nil {
-			logger.With(errKey, err, "meeting_id", meetingID).WarnContext(ctx, "failed to store meeting mapping")
+			funcLogger.With(errKey, err, "meeting_id", meetingID).WarnContext(ctx, "failed to store meeting mapping")
 		}
 	}
 
@@ -459,16 +452,16 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 		indexKey = fmt.Sprintf("v1-mappings.meeting-mappings.%s", meetingID)
 		committeeMappingsBytes, err := json.Marshal(committeeMappings)
 		if err != nil {
-			logger.With(errKey, err, "meeting_id", meetingID, "key", key).ErrorContext(ctx, "failed to marshal committee mappings")
+			funcLogger.With(errKey, err, "meeting_id", meetingID).ErrorContext(ctx, "failed to marshal committee mappings")
 			return
 		}
 		if _, err := mappingsKV.Put(ctx, indexKey, committeeMappingsBytes); err != nil {
-			logger.With(errKey, err, "meeting_id", meetingID, "key", key).ErrorContext(ctx, "failed to store committee mappings")
+			funcLogger.With(errKey, err, "meeting_id", meetingID).ErrorContext(ctx, "failed to store committee mappings")
 			return
 		}
 	}
 
-	logger.With("meeting_id", meetingID, "committee_id", committeeID, "key", key).InfoContext(ctx, "successfully triggered meeting re-index with updated committees")
+	funcLogger.With("meeting_id", meetingID, "committee_id", committeeID).InfoContext(ctx, "successfully triggered meeting re-index with updated committees")
 }
 
 // convertMapToInputRegistrant converts a map[string]any to a RegistrantInput struct.
@@ -476,14 +469,12 @@ func convertMapToInputRegistrant(ctx context.Context, v1Data map[string]any) (*r
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to marshal v1Data to JSON")
-		return nil, fmt.Errorf("failed to marshal v1Data to JSON: %w", err)
+		return nil, fmt.Errorf("failed to marshal v1Data to JSON for registrant: %w", err)
 	}
 
 	// Unmarshal JSON bytes into RegistrantInput struct
 	var registrant registrantInput
 	if err := json.Unmarshal(jsonBytes, &registrant); err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into registrantInput")
 		return nil, fmt.Errorf("failed to unmarshal JSON into registrantInput: %w", err)
 	}
 
@@ -526,42 +517,46 @@ func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data m
 		return
 	}
 
-	logger.With("key", key).DebugContext(ctx, "processing zoom meeting registrant update")
+	funcLogger := logger.With("key", key)
+
+	funcLogger.DebugContext(ctx, "processing zoom meeting registrant update")
 
 	// Convert v1Data map to RegistrantInput struct
 	registrant, err := convertMapToInputRegistrant(ctx, v1Data)
 	if err != nil {
-		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert v1Data to registrantInput")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to registrantInput")
 		return
 	}
 
 	// Extract the registrant ID
 	registrantID := registrant.ID
 	if registrantID == "" {
-		logger.With("key", key).ErrorContext(ctx, "missing or invalid id in v1 registrant data")
+		funcLogger.ErrorContext(ctx, "missing or invalid id in v1 registrant data")
 		return
 	}
+	funcLogger = funcLogger.With("registrant_id", registrantID)
 
 	// If username is blank but we have a v1 Platform ID (user_id), lookup the username.
 	if registrant.Username == "" && registrant.UserID != "" {
 		if v1User, lookupErr := lookupV1User(ctx, registrant.UserID); lookupErr == nil && v1User != nil && v1User.Username != "" {
 			registrant.Username = v1User.Username
-			logger.With("user_id", registrant.UserID, "username", v1User.Username).DebugContext(ctx, "looked up username for registrant")
+			funcLogger.With("user_id", registrant.UserID, "username", v1User.Username).DebugContext(ctx, "looked up username for registrant")
 		} else {
 			if lookupErr != nil {
-				logger.With(errKey, lookupErr, "user_id", registrant.UserID).WarnContext(ctx, "failed to lookup v1 user for registrant")
+				funcLogger.With(errKey, lookupErr, "user_id", registrant.UserID).WarnContext(ctx, "failed to lookup v1 user for registrant")
 			}
 		}
 	}
 
 	// Check if parent meeting exists in mappings before proceeding.
 	if registrant.MeetingID == "" {
-		logger.With("registrant_id", registrantID).ErrorContext(ctx, "meeting registrant missing required parent meeting ID")
+		funcLogger.ErrorContext(ctx, "meeting registrant missing required parent meeting ID")
 		return
 	}
+	funcLogger = funcLogger.With("meeting_id", registrant.MeetingID)
 	meetingMappingKey := fmt.Sprintf("v1_meetings.%s", registrant.MeetingID)
 	if _, err := mappingsKV.Get(ctx, meetingMappingKey); err != nil {
-		logger.With("meeting_id", registrant.MeetingID, "registrant_id", registrantID).InfoContext(ctx, "skipping meeting registrant sync - parent meeting not found in mappings")
+		funcLogger.With(errKey, err).InfoContext(ctx, "skipping meeting registrant sync - parent meeting not found in mappings")
 		return
 	}
 
@@ -573,7 +568,7 @@ func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data m
 
 	tags := getRegistrantTags(registrant)
 	if err := sendIndexerMessage(ctx, IndexV1MeetingRegistrantSubject, indexerAction, registrant, tags); err != nil {
-		logger.With(errKey, err, "id", registrantID, "key", key).ErrorContext(ctx, "failed to send registrant indexer message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send registrant indexer message")
 		return
 	}
 
@@ -590,38 +585,36 @@ func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data m
 
 		accessMsgBytes, err := json.Marshal(accessMsg)
 		if err != nil {
-			logger.With(errKey, err, "id", registrantID, "key", key).ErrorContext(ctx, "failed to marshal access message")
+			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal access message")
 			return
 		}
 
 		if err := sendAccessMessage(ctx, V1MeetingRegistrantPutSubject, accessMsgBytes); err != nil {
-			logger.With(errKey, err, "id", registrantID, "key", key).ErrorContext(ctx, "failed to send registrant put message")
+			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send registrant put message")
 			return
 		}
 	}
 
 	if registrantID != "" {
 		if _, err := mappingsKV.Put(ctx, mappingKey, []byte("1")); err != nil {
-			logger.With(errKey, err, "id", registrantID).WarnContext(ctx, "failed to store registrant mapping")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to store registrant mapping")
 		}
 	}
 
-	logger.With("id", registrantID, "meeting_id", registrant.MeetingID, "key", key).InfoContext(ctx, "successfully sent registrant indexer and put messages")
+	funcLogger.InfoContext(ctx, "successfully sent registrant indexer and put messages")
 }
 
 func convertMapToInputInviteResponse(ctx context.Context, v1Data map[string]any) (*inviteResponseInput, error) {
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to marshal v1Data to JSON")
-		return nil, fmt.Errorf("failed to marshal v1Data to JSON: %w", err)
+		return nil, fmt.Errorf("failed to marshal v1Data to JSON for invite response: %w", err)
 	}
 
 	// Unmarshal JSON bytes into InviteResponseInput struct
 	var inviteResponse inviteResponseInput
 	if err := json.Unmarshal(jsonBytes, &inviteResponse); err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into InviteResponseInput")
-		return nil, fmt.Errorf("failed to unmarshal JSON into InviteResponseInput: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal JSON into inviteResponseInput: %w", err)
 	}
 
 	// Convert the v1 response type to the v2 response type.
@@ -672,12 +665,14 @@ func handleZoomMeetingInviteResponseUpdate(ctx context.Context, key string, v1Da
 		return
 	}
 
-	logger.With("key", key).DebugContext(ctx, "processing zoom meeting invite response update")
+	funcLogger := logger.With("key", key)
+
+	funcLogger.DebugContext(ctx, "processing zoom meeting invite response update")
 
 	// Convert v1Data map to InviteResponseInput struct
 	inviteResponse, err := convertMapToInputInviteResponse(ctx, v1Data)
 	if err != nil {
-		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert v1Data to inviteResponseInput")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to inviteResponseInput")
 		return
 	}
 
@@ -690,10 +685,10 @@ func handleZoomMeetingInviteResponseUpdate(ctx context.Context, key string, v1Da
 	if inviteResponse.Username == "" && inviteResponse.UserID != "" {
 		if v1User, lookupErr := lookupV1User(ctx, inviteResponse.UserID); lookupErr == nil && v1User != nil && v1User.Username != "" {
 			inviteResponse.Username = mapUsernameToAuthSub(v1User.Username)
-			logger.With("user_id", inviteResponse.UserID, "username", v1User.Username).DebugContext(ctx, "looked up username for invite response")
+			funcLogger.With("user_id", inviteResponse.UserID, "username", v1User.Username).DebugContext(ctx, "looked up username for invite response")
 		} else {
 			if lookupErr != nil {
-				logger.With(errKey, lookupErr, "user_id", inviteResponse.UserID).WarnContext(ctx, "failed to lookup v1 user for invite response")
+				funcLogger.With(errKey, lookupErr, "user_id", inviteResponse.UserID).WarnContext(ctx, "failed to lookup v1 user for invite response")
 			}
 		}
 	}
@@ -701,18 +696,21 @@ func handleZoomMeetingInviteResponseUpdate(ctx context.Context, key string, v1Da
 	// Extract the invite response ID
 	inviteResponseID := inviteResponse.ID
 	if inviteResponseID == "" {
-		logger.With("key", key).ErrorContext(ctx, "missing or invalid id in v1 invite response data")
+		funcLogger.ErrorContext(ctx, "missing or invalid id in v1 invite response data")
 		return
 	}
 
+	funcLogger = funcLogger.With("invite_response_id", inviteResponseID)
+
 	// Check if parent meeting exists in mappings before proceeding.
 	if inviteResponse.MeetingID == "" {
-		logger.With("invite_response_id", inviteResponseID).ErrorContext(ctx, "invite response missing required parent meeting ID")
+		funcLogger.ErrorContext(ctx, "invite response missing required parent meeting ID")
 		return
 	}
+	funcLogger = funcLogger.With("meeting_id", inviteResponse.MeetingID)
 	meetingMappingKey := fmt.Sprintf("v1_meetings.%s", inviteResponse.MeetingID)
 	if _, err := mappingsKV.Get(ctx, meetingMappingKey); err != nil {
-		logger.With("meeting_id", inviteResponse.MeetingID, "invite_response_id", inviteResponseID).InfoContext(ctx, "skipping invite response sync - parent meeting not found in mappings")
+		funcLogger.With("meeting_mapping_key", meetingMappingKey).InfoContext(ctx, "skipping invite response sync - parent meeting not found in mappings")
 		return
 	}
 
@@ -724,15 +722,15 @@ func handleZoomMeetingInviteResponseUpdate(ctx context.Context, key string, v1Da
 
 	tags := getInviteResponseTags(inviteResponse)
 	if err := sendIndexerMessage(ctx, IndexV1MeetingInviteResponseSubject, indexerAction, inviteResponse, tags); err != nil {
-		logger.With(errKey, err, "invite_response_id", inviteResponseID, "key", key).ErrorContext(ctx, "failed to send invite response indexer message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send invite response indexer message")
 		return
 	}
 
 	if _, err := mappingsKV.Put(ctx, mappingKey, []byte("1")); err != nil {
-		logger.With(errKey, err, "invite_response_id", inviteResponseID).WarnContext(ctx, "failed to store invite response mapping")
+		funcLogger.With(errKey, err).WarnContext(ctx, "failed to store invite response mapping")
 	}
 
-	logger.With("invite_response_id", inviteResponseID, "meeting_id", inviteResponse.MeetingID, "key", key).InfoContext(ctx, "successfully sent invite response indexer message")
+	funcLogger.InfoContext(ctx, "successfully sent invite response indexer message")
 }
 
 // PastMeetingAccessMessage is the schema for the data in the message sent to the fga-sync service.
@@ -751,14 +749,12 @@ func convertMapToInputPastMeeting(ctx context.Context, v1Data map[string]any) (*
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to marshal v1Data to JSON")
-		return nil, fmt.Errorf("failed to marshal v1Data to JSON: %w", err)
+		return nil, fmt.Errorf("failed to marshal v1Data to JSON for past meeting: %w", err)
 	}
 
 	// Unmarshal JSON bytes into PastMeetingInput struct
 	var pastMeeting pastMeetingInput
 	if err := json.Unmarshal(jsonBytes, &pastMeeting); err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into pastMeetingInput")
 		return nil, fmt.Errorf("failed to unmarshal JSON into pastMeetingInput: %w", err)
 	}
 
@@ -804,30 +800,34 @@ func handleZoomPastMeetingUpdate(ctx context.Context, key string, v1Data map[str
 		return
 	}
 
-	logger.With("key", key).DebugContext(ctx, "processing zoom past meeting update")
+	funcLogger := logger.With("key", key)
+
+	funcLogger.DebugContext(ctx, "processing zoom past meeting update")
 
 	// Convert v1Data map to PastMeetingInput struct
 	pastMeeting, err := convertMapToInputPastMeeting(ctx, v1Data)
 	if err != nil {
-		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert v1Data to pastMeetingInput")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to pastMeetingInput")
 		return
 	}
 
 	// Extract the past meeting UID (MeetingAndOccurrenceID)
 	uid := pastMeeting.MeetingAndOccurrenceID
 	if uid == "" {
-		logger.With("key", key).ErrorContext(ctx, "missing or invalid meeting_and_occurrence_id in v1 past meeting data")
+		funcLogger.ErrorContext(ctx, "missing or invalid meeting_and_occurrence_id in v1 past meeting data")
 		return
 	}
+	funcLogger = funcLogger.With("past_meeting_id", uid)
 
 	// Check if parent meeting exists in mappings before proceeding.
 	if pastMeeting.MeetingID == "" {
-		logger.With("past_meeting_id", uid).ErrorContext(ctx, "past meeting missing required parent meeting ID")
+		funcLogger.ErrorContext(ctx, "past meeting missing required parent meeting ID")
 		return
 	}
+	funcLogger = funcLogger.With("meeting_id", pastMeeting.MeetingID)
 	meetingMappingKey := fmt.Sprintf("v1_meetings.%s", pastMeeting.MeetingID)
 	if _, err := mappingsKV.Get(ctx, meetingMappingKey); err != nil {
-		logger.With("meeting_id", pastMeeting.MeetingID, "past_meeting_id", uid).InfoContext(ctx, "skipping past meeting sync - parent meeting not found in mappings")
+		funcLogger.InfoContext(ctx, "skipping past meeting sync - parent meeting not found in mappings")
 		return
 	}
 
@@ -839,7 +839,7 @@ func handleZoomPastMeetingUpdate(ctx context.Context, key string, v1Data map[str
 
 	tags := getPastMeetingTags(pastMeeting)
 	if err := sendIndexerMessage(ctx, IndexV1PastMeetingSubject, indexerAction, pastMeeting, tags); err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send past meeting indexer message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send past meeting indexer message")
 		return
 	}
 
@@ -850,7 +850,7 @@ func handleZoomPastMeetingUpdate(ctx context.Context, key string, v1Data map[str
 	indexEntry, err := mappingsKV.Get(ctx, indexKey)
 	if err == nil && indexEntry != nil {
 		if err := json.Unmarshal(indexEntry.Value(), &committeeMappings); err != nil {
-			logger.With(errKey, err, "meeting_and_occurrence_id", uid, "key", key).WarnContext(ctx, "failed to unmarshal past meeting mapping index")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to unmarshal past meeting mapping index")
 		} else {
 			// Extract committee IDs from the mappings
 			for committeeID := range committeeMappings {
@@ -882,22 +882,22 @@ func handleZoomPastMeetingUpdate(ctx context.Context, key string, v1Data map[str
 
 	accessMsgBytes, err := json.Marshal(accessMsg)
 	if err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to marshal past meeting access message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal past meeting access message")
 		return
 	}
 
 	if err := sendAccessMessage(ctx, V1PastMeetingUpdateAccessSubject, accessMsgBytes); err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send past meeting access message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send past meeting access message")
 		return
 	}
 
 	if uid != "" {
 		if _, err := mappingsKV.Put(ctx, mappingKey, []byte("1")); err != nil {
-			logger.With(errKey, err, "uid", uid).WarnContext(ctx, "failed to store past meeting mapping")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to store past meeting mapping")
 		}
 	}
 
-	logger.With("uid", uid, "meeting_id", pastMeeting.MeetingID, "key", key).InfoContext(ctx, "successfully sent past meeting indexer and access messages")
+	funcLogger.InfoContext(ctx, "successfully sent past meeting indexer and access messages")
 }
 
 // convertMapToInputPastMeetingMapping converts a map[string]any to a ZoomPastMeetingMappingDB struct.
@@ -905,14 +905,12 @@ func convertMapToInputPastMeetingMapping(ctx context.Context, v1Data map[string]
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to marshal v1Data to JSON")
-		return nil, fmt.Errorf("failed to marshal v1Data to JSON: %w", err)
+		return nil, fmt.Errorf("failed to marshal v1Data to JSON for past meeting mapping: %w", err)
 	}
 
 	// Unmarshal JSON bytes into ZoomPastMeetingMappingDB struct
 	var mapping ZoomPastMeetingMappingDB
 	if err := json.Unmarshal(jsonBytes, &mapping); err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into ZoomPastMeetingMappingDB")
 		return nil, fmt.Errorf("failed to unmarshal JSON into ZoomPastMeetingMappingDB: %w", err)
 	}
 
@@ -927,27 +925,30 @@ func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data 
 		return
 	}
 
-	logger.With("key", key).DebugContext(ctx, "processing zoom past meeting mapping update")
+	funcLogger := logger.With("key", key)
+
+	funcLogger.DebugContext(ctx, "processing zoom past meeting mapping update")
 
 	// Convert v1Data map to ZoomPastMeetingMappingDB struct
 	mapping, err := convertMapToInputPastMeetingMapping(ctx, v1Data)
 	if err != nil {
-		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert v1Data to ZoomPastMeetingMappingDB")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to ZoomPastMeetingMappingDB")
 		return
 	}
 
 	// Extract the meeting_and_occurrence_id from the mapping
 	meetingAndOccurrenceID := mapping.MeetingAndOccurrenceID
 	if meetingAndOccurrenceID == "" {
-		logger.With("key", key).ErrorContext(ctx, "missing meeting_and_occurrence_id in mapping data")
+		funcLogger.ErrorContext(ctx, "missing meeting_and_occurrence_id in mapping data")
 		return
 	}
+	funcLogger = funcLogger.With("past_meeting_id", meetingAndOccurrenceID)
 	mappingKey := fmt.Sprintf("v1_past_meetings.%s", meetingAndOccurrenceID)
 
 	// Extract the committee ID from the mapping
 	committeeID := mapping.CommitteeID
 	if committeeID == "" {
-		logger.With("key", key, "meeting_and_occurrence_id", meetingAndOccurrenceID).WarnContext(ctx, "mapping has no committee_id")
+		funcLogger.WarnContext(ctx, "mapping has no committee_id")
 		return
 	}
 
@@ -955,21 +956,21 @@ func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data 
 	pastMeetingKey := fmt.Sprintf("itx-zoom-past-meetings.%s", meetingAndOccurrenceID)
 	pastMeetingEntry, err := v1KV.Get(ctx, pastMeetingKey)
 	if err != nil {
-		logger.With(errKey, err, "meeting_and_occurrence_id", meetingAndOccurrenceID, "key", key).WarnContext(ctx, "failed to fetch past meeting from KV bucket, cannot trigger re-index")
+		funcLogger.With(errKey, err).WarnContext(ctx, "failed to fetch past meeting from KV bucket, cannot trigger re-index")
 		return
 	}
 
 	// Parse the past meeting data
 	var pastMeetingData map[string]any
 	if err := json.Unmarshal(pastMeetingEntry.Value(), &pastMeetingData); err != nil {
-		logger.With(errKey, err, "meeting_and_occurrence_id", meetingAndOccurrenceID).ErrorContext(ctx, "failed to unmarshal past meeting data")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal past meeting data")
 		return
 	}
 
 	// Convert past meeting data to typed struct
 	pastMeeting, err := convertMapToInputPastMeeting(ctx, pastMeetingData)
 	if err != nil {
-		logger.With(errKey, err, "meeting_and_occurrence_id", meetingAndOccurrenceID).ErrorContext(ctx, "failed to convert past meeting data")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert past meeting data")
 		return
 	}
 
@@ -978,7 +979,7 @@ func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data 
 	indexEntry, _ := mappingsKV.Get(ctx, indexKey)
 	if indexEntry != nil {
 		if err := json.Unmarshal(indexEntry.Value(), &committeeMappings); err != nil {
-			logger.With(errKey, err, "meeting_and_occurrence_id", meetingAndOccurrenceID, "key", key).WarnContext(ctx, "failed to unmarshal past meeting mapping index")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to unmarshal past meeting mapping index")
 			return
 		}
 	}
@@ -998,7 +999,7 @@ func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data 
 		// Send past meeting indexer message with the past meeting data
 		tags := getPastMeetingTags(pastMeeting)
 		if err := sendIndexerMessage(ctx, IndexV1PastMeetingSubject, indexerAction, pastMeeting, tags); err != nil {
-			logger.With(errKey, err, "meeting_and_occurrence_id", meetingAndOccurrenceID, "key", key).ErrorContext(ctx, "failed to send past meeting indexer message")
+			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send past meeting indexer message")
 			return
 		}
 
@@ -1013,12 +1014,12 @@ func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data 
 
 		accessMsgBytes, err := json.Marshal(accessMsg)
 		if err != nil {
-			logger.With(errKey, err, "meeting_and_occurrence_id", meetingAndOccurrenceID, "key", key).ErrorContext(ctx, "failed to marshal access message")
+			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal access message")
 			return
 		}
 
 		if err := sendAccessMessage(ctx, V1PastMeetingUpdateAccessSubject, accessMsgBytes); err != nil {
-			logger.With(errKey, err, "meeting_and_occurrence_id", meetingAndOccurrenceID, "key", key).ErrorContext(ctx, "failed to send past meeting access message")
+			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send past meeting access message")
 			return
 		}
 	}
@@ -1026,7 +1027,7 @@ func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data 
 	// Store the mapping
 	if meetingAndOccurrenceID != "" {
 		if _, err := mappingsKV.Put(ctx, mappingKey, []byte("1")); err != nil {
-			logger.With(errKey, err, "meeting_and_occurrence_id", meetingAndOccurrenceID).WarnContext(ctx, "failed to store past meeting mapping")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to store past meeting mapping")
 		}
 	}
 
@@ -1039,16 +1040,16 @@ func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data 
 		indexKey = fmt.Sprintf("v1-mappings.past-meeting-mappings.%s", meetingAndOccurrenceID)
 		committeeMappingsBytes, err := json.Marshal(committeeMappings)
 		if err != nil {
-			logger.With(errKey, err, "meeting_and_occurrence_id", meetingAndOccurrenceID, "key", key).ErrorContext(ctx, "failed to marshal committee mappings")
+			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal committee mappings")
 			return
 		}
 		if _, err := mappingsKV.Put(ctx, indexKey, committeeMappingsBytes); err != nil {
-			logger.With(errKey, err, "meeting_and_occurrence_id", meetingAndOccurrenceID, "key", key).ErrorContext(ctx, "failed to store committee mappings")
+			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to store committee mappings")
 			return
 		}
 	}
 
-	logger.With("meeting_and_occurrence_id", meetingAndOccurrenceID, "committee_id", committeeID, "key", key).InfoContext(ctx, "successfully triggered past meeting re-index with updated committees")
+	funcLogger.InfoContext(ctx, "successfully triggered past meeting re-index with updated committees")
 }
 
 // PastMeetingParticipantAccessMessage is the schema for the data in the message sent to the fga-sync service.
@@ -1066,14 +1067,12 @@ func convertMapToInputPastMeetingInvitee(ctx context.Context, v1Data map[string]
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to marshal v1Data to JSON")
-		return nil, fmt.Errorf("failed to marshal v1Data to JSON: %w", err)
+		return nil, fmt.Errorf("failed to marshal v1Data to JSON for past meeting invitee: %w", err)
 	}
 
 	// Unmarshal JSON bytes into ZoomPastMeetingInviteeDatabase struct
 	var invitee ZoomPastMeetingInviteeDatabase
 	if err := json.Unmarshal(jsonBytes, &invitee); err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into ZoomPastMeetingInviteeDatabase")
 		return nil, fmt.Errorf("failed to unmarshal JSON into ZoomPastMeetingInviteeDatabase: %w", err)
 	}
 
@@ -1107,30 +1106,34 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 		return
 	}
 
-	logger.With("key", key).DebugContext(ctx, "processing zoom past meeting invitee update")
+	funcLogger := logger.With("key", key)
+
+	funcLogger.DebugContext(ctx, "processing zoom past meeting invitee update")
 
 	// Convert v1Data map to PastMeetingInviteeInput struct
 	invitee, err := convertMapToInputPastMeetingInvitee(ctx, v1Data)
 	if err != nil {
-		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert v1Data to PastMeetingInviteeInput")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to PastMeetingInviteeInput")
 		return
 	}
 
 	// Extract the invitee ID
 	inviteeID := invitee.ID
 	if inviteeID == "" {
-		logger.With("key", key).ErrorContext(ctx, "missing or invalid id in v1 past meeting invitee data")
+		funcLogger.ErrorContext(ctx, "missing or invalid id in v1 past meeting invitee data")
 		return
 	}
+	funcLogger = funcLogger.With("invitee_id", inviteeID)
 
 	// Check if parent past meeting exists in mappings before proceeding.
 	if invitee.MeetingAndOccurrenceID == "" {
-		logger.With("invitee_id", inviteeID).ErrorContext(ctx, "past meeting invitee missing required parent past meeting ID")
+		funcLogger.ErrorContext(ctx, "past meeting invitee missing required parent past meeting ID")
 		return
 	}
+	funcLogger = funcLogger.With("past_meeting_id", invitee.MeetingAndOccurrenceID)
 	pastMeetingMappingKey := fmt.Sprintf("v1_past_meetings.%s", invitee.MeetingAndOccurrenceID)
 	if _, err := mappingsKV.Get(ctx, pastMeetingMappingKey); err != nil {
-		logger.With("past_meeting_id", invitee.MeetingAndOccurrenceID, "invitee_id", inviteeID).InfoContext(ctx, "skipping past meeting invitee sync - parent past meeting not found in mappings")
+		funcLogger.InfoContext(ctx, "skipping past meeting invitee sync - parent past meeting not found in mappings")
 		return
 	}
 
@@ -1150,16 +1153,16 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 					isHost = hostValue
 				}
 			} else {
-				logger.With(errKey, err, "registrant_id", registrantID).WarnContext(ctx, "failed to unmarshal registrant data")
+				funcLogger.With(errKey, err, "registrant_id", registrantID).WarnContext(ctx, "failed to unmarshal registrant data")
 			}
 		} else {
-			logger.With(errKey, err, "registrant_id", registrantID).WarnContext(ctx, "failed to fetch registrant from KV bucket")
+			funcLogger.With(errKey, err, "registrant_id", registrantID).WarnContext(ctx, "failed to fetch registrant from KV bucket")
 		}
 	}
 
 	v2Participant, err := convertInviteeToV2Participant(ctx, invitee, isHost)
 	if err != nil {
-		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert invitee to V2 participant")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert invitee to V2 participant")
 		return
 	}
 
@@ -1168,10 +1171,10 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 		if v1User, lookupErr := lookupV1User(ctx, invitee.LFUserID); lookupErr == nil && v1User != nil && v1User.Username != "" {
 			v2Participant.Username = mapUsernameToAuthSub(v1User.Username)
 			invitee.LFSSO = v1User.Username // Update the invitee data for access message
-			logger.With("lf_user_id", invitee.LFUserID, "username", v1User.Username).DebugContext(ctx, "looked up username for past meeting invitee")
+			funcLogger.With("lf_user_id", invitee.LFUserID, "username", v1User.Username).DebugContext(ctx, "looked up username for past meeting invitee")
 		} else {
 			if lookupErr != nil {
-				logger.With(errKey, lookupErr, "lf_user_id", invitee.LFUserID).WarnContext(ctx, "failed to lookup v1 user for past meeting invitee")
+				funcLogger.With(errKey, lookupErr, "lf_user_id", invitee.LFUserID).WarnContext(ctx, "failed to lookup v1 user for past meeting invitee")
 			}
 		}
 	}
@@ -1184,7 +1187,7 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 
 	tags := getPastMeetingParticipantTags(v2Participant)
 	if err := sendIndexerMessage(ctx, IndexV1PastMeetingParticipantSubject, indexerAction, v2Participant, tags); err != nil {
-		logger.With(errKey, err, "id", inviteeID, "key", key).ErrorContext(ctx, "failed to send invitee indexer message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send invitee indexer message")
 		return
 	}
 
@@ -1202,23 +1205,23 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 
 		accessMsgBytes, err := json.Marshal(accessMsg)
 		if err != nil {
-			logger.With(errKey, err, "id", inviteeID, "key", key).ErrorContext(ctx, "failed to marshal invitee access message")
+			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal invitee access message")
 			return
 		}
 
 		if err := sendAccessMessage(ctx, V1PastMeetingParticipantPutSubject, accessMsgBytes); err != nil {
-			logger.With(errKey, err, "id", inviteeID, "key", key).ErrorContext(ctx, "failed to send invitee access message")
+			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send invitee access message")
 			return
 		}
 	}
 
 	if inviteeID != "" {
 		if _, err := mappingsKV.Put(ctx, mappingKey, []byte("1")); err != nil {
-			logger.With(errKey, err, "id", inviteeID).WarnContext(ctx, "failed to store past meeting invitee mapping")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to store past meeting invitee mapping")
 		}
 	}
 
-	logger.With("id", inviteeID, "meeting_and_occurrence_id", invitee.MeetingAndOccurrenceID, "key", key).InfoContext(ctx, "successfully sent invitee indexer and access messages")
+	funcLogger.InfoContext(ctx, "successfully sent invitee indexer and access messages")
 }
 
 func convertInviteeToV2Participant(ctx context.Context, invitee *ZoomPastMeetingInviteeDatabase, isHost bool) (*V2PastMeetingParticipant, error) {
@@ -1246,7 +1249,7 @@ func convertInviteeToV2Participant(ctx context.Context, invitee *ZoomPastMeeting
 				"created_at", invitee.CreatedAt,
 				"invitee_id", invitee.ID,
 				"meeting_and_occurrence_id", invitee.MeetingAndOccurrenceID,
-			).WarnContext(ctx, "failed to parse created_at")
+			).WarnContext(ctx, "failed to parse created_at for invitee %s", invitee.ID)
 		} else {
 			pastMeetingParticipant.CreatedAt = &createdAt
 		}
@@ -1259,7 +1262,7 @@ func convertInviteeToV2Participant(ctx context.Context, invitee *ZoomPastMeeting
 				"modified_at", invitee.ModifiedAt,
 				"invitee_id", invitee.ID,
 				"meeting_and_occurrence_id", invitee.MeetingAndOccurrenceID,
-			).WarnContext(ctx, "failed to parse modified_at")
+			).WarnContext(ctx, "failed to parse modified_at for invitee %s", invitee.ID)
 		} else {
 			pastMeetingParticipant.UpdatedAt = &modifiedAt
 		}
@@ -1280,14 +1283,12 @@ func convertMapToInputPastMeetingAttendee(ctx context.Context, v1Data map[string
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to marshal v1Data to JSON")
-		return nil, fmt.Errorf("failed to marshal v1Data to JSON: %w", err)
+		return nil, fmt.Errorf("failed to marshal v1Data to JSON for past meeting attendee: %w", err)
 	}
 
 	// Unmarshal JSON bytes into PastMeetingAttendeeInput struct
 	var attendee PastMeetingAttendeeInput
 	if err := json.Unmarshal(jsonBytes, &attendee); err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into PastMeetingAttendeeInput")
 		return nil, fmt.Errorf("failed to unmarshal JSON into PastMeetingAttendeeInput: %w", err)
 	}
 
@@ -1301,30 +1302,34 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 		return
 	}
 
-	logger.With("key", key).DebugContext(ctx, "processing zoom past meeting attendee update")
+	funcLogger := logger.With("key", key)
+
+	funcLogger.DebugContext(ctx, "processing zoom past meeting attendee update")
 
 	// Convert v1Data map to PastMeetingAttendeeInput struct
 	attendee, err := convertMapToInputPastMeetingAttendee(ctx, v1Data)
 	if err != nil {
-		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert v1Data to PastMeetingAttendeeInput")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to PastMeetingAttendeeInput")
 		return
 	}
 
 	// Extract the attendee ID
 	attendeeID := attendee.ID
 	if attendeeID == "" {
-		logger.With("key", key).ErrorContext(ctx, "missing or invalid id in v1 past meeting attendee data")
+		funcLogger.ErrorContext(ctx, "missing or invalid id in v1 past meeting attendee data")
 		return
 	}
+	funcLogger = funcLogger.With("attendee_id", attendeeID)
 
 	// Check if parent past meeting exists in mappings before proceeding.
 	if attendee.MeetingAndOccurrenceID == "" {
-		logger.With("attendee_id", attendeeID).ErrorContext(ctx, "past meeting attendee missing required parent past meeting ID")
+		funcLogger.ErrorContext(ctx, "past meeting attendee missing required parent past meeting ID")
 		return
 	}
+	funcLogger = funcLogger.With("past_meeting_id", attendee.MeetingAndOccurrenceID)
 	pastMeetingMappingKey := fmt.Sprintf("v1_past_meetings.%s", attendee.MeetingAndOccurrenceID)
 	if _, err := mappingsKV.Get(ctx, pastMeetingMappingKey); err != nil {
-		logger.With("past_meeting_id", attendee.MeetingAndOccurrenceID, "attendee_id", attendeeID).InfoContext(ctx, "skipping past meeting attendee sync - parent past meeting not found in mappings")
+		funcLogger.InfoContext(ctx, "skipping past meeting attendee sync - parent past meeting not found in mappings")
 		return
 	}
 
@@ -1346,10 +1351,10 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 					isHost = hostValue
 				}
 			} else {
-				logger.With(errKey, err, "registrant_id", registrantID).WarnContext(ctx, "failed to unmarshal registrant data")
+				funcLogger.With(errKey, err, "registrant_id", registrantID).WarnContext(ctx, "failed to unmarshal registrant data")
 			}
 		} else {
-			logger.With(errKey, err, "registrant_id", registrantID).WarnContext(ctx, "failed to fetch registrant from KV bucket")
+			funcLogger.With(errKey, err, "registrant_id", registrantID).WarnContext(ctx, "failed to fetch registrant from KV bucket")
 		}
 	}
 
@@ -1361,7 +1366,7 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 
 	v2Participant, err := convertAttendeeToV2Participant(ctx, attendee, isHost, isRegistrant)
 	if err != nil {
-		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert attendee to V2 participant")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert attendee to V2 participant")
 		return
 	}
 
@@ -1370,17 +1375,17 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 		if v1User, lookupErr := lookupV1User(ctx, attendee.LFUserID); lookupErr == nil && v1User != nil && v1User.Username != "" {
 			v2Participant.Username = mapUsernameToAuthSub(v1User.Username)
 			attendee.LFSSO = v1User.Username // Update the attendee data for access message
-			logger.With("lf_user_id", attendee.LFUserID, "username", v1User.Username).DebugContext(ctx, "looked up username for past meeting attendee")
+			funcLogger.With("lf_user_id", attendee.LFUserID, "username", v1User.Username).DebugContext(ctx, "looked up username for past meeting attendee")
 		} else {
 			if lookupErr != nil {
-				logger.With(errKey, lookupErr, "lf_user_id", attendee.LFUserID).WarnContext(ctx, "failed to lookup v1 user for past meeting attendee")
+				funcLogger.With(errKey, lookupErr, "lf_user_id", attendee.LFUserID).WarnContext(ctx, "failed to lookup v1 user for past meeting attendee")
 			}
 		}
 	}
 
 	tags := getPastMeetingParticipantTags(v2Participant)
 	if err := sendIndexerMessage(ctx, IndexV1PastMeetingParticipantSubject, indexerAction, v2Participant, tags); err != nil {
-		logger.With(errKey, err, "id", attendeeID, "key", key).ErrorContext(ctx, "failed to send attendee indexer message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send attendee indexer message")
 		return
 	}
 
@@ -1398,23 +1403,23 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 
 		accessMsgBytes, err := json.Marshal(accessMsg)
 		if err != nil {
-			logger.With(errKey, err, "id", attendeeID, "key", key).ErrorContext(ctx, "failed to marshal attendee access message")
+			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal attendee access message")
 			return
 		}
 
 		if err := sendAccessMessage(ctx, V1PastMeetingParticipantPutSubject, accessMsgBytes); err != nil {
-			logger.With(errKey, err, "id", attendeeID, "key", key).ErrorContext(ctx, "failed to send attendee access message")
+			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send attendee access message")
 			return
 		}
 	}
 
 	if attendeeID != "" {
 		if _, err := mappingsKV.Put(ctx, mappingKey, []byte("1")); err != nil {
-			logger.With(errKey, err, "id", attendeeID).WarnContext(ctx, "failed to store past meeting attendee mapping")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to store past meeting attendee mapping")
 		}
 	}
 
-	logger.With("id", attendeeID, "meeting_and_occurrence_id", attendee.MeetingAndOccurrenceID, "key", key).InfoContext(ctx, "successfully sent attendee indexer and access messages")
+	funcLogger.InfoContext(ctx, "successfully sent attendee indexer and access messages")
 }
 
 func convertAttendeeToV2Participant(ctx context.Context, attendee *PastMeetingAttendeeInput, isHost bool, isRegistrant bool) (*V2PastMeetingParticipant, error) {
@@ -1452,7 +1457,7 @@ func convertAttendeeToV2Participant(ctx context.Context, attendee *PastMeetingAt
 				"created_at", attendee.CreatedAt,
 				"attendee_id", attendee.ID,
 				"meeting_and_occurrence_id", attendee.MeetingAndOccurrenceID,
-			).WarnContext(ctx, "failed to parse created_at")
+			).WarnContext(ctx, "failed to parse created_at for attendee %s", attendee.ID)
 		} else {
 			pastMeetingParticipant.CreatedAt = &createdAt
 		}
@@ -1465,7 +1470,7 @@ func convertAttendeeToV2Participant(ctx context.Context, attendee *PastMeetingAt
 				"modified_at", attendee.ModifiedAt,
 				"attendee_id", attendee.ID,
 				"meeting_and_occurrence_id", attendee.MeetingAndOccurrenceID,
-			).WarnContext(ctx, "failed to parse modified_at")
+			).WarnContext(ctx, "failed to parse modified_at for attendee %s", attendee.ID)
 		} else {
 			pastMeetingParticipant.UpdatedAt = &modifiedAt
 		}
@@ -1490,9 +1495,10 @@ func convertAttendeeToV2Participant(ctx context.Context, attendee *PastMeetingAt
 			if err != nil {
 				logger.With(errKey, err,
 					"join_time", session.JoinTime,
+					"session_id", session.ParticipantUUID,
 					"attendee_id", attendee.ID,
 					"meeting_and_occurrence_id", attendee.MeetingAndOccurrenceID,
-				).WarnContext(ctx, "failed to parse join_time")
+				).WarnContext(ctx, "failed to parse join_time for attendee %s", attendee.ID)
 			} else {
 				participantSession.JoinTime = &joinTime
 			}
@@ -1503,9 +1509,10 @@ func convertAttendeeToV2Participant(ctx context.Context, attendee *PastMeetingAt
 			if err != nil {
 				logger.With(errKey, err,
 					"leave_time", session.LeaveTime,
+					"session_id", session.ParticipantUUID,
 					"attendee_id", attendee.ID,
 					"meeting_and_occurrence_id", attendee.MeetingAndOccurrenceID,
-				).WarnContext(ctx, "failed to parse leave_time")
+				).WarnContext(ctx, "failed to parse leave_time for attendee %s", attendee.ID)
 			} else {
 				participantSession.LeaveTime = &leaveTime
 			}
@@ -1538,14 +1545,12 @@ func convertMapToInputPastMeetingRecording(ctx context.Context, v1Data map[strin
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to marshal v1Data to JSON")
-		return nil, fmt.Errorf("failed to marshal v1Data to JSON: %w", err)
+		return nil, fmt.Errorf("failed to marshal v1Data to JSON for past meeting recording: %w", err)
 	}
 
 	// Unmarshal JSON bytes into PastMeetingRecordingInput struct
 	var recording PastMeetingRecordingInput
 	if err := json.Unmarshal(jsonBytes, &recording); err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into PastMeetingRecordingInput")
 		return nil, fmt.Errorf("failed to unmarshal JSON into PastMeetingRecordingInput: %w", err)
 	}
 
@@ -1620,30 +1625,29 @@ func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Dat
 		return
 	}
 
-	logger.With("key", key).DebugContext(ctx, "processing zoom past meeting recording update")
+	funcLogger := logger.With("key", key)
+
+	funcLogger.DebugContext(ctx, "processing zoom past meeting recording update")
 
 	// Convert the v1Data map to PastMeetingRecordingInput struct
 	recordingInput, err := convertMapToInputPastMeetingRecording(ctx, v1Data)
 	if err != nil {
-		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert v1Data to PastMeetingRecordingInput")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to PastMeetingRecordingInput")
 		return
 	}
 
 	// Extract the UID (MeetingAndOccurrenceID)
 	uid := recordingInput.MeetingAndOccurrenceID
 	if uid == "" {
-		logger.With("key", key).ErrorContext(ctx, "missing meeting_and_occurrence_id in past meeting recording data")
+		funcLogger.ErrorContext(ctx, "missing meeting_and_occurrence_id in past meeting recording data")
 		return
 	}
+	funcLogger = funcLogger.With("past_meeting_id", uid)
 
 	// Check if parent past meeting exists in mappings before proceeding.
-	if uid == "" {
-		logger.With("key", key).ErrorContext(ctx, "past meeting recording missing required parent past meeting ID")
-		return
-	}
 	pastMeetingMappingKey := fmt.Sprintf("v1_past_meetings.%s", uid)
 	if _, err := mappingsKV.Get(ctx, pastMeetingMappingKey); err != nil {
-		logger.With("past_meeting_id", uid).InfoContext(ctx, "skipping past meeting recording sync - parent past meeting not found in mappings")
+		funcLogger.InfoContext(ctx, "skipping past meeting recording sync - parent past meeting not found in mappings")
 		return
 	}
 
@@ -1657,7 +1661,7 @@ func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Dat
 	// Send recording indexer message
 	recordingTags := getPastMeetingRecordingTags(recordingInput)
 	if err := sendIndexerMessage(ctx, IndexV1PastMeetingRecordingSubject, indexerAction, recordingInput, recordingTags); err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send recording indexer message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send recording indexer message")
 		return
 	}
 
@@ -1671,20 +1675,20 @@ func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Dat
 	// Marshal recording access message
 	recordingAccessMsgBytes, err := json.Marshal(recordingAccessMsg)
 	if err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to marshal recording access message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal recording access message")
 		return
 	}
 
 	// Send recording access message
 	if err := sendAccessMessage(ctx, V1PastMeetingRecordingUpdateAccessSubject, recordingAccessMsgBytes); err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send recording access message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send recording access message")
 		return
 	}
 
 	// Send transcript indexer message
 	transcriptTags := getPastMeetingTranscriptTags(recordingInput)
 	if err := sendIndexerMessage(ctx, IndexV1PastMeetingTranscriptSubject, indexerAction, recordingInput, transcriptTags); err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send transcript indexer message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send transcript indexer message")
 		return
 	}
 
@@ -1698,23 +1702,23 @@ func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Dat
 	// Marshal transcript access message
 	transcriptAccessMsgBytes, err := json.Marshal(transcriptAccessMsg)
 	if err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to marshal transcript access message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal transcript access message")
 		return
 	}
 
 	// Send transcript access message
 	if err := sendAccessMessage(ctx, V1PastMeetingTranscriptUpdateAccessSubject, transcriptAccessMsgBytes); err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send transcript access message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send transcript access message")
 		return
 	}
 
 	if uid != "" {
 		if _, err := mappingsKV.Put(ctx, mappingKey, []byte("1")); err != nil {
-			logger.With(errKey, err, "uid", uid).WarnContext(ctx, "failed to store past meeting recording mapping")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to store past meeting recording mapping")
 		}
 	}
 
-	logger.With("uid", uid, "key", key).InfoContext(ctx, "successfully sent recording and transcript indexer and access messages")
+	funcLogger.InfoContext(ctx, "successfully sent recording and transcript indexer and access messages")
 }
 
 // PastMeetingSummaryAccessMessage is the schema for the data in the message sent to the fga-sync service.
@@ -1730,14 +1734,12 @@ func convertMapToInputPastMeetingSummary(ctx context.Context, v1Data map[string]
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to marshal v1Data to JSON")
-		return nil, fmt.Errorf("failed to marshal v1Data to JSON: %w", err)
+		return nil, fmt.Errorf("failed to marshal v1Data to JSON for past meeting summary: %w", err)
 	}
 
 	// Unmarshal JSON bytes into PastMeetingSummaryInput struct
 	var summary PastMeetingSummaryInput
 	if err := json.Unmarshal(jsonBytes, &summary); err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal JSON into PastMeetingSummaryInput")
 		return nil, fmt.Errorf("failed to unmarshal JSON into PastMeetingSummaryInput: %w", err)
 	}
 
@@ -1764,30 +1766,34 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 		return
 	}
 
-	logger.With("key", key).DebugContext(ctx, "processing zoom past meeting summary update")
+	funcLogger := logger.With("key", key)
+
+	funcLogger.DebugContext(ctx, "processing zoom past meeting summary update")
 
 	// Convert the v1Data map to PastMeetingSummaryInput struct
 	summaryInput, err := convertMapToInputPastMeetingSummary(ctx, v1Data)
 	if err != nil {
-		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to convert v1Data to PastMeetingSummaryInput")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to PastMeetingSummaryInput")
 		return
 	}
 
 	// Extract the UID (ID)
 	uid := summaryInput.ID
 	if uid == "" {
-		logger.With("key", key).ErrorContext(ctx, "missing id in past meeting summary data")
+		funcLogger.ErrorContext(ctx, "missing id in past meeting summary data")
 		return
 	}
+	funcLogger = funcLogger.With("summary_id", uid)
 
 	// Check if parent past meeting exists in mappings before proceeding.
 	if summaryInput.MeetingAndOccurrenceID == "" {
-		logger.With("summary_id", uid).ErrorContext(ctx, "past meeting summary missing required parent past meeting ID")
+		funcLogger.ErrorContext(ctx, "past meeting summary missing required parent past meeting ID")
 		return
 	}
+	funcLogger = funcLogger.With("past_meeting_id", summaryInput.MeetingAndOccurrenceID)
 	pastMeetingMappingKey := fmt.Sprintf("v1_past_meetings.%s", summaryInput.MeetingAndOccurrenceID)
 	if _, err := mappingsKV.Get(ctx, pastMeetingMappingKey); err != nil {
-		logger.With("past_meeting_id", summaryInput.MeetingAndOccurrenceID, "summary_id", uid).InfoContext(ctx, "skipping past meeting summary sync - parent past meeting not found in mappings")
+		funcLogger.InfoContext(ctx, "skipping past meeting summary sync - parent past meeting not found in mappings")
 		return
 	}
 
@@ -1801,7 +1807,7 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 	// Send summary indexer message
 	tags := getPastMeetingSummaryTags(summaryInput)
 	if err := sendIndexerMessage(ctx, IndexV1PastMeetingSummarySubject, indexerAction, summaryInput, tags); err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send summary indexer message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send summary indexer message")
 		return
 	}
 
@@ -1816,10 +1822,10 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 					aiSummaryAccess = aiSummaryAccessValue
 				}
 			} else {
-				logger.With(errKey, err, "meeting_and_occurrence_id", summaryInput.MeetingAndOccurrenceID).WarnContext(ctx, "failed to unmarshal past meeting data")
+				funcLogger.With(errKey, err).WarnContext(ctx, "failed to unmarshal past meeting data")
 			}
 		} else {
-			logger.With(errKey, err, "meeting_and_occurrence_id", summaryInput.MeetingAndOccurrenceID).WarnContext(ctx, "failed to fetch past meeting from KV bucket")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to fetch past meeting from KV bucket")
 		}
 	}
 
@@ -1832,21 +1838,21 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 	// Marshal summary access message
 	summaryAccessMsgBytes, err := json.Marshal(summaryAccessMsg)
 	if err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to marshal summary access message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal summary access message")
 		return
 	}
 
 	// Send summary access message
 	if err := sendAccessMessage(ctx, V1PastMeetingSummaryUpdateAccessSubject, summaryAccessMsgBytes); err != nil {
-		logger.With(errKey, err, "uid", uid, "key", key).ErrorContext(ctx, "failed to send summary access message")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send summary access message")
 		return
 	}
 
 	if uid != "" {
 		if _, err := mappingsKV.Put(ctx, mappingKey, []byte("1")); err != nil {
-			logger.With(errKey, err, "uid", uid).WarnContext(ctx, "failed to store past meeting summary mapping")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to store past meeting summary mapping")
 		}
 	}
 
-	logger.With("uid", uid, "meeting_and_occurrence_id", summaryInput.MeetingAndOccurrenceID, "key", key).InfoContext(ctx, "successfully sent summary indexer and access messages")
+	funcLogger.InfoContext(ctx, "successfully sent summary indexer and access messages")
 }
