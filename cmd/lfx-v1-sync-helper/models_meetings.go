@@ -309,9 +309,14 @@ type meetingInput struct {
 
 	// LastMailingListMembersSyncJobWarningCount is the total number of passed records with warnings in the last bulk insert job that was run to insert registrants
 	LastMailingListMembersSyncJobWarningCount int `json:"-"`
+
 	// UseUniqueICSUID is a flag that indicates if the meeting should use a unique event ID for the calendar event.
 	// Apply manually (generate uuid and store in this field) when a meeting has calendar issues, and we wish to use a separate unique uuid instead of the meeting ID.
 	UseUniqueICSUID string `json:"use_unique_ics_uid"` // this is a uuid
+
+	// ShowMeetingAttendees determines whether or not LFX One should show data about
+	// meeting attendees to each other
+	ShowMeetingAttendees bool `json:"show_meeting_attendees"`
 }
 
 // MarshalJSON custom marshaler to include integer fields that are excluded from unmarshaling
