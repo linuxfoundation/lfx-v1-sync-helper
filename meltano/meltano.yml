@@ -15,6 +15,9 @@ plugins:
     config:
       database: sfdc
       user: lfit
+      filter_schemas:
+      - platform
+      - salesforce
     select:
     - platform-collaboration__c.*
     - platform-community__c.*
