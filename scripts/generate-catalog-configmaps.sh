@@ -140,7 +140,6 @@ metadata:
   labels:
     app.kubernetes.io/name: lfx-v1-sync-helper
     app.kubernetes.io/component: meltano
-    lfx.linuxfoundation.org/tap: ${tap_name}
 data:
   catalog.json: |
     ${catalog_json}

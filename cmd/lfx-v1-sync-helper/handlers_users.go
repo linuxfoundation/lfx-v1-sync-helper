@@ -125,7 +125,7 @@ func updateUserAlternateEmails(ctx context.Context, userSfid, emailSfid string, 
 
 		// If we get here, there was an unexpected error.
 		logger.With("error", saveErr, "key", mappingKey, "attempt", attempt).
-			ErrorContext(ctx, "unexpected error during save operation")
+			WarnContext(ctx, "unexpected error during save operation")
 
 		if attempt == maxRetries {
 			logger.With("key", mappingKey, "maxRetries", maxRetries).

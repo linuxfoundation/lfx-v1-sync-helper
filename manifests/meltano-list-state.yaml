@@ -1,0 +1,56 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: meltano-list-state
+  namespace: v1-sync-helper
+  labels:
+    app.kubernetes.io/name: lfx-v1-sync-helper
+    app.kubernetes.io/component: meltano
+spec:
+  ttlSecondsAfterFinished: 600 # Clean up job after 10 minutes
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lfx-v1-sync-helper
+        app.kubernetes.io/component: meltano
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: meltano
+          image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/meltano:latest
+          imagePullPolicy: Always
+          workingDir: /app/meltano
+          args: ["state", "list"]
+          env:
+            # Environment (prod/staging/dev per meltano.yml "environments" list)
+            - name: MELTANO_ENVIRONMENT
+              value: "prod"
+            # S3 state backend (prod/staging/dev suffix from OpenTofu workspace names)
+            - name: MELTANO_STATE_BACKEND_URI
+              value: "s3://lfx-v2-meltano-state-prod"
+            # AWS configuration for DynamoDB access
+            - name: AWS_DEFAULT_REGION
+              value: "us-west-2"
+            - name: AWS_REGION
+              value: "us-west-2"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          # Health check - Meltano jobs don't typically have health endpoints
+          # but we can check if the process is running
+          livenessProbe:
+            exec:
+              command: ["pgrep", "-f", "meltano"]
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            failureThreshold: 3
+      # Use service account with appropriate permissions for AWS
+      serviceAccountName: v1-sync-helper-sa
