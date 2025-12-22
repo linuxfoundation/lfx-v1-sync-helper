@@ -33,7 +33,7 @@ jobs:
       - name: MegaLinter
         id: ml
         # Use the Cupcake flavor (Go and Python).
-        uses: oxsecurity/megalinter/flavors/cupcake@5a91fb06c83d0e69fbd23756d47438aa723b4a5a  # 8.7.0
+        uses: oxsecurity/megalinter/flavors/cupcake@62c799d895af9bcbca5eacfebca29d527f125a57  # 9.1.0
         env:
           # All available variables are described in documentation
           # https://megalinter.io/latest/configuration/

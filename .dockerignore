@@ -4,22 +4,22 @@
 .git
 .gitignore
 .dockerignore
-/bin/
-*.sh
-*.pem
-.env
-*.env
+**/bin
 
 # Helm chart dependencies
-/charts/*/charts/
-*.tgz
+charts/*/charts
+**/*.tgz
 
 # Local and temporary files
-.DS_Store
-.idea/
-.vscode/
-*.swp
-*~
+**/.DS_Store
+.idea
+.vscode
+**/*.swp
+**/*.out
+**/*~
+**/*.pem
+**/.env
+**/*.env
 
 # Rendered templates
 **/templates/*.rendered
@@ -30,19 +30,27 @@
 /megalinter-reports/
 
 # Python environment for meltano
-.venv/
-__pycache__/
-.mypy_cache/
-.ruff_cache/
+**/.venv
+**/venv
+**/.meltano
+**/__pycache__
+**/.mypy_cache
+**/.ruff_cache
+
+# More potential Meltano paths
+meltano/ui.cfg
+meltano/output
+meltano/transform/target
+meltano/transform/dbt_modules
+meltano/transform/logs
 
 # Documentation
-README.md
-*.md
+**/README.md
+**/*.md
 LICENSE*
 
 # Test files
-*_test.go
-testdata/
+**/*_test.go
 
 # Development files
 Makefile

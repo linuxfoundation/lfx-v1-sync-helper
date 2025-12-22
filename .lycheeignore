@@ -1,2 +1,2 @@
 # Ignore local Kubernetes paths.
-^https?://[a-zA-Z0-9.-]+\.svc\.cluster\.local
+^(https?|nats)://[a-zA-Z0-9.-]+\.svc\.cluster\.local

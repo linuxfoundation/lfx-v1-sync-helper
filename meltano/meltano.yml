@@ -15,6 +15,9 @@ plugins:
     config:
       database: sfdc
       user: lfit
+      filter_schemas:
+      - platform
+      - salesforce
     select:
     - platform-collaboration__c.*
     - platform-community__c.*
@@ -51,7 +54,7 @@ plugins:
     - salesforce-merged_user.createdbyid
     - salesforce-merged_user.lastmodifiedbyid
     metadata:
-      "*":
+      '*':
         replication-method: INCREMENTAL
         replication-key: lastmodifieddate
   - name: tap-dynamodb
@@ -71,40 +74,40 @@ plugins:
       - itx-zoom-meetings-registrants-v2
       - itx-zoom-meetings-invite-responses-v2
       metadata:
-        "*":
+        '*':
           # Setting the replication key allows conditional loads for
           # target-nats-kv, even though Meltano's tap-dynamodb doesn't support
           # INCREMENTAL or LOG_BASED replication methods.
           replication-key: modified_at
         itx-zoom-meetings-mappings-v2:
           # No timestamp field for this table.
-          replication-key: ""
+          replication-key: ''
         itx-zoom-past-meetings-mappings:
           # No timestamp field for this table.
-          replication-key: ""
+          replication-key: ''
       use_aws_env_vars: true
     schema:
       # Override auto-detected schema for alternate columns and datatypes that
       # weren't seen in the sample data.
       itx-zoom-meetings-registrants-v2:
         occurrence:
-          type: ["string", "null"]
+          type: [string, 'null']
       itx-zoom-meetings-v2:
         # Matches both `.recurrence` and `.updated_occurrences[].recurrence`.
-        "*recurrence.monthly_day":
-          type: ["integer", "null"]
-        "*recurrence.end_times":
-          type: ["integer", "null"]
+        '*recurrence.monthly_day':
+          type: [integer, 'null']
+        '*recurrence.end_times':
+          type: [integer, 'null']
         use_unique_ics_uid:
-          type: ["string", "null"]
+          type: [string, 'null']
       itx-zoom-past-meetings:
-        "*recurrence.monthly_day":
-          type: ["integer", "null"]
-        "*recurrence.end_times":
-          type: ["integer", "null"]
+        '*recurrence.monthly_day':
+          type: [integer, 'null']
+        '*recurrence.end_times':
+          type: [integer, 'null']
       itx-zoom-past-meetings-attendees:
         is_auto_matched:
-          type: ["boolean", "null"]
+          type: [boolean, 'null']
   loaders:
   - name: target-nats-kv
     namespace: target_nats_kv
@@ -123,6 +126,7 @@ plugins:
     - name: key_prefix
     - name: refresh_mode
       kind: options
+      value: newer
       options:
       - label: All
         value: all
@@ -130,7 +134,6 @@ plugins:
         value: same
       - label: Newer only
         value: newer
-      value: newer
     - name: validate_records
       kind: boolean
       value: true

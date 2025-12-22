@@ -24,15 +24,15 @@ This document analyzes the schema differences between LFX v1 (DynamoDB-based Zoo
 
 ### Meeting Entities
 
-| Feature | v1 Table | v2 Bucket | Migration Complexity |
-|---------|----------|-----------|---------------------|
-| Core meetings | `itx-zoom-meetings-v2` | `meetings` | **High** - Schema transformation |
-| Meeting settings | Embedded in core table | `meeting-settings` | **Medium** - Data extraction |
-| Registrants | `itx-zoom-meetings-registrants-v2` | `meeting-registrants` | **High** - Identity mapping |
-| Mappings | `itx-zoom-meetings-mappings-v2` | Embedded in `meetings` | **Medium** - Data restructuring |
-| Past meetings | `itx-zoom-past-meetings` | `past-meetings` | **Medium** - Schema alignment |
-| Attendees | `itx-zoom-past-meetings-attendees` | `past-meeting-participants` | **High** - Identity mapping |
-| Recordings | `itx-zoom-past-meetings-recordings` | `past-meeting-recordings` | **Low** - Minor schema changes |
+| Feature          | v1 Table                            | v2 Bucket                   | Migration Complexity             |
+|------------------|-------------------------------------|-----------------------------|----------------------------------|
+| Core meetings    | `itx-zoom-meetings-v2`              | `meetings`                  | **High** - Schema transformation |
+| Meeting settings | Embedded in core table              | `meeting-settings`          | **Medium** - Data extraction     |
+| Registrants      | `itx-zoom-meetings-registrants-v2`  | `meeting-registrants`       | **High** - Identity mapping      |
+| Mappings         | `itx-zoom-meetings-mappings-v2`     | Embedded in `meetings`      | **Medium** - Data restructuring  |
+| Past meetings    | `itx-zoom-past-meetings`            | `past-meetings`             | **Medium** - Schema alignment    |
+| Attendees        | `itx-zoom-past-meetings-attendees`  | `past-meeting-participants` | **High** - Identity mapping      |
+| Recordings       | `itx-zoom-past-meetings-recordings` | `past-meeting-recordings`   | **Low** - Minor schema changes   |
 
 ## Critical Identity Mapping Requirements
 
@@ -94,7 +94,7 @@ The following v1 entities contain platform IDs that require resolution to userna
 #### v1 `itx-zoom-meetings-v2` → v2 `meetings`
 
 **Direct Mappings:**
-```
+```text
 v1 Field → v2 Field
 topic → title
 agenda → description
@@ -115,12 +115,12 @@ recording_enabled → recording_enabled
 #### v1 `itx-zoom-meetings-registrants-v2` → v2 `meeting-registrants`
 
 **Identity Resolution Required:**
-```
+```text
 v1.user_id (platform ID) → v2.username OR v2.email
 ```
 
 **Field Mappings:**
-```
+```text
 v1 Field → v2 Field
 id → uid
 meeting_id → meeting_uid

@@ -1,0 +1,77 @@
+# Copyright The Linux Foundation and its contributors.
+# SPDX-License-Identifier: MIT
+
+# Build stage for dependencies and virtual environment.
+FROM ghcr.io/astral-sh/uv:0.9.18-python3.12-trixie-slim AS builder
+
+# Install git for tap-dynamodb plugin installation.
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set environment variables for uv optimization.
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_NO_INSTALLER_METADATA=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0
+
+WORKDIR /app
+
+# Install dependencies first (better caching).
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --locked --no-install-project --no-dev --no-editable
+
+# Copy meltano project directory.
+COPY meltano/ ./meltano/
+
+ENV MELTANO_CLI_DISABLE_VERSION_CHECK=1
+
+# Install meltano and project dependencies.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    cd meltano && uv run meltano install
+
+# Runtime stage with minimal dependencies.
+FROM python:3.12.12-slim-trixie
+
+# Create non-root user for security.
+RUN groupadd --system --gid 999 meltano && \
+    useradd --system --gid 999 --uid 999 --create-home meltano
+
+# Copy application and virtual environment from builder.
+COPY --from=builder --chown=meltano:meltano /app /app
+
+# Set PATH to include virtual environment.
+ENV PATH="/app/.venv/bin:$PATH" \
+    MELTANO_PROJECT_ROOT="/app/meltano" \
+    MELTANO_PROJECT_READONLY=1 \
+    MELTANO_CLI_DISABLE_VERSION_CHECK=1 \
+    MELTANO_CLI_LOG_FORMAT=json
+
+# Switch to non-root user.
+USER meltano:meltano
+
+# Set working directory to meltano project.
+WORKDIR /app/meltano
+
+# Requires passing parameters for different sync scenarios.
+# - PostgreSQL sync:
+#     docker run \
+#       ghcr.io/linuxfoundation/lfx-v1-sync-helper/meltano run --environment=dev \
+#       tap-postgres target-nats-kv
+# - DynamoDB sync:
+#     docker run -e TAP_DYNAMODB_TABLE_SCAN_KWARGS='...' \
+#       ghcr.io/linuxfoundation/lfx-v1-sync-helper/meltano run --environment=prod \
+#       tap-dynamodb target-nats-kv
+# ... and so on.
+ENTRYPOINT ["meltano"]
+
+# Default command shows help.
+CMD ["--help"]

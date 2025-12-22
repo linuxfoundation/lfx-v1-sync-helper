@@ -12,17 +12,17 @@ This document provides a comprehensive analysis of the NATS JetStream Key-Value 
 
 The LFX v2 Meeting Service uses the following NATS KV buckets:
 
-| Bucket Name | Entity Type | Description |
-|-------------|-------------|-------------|
-| `meetings` | MeetingBase | Core meeting information and configuration |
-| `meeting-settings` | MeetingSettings | Meeting organizers and administrative settings |
-| `meeting-registrants` | Registrant | Meeting registration records |
-| `meeting-rsvps` | RSVPResponse | RSVP responses for meetings |
-| `past-meetings` | PastMeeting | Historical meeting occurrence records |
-| `past-meeting-participants` | PastMeetingParticipant | Historical participant attendance data |
-| `past-meeting-recordings` | PastMeetingRecording | Meeting recording metadata and access URLs |
-| `past-meeting-transcripts` | PastMeetingTranscript | Meeting transcript content and metadata |
-| `past-meeting-summaries` | PastMeetingSummary | AI-generated meeting summaries |
+| Bucket Name                 | Entity Type            | Description                                    |
+|-----------------------------|------------------------|------------------------------------------------|
+| `meetings`                  | MeetingBase            | Core meeting information and configuration     |
+| `meeting-settings`          | MeetingSettings        | Meeting organizers and administrative settings |
+| `meeting-registrants`       | Registrant             | Meeting registration records                   |
+| `meeting-rsvps`             | RSVPResponse           | RSVP responses for meetings                    |
+| `past-meetings`             | PastMeeting            | Historical meeting occurrence records          |
+| `past-meeting-participants` | PastMeetingParticipant | Historical participant attendance data         |
+| `past-meeting-recordings`   | PastMeetingRecording   | Meeting recording metadata and access URLs     |
+| `past-meeting-transcripts`  | PastMeetingTranscript  | Meeting transcript content and metadata        |
+| `past-meeting-summaries`    | PastMeetingSummary     | AI-generated meeting summaries                 |
 
 ## Detailed Bucket Analysis
 
@@ -184,7 +184,7 @@ The service uses two key encoding approaches:
 
 The `KeyBuilder` utility provides consistent key generation:
 
-```
+```text
 // Entity keys
 registrant/{uid}
 

@@ -55,22 +55,22 @@ maxAckPending: 1000
 
 ### Environment Variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `NATS_URL` | No | NATS server URL (default: `nats://nats:4222`) |
-| `PROJECT_SERVICE_URL` | Yes | Project Service API URL |
-| `COMMITTEE_SERVICE_URL` | Yes | Committee Service API URL |
-| `HEIMDALL_CLIENT_ID` | No | Client ID for JWT claims (default: `v1_sync_helper`) |
-| `HEIMDALL_PRIVATE_KEY` | Yes | JWT private key (PEM format) for v2 services |
-| `HEIMDALL_KEY_ID` | No | JWT key ID (if not provided, fetches from JWKS) |
-| `HEIMDALL_JWKS_URL` | No | JWKS endpoint URL (default: cluster service) |
-| `AUTH0_TENANT` | Yes | Auth0 tenant name (without .auth0.com suffix) |
-| `AUTH0_CLIENT_ID` | Yes | Auth0 client ID for v1 API authentication |
-| `AUTH0_PRIVATE_KEY` | Yes | Auth0 private key (PEM format) for v1 API |
-| `LFX_API_GW` | No | LFX API Gateway URL (default: `https://api-gw.dev.platform.linuxfoundation.org/`) |
-| `PORT` | No | HTTP server port (default: `8080`) |
-| `BIND` | No | Interface to bind on (default: `*`) |
-| `DEBUG` | No | Enable debug logging (default: `false`) |
+| Variable                | Required | Description                                                                       |
+|-------------------------|----------|-----------------------------------------------------------------------------------|
+| `NATS_URL`              | No       | NATS server URL (default: `nats://nats:4222`)                                     |
+| `PROJECT_SERVICE_URL`   | Yes      | Project Service API URL                                                           |
+| `COMMITTEE_SERVICE_URL` | Yes      | Committee Service API URL                                                         |
+| `HEIMDALL_CLIENT_ID`    | No       | Client ID for JWT claims (default: `v1_sync_helper`)                              |
+| `HEIMDALL_PRIVATE_KEY`  | Yes      | JWT private key (PEM format) for v2 services                                      |
+| `HEIMDALL_KEY_ID`       | No       | JWT key ID (if not provided, fetches from JWKS)                                   |
+| `HEIMDALL_JWKS_URL`     | No       | JWKS endpoint URL (default: cluster service)                                      |
+| `AUTH0_TENANT`          | Yes      | Auth0 tenant name (without .auth0.com suffix)                                     |
+| `AUTH0_CLIENT_ID`       | Yes      | Auth0 client ID for v1 API authentication                                         |
+| `AUTH0_PRIVATE_KEY`     | Yes      | Auth0 private key (PEM format) for v1 API                                         |
+| `LFX_API_GW`            | No       | LFX API Gateway URL (default: `https://api-gw.dev.platform.linuxfoundation.org/`) |
+| `PORT`                  | No       | HTTP server port (default: `8080`)                                                |
+| `BIND`                  | No       | Interface to bind on (default: `*`)                                               |
+| `DEBUG`                 | No       | Enable debug logging (default: `false`)                                           |
 
 ### Setting authentication parameters
 

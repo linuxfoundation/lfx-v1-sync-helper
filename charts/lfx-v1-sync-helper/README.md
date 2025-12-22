@@ -100,16 +100,16 @@ The chart requires the following secrets to be created before installation (if t
 
 The following environment variables have defaults configured in the chart's `app.environment` section:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NATS_URL` | `nats://lfx-platform-nats.lfx.svc.cluster.local:4222` | NATS server URL |
-| `PROJECT_SERVICE_URL` | `http://lfx-v2-project-service.lfx.svc.cluster.local:8080` | Project Service API URL |
-| `COMMITTEE_SERVICE_URL` | `http://lfx-v2-committee-service.lfx.svc.cluster.local:8080` | Committee Service API URL |
-| `HEIMDALL_JWKS_URL` | `http://lfx-platform-heimdall.lfx.svc.cluster.local:4457/.well-known/jwks` | JWKS endpoint URL |
-| `LFX_API_GW` | `https://api-gw.dev.platform.linuxfoundation.org/` | LFX API Gateway URL |
-| `DEBUG` | `false` | Enable debug logging |
-| `PORT` | `8080` | HTTP server port |
-| `BIND` | `*` | Interface to bind on |
+| Variable                | Default                                                                    | Description               |
+|-------------------------|----------------------------------------------------------------------------|---------------------------|
+| `NATS_URL`              | `nats://lfx-platform-nats.lfx.svc.cluster.local:4222`                      | NATS server URL           |
+| `PROJECT_SERVICE_URL`   | `http://lfx-v2-project-service.lfx.svc.cluster.local:8080`                 | Project Service API URL   |
+| `COMMITTEE_SERVICE_URL` | `http://lfx-v2-committee-service.lfx.svc.cluster.local:8080`               | Committee Service API URL |
+| `HEIMDALL_JWKS_URL`     | `http://lfx-platform-heimdall.lfx.svc.cluster.local:4457/.well-known/jwks` | JWKS endpoint URL         |
+| `LFX_API_GW`            | `https://api-gw.dev.platform.linuxfoundation.org/`                         | LFX API Gateway URL       |
+| `DEBUG`                 | `false`                                                                    | Enable debug logging      |
+| `PORT`                  | `8080`                                                                     | HTTP server port          |
+| `BIND`                  | `*`                                                                        | Interface to bind on      |
 
 For a complete list of all supported environment variables, including required ones like `AUTH0_TENANT`, see the [v1-sync-helper README](../../cmd/lfx-v1-sync-helper/README.md#environment-variables).
 

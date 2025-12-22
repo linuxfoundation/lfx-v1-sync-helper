@@ -13,8 +13,8 @@ permissions:
   contents: read
 
 jobs:
-  publish:
-    name: Publish Main
+  publish-v1-sync-helper:
+    name: Publish v1-sync-helper Main
     runs-on: ubuntu-latest
     permissions:
       contents: read
