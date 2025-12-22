@@ -2286,5 +2286,5 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 
 func shouldShowMeetingAttendees(m meetingInput) bool {
 	allowedShowMeetingAttendeesSFDCIds := []string{"a0941000002wBz9AAE"}
-	return m.MeetingType == "board" && slices.Contains(allowedShowMeetingAttendeesSFDCIds, m.ProjectSFID)
+	return strings.EqualFold(m.MeetingType, "board") && slices.Contains(allowedShowMeetingAttendeesSFDCIds, m.ProjectSFID)
 }
