@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -175,6 +176,9 @@ func convertMapToInputMeeting(ctx context.Context, v1Data map[string]any) (*meet
 			meeting.ProjectUID = string(entry.Value())
 		}
 	}
+
+	// Set show_meeting_attendees (an attribute that does not exist in PCC)
+	meeting.ShowMeetingAttendees = shouldShowMeetingAttendees(meeting)
 
 	// Convert v1 named fields to v2 named fields.
 	if title, ok := v1Data["topic"].(string); ok && title != "" {
@@ -2278,4 +2282,9 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 	}
 
 	funcLogger.InfoContext(ctx, "successfully sent summary indexer and access messages")
+}
+
+func shouldShowMeetingAttendees(m meetingInput) bool {
+	allowedShowMeetingAttendeesSFDCIds := []string{"a0941000002wBz9AAE"}
+	return strings.EqualFold(m.MeetingType, "board") && slices.Contains(allowedShowMeetingAttendeesSFDCIds, m.ProjectSFID)
 }
