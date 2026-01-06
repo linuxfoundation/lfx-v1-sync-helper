@@ -1,6 +1,6 @@
 # LFX v1 Sync Helper Helm Chart
 
-This Helm chart deploys the LFX v1 Sync Helper service, which monitors NATS KV stores for v1 data and synchronizes it with the LFX v2 platform APIs, handling data transformation and conflict resolution.
+This Helm chart deploys the LFX v1 Sync Helper service, which monitors NATS KV stores for v1 data and synchronizes it with the LFX v2 platform APIs, handling data transformation and conflict resolution. The chart also includes an optional PostgreSQL WAL listener component for real-time database change streaming.
 
 ## Prerequisites
 
@@ -52,6 +52,13 @@ kubectl create secret generic v1-sync-helper-auth0-credentials \
     --from-literal=client_private_key="$(cat auth0-private-key.pem)" \
     -n lfx
 
+# Create PostgreSQL credentials secret (for wal-listener component)
+kubectl create secret generic postgres-credentials-ad-hoc \
+    --from-literal=host=your-postgres-host \
+    --from-literal=username=your-postgres-user \
+    --from-literal=password=your-postgres-password \
+    -n lfx
+
 # Create values.yaml with required AUTH0_TENANT
 cat > values.yaml << EOF
 app:
@@ -96,6 +103,16 @@ The chart requires the following secrets to be created before installation (if t
        -n lfx
    ```
 
+3. **PostgreSQL credentials** (default name: `postgres-credentials-ad-hoc`):
+   Required for the WAL listener component to connect to the PostgreSQL database.
+   ```bash
+   kubectl create secret generic postgres-credentials-ad-hoc \
+       --from-literal=host=your-postgres-host \
+       --from-literal=username=your-postgres-user \
+       --from-literal=password=your-postgres-password \
+       -n lfx
+   ```
+
 ### Environment Variables
 
 The following environment variables have defaults configured in the chart's `app.environment` section:
@@ -112,6 +129,49 @@ The following environment variables have defaults configured in the chart's `app
 | `BIND`                  | `*`                                                                        | Interface to bind on      |
 
 For a complete list of all supported environment variables, including required ones like `AUTH0_TENANT`, see the [v1-sync-helper README](../../cmd/lfx-v1-sync-helper/README.md#environment-variables).
+
+### WAL Listener Component
+
+The chart includes an optional PostgreSQL WAL (Write-Ahead Log) listener component that provides real-time streaming of database changes to NATS. This component is enabled by default and can be configured or disabled as needed.
+
+#### WAL Listener Configuration
+
+| Parameter                                      | Default                                              | Description                                |
+|-----------------------------------------------|------------------------------------------------------|--------------------------------------------|
+| `walListener.enabled`                         | `true`                                               | Enable/disable WAL listener deployment    |
+| `walListener.replicas`                        | `1`                                                  | Number of WAL listener replicas           |
+| `walListener.image.repository`                | `ihippik/wal-listener`                              | WAL listener container image              |
+| `walListener.image.tag`                       | `latest`                                            | WAL listener image tag                    |
+| `walListener.config.listener.slotName`        | `lfx_v2`                                            | PostgreSQL replication slot name          |
+| `walListener.config.database.secret.name`     | `postgres-credentials-ad-hoc`                       | Secret containing database credentials     |
+| `walListener.config.publisher.address`        | `lfx-platform-nats.lfx.svc.cluster.local:4222`     | NATS server address                       |
+| `walListener.config.publisher.topic`          | `wal_listener`                                      | NATS topic for publishing changes         |
+
+The WAL listener monitors the following PostgreSQL tables by default (matching the meltano.yml tap-postgres configuration):
+- `collaboration__c` (platform schema)
+- `community__c` (platform schema) 
+- `project__c` (salesforce schema)
+- `alternate_email__c` (salesforce schema)
+- `merged_user` (salesforce schema)
+
+To disable the WAL listener:
+```yaml
+walListener:
+  enabled: false
+```
+
+To customize monitored tables:
+```yaml
+walListener:
+  config:
+    listener:
+      filter:
+        tables:
+          your_table:
+            - insert
+            - update
+            - delete
+```
 
 ### Additional Configuration
 

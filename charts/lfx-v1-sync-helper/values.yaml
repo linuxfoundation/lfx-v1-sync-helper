@@ -73,9 +73,9 @@ nats:
     # storage is the storage type for the KV bucket
     storage: file
     # maxValueSize is the maximum size of a value in the KV bucket
-    maxValueSize: 10485760  # 10MB
+    maxValueSize: 10485760 # 10MB
     # maxBytes is the maximum number of bytes in the KV bucket
-    maxBytes: 10737418240  # 10GB
+    maxBytes: 10737418240 # 10GB
     # compression is a boolean to determine if the KV bucket should be compressed
     compression: true
 
@@ -94,9 +94,9 @@ nats:
     # storage is the storage type for the KV bucket
     storage: file
     # maxValueSize is the maximum size of a value in the KV bucket
-    maxValueSize: 10485760  # 10MB
+    maxValueSize: 10485760 # 10MB
     # maxBytes is the maximum number of bytes in the KV bucket
-    maxBytes: 2147483648  # 2GB
+    maxBytes: 2147483648 # 2GB
     # compression is a boolean to determine if the KV bucket should be compressed
     compression: true
 
@@ -124,3 +124,90 @@ auth0:
     clientIdKey: client_id
     # key in the secret which contains the Auth0 private key
     privateKeyKey: client_private_key
+
+# wal-listener is the configuration for the PostgreSQL WAL listener component
+walListener:
+  # enabled specifies whether the wal-listener should be deployed
+  enabled: true
+  # replicas is the number of wal-listener instances to run
+  replicas: 1
+  # image is the configuration for the wal-listener container image
+  image:
+    # repository is the container image repository
+    repository: ihippik/wal-listener
+    # tag is the container image tag
+    tag: latest
+    # pullPolicy is the image pull policy
+    pullPolicy: IfNotPresent
+  # config is the configuration for the wal-listener
+  config:
+    listener:
+      # serverPort is the port for health checks and monitoring
+      serverPort: 8080
+      # slotName is the PostgreSQL replication slot name
+      slotName: lfx_v2
+      # refreshConnection is the connection refresh interval
+      refreshConnection: 30s
+      # heartbeatInterval is the heartbeat interval
+      heartbeatInterval: 10s
+      # filter contains table filtering configuration
+      filter:
+        # tables is a map of table names to operations to listen for
+        # Default tables match those from meltano.yml tap-postgres configuration
+        tables:
+          collaboration__c:
+            - insert
+            - update
+            - delete
+          community__c:
+            - insert
+            - update
+            - delete
+          project__c:
+            - insert
+            - update
+            - delete
+          alternate_email__c:
+            - insert
+            - update
+            - delete
+          merged_user:
+            - insert
+            - update
+            - delete
+    logger:
+      # level is the logging level
+      level: info
+      # fmt is the log format
+      fmt: json
+    database:
+      # PostgreSQL database configuration
+      # Uses the same secret as meltano-el-postgres by default
+      secret:
+        # name is the name of the secret containing database credentials
+        name: postgres-credentials-ad-hoc
+        # hostKey is the key in the secret containing the database host
+        hostKey: host
+        # usernameKey is the key in the secret containing the database username
+        usernameKey: username
+        # passwordKey is the key in the secret containing the database password
+        passwordKey: password
+      # port is the database port
+      port: 5432
+      # name is the database name
+      name: sfdc
+    publisher:
+      # type is the publisher type (nats or kafka)
+      type: nats
+      # address is the NATS server address (matches meltano.yml default)
+      address: lfx-platform-nats.lfx.svc.cluster.local:4222
+      # topic is the NATS topic to publish to
+      topic: wal_listener
+  # resources is the resource configuration for the wal-listener container
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"

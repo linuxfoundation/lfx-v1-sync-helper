@@ -32,7 +32,7 @@ lfx-v1-sync-helper/
 │   ├── meltano.yml            # Main Meltano configuration
 │   └── load/target-nats-kv/   # Custom NATS KV target plugin
 ├── cmd/lfx-v1-sync-helper/    # Go microservice source
-├── charts/lfx-v1-sync-helper/ # Helm deployment charts
+├── charts/lfx-v1-sync-helper/ # Helm deployment charts (Chart.yaml version is dynamic on release)
 ├── docker/                    # Docker build configurations
 │   ├── Dockerfile.v1-sync-helper  # Go service container
 │   └── Dockerfile.meltano         # Python ETL container
