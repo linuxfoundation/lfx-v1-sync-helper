@@ -9,8 +9,9 @@ requires-python = ">=3.11"
 dependencies = [
     "adjust-precision-for-schema>=0.3.4",
     "jsonschema>=2.6.0",
-    "msgpack>=1.1.0",
+    "msgspec>=0.20.0",
     "nats-py>=2.10.0",
+    "simplejson>=3.17.0",
     "singer-python>=6.1.1",
 ]
 
@@ -37,8 +38,4 @@ follow_untyped_imports = true
 
 [[tool.mypy.overrides]]
 module = ["adjust_precision_for_schema.*"]
-follow_untyped_imports = true
-
-[[tool.mypy.overrides]]
-module = ["msgpack.*"]
 follow_untyped_imports = true

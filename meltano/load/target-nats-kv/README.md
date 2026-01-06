@@ -69,7 +69,7 @@ tap-something | target-nats-kv --config config-msgpack.json
 #### MessagePack Mode
 ```json
 {
-  "url": "nats://localhost:4222", 
+  "url": "nats://localhost:4222",
   "bucket": "my-data",
   "msgpack": true
 }
