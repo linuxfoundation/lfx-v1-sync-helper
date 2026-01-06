@@ -12,12 +12,11 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import jsonschema
-import msgpack
+import msgspec
 import nats
-import simplejson as json
+import simplejson
 import singer
 from adjust_precision_for_schema import adjust_decimal_precision_for_schema
-from jsonschema import Draft4Validator
 from nats.js.kv import KeyValue
 from singer.messages import (
     ActivateVersionMessage,
@@ -33,7 +32,8 @@ def emit_state(state: dict | None) -> None:
     """Emit the state to stdout in JSON format."""
     if state is None:
         return
-    line = json.dumps(state)
+    state_encoder = msgspec.json.Encoder(decimal_format="number")
+    line = state_encoder.encode(state).decode("utf-8")
     logger.debug("Emitting state %s", line)
     sys.stdout.write(f"{line}\n")
     sys.stdout.flush()
@@ -71,12 +71,16 @@ async def persist_messages(
     schemas: dict[str, dict] = {}
     key_properties: dict[str, list[str]] = {}
     bookmarks: dict[str, (list[str] | None)] = {}
-    validators: dict[str, Draft4Validator] = {}
+    validators: dict[str, jsonschema.Draft4Validator] = {}
+    json_encoder = msgspec.json.Encoder(decimal_format="number")
+    msgpack_encoder = msgspec.msgpack.Encoder(decimal_format="number")
+    json_decoder = msgspec.json.Decoder()
+    msgpack_decoder = msgspec.msgpack.Decoder()
 
     for message in next_singer_message():
         try:
             o = singer.parse_message(message)
-        except json.JSONDecodeError:
+        except simplejson.JSONDecodeError:
             logger.error("Unable to parse: %s", repr(message))
             raise
 
@@ -184,11 +188,10 @@ async def persist_messages(
                     # we don't know what format was used when the data was
                     # originally stored.
                     try:
-                        current_record = msgpack.unpackb(current.value, raw=False)
-                    except (msgpack.exceptions.ExtraData, ValueError):
+                        current_record = msgpack_decoder.decode(current.value)
+                    except (msgspec.DecodeError, ValueError):
                         # Fallback to JSON if msgpack fails.
-                        current_value = current.value.decode("utf-8")
-                        current_record = json.loads(current_value)
+                        current_record = json_decoder.decode(current.value)
 
                     # Check if the record was deleted.
                     if "_sdc_deleted_at" in current_record:
@@ -246,9 +249,9 @@ async def persist_messages(
                     if should_update:
                         # Update with revision
                         if use_msgpack:
-                            value = msgpack.packb(o.record)
+                            value = msgpack_encoder.encode(o.record)
                         else:
-                            value = json.dumps(o.record).encode("utf-8")
+                            value = json_encoder.encode(o.record)
                         await kv_client.update(
                             key=key,
                             value=value,
@@ -269,9 +272,9 @@ async def persist_messages(
                 except nats.js.errors.KeyNotFoundError:
                     # Key doesn't exist, create it.
                     if use_msgpack:
-                        value = msgpack.packb(o.record)
+                        value = msgpack_encoder.encode(o.record)
                     else:
-                        value = json.dumps(o.record).encode("utf-8")
+                        value = json_encoder.encode(o.record)
                     await kv_client.create(
                         key=key,
                         value=value,
@@ -280,9 +283,9 @@ async def persist_messages(
                 # User has requested "full" sync, so use "put" without
                 # data checks.
                 if use_msgpack:
-                    value = msgpack.packb(o.record)
+                    value = msgpack_encoder.encode(o.record)
                 else:
-                    value = json.dumps(o.record).encode("utf-8")
+                    value = json_encoder.encode(o.record)
                 await kv_client.put(
                     key=key,
                     value=value,
@@ -296,8 +299,8 @@ async def persist_messages(
             stream = o.stream
             schemas[stream] = o.schema
             adjust_decimal_precision_for_schema(schemas[stream])
+            validators[stream] = jsonschema.Draft4Validator(o.schema)
             bookmarks[stream] = o.bookmark_properties
-            validators[stream] = Draft4Validator(o.schema)
             key_properties[stream] = o.key_properties
         elif isinstance(o, ActivateVersionMessage):
             logger.warning(
@@ -358,8 +361,9 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.config:
-        with open(args.config) as input_json:
-            config = json.load(input_json)
+        config_decoder = msgspec.json.Decoder()
+        with open(args.config, "rb") as input_json:
+            config = config_decoder.decode(input_json.read())
     else:
         config = {}
 
