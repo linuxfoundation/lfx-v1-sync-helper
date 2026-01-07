@@ -1,6 +1,6 @@
 # Data sync components for LFX One
 
-This repository contains tools and services for synchronizing data between LFX v1 and LFX One (v2) platforms. This solution uses Meltano for data replication into the v2 ecosystem, after which a sync helper service handles data mapping and ingestion.
+This repository contains tools and services for synchronizing data between LFX v1 and LFX One (v2) platforms. This solution uses Meltano for data extraction and loading, a WAL listener for real-time PostgreSQL change streaming, and a sync helper service that handles data mapping and ingestion into the v2 ecosystem.
 
 ## Overview
 
@@ -69,12 +69,12 @@ Data extraction and loading pipeline that extracts data from LFX v1 sources (Dyn
 Go service that monitors NATS KV stores for replicated v1 data and synchronizes it with the LFX v2 platform APIs, handling data transformation and conflict resolution.
 
 ### [Helm charts](./charts/lfx-v1-sync-helper/README.md)
-Kubernetes deployment manifests for the v1-sync-helper service, providing scalable deployment options for production environments.
+Kubernetes deployment manifests for the custom app service and WAL listener component, providing scalable deployment options for production environments.
 
 ## Architecture Diagrams
 
 Regarding the following diagrams:
-- The planned realtime sync for PostgreSQL is included in the diagrams.
+
 - The DynamoDB source (incremental or realtime) is not currently included in the diagrams.
 - The planned bidirectional sync (LFX One changes back to v1) is included in the diagrams.
 - "Projects API" is representative of most data entities. However, v1 Meetings push straight to OpenSearch and OpenFGA (via platform services)—this is not shown.
