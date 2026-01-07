@@ -1,40 +1,40 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
 ---
-{{- if .Values.nats.kv_bucket_v1_objects.creation }}
+{{- if .Values.natsResources.kv_bucket_v1_objects.creation }}
 apiVersion: jetstream.nats.io/v1beta2
 kind: KeyValue
 metadata:
-  name: {{ .Values.nats.kv_bucket_v1_objects.name }}
+  name: {{ .Values.natsResources.kv_bucket_v1_objects.name }}
   namespace: lfx
-  {{- if .Values.nats.kv_bucket_v1_objects.keep }}
+  {{- if .Values.natsResources.kv_bucket_v1_objects.keep }}
   annotations:
     "helm.sh/resource-policy": keep
   {{- end }}
 spec:
-  bucket: {{ .Values.nats.kv_bucket_v1_objects.name }}
-  history: {{ .Values.nats.kv_bucket_v1_objects.history }}
-  storage: {{ .Values.nats.kv_bucket_v1_objects.storage }}
-  maxValueSize: {{ .Values.nats.kv_bucket_v1_objects.maxValueSize }}
-  maxBytes: {{ .Values.nats.kv_bucket_v1_objects.maxBytes }}
-  compression: {{ .Values.nats.kv_bucket_v1_objects.compression }}
+  bucket: {{ .Values.natsResources.kv_bucket_v1_objects.name }}
+  history: {{ .Values.natsResources.kv_bucket_v1_objects.history }}
+  storage: {{ .Values.natsResources.kv_bucket_v1_objects.storage }}
+  maxValueSize: {{ .Values.natsResources.kv_bucket_v1_objects.maxValueSize }}
+  maxBytes: {{ .Values.natsResources.kv_bucket_v1_objects.maxBytes }}
+  compression: {{ .Values.natsResources.kv_bucket_v1_objects.compression }}
 {{- end }}
 ---
-{{- if .Values.nats.kv_bucket_v1_mappings.creation }}
+{{- if .Values.natsResources.kv_bucket_v1_mappings.creation }}
 apiVersion: jetstream.nats.io/v1beta2
 kind: KeyValue
 metadata:
-  name: {{ .Values.nats.kv_bucket_v1_mappings.name }}
+  name: {{ .Values.natsResources.kv_bucket_v1_mappings.name }}
   namespace: lfx
-  {{- if .Values.nats.kv_bucket_v1_mappings.keep }}
+  {{- if .Values.natsResources.kv_bucket_v1_mappings.keep }}
   annotations:
     "helm.sh/resource-policy": keep
   {{- end }}
 spec:
-  bucket: {{ .Values.nats.kv_bucket_v1_mappings.name }}
-  history: {{ .Values.nats.kv_bucket_v1_mappings.history }}
-  storage: {{ .Values.nats.kv_bucket_v1_mappings.storage }}
-  maxValueSize: {{ .Values.nats.kv_bucket_v1_mappings.maxValueSize }}
-  maxBytes: {{ .Values.nats.kv_bucket_v1_mappings.maxBytes }}
-  compression: {{ .Values.nats.kv_bucket_v1_mappings.compression }}
+  bucket: {{ .Values.natsResources.kv_bucket_v1_mappings.name }}
+  history: {{ .Values.natsResources.kv_bucket_v1_mappings.history }}
+  storage: {{ .Values.natsResources.kv_bucket_v1_mappings.storage }}
+  maxValueSize: {{ .Values.natsResources.kv_bucket_v1_mappings.maxValueSize }}
+  maxBytes: {{ .Values.natsResources.kv_bucket_v1_mappings.maxBytes }}
+  compression: {{ .Values.natsResources.kv_bucket_v1_mappings.compression }}
 {{- end }}

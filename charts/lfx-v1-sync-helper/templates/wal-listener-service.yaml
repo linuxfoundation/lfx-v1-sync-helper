@@ -1,0 +1,23 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+{{- if .Values.walListener.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}-wal-listener
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Chart.Name }}
+    component: wal-listener
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.walListener.config.listener.serverPort }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app: {{ .Chart.Name }}
+    component: wal-listener
+{{- end }}

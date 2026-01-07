@@ -1,0 +1,26 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+{{- if .Values.walListener.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Chart.Name }}-wal-listener-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Chart.Name }}
+    component: wal-listener
+data:
+  config.yml: |
+    # Most configuration is provided via environment variables with WAL_ prefix.
+    # Only table filter configuration is specified here as it requires complex YAML structure.
+    listener:
+      filter:
+        tables:
+          {{- range $table, $operations := .Values.walListener.config.listener.filter.tables }}
+          {{ $table }}:
+            {{- range $operation := $operations }}
+            - {{ $operation }}
+            {{- end }}
+          {{- end }}
+{{- end }}
