@@ -57,6 +57,34 @@ natsResources:
     # compression is a boolean to determine if the KV bucket should be compressed
     compression: true
 
+  # stream_wal_listener is the configuration for the JetStream stream for wal-listener events
+  stream_wal_listener:
+    # creation is a boolean to determine if the JetStream stream should be created via the helm chart.
+    # set it to false if you want to use an existing stream.
+    creation: true
+    # keep is a boolean to determine if the stream should be preserved during helm uninstall
+    # set it to false if you want the stream to be deleted when the chart is uninstalled
+    keep: true
+    # name is the name of the JetStream stream for wal-listener events
+    name: wal_listener
+    # subjects is the list of subjects this stream will subscribe to
+    subjects:
+      - wal_listener.*
+    # storage is the storage type for the stream
+    storage: file
+    # retention is the retention policy type: "limits", "interest", or "workqueue"
+    retention: limits
+    # maxAge is the maximum age of messages in the stream (uses time.ParseDuration() format)
+    maxAge: 336h # 2 weeks
+    # maxBytes is the maximum number of bytes in the stream (-1 for unlimited)
+    maxBytes: -1
+    # maxMsgs is the maximum number of messages in the stream (-1 for unlimited)
+    maxMsgs: -1
+    # replicas is the number of replicas for the stream (1 for single instance)
+    replicas: 1
+    # compression can be "s2" or "none" (s2 is default)
+    compression: s2
+
 # app is the configuration for the application
 app:
   # replicas is the number of service instances to run for horizontal scaling

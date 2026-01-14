@@ -38,3 +38,28 @@ spec:
   maxBytes: {{ .Values.natsResources.kv_bucket_v1_mappings.maxBytes }}
   compression: {{ .Values.natsResources.kv_bucket_v1_mappings.compression }}
 {{- end }}
+---
+{{- if .Values.natsResources.stream_wal_listener.creation }}
+apiVersion: jetstream.nats.io/v1beta2
+kind: Stream
+metadata:
+  name: {{ .Values.natsResources.stream_wal_listener.name | replace "_" "-" }}
+  namespace: lfx
+  {{- if .Values.natsResources.stream_wal_listener.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+spec:
+  name: {{ .Values.natsResources.stream_wal_listener.name }}
+  subjects:
+  {{- range .Values.natsResources.stream_wal_listener.subjects }}
+    - {{ . }}
+  {{- end }}
+  storage: {{ .Values.natsResources.stream_wal_listener.storage }}
+  retention: {{ .Values.natsResources.stream_wal_listener.retention }}
+  maxAge: {{ .Values.natsResources.stream_wal_listener.maxAge }}
+  maxBytes: {{ .Values.natsResources.stream_wal_listener.maxBytes }}
+  maxMsgs: {{ .Values.natsResources.stream_wal_listener.maxMsgs }}
+  replicas: {{ .Values.natsResources.stream_wal_listener.replicas }}
+  compression: {{ .Values.natsResources.stream_wal_listener.compression }}
+{{- end }}
