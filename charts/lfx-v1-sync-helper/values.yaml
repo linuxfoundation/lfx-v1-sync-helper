@@ -125,6 +125,10 @@ app:
     # LFX_API_GW is optional - LFX API Gateway URL
     LFX_API_GW:
       value: https://api-gw.dev.platform.linuxfoundation.org/
+    # USE_MSGPACK is optional - Use MessagePack encoding for KV bucket values (default: false for JSON)
+    # Accepts truthy values: "true", "yes", "t", "y", "1" (case-insensitive)
+    USE_MSGPACK:
+      value: "false"
 
   # heimdall is the configuration for JWT impersonation of Heimdall-authorized
   # principals for v1 data ingest.
