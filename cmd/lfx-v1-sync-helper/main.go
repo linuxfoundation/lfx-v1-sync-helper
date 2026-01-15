@@ -220,7 +220,7 @@ func main() {
 	}
 
 	// Start consuming KV updates using the JetStream consumer with error handling.
-	kvConsumerCtx, err := consumer.Consume(kvMessageHandler, jetstream.ConsumeErrHandler(func(consCtx jetstream.ConsumeContext, err error) {
+	kvConsumerCtx, err := consumer.Consume(kvMessageHandler, jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
 		logger.With(errKey, err).Error("KV consumer error encountered")
 	}))
 	if err != nil {
@@ -251,7 +251,7 @@ func main() {
 	}
 
 	// Start consuming WAL listener messages with error handling.
-	walConsumerCtx, err := walConsumer.Consume(walIngestHandler, jetstream.ConsumeErrHandler(func(consCtx jetstream.ConsumeContext, err error) {
+	walConsumerCtx, err := walConsumer.Consume(walIngestHandler, jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
 		logger.With(errKey, err).Error("WAL consumer error encountered")
 	}))
 	if err != nil {

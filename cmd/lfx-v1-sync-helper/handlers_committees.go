@@ -755,15 +755,6 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID s
 		}
 	}
 
-	// Map GAC-specific fields.
-	if country, ok := v1Data["country"].(string); ok && country != "" {
-		payload.Country = &country
-	}
-
-	if agency, ok := v1Data["agency"].(string); ok && agency != "" {
-		payload.Agency = &agency
-	}
-
 	// Map organization information.
 	if accountSFID, ok := v1Data["account__c"].(string); ok && accountSFID != "" {
 		// Look up organization information from v1 Organization Service.

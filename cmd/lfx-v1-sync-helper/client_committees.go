@@ -182,9 +182,7 @@ func committeeMembersEqual(current *committeeservice.CommitteeMemberFullWithRead
 		stringPtrToString(current.LastName) != stringPtrToString(update.LastName) ||
 		stringPtrToString(current.JobTitle) != stringPtrToString(update.JobTitle) ||
 		current.AppointedBy != update.AppointedBy ||
-		current.Status != update.Status ||
-		stringPtrToString(current.Agency) != stringPtrToString(update.Agency) ||
-		stringPtrToString(current.Country) != stringPtrToString(update.Country) {
+		current.Status != update.Status {
 		return false
 	}
 
