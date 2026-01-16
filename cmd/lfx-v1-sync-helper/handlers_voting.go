@@ -21,33 +21,7 @@ const (
 
 	// IndexIndividualVoteSubject is the subject for the individual vote indexing.
 	IndexIndividualVoteSubject = "lfx.index.individual_vote"
-
-	// UpdateAccessSubject is the subject for the fga-sync access control updates.
-	UpdateAccessSubject = "lfx.fga-sync.update_access"
 )
-
-// GenericFGAMessage is the universal message format for all FGA operations.
-// This allows clients to send resource-agnostic messages without needing
-// to know about resource-specific NATS subjects or message formats.
-type GenericFGAMessage struct {
-	ObjectType string                 `json:"object_type"` // e.g., "committee", "project", "meeting"
-	Operation  string                 `json:"operation"`   // e.g., "update_access", "member_put"
-	Data       map[string]interface{} `json:"data"`        // Operation-specific payload
-}
-
-// GenericAccessData represents the data field for update_access operations
-type GenericAccessData struct {
-	UID              string              `json:"uid"`
-	Public           bool                `json:"public"`
-	Relations        map[string][]string `json:"relations"`         // relation_name → [usernames]
-	References       map[string][]string `json:"references"`        // relation_name → [object_uids]
-	ExcludeRelations []string            `json:"exclude_relations"` // Optional: relations managed elsewhere
-}
-
-// GenericDeleteData represents the data field for delete_access operations
-type GenericDeleteData struct {
-	UID string `json:"uid"`
-}
 
 // sendVoteIndexerMessage sends the message to the NATS server for the vote indexer.
 func sendVoteIndexerMessage(ctx context.Context, subject string, action indexerConstants.MessageAction, data InputVote) error {
@@ -141,6 +115,8 @@ func sendVoteAccessMessage(vote InputVote) error {
 }
 
 func convertMapToInputVote(ctx context.Context, v1Data map[string]any) (*InputVote, error) {
+	funcLogger := logger.With("handler", "vote")
+
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
@@ -180,16 +156,31 @@ func convertMapToInputVote(ctx context.Context, v1Data map[string]any) (*InputVo
 	if pollDB.TotalVotingRequestInvitations != "" {
 		if val, err := strconv.Atoi(pollDB.TotalVotingRequestInvitations); err == nil {
 			vote.TotalVotingRequestInvitations = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "total_voting_request_invitations").
+				With("value", pollDB.TotalVotingRequestInvitations).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 	if pollDB.NumResponseReceived != "" {
 		if val, err := strconv.Atoi(pollDB.NumResponseReceived); err == nil {
 			vote.NumResponseReceived = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "num_response_received").
+				With("value", pollDB.NumResponseReceived).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 	if pollDB.NumWinners != "" {
 		if val, err := strconv.Atoi(pollDB.NumWinners); err == nil {
 			vote.NumWinners = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "num_winners").
+				With("value", pollDB.NumWinners).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 
@@ -198,6 +189,11 @@ func convertMapToInputVote(ctx context.Context, v1Data map[string]any) (*InputVo
 		projectMappingKey := fmt.Sprintf("project.sfid.%s", pollDB.ProjectID)
 		if entry, err := mappingsKV.Get(ctx, projectMappingKey); err == nil {
 			vote.ProjectUID = string(entry.Value())
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "project_id").
+				With("value", pollDB.ProjectID).
+				WarnContext(ctx, "failed to get v2 project UID from v1 project ID")
 		}
 	}
 
@@ -206,6 +202,11 @@ func convertMapToInputVote(ctx context.Context, v1Data map[string]any) (*InputVo
 		committeeMappingKey := fmt.Sprintf("committee.sfid.%s", pollDB.CommitteeID)
 		if entry, err := mappingsKV.Get(ctx, committeeMappingKey); err == nil {
 			vote.CommitteeUID = string(entry.Value())
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "committee_id").
+				With("value", pollDB.CommitteeID).
+				WarnContext(ctx, "failed to get v2 committee UID from v1 committee ID")
 		}
 	}
 
@@ -371,6 +372,8 @@ func sendIndividualVoteAccessMessage(data IndividualVoteInput) error {
 }
 
 func convertMapToInputIndividualVote(ctx context.Context, v1Data map[string]any) (*IndividualVoteInput, error) {
+	funcLogger := logger.With("handler", "individual_vote")
+
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
@@ -437,6 +440,11 @@ func convertMapToInputIndividualVote(ctx context.Context, v1Data map[string]any)
 			if rc.ChoiceRank != "" {
 				if val, err := strconv.Atoi(rc.ChoiceRank); err == nil {
 					rankedChoiceInput.ChoiceRank = val
+				} else {
+					funcLogger.With(errKey, err).
+						With("field", "choice_rank").
+						With("value", rc.ChoiceRank).
+						WarnContext(ctx, "failed to convert string to int")
 				}
 			}
 			pollAnswerInput.RankedUserChoice = append(pollAnswerInput.RankedUserChoice, rankedChoiceInput)
@@ -450,6 +458,11 @@ func convertMapToInputIndividualVote(ctx context.Context, v1Data map[string]any)
 		projectMappingKey := fmt.Sprintf("project.sfid.%s", voteDB.ProjectID)
 		if entry, err := mappingsKV.Get(ctx, projectMappingKey); err == nil {
 			individualVote.ProjectUID = string(entry.Value())
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "project_id").
+				With("value", voteDB.ProjectID).
+				WarnContext(ctx, "failed to get v2 project UID from v1 project ID")
 		}
 	}
 

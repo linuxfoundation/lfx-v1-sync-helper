@@ -161,6 +161,8 @@ func sendSurveyAccessMessage(survey SurveyInput) error {
 }
 
 func convertMapToInputSurvey(ctx context.Context, v1Data map[string]any) (*SurveyInput, error) {
+	funcLogger := logger.With("handler", "survey")
+
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
@@ -204,56 +206,111 @@ func convertMapToInputSurvey(ctx context.Context, v1Data map[string]any) (*Surve
 	if surveyDB.SurveyReminderRateDays != "" {
 		if val, err := strconv.Atoi(surveyDB.SurveyReminderRateDays); err == nil {
 			survey.SurveyReminderRateDays = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "survey_reminder_rate_days").
+				With("value", surveyDB.SurveyReminderRateDays).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 	if surveyDB.NPSValue != "" {
 		if val, err := strconv.Atoi(surveyDB.NPSValue); err == nil {
 			survey.NPSValue = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "nps_value").
+				With("value", surveyDB.NPSValue).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 	if surveyDB.NumPromoters != "" {
 		if val, err := strconv.Atoi(surveyDB.NumPromoters); err == nil {
 			survey.NumPromoters = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "num_promoters").
+				With("value", surveyDB.NumPromoters).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 	if surveyDB.NumPassives != "" {
 		if val, err := strconv.Atoi(surveyDB.NumPassives); err == nil {
 			survey.NumPassives = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "num_passives").
+				With("value", surveyDB.NumPassives).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 	if surveyDB.NumDetractors != "" {
 		if val, err := strconv.Atoi(surveyDB.NumDetractors); err == nil {
 			survey.NumDetractors = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "num_detractors").
+				With("value", surveyDB.NumDetractors).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 	if surveyDB.TotalRecipients != "" {
 		if val, err := strconv.Atoi(surveyDB.TotalRecipients); err == nil {
 			survey.TotalRecipients = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "total_recipients").
+				With("value", surveyDB.TotalRecipients).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 	if surveyDB.TotalSentRecipients != "" {
 		if val, err := strconv.Atoi(surveyDB.TotalSentRecipients); err == nil {
 			survey.TotalSentRecipients = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "total_sent_recipients").
+				With("value", surveyDB.TotalSentRecipients).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 	if surveyDB.TotalResponses != "" {
 		if val, err := strconv.Atoi(surveyDB.TotalResponses); err == nil {
 			survey.TotalResponses = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "total_responses").
+				With("value", surveyDB.TotalResponses).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 	if surveyDB.TotalRecipientsOpened != "" {
 		if val, err := strconv.Atoi(surveyDB.TotalRecipientsOpened); err == nil {
 			survey.TotalRecipientsOpened = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "total_recipients_opened").
+				With("value", surveyDB.TotalRecipientsOpened).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 	if surveyDB.TotalRecipientsClicked != "" {
 		if val, err := strconv.Atoi(surveyDB.TotalRecipientsClicked); err == nil {
 			survey.TotalRecipientsClicked = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "total_recipients_clicked").
+				With("value", surveyDB.TotalRecipientsClicked).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 	if surveyDB.TotalDeliveryErrors != "" {
 		if val, err := strconv.Atoi(surveyDB.TotalDeliveryErrors); err == nil {
 			survey.TotalDeliveryErrors = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "total_delivery_errors").
+				With("value", surveyDB.TotalDeliveryErrors).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 
@@ -270,51 +327,111 @@ func convertMapToInputSurvey(ctx context.Context, v1Data map[string]any) (*Surve
 		if committee.NPSValue != "" {
 			if val, err := strconv.Atoi(committee.NPSValue); err == nil {
 				committeeInput.NPSValue = val
+			} else {
+				funcLogger.With(errKey, err).
+					With("field", "committee.nps_value").
+					With("value", committee.NPSValue).
+					With("committee_id", committee.CommitteeID).
+					WarnContext(ctx, "failed to convert string to int")
 			}
 		}
 		if committee.NumPromoters != "" {
 			if val, err := strconv.Atoi(committee.NumPromoters); err == nil {
 				committeeInput.NumPromoters = val
+			} else {
+				funcLogger.With(errKey, err).
+					With("field", "committee.num_promoters").
+					With("value", committee.NumPromoters).
+					With("committee_id", committee.CommitteeID).
+					WarnContext(ctx, "failed to convert string to int")
 			}
 		}
 		if committee.NumPassives != "" {
 			if val, err := strconv.Atoi(committee.NumPassives); err == nil {
 				committeeInput.NumPassives = val
+			} else {
+				funcLogger.With(errKey, err).
+					With("field", "committee.num_passives").
+					With("value", committee.NumPassives).
+					With("committee_id", committee.CommitteeID).
+					WarnContext(ctx, "failed to convert string to int")
 			}
 		}
 		if committee.NumDetractors != "" {
 			if val, err := strconv.Atoi(committee.NumDetractors); err == nil {
 				committeeInput.NumDetractors = val
+			} else {
+				funcLogger.With(errKey, err).
+					With("field", "committee.num_detractors").
+					With("value", committee.NumDetractors).
+					With("committee_id", committee.CommitteeID).
+					WarnContext(ctx, "failed to convert string to int")
 			}
 		}
 		if committee.TotalRecipients != "" {
 			if val, err := strconv.Atoi(committee.TotalRecipients); err == nil {
 				committeeInput.TotalRecipients = val
+			} else {
+				funcLogger.With(errKey, err).
+					With("field", "committee.total_recipients").
+					With("value", committee.TotalRecipients).
+					With("committee_id", committee.CommitteeID).
+					WarnContext(ctx, "failed to convert string to int")
 			}
 		}
 		if committee.TotalSentRecipients != "" {
 			if val, err := strconv.Atoi(committee.TotalSentRecipients); err == nil {
 				committeeInput.TotalSentRecipients = val
+			} else {
+				funcLogger.With(errKey, err).
+					With("field", "committee.total_sent_recipients").
+					With("value", committee.TotalSentRecipients).
+					With("committee_id", committee.CommitteeID).
+					WarnContext(ctx, "failed to convert string to int")
 			}
 		}
 		if committee.TotalResponses != "" {
 			if val, err := strconv.Atoi(committee.TotalResponses); err == nil {
 				committeeInput.TotalResponses = val
+			} else {
+				funcLogger.With(errKey, err).
+					With("field", "committee.total_responses").
+					With("value", committee.TotalResponses).
+					With("committee_id", committee.CommitteeID).
+					WarnContext(ctx, "failed to convert string to int")
 			}
 		}
 		if committee.TotalRecipientsOpened != "" {
 			if val, err := strconv.Atoi(committee.TotalRecipientsOpened); err == nil {
 				committeeInput.TotalRecipientsOpened = val
+			} else {
+				funcLogger.With(errKey, err).
+					With("field", "committee.total_recipients_opened").
+					With("value", committee.TotalRecipientsOpened).
+					With("committee_id", committee.CommitteeID).
+					WarnContext(ctx, "failed to convert string to int")
 			}
 		}
 		if committee.TotalRecipientsClicked != "" {
 			if val, err := strconv.Atoi(committee.TotalRecipientsClicked); err == nil {
 				committeeInput.TotalRecipientsClicked = val
+			} else {
+				funcLogger.With(errKey, err).
+					With("field", "committee.total_recipients_clicked").
+					With("value", committee.TotalRecipientsClicked).
+					With("committee_id", committee.CommitteeID).
+					WarnContext(ctx, "failed to convert string to int")
 			}
 		}
 		if committee.TotalDeliveryErrors != "" {
 			if val, err := strconv.Atoi(committee.TotalDeliveryErrors); err == nil {
 				committeeInput.TotalDeliveryErrors = val
+			} else {
+				funcLogger.With(errKey, err).
+					With("field", "committee.total_delivery_errors").
+					With("value", committee.TotalDeliveryErrors).
+					With("committee_id", committee.CommitteeID).
+					WarnContext(ctx, "failed to convert string to int")
 			}
 		}
 
@@ -323,6 +440,11 @@ func convertMapToInputSurvey(ctx context.Context, v1Data map[string]any) (*Surve
 			committeeMappingKey := fmt.Sprintf("committee.sfid.%s", committee.CommitteeID)
 			if entry, err := mappingsKV.Get(ctx, committeeMappingKey); err == nil {
 				committeeInput.CommitteeUID = string(entry.Value())
+			} else {
+				funcLogger.With(errKey, err).
+					With("field", "committee_id").
+					With("value", committee.CommitteeID).
+					WarnContext(ctx, "failed to get v2 committee UID from v1 committee ID")
 			}
 		}
 
@@ -331,6 +453,11 @@ func convertMapToInputSurvey(ctx context.Context, v1Data map[string]any) (*Surve
 			projectMappingKey := fmt.Sprintf("project.sfid.%s", committee.ProjectID)
 			if entry, err := mappingsKV.Get(ctx, projectMappingKey); err == nil {
 				committeeInput.ProjectUID = string(entry.Value())
+			} else {
+				funcLogger.With(errKey, err).
+					With("field", "project_id").
+					With("value", committee.ProjectID).
+					WarnContext(ctx, "failed to get v2 project UID from v1 project ID")
 			}
 		}
 
@@ -367,17 +494,17 @@ func handleSurveyUpdate(ctx context.Context, key string, v1Data map[string]any) 
 	funcLogger = funcLogger.With("survey_id", uid)
 
 	// Check if at least one parent committee/project exists in mappings before proceeding
-	// hasValidParent := false
-	// for _, committee := range survey.Committees {
-	// 	if committee.CommitteeUID != "" || committee.ProjectUID != "" {
-	// 		hasValidParent = true
-	// 		break
-	// 	}
-	// }
-	// if !hasValidParent {
-	// 	funcLogger.InfoContext(ctx, "skipping survey sync - no parent committees or projects found in mappings")
-	// 	return
-	// }
+	hasValidParent := false
+	for _, committee := range survey.Committees {
+		if committee.CommitteeUID != "" || committee.ProjectUID != "" {
+			hasValidParent = true
+			break
+		}
+	}
+	if !hasValidParent {
+		funcLogger.InfoContext(ctx, "skipping survey sync - no parent committees or projects found in mappings")
+		return
+	}
 
 	mappingKey := fmt.Sprintf("survey.%s", uid)
 	indexerAction := indexerConstants.ActionCreated
@@ -518,6 +645,8 @@ func sendSurveyResponseAccessMessage(data SurveyResponseInput) error {
 }
 
 func convertMapToInputSurveyResponse(ctx context.Context, v1Data map[string]any) (*SurveyResponseInput, error) {
+	funcLogger := logger.With("handler", "survey_response")
+
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
 	if err != nil {
@@ -573,11 +702,21 @@ func convertMapToInputSurveyResponse(ctx context.Context, v1Data map[string]any)
 	if responseDB.NumAutomatedRemindersReceived != "" {
 		if val, err := strconv.Atoi(responseDB.NumAutomatedRemindersReceived); err == nil {
 			surveyResponse.NumAutomatedRemindersReceived = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "num_automated_reminders_received").
+				With("value", responseDB.NumAutomatedRemindersReceived).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 	if responseDB.NPSValue != "" {
 		if val, err := strconv.Atoi(responseDB.NPSValue); err == nil {
 			surveyResponse.NPSValue = val
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "nps_value").
+				With("value", responseDB.NPSValue).
+				WarnContext(ctx, "failed to convert string to int")
 		}
 	}
 
@@ -592,6 +731,11 @@ func convertMapToInputSurveyResponse(ctx context.Context, v1Data map[string]any)
 		projectMappingKey := fmt.Sprintf("project.sfid.%s", responseDB.Project.ID)
 		if entry, err := mappingsKV.Get(ctx, projectMappingKey); err == nil {
 			surveyResponse.Project.ProjectUID = string(entry.Value())
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "project_id").
+				With("value", responseDB.Project.ID).
+				WarnContext(ctx, "failed to get v2 project UID from v1 project ID")
 		}
 	}
 
@@ -600,6 +744,11 @@ func convertMapToInputSurveyResponse(ctx context.Context, v1Data map[string]any)
 		committeeMappingKey := fmt.Sprintf("committee.sfid.%s", responseDB.CommitteeID)
 		if entry, err := mappingsKV.Get(ctx, committeeMappingKey); err == nil {
 			surveyResponse.CommitteeUID = string(entry.Value())
+		} else {
+			funcLogger.With(errKey, err).
+				With("field", "committee_id").
+				With("value", responseDB.CommitteeID).
+				WarnContext(ctx, "failed to get v2 committee UID from v1 committee ID")
 		}
 	}
 
