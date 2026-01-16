@@ -17,11 +17,11 @@ import (
 // entries must be lowercase* (lookups downcase for case-insensitive matching).
 var projectAllowlist = []string{
 	"tlf",
-	// "lfprojects",
-	// "lf-charities",
-	// "jdf",
-	// "jdf-llc",
-	// "jdf-international",
+	"lfprojects",
+	"lf-charities",
+	"jdf",
+	"jdf-llc",
+	"jdf-international",
 	// "lfenergy",
 }
 
@@ -29,6 +29,7 @@ var projectAllowlist = []string{
 // to be synced along with their child projects. *All entries must be
 // lowercase* (lookups downcase for case-insensitive matching).
 var projectFamilyAllowlist = []string{
+	"test-project-group",
 	// "tazama",
 	// "chiplet",
 	// "cnab",

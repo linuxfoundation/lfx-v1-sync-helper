@@ -8,8 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand/v2"
-	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -47,10 +45,6 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 // Returns true if the operation should be retried, false otherwise.
 func updateUserAlternateEmails(ctx context.Context, userSfid, emailSfid string, isDeleted bool) bool {
 	mappingKey := fmt.Sprintf("v1-merged-user.alternate-emails.%s", userSfid)
-
-	// Add random splay time up to 1 second to reduce collision chances.
-	splayTime := time.Duration(rand.IntN(1000)) * time.Millisecond
-	time.Sleep(splayTime)
 
 	// Get current mapping record.
 	entry, err := mappingsKV.Get(ctx, mappingKey)

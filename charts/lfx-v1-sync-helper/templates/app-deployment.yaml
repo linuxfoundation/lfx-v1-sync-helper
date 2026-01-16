@@ -15,10 +15,12 @@ spec:
   selector:
     matchLabels:
       app: {{ .Chart.Name }}
+      component: app
   template:
     metadata:
       labels:
         app: {{ .Chart.Name }}
+        component: app
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name | default .Chart.Name }}
       containers:
