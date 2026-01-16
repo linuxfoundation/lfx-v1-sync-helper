@@ -175,6 +175,12 @@ func updateCommitteeMember(ctx context.Context, payload *committeeservice.Update
 
 // deleteCommittee deletes a committee by UID.
 func deleteCommittee(ctx context.Context, committeeUID string, v1Principal string) error {
+	// Fetch current committee base to get etag.
+	_, etag, err := fetchCommitteeBase(ctx, committeeUID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch committee base for deletion: %w", err)
+	}
+
 	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, v1Principal)
 	if err != nil {
 		return fmt.Errorf("failed to generate token for committee deletion: %w", err)
@@ -183,6 +189,7 @@ func deleteCommittee(ctx context.Context, committeeUID string, v1Principal strin
 	payload := &committeeservice.DeleteCommitteePayload{
 		BearerToken: &token,
 		UID:         &committeeUID,
+		IfMatch:     stringToStringPtr(etag),
 	}
 
 	err = committeeClient.DeleteCommittee(ctx, payload)
@@ -195,6 +202,12 @@ func deleteCommittee(ctx context.Context, committeeUID string, v1Principal strin
 
 // deleteCommitteeMember deletes a committee member by committee UID and member UID.
 func deleteCommitteeMember(ctx context.Context, committeeUID, memberUID string, v1Principal string) error {
+	// Fetch current committee member to get etag.
+	_, etag, err := fetchCommitteeMember(ctx, committeeUID, memberUID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch committee member for deletion: %w", err)
+	}
+
 	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, v1Principal)
 	if err != nil {
 		return fmt.Errorf("failed to generate token for committee member deletion: %w", err)
@@ -205,6 +218,7 @@ func deleteCommitteeMember(ctx context.Context, committeeUID, memberUID string, 
 		UID:         committeeUID,
 		MemberUID:   memberUID,
 		Version:     "1",
+		IfMatch:     stringToStringPtr(etag),
 	}
 
 	err = committeeClient.DeleteCommitteeMember(ctx, payload)
