@@ -84,6 +84,14 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) {
 		handleCommitteeUpdate(ctx, key, v1Data)
 	case "platform-community__c":
 		handleCommitteeMemberUpdate(ctx, key, v1Data)
+	case "itx-poll":
+		handleVoteUpdate(ctx, key, v1Data)
+	case "itx-poll-vote":
+		handleIndividualVoteUpdate(ctx, key, v1Data)
+	case "itx-surveys":
+		handleSurveyUpdate(ctx, key, v1Data)
+	case "itx-survey-responses":
+		handleSurveyResponseUpdate(ctx, key, v1Data)
 	case "itx-zoom-meetings-v2":
 		handleZoomMeetingUpdate(ctx, key, v1Data)
 	case "itx-zoom-meetings-registrants-v2":
