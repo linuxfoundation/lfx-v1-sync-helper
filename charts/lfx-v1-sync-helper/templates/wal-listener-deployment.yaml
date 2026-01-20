@@ -1,0 +1,82 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+{{- if .Values.walListener.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}-wal-listener
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Chart.Name }}
+    component: wal-listener
+spec:
+  replicas: {{ .Values.walListener.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+      component: wal-listener
+  template:
+    metadata:
+      labels:
+        app: {{ .Chart.Name }}
+        component: wal-listener
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name | default .Chart.Name }}
+      containers:
+        - name: wal-listener
+          image: "{{ .Values.walListener.image.repository }}:{{ .Values.walListener.image.tag }}"
+          imagePullPolicy: {{ .Values.walListener.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+          ports:
+            - name: http
+              containerPort: {{ .Values.walListener.config.listener.serverPort }}
+              protocol: TCP
+          env:
+            - name: WAL_DATABASE_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.walListener.config.database.secret.name }}
+                  key: {{ .Values.walListener.config.database.secret.hostKey }}
+                  optional: true
+            - name: WAL_DATABASE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.walListener.config.database.secret.name }}
+                  key: {{ .Values.walListener.config.database.secret.usernameKey }}
+                  optional: true
+            - name: WAL_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.walListener.config.database.secret.name }}
+                  key: {{ .Values.walListener.config.database.secret.passwordKey }}
+                  optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yml
+              subPath: config.yml
+              readOnly: true
+          resources:
+            {{- toYaml .Values.walListener.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Chart.Name }}-wal-listener-config
+{{- end }}

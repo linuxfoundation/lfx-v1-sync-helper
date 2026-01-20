@@ -32,7 +32,7 @@ lfx-v1-sync-helper/
 │   ├── meltano.yml            # Main Meltano configuration
 │   └── load/target-nats-kv/   # Custom NATS KV target plugin
 ├── cmd/lfx-v1-sync-helper/    # Go microservice source
-├── charts/lfx-v1-sync-helper/ # Helm deployment charts
+├── charts/lfx-v1-sync-helper/ # Helm deployment charts (Chart.yaml version is dynamic on release)
 ├── docker/                    # Docker build configurations
 │   ├── Dockerfile.v1-sync-helper  # Go service container
 │   └── Dockerfile.meltano         # Python ETL container
@@ -142,7 +142,7 @@ lfx-v1-sync-helper/
 
 #### Data Format Support
 - **JSON** (default): Standard JSON encoding for record storage
-- **MessagePack**: Compact binary serialization with `msgpack: true` configuration
+- **MessagePack**: Compact binary serialization with `msgpack: true` configuration (Meltano) or `USE_MSGPACK=true` (WAL handler)
 - **Automatic Detection**: Both Go service and Python plugin automatically detect format when reading existing data
 
 ## CI/CD Integration
@@ -189,8 +189,11 @@ lfx-v1-sync-helper/
 ### Data Serialization
 - **target-nats-kv** supports both JSON and MessagePack encoding
 - Set `msgpack: true` in Meltano configuration to enable MessagePack
+- Set `USE_MSGPACK=true` environment variable for WAL handler to use MessagePack
+- Boolean environment variables accept truthy values: "true", "yes", "t", "y", "1" (case-insensitive)
 - Automatic format detection when reading existing data for compatibility
 - Go service handles both formats transparently
+- WAL handler respects the same encoding configuration as Meltano for consistency
 
 ### Container Standards
 - Multi-stage builds for size optimization

@@ -20,41 +20,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// kvEntry implements a mock jetstream.KeyValueEntry interface for the handler
-type kvEntry struct {
-	key       string
-	value     []byte
-	operation jetstream.KeyValueOp
-}
-
-func (e *kvEntry) Key() string {
-	return e.key
-}
-
-func (e *kvEntry) Value() []byte {
-	return e.value
-}
-
-func (e *kvEntry) Operation() jetstream.KeyValueOp {
-	return e.operation
-}
-
-func (e *kvEntry) Bucket() string {
-	return "v1-objects"
-}
-
-func (e *kvEntry) Created() time.Time {
-	return time.Now()
-}
-
-func (e *kvEntry) Delta() uint64 {
-	return 0
-}
-
-func (e *kvEntry) Revision() uint64 {
-	return 0
-}
-
 const (
 	errKey            = "error"
 	defaultListenPort = "8080"
@@ -62,8 +27,6 @@ const (
 	// request timeout, and lower than the pod or liveness probe's
 	// terminationGracePeriodSeconds.
 	gracefulShutdownSeconds = 25
-	// natsQueue is commented out since WAL-listener handlers are disabled for now.
-	//natsQueue = "dev.lfx.v1-sync-helper.queue"
 )
 
 var (
@@ -256,132 +219,65 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Process KV updates using the JetStream pull consumer
-	// Multiple instances will compete for messages automatically
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				// Fetch messages with a batch size of 1 and timeout
-				msgs, err := consumer.Fetch(1, jetstream.FetchMaxWait(5*time.Second))
-				if err != nil {
-					if err == jetstream.ErrNoMessages {
-						// No messages available, continue polling
-						continue
-					}
-					logger.With(errKey, err, "consumer", consumerName).Error("error fetching messages from consumer")
-					continue
-				}
+	// Start consuming KV updates using the JetStream consumer with error handling.
+	kvConsumerCtx, err := consumer.Consume(kvMessageHandler, jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
+		logger.With(errKey, err).Error("KV consumer error encountered")
+	}))
+	if err != nil {
+		logger.With(errKey, err, "consumer", consumerName).Error("error starting KV consumer")
+		os.Exit(1)
+	}
+	defer kvConsumerCtx.Stop()
 
-				for msg := range msgs.Messages() {
-					// Parse the message as a KV entry
-					headers := msg.Headers()
-					subject := msg.Subject()
+	// Subscribe to WAL-listener events from the wal_listener stream
+	walStreamName := "wal_listener"
+	walConsumerName := "v1-sync-helper-wal-consumer"
 
-					// Extract key from the subject ($KV.v1-objects.{key})
-					key := ""
-					if len(subject) > len("$KV.v1-objects.") {
-						key = subject[len("$KV.v1-objects."):]
-					}
+	// Create or get consumer for WAL listener events
+	walConsumer, err := jsContext.CreateOrUpdateConsumer(ctx, walStreamName, jetstream.ConsumerConfig{
+		Name:          walConsumerName,
+		Durable:       walConsumerName,
+		DeliverPolicy: jetstream.DeliverAllPolicy,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		FilterSubject: "wal_listener.*",
+		MaxDeliver:    3,
+		AckWait:       30 * time.Second,
+		MaxAckPending: 100,
+		Description:   "WAL listener consumer for v1-sync-helper",
+	})
+	if err != nil {
+		logger.With(errKey, err, "consumer", walConsumerName, "stream", walStreamName).Error("error creating WAL listener consumer")
+		os.Exit(1)
+	}
 
-					// Determine operation from headers
-					operation := jetstream.KeyValuePut // Default to PUT
-					if opHeader := headers.Get("KV-Operation"); opHeader != "" {
-						switch opHeader {
-						case "DEL":
-							operation = jetstream.KeyValueDelete
-						case "PURGE":
-							operation = jetstream.KeyValuePurge
-						}
-					}
-
-					// Create a mock KV entry for the handler
-					entry := &kvEntry{
-						key:       key,
-						value:     msg.Data(),
-						operation: operation,
-					}
-
-					// Process the KV entry
-					kvHandler(entry)
-
-					// Acknowledge the message
-					if err := msg.Ack(); err != nil {
-						logger.With(errKey, err, "key", key).Error("failed to acknowledge JetStream message")
-					}
-				}
-			}
-		}
-	}()
-
-	// WAL-listener handlers are commented out but kept for future use
-	// when they need to write to the same v1-objects KV bucket
-	/*
-		// Define WAL-listener subjects locally since they're commented out in other files
-		const (
-			walProjectSubject       = "wal_listener.salesforce_project__c"
-			walCollaborationSubject = "wal_listener.salesforce_collaboration__c"
-		)
-
-		// Subscribe to wal-listener v1 project events using JetStream
-		walConsumer, err := jsContext.CreateOrUpdateConsumer(ctx, "wal", jetstream.ConsumerConfig{
-			Durable:       "v1-sync-helper-wal-project",
-			FilterSubject: walProjectSubject,
-			DeliverGroup:  natsQueue,
-			AckPolicy:     jetstream.AckExplicitPolicy,
-			DeliverPolicy: jetstream.DeliverAllPolicy,
-		})
-		if err != nil {
-			logger.With(errKey, err, "subject", walProjectSubject).Error("error creating consumer for WAL-listener subject")
-			os.Exit(1)
-		}
-		if _, err = walConsumer.Consume(func(msg jetstream.Msg) {
-			if err := msg.Ack(); err != nil {
-				logger.With(errKey, err).Error("failed to acknowledge JetStream message")
-				return
-			}
-			// walListenerHandler(&msg.Message, v1KV, mappingsKV) - handler commented out
-		}); err != nil {
-			logger.With(errKey, err, "subject", walProjectSubject).Error("error subscribing to WAL-listener subject")
-			os.Exit(1)
-		}
-
-		// Subscribe to wal-listener v1 committee (collaboration) events using JetStream
-		walCollabConsumer, err := jsContext.CreateOrUpdateConsumer(ctx, "wal", jetstream.ConsumerConfig{
-			Durable:       "v1-sync-helper-wal-collab",
-			FilterSubject: walCollaborationSubject,
-			DeliverGroup:  natsQueue,
-			AckPolicy:     jetstream.AckExplicitPolicy,
-			DeliverPolicy: jetstream.DeliverAllPolicy,
-		})
-		if err != nil {
-			logger.With(errKey, err, "subject", walCollaborationSubject).Error("error creating consumer for WAL-listener collaboration subject")
-			os.Exit(1)
-		}
-		if _, err = walCollabConsumer.Consume(func(msg jetstream.Msg) {
-			if err := msg.Ack(); err != nil {
-				logger.With(errKey, err).Error("failed to acknowledge JetStream message")
-				return
-			}
-			// walCollaborationHandler(&msg.Message, v1KV, mappingsKV) - handler commented out
-		}); err != nil {
-			logger.With(errKey, err, "subject", walCollaborationSubject).Error("error subscribing to WAL-listener collaboration subject")
-			os.Exit(1)
-		}
-	*/
+	// Start consuming WAL listener messages with error handling.
+	walConsumerCtx, err := walConsumer.Consume(walIngestHandler, jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
+		logger.With(errKey, err).Error("WAL consumer error encountered")
+	}))
+	if err != nil {
+		logger.With(errKey, err, "consumer", walConsumerName).Error("error starting WAL listener consumer")
+		os.Exit(1)
+	}
+	defer walConsumerCtx.Stop()
 
 	// This next line blocks until SIGINT or SIGTERM is received, or NATS disconnects.
 	<-done
 
+	// Begin graceful shutdown process.
+	logger.Debug("beginning graceful shutdown")
+
+	// Drain consumers first (non-blocking) to mitigate "nats: connection closed"
+	// errors in the ConsumeErrHandler.
+	kvConsumerCtx.Drain()
+	walConsumerCtx.Drain()
+
 	// Cancel the background context.
 	cancel()
 
-	// Drain the connection, which will drain all subscriptions, then close the
-	// connection when complete.
+	// Drain the connection, which will drain all remaining subscriptions, then
+	// close the connection when complete (including the consumer draining).
 	if !natsConn.IsClosed() && !natsConn.IsDraining() {
-		logger.Info("draining NATS connections")
+		logger.Info("draining NATS connection")
 		if err := natsConn.Drain(); err != nil {
 			logger.With(errKey, err).Error("error draining NATS connection")
 			os.Exit(1)
@@ -389,7 +285,9 @@ func main() {
 	}
 
 	// Wait for the graceful shutdown steps to complete.
+	logger.Debug("waiting for graceful shutdown steps to complete")
 	gracefulCloseWG.Wait()
+	logger.Debug("graceful shutdown steps completed")
 
 	// Immediately close the HTTP server after graceful shutdown has finished.
 	if err = httpServer.Close(); err != nil {

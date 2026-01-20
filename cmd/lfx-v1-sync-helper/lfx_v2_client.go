@@ -87,11 +87,11 @@ func (dt *debugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 var (
-	httpClient      *http.Client
-	jwtPrivateKey   *rsa.PrivateKey
-	jwtKeyID        string
-	jwtClientID     string
-	heimdallConfig  *Config
+	httpClient    *http.Client
+	jwtPrivateKey *rsa.PrivateKey
+	jwtKeyID      string
+	jwtClientID   string
+
 	projectClient   *projectservice.Client
 	committeeClient *committeeservice.Client
 	jwtTokenCache   *cache.Cache
@@ -109,7 +109,6 @@ type JWK struct {
 
 // initJWTClient initializes the JWT authentication and HTTP client with Goa SDK clients.
 func initJWTClient(cfg *Config) error {
-	heimdallConfig = cfg
 	// Parse the private key.
 	block, _ := pem.Decode([]byte(cfg.HeimdallPrivateKey))
 	if block == nil {
@@ -381,16 +380,4 @@ func boolPtrToBool(b *bool) bool {
 		return false
 	}
 	return *b
-}
-
-// stringToTime converts a string to time, parsing ISO 8601 format, returning zero time if empty or invalid.
-func stringToTime(s string) time.Time {
-	if s == "" {
-		return time.Time{}
-	}
-	t, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		return time.Time{}
-	}
-	return t
 }

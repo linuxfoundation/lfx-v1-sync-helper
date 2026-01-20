@@ -56,6 +56,9 @@ plugins:
     metadata:
       '*':
         replication-method: INCREMENTAL
+        replication-key: systemmodstamp
+      'platform-collaboration__c':
+        replication-method: INCREMENTAL
         replication-key: lastmodifieddate
   - name: tap-dynamodb
     variant: meltanolabs

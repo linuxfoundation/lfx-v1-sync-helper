@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"slices"
+	"strings"
 )
 
 // projectAllowlist contains the list of project slugs that are allowed to be
@@ -15,11 +17,11 @@ import (
 // entries must be lowercase* (lookups downcase for case-insensitive matching).
 var projectAllowlist = []string{
 	"tlf",
-	// "lfprojects",
-	// "lf-charities",
-	// "jdf",
-	// "jdf-llc",
-	// "jdf-international",
+	"lfprojects",
+	"lf-charities",
+	"jdf",
+	"jdf-llc",
+	"jdf-international",
 	// "lfenergy",
 }
 
@@ -27,6 +29,7 @@ var projectAllowlist = []string{
 // to be synced along with their child projects. *All entries must be
 // lowercase* (lookups downcase for case-insensitive matching).
 var projectFamilyAllowlist = []string{
+	"test-project-group",
 	// "tazama",
 	// "chiplet",
 	// "cnab",
@@ -99,6 +102,9 @@ type Config struct {
 	// Logging
 	Debug     bool
 	HTTPDebug bool
+
+	// Data encoding
+	UseMsgpack bool
 }
 
 // LoadConfig loads configuration from environment variables
@@ -118,11 +124,12 @@ func LoadConfig() (*Config, error) {
 		Auth0ClientID:   os.Getenv("AUTH0_CLIENT_ID"),
 		Auth0PrivateKey: os.Getenv("AUTH0_PRIVATE_KEY"),
 		// Other configuration
-		NATSURL:   os.Getenv("NATS_URL"),
-		Port:      os.Getenv("PORT"),
-		Bind:      os.Getenv("BIND"),
-		Debug:     os.Getenv("DEBUG") != "",
-		HTTPDebug: os.Getenv("HTTP_DEBUG") != "",
+		NATSURL:    os.Getenv("NATS_URL"),
+		Port:       os.Getenv("PORT"),
+		Bind:       os.Getenv("BIND"),
+		Debug:      parseBooleanEnv("DEBUG"),
+		HTTPDebug:  parseBooleanEnv("HTTP_DEBUG"),
+		UseMsgpack: parseBooleanEnv("USE_MSGPACK"),
 	}
 
 	// Set defaults
@@ -196,4 +203,20 @@ func LoadConfig() (*Config, error) {
 	cfg.CommitteeServiceURL = committeeServiceURL
 
 	return cfg, nil
+}
+
+// parseBooleanEnv parses a boolean environment variable with common truthy values.
+// Returns true if the value (case-insensitive) is "true", "yes", "t", "y", or "1".
+// Returns false for any other value including empty string.
+//
+// Examples:
+//   - parseBooleanEnv("USE_MSGPACK") where USE_MSGPACK="true" returns true
+//   - parseBooleanEnv("USE_MSGPACK") where USE_MSGPACK="YES" returns true
+//   - parseBooleanEnv("USE_MSGPACK") where USE_MSGPACK="1" returns true
+//   - parseBooleanEnv("USE_MSGPACK") where USE_MSGPACK="false" returns false
+//   - parseBooleanEnv("USE_MSGPACK") where USE_MSGPACK="" returns false
+func parseBooleanEnv(envVar string) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(envVar)))
+	truthyValues := []string{"true", "yes", "t", "y", "1"}
+	return slices.Contains(truthyValues, value)
 }

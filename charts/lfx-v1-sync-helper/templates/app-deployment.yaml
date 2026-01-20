@@ -4,29 +4,31 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Chart.Name }}
+  name: {{ .Chart.Name }}-app
   namespace: {{ .Release.Namespace }}
   {{- with .Values.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
-  replicas: {{ .Values.replicas | default 1 }}
+  replicas: {{ .Values.app.replicas | default 1 }}
   selector:
     matchLabels:
       app: {{ .Chart.Name }}
+      component: app
   template:
     metadata:
       labels:
         app: {{ .Chart.Name }}
+        component: app
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name | default .Chart.Name }}
       containers:
         - name: app
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.app.image.repository }}:{{ .Values.app.image.tag | default .Chart.AppVersion }}"
           securityContext:
             allowPrivilegeEscalation: false
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: {{ .Values.app.image.pullPolicy }}
           env:
           {{- range $name, $config := .Values.app.environment }}
           - name: {{ $name }}
@@ -39,23 +41,23 @@ spec:
           {{- end }}
           # JWT configuration from Heimdall
           - name: HEIMDALL_CLIENT_ID
-            value: {{ .Values.heimdall.clientId | quote }}
+            value: {{ .Values.app.heimdall.clientId | quote }}
           - name: HEIMDALL_PRIVATE_KEY
             valueFrom:
               secretKeyRef:
-                name: {{ .Values.heimdall.secret.name }}
-                key: {{ .Values.heimdall.secret.privateKeyKey }}
+                name: {{ .Values.app.heimdall.secret.name }}
+                key: {{ .Values.app.heimdall.secret.privateKeyKey }}
           # Auth0 configuration for v1 API authentication
           - name: AUTH0_CLIENT_ID
             valueFrom:
               secretKeyRef:
-                name: {{ .Values.auth0.secret.name }}
-                key: {{ .Values.auth0.secret.clientIdKey }}
+                name: {{ .Values.app.auth0.secret.name }}
+                key: {{ .Values.app.auth0.secret.clientIdKey }}
           - name: AUTH0_PRIVATE_KEY
             valueFrom:
               secretKeyRef:
-                name: {{ .Values.auth0.secret.name }}
-                key: {{ .Values.auth0.secret.privateKeyKey }}
+                name: {{ .Values.app.auth0.secret.name }}
+                key: {{ .Values.app.auth0.secret.privateKeyKey }}
           ports:
             - containerPort: 8080
               name: web

@@ -1,0 +1,123 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+---
+# Meltano PostgreSQL ETL CronJob for extracting data from PostgreSQL and loading to NATS KV.
+{{- if .Values.meltano.postgresEtl.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Chart.Name }}-meltano-postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/component: meltano
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+spec:
+  schedule: {{ .Values.meltano.postgresEtl.schedule | quote }}
+  concurrencyPolicy: {{ .Values.meltano.postgresEtl.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.meltano.postgresEtl.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.meltano.postgresEtl.failedJobsHistoryLimit }}
+  jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/component: meltano
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/managed-by: {{ .Release.Service }}
+    spec:
+      ttlSecondsAfterFinished: {{ .Values.meltano.postgresEtl.ttlSecondsAfterFinished }}
+      backoffLimit: {{ .Values.meltano.postgresEtl.backoffLimit }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: {{ .Chart.Name }}
+            app.kubernetes.io/component: meltano
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/managed-by: {{ .Release.Service }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ .Values.serviceAccount.name | default .Chart.Name }}
+          containers:
+            - name: meltano
+              image: "{{ .Values.meltano.postgresEtl.image.repository }}:{{ .Values.meltano.postgresEtl.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.meltano.postgresEtl.image.pullPolicy }}
+              workingDir: /app/meltano
+              # Meltano args must be in specific order: el [--catalog path] [--state-id id] <tap> <target>
+              args:
+                - "el"
+                {{- if and .Values.meltano.postgresEtl.catalog.enabled .Values.meltano.postgresEtl.catalog.configMap.name }}
+                - "--catalog"
+                - "{{ .Values.meltano.postgresEtl.catalog.configMap.mountPath }}/{{ .Values.meltano.postgresEtl.catalog.configMap.key }}"
+                {{- end }}
+                - "--state-id"
+                - {{ .Values.meltano.postgresEtl.stateId | quote }}
+                - "tap-postgres"
+                - "target-nats-kv"
+              env:
+                # Meltano environment configuration
+                - name: MELTANO_ENVIRONMENT
+                  value: {{ .Values.meltano.postgresEtl.environment | quote }}
+                - name: MELTANO_STATE_BACKEND_URI
+                  value: "s3://{{ .Values.meltano.postgresEtl.aws.stateBucketPrefix }}-{{ .Values.meltano.postgresEtl.environment }}"
+                # AWS configuration
+                - name: AWS_DEFAULT_REGION
+                  value: {{ .Values.meltano.postgresEtl.aws.region | quote }}
+                - name: AWS_REGION
+                  value: {{ .Values.meltano.postgresEtl.aws.region | quote }}
+                # PostgreSQL configuration
+                - name: TAP_POSTGRES_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.meltano.postgresEtl.postgres.host.secret.name }}
+                      key: {{ .Values.meltano.postgresEtl.postgres.host.secret.key }}
+                      optional: true
+                - name: TAP_POSTGRES_PORT
+                  value: {{ .Values.meltano.postgresEtl.postgres.port | quote }}
+                - name: TAP_POSTGRES_DATABASE
+                  value: {{ .Values.meltano.postgresEtl.postgres.database | quote }}
+                - name: TAP_POSTGRES_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.meltano.postgresEtl.postgres.username.secret.name }}
+                      key: {{ .Values.meltano.postgresEtl.postgres.username.secret.key }}
+                      optional: true
+                - name: TAP_POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.meltano.postgresEtl.postgres.password.secret.name }}
+                      key: {{ .Values.meltano.postgresEtl.postgres.password.secret.key }}
+                      optional: true
+                # Target NATS KV configuration
+                - name: TARGET_NATS_KV_URL
+                  value: {{ .Values.meltano.postgresEtl.nats.url | quote }}
+                - name: TARGET_NATS_KV_BUCKET
+                  value: {{ .Values.meltano.postgresEtl.nats.bucket | quote }}
+                - name: TARGET_NATS_KV_REFRESH_MODE
+                  value: {{ .Values.meltano.postgresEtl.nats.refreshMode | quote }}
+                - name: TARGET_NATS_KV_VALIDATE_RECORDS
+                  value: {{ .Values.meltano.postgresEtl.nats.validateRecords | quote }}
+                - name: TARGET_NATS_KV_MSGPACK
+                  value: {{ .Values.meltano.postgresEtl.nats.useMessagePack | quote }}
+              resources:
+                {{- toYaml .Values.meltano.postgresEtl.resources | nindent 16 }}
+              livenessProbe:
+                exec:
+                  command: ["pgrep", "-f", "meltano"]
+                initialDelaySeconds: 30
+                periodSeconds: 60
+                failureThreshold: 3
+              {{- if and .Values.meltano.postgresEtl.catalog.enabled .Values.meltano.postgresEtl.catalog.configMap.name }}
+              volumeMounts:
+                - name: tap-postgres-catalog
+                  mountPath: {{ .Values.meltano.postgresEtl.catalog.configMap.mountPath }}
+                  readOnly: true
+              {{- end }}
+          {{- if and .Values.meltano.postgresEtl.catalog.enabled .Values.meltano.postgresEtl.catalog.configMap.name }}
+          volumes:
+            - name: tap-postgres-catalog
+              configMap:
+                name: {{ .Values.meltano.postgresEtl.catalog.configMap.name }}
+          {{- end }}
+{{- end }}
