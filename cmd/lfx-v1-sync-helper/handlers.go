@@ -87,7 +87,7 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) {
 	case "itx-poll":
 		handleVoteUpdate(ctx, key, v1Data)
 	case "itx-poll-vote":
-		handleIndividualVoteUpdate(ctx, key, v1Data)
+		handleVoteResponseUpdate(ctx, key, v1Data)
 	case "itx-surveys":
 		handleSurveyUpdate(ctx, key, v1Data)
 	case "itx-survey-responses":

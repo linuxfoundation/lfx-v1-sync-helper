@@ -19,8 +19,8 @@ const (
 	// IndexVoteSubject is the subject for the vote indexing.
 	IndexVoteSubject = "lfx.index.vote"
 
-	// IndexIndividualVoteSubject is the subject for the individual vote indexing.
-	IndexIndividualVoteSubject = "lfx.index.individual_vote"
+	// IndexVoteResponseSubject is the subject for the vote response indexing.
+	IndexVoteResponseSubject = "lfx.index.vote_response"
 )
 
 // sendVoteIndexerMessage sends the message to the NATS server for the vote indexer.
@@ -44,6 +44,17 @@ func sendVoteIndexerMessage(ctx context.Context, subject string, action indexerC
 
 	// Construct the indexer message
 	public := false
+	nameAndAliases := []string{}
+	parentRefs := []string{}
+	if data.Name != "" {
+		nameAndAliases = append(nameAndAliases, data.Name)
+	}
+	if data.ProjectUID != "" {
+		parentRefs = append(parentRefs, fmt.Sprintf("project:%s", data.ProjectUID))
+	}
+	if data.CommitteeUID != "" {
+		parentRefs = append(parentRefs, fmt.Sprintf("committee:%s", data.CommitteeUID))
+	}
 	message := indexerTypes.IndexerMessageEnvelope{
 		Action:  action,
 		Headers: headers,
@@ -56,8 +67,8 @@ func sendVoteIndexerMessage(ctx context.Context, subject string, action indexerC
 			HistoryCheckObject:   "vote:{{ uid }}",
 			HistoryCheckRelation: "auditor",
 			SortName:             "{{ name }}",
-			NameAndAliases:       []string{"{{ name }}"},
-			ParentRefs:           []string{"project:{{ project_uid }}", "committee:{{ committee_uid }}"},
+			NameAndAliases:       nameAndAliases,
+			ParentRefs:           parentRefs,
 			Fulltext:             "{{ name }} {{ description }}",
 		},
 	}
@@ -79,16 +90,16 @@ func sendVoteIndexerMessage(ctx context.Context, subject string, action indexerC
 
 // sendVoteAccessMessage sends the message to the NATS server for the vote access control.
 func sendVoteAccessMessage(vote InputVote) error {
-	relations := map[string][]string{}
+	references := map[string][]string{}
 	if vote.ProjectUID != "" {
-		relations["project"] = []string{vote.ProjectUID}
+		references["project"] = []string{vote.ProjectUID}
 	}
 	if vote.CommitteeUID != "" {
-		relations["committee"] = []string{vote.CommitteeUID}
+		references["committee"] = []string{vote.CommitteeUID}
 	}
 
-	// Skip sending access message if there are no relations
-	if len(relations) == 0 {
+	// Skip sending access message if there are no references
+	if len(references) == 0 {
 		return nil
 	}
 
@@ -96,9 +107,9 @@ func sendVoteAccessMessage(vote InputVote) error {
 		ObjectType: "vote",
 		Operation:  "update_access",
 		Data: map[string]interface{}{
-			"uid":       vote.UID,
-			"public":    false,
-			"relations": relations,
+			"uid":        vote.UID,
+			"public":     false,
+			"references": references,
 		},
 	}
 	accessMsgBytes, err := json.Marshal(accessMsg)
@@ -273,8 +284,8 @@ func handleVoteUpdate(ctx context.Context, key string, v1Data map[string]any) {
 	funcLogger.InfoContext(ctx, "successfully sent vote indexer and access messages")
 }
 
-// sendIndividualVoteIndexerMessage sends the message to the NATS server for the individual vote indexer.
-func sendIndividualVoteIndexerMessage(ctx context.Context, subject string, action indexerConstants.MessageAction, data IndividualVoteInput) error {
+// sendVoteResponseIndexerMessage sends the message to the NATS server for the vote response indexer.
+func sendVoteResponseIndexerMessage(ctx context.Context, subject string, action indexerConstants.MessageAction, data VoteResponseInput) error {
 	headers := make(map[string]string)
 
 	// Extract authorization from context if available
@@ -294,22 +305,35 @@ func sendIndividualVoteIndexerMessage(ctx context.Context, subject string, actio
 
 	// Construct the indexer message
 	public := false
+	nameAndAliases := []string{}
+	parentRefs := []string{}
+	if data.Username != "" {
+		nameAndAliases = append(nameAndAliases, data.Username)
+	}
+	if data.ProjectUID != "" {
+		parentRefs = append(parentRefs, fmt.Sprintf("project:%s", data.ProjectUID))
+	}
+	if data.VoteUID != "" {
+		parentRefs = append(parentRefs, fmt.Sprintf("vote:%s", data.VoteUID))
+	}
+	indexingConfig := &indexerTypes.IndexingConfig{
+		ObjectID:             "{{ uid }}",
+		Public:               &public,
+		AccessCheckObject:    "vote:{{ uid }}",
+		AccessCheckRelation:  "viewer",
+		HistoryCheckObject:   "vote_response:{{ uid }}",
+		HistoryCheckRelation: "auditor",
+		SortName:             "{{ user_name }}",
+		NameAndAliases:       nameAndAliases,
+		ParentRefs:           parentRefs,
+		Fulltext:             "{{ user_name }}",
+	}
+
 	message := indexerTypes.IndexerMessageEnvelope{
-		Action:  action,
-		Headers: headers,
-		Data:    data,
-		IndexingConfig: &indexerTypes.IndexingConfig{
-			ObjectID:             "{{ uid }}",
-			Public:               &public,
-			AccessCheckObject:    "individual_vote:{{ uid }}",
-			AccessCheckRelation:  "viewer",
-			HistoryCheckObject:   "individual_vote:{{ uid }}",
-			HistoryCheckRelation: "auditor",
-			SortName:             "{{ user_name }}",
-			NameAndAliases:       []string{"{{ user_name }}"},
-			ParentRefs:           []string{"project:{{ project_uid }}", "vote:{{ vote_uid }}"},
-			Fulltext:             "{{ user_name }}",
-		},
+		Action:         action,
+		Headers:        headers,
+		Data:           data,
+		IndexingConfig: indexingConfig,
 	}
 
 	messageBytes, err := json.Marshal(message)
@@ -327,8 +351,8 @@ func sendIndividualVoteIndexerMessage(ctx context.Context, subject string, actio
 	return nil
 }
 
-// sendIndividualVoteAccessMessage sends the message to the NATS server for the individual vote access control.
-func sendIndividualVoteAccessMessage(data IndividualVoteInput) error {
+// sendVoteResponseAccessMessage sends the message to the NATS server for the vote response access control.
+func sendVoteResponseAccessMessage(data VoteResponseInput) error {
 	relations := map[string][]string{}
 	if data.Username != "" {
 		relations["writer"] = []string{data.Username}
@@ -349,7 +373,7 @@ func sendIndividualVoteAccessMessage(data IndividualVoteInput) error {
 	}
 
 	accessMsg := GenericFGAMessage{
-		ObjectType: "individual_vote",
+		ObjectType: "vote_response",
 		Operation:  "update_access",
 		Data: map[string]interface{}{
 			"uid":        data.UID,
@@ -371,8 +395,8 @@ func sendIndividualVoteAccessMessage(data IndividualVoteInput) error {
 	return nil
 }
 
-func convertMapToInputIndividualVote(ctx context.Context, v1Data map[string]any) (*IndividualVoteInput, error) {
-	funcLogger := logger.With("handler", "individual_vote")
+func convertMapToInputVoteResponse(ctx context.Context, v1Data map[string]any) (*VoteResponseInput, error) {
+	funcLogger := logger.With("handler", "vote_response")
 
 	// Convert map to JSON bytes
 	jsonBytes, err := json.Marshal(v1Data)
@@ -386,8 +410,8 @@ func convertMapToInputIndividualVote(ctx context.Context, v1Data map[string]any)
 		return nil, fmt.Errorf("failed to unmarshal JSON into VoteDB: %w", err)
 	}
 
-	// Convert VoteDB to IndividualVoteInput
-	individualVote := IndividualVoteInput{
+	// Convert VoteDB to VoteResponseInput
+	voteResponse := VoteResponseInput{
 		UID:                     voteDB.VoteID, // Use vote_id as UID for v2 system
 		VoteID:                  voteDB.VoteID,
 		VoteUID:                 voteDB.PollID, // Use poll_id as VoteUID
@@ -450,14 +474,14 @@ func convertMapToInputIndividualVote(ctx context.Context, v1Data map[string]any)
 			pollAnswerInput.RankedUserChoice = append(pollAnswerInput.RankedUserChoice, rankedChoiceInput)
 		}
 
-		individualVote.PollAnswers = append(individualVote.PollAnswers, pollAnswerInput)
+		voteResponse.PollAnswers = append(voteResponse.PollAnswers, pollAnswerInput)
 	}
 
 	// Use the v1 project ID to get the v2 project UID.
 	if voteDB.ProjectID != "" {
 		projectMappingKey := fmt.Sprintf("project.sfid.%s", voteDB.ProjectID)
 		if entry, err := mappingsKV.Get(ctx, projectMappingKey); err == nil {
-			individualVote.ProjectUID = string(entry.Value())
+			voteResponse.ProjectUID = string(entry.Value())
 		} else {
 			funcLogger.With(errKey, err).
 				With("field", "project_id").
@@ -466,11 +490,11 @@ func convertMapToInputIndividualVote(ctx context.Context, v1Data map[string]any)
 		}
 	}
 
-	return &individualVote, nil
+	return &voteResponse, nil
 }
 
-// handleIndividualVoteUpdate processes an individual vote update from itx-individual-vote records.
-func handleIndividualVoteUpdate(ctx context.Context, key string, v1Data map[string]any) {
+// handleVoteResponseUpdate processes a vote response update from itx-poll-vote records.
+func handleVoteResponseUpdate(ctx context.Context, key string, v1Data map[string]any) {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return
@@ -478,53 +502,53 @@ func handleIndividualVoteUpdate(ctx context.Context, key string, v1Data map[stri
 
 	funcLogger := logger.With("key", key)
 
-	funcLogger.DebugContext(ctx, "processing individual vote update")
+	funcLogger.DebugContext(ctx, "processing vote response update")
 
-	// Convert v1Data map to IndividualVoteInput struct
-	individualVote, err := convertMapToInputIndividualVote(ctx, v1Data)
+	// Convert v1Data map to VoteResponseInput struct
+	voteResponse, err := convertMapToInputVoteResponse(ctx, v1Data)
 	if err != nil {
-		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to IndividualVoteInput")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to VoteResponseInput")
 		return
 	}
 
 	// Extract the individual vote UID
-	uid := individualVote.UID
+	uid := voteResponse.UID
 	if uid == "" {
-		funcLogger.ErrorContext(ctx, "missing or invalid uid in v1 individual vote data")
+		funcLogger.ErrorContext(ctx, "missing or invalid uid in v1 vote response data")
 		return
 	}
-	funcLogger = funcLogger.With("individual_vote_id", uid)
+	funcLogger = funcLogger.With("vote_response_id", uid)
 
 	// Check if parent project exists in mappings before proceeding. Because
-	// convertMapToInputIndividualVote has already looked up the SFID project ID
+	// convertMapToInputVoteResponse has already looked up the SFID project ID
 	// mapping, we don't need to do it again: we can just check if ProjectID (v2
 	// UID) is set.
-	if individualVote.ProjectUID == "" {
-		funcLogger.With("project_id", individualVote.ProjectID).InfoContext(ctx, "skipping individual vote sync - parent project not found in mappings")
+	if voteResponse.ProjectUID == "" {
+		funcLogger.With("project_id", voteResponse.ProjectID).InfoContext(ctx, "skipping vote response sync - parent project not found in mappings")
 		return
 	}
 
-	mappingKey := fmt.Sprintf("individual_vote.%s", uid)
+	mappingKey := fmt.Sprintf("vote_response.%s", uid)
 	indexerAction := indexerConstants.ActionCreated
 	if _, err := mappingsKV.Get(ctx, mappingKey); err == nil {
 		indexerAction = indexerConstants.ActionUpdated
 	}
 
-	if err := sendIndividualVoteIndexerMessage(ctx, IndexIndividualVoteSubject, indexerAction, *individualVote); err != nil {
-		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send individual vote indexer message")
+	if err := sendVoteResponseIndexerMessage(ctx, IndexVoteResponseSubject, indexerAction, *voteResponse); err != nil {
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send vote response indexer message")
 		return
 	}
 
-	if err := sendIndividualVoteAccessMessage(*individualVote); err != nil {
-		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send individual vote access message")
+	if err := sendVoteResponseAccessMessage(*voteResponse); err != nil {
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send vote response access message")
 		return
 	}
 
 	if uid != "" {
 		if _, err := mappingsKV.Put(ctx, mappingKey, []byte("1")); err != nil {
-			funcLogger.With(errKey, err).WarnContext(ctx, "failed to store individual vote mapping")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to store vote response mapping")
 		}
 	}
 
-	funcLogger.InfoContext(ctx, "successfully sent individual vote indexer and access messages")
+	funcLogger.InfoContext(ctx, "successfully sent vote response indexer and access messages")
 }

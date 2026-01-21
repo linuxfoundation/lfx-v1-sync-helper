@@ -176,8 +176,8 @@ type InputVote struct {
 	AllowAbstain                  bool                    `json:"allow_abstain"`
 }
 
-// IndividualVoteInput is the input model for an individual vote.
-type IndividualVoteInput struct {
+// VoteResponseInput is the input model for a vote response.
+type VoteResponseInput struct {
 	UID                     string                `json:"uid"`         // new system primary key attribute (same as [VoteID])
 	VoteID                  string                `json:"vote_id"`     // old system primary key attribute
 	VoteUID                 string                `json:"vote_uid"`    // new system poll/vote UID (same as [PollID])

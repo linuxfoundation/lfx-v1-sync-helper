@@ -571,7 +571,7 @@ func sendSurveyResponseIndexerMessage(ctx context.Context, subject string, actio
 		IndexingConfig: &indexerTypes.IndexingConfig{
 			ObjectID:             "{{ uid }}",
 			Public:               &public,
-			AccessCheckObject:    "survey_response:{{ uid }}",
+			AccessCheckObject:    "survey:{{ uid }}",
 			AccessCheckRelation:  "viewer",
 			HistoryCheckObject:   "survey_response:{{ uid }}",
 			HistoryCheckRelation: "auditor",
@@ -602,18 +602,11 @@ func sendSurveyResponseAccessMessage(data SurveyResponseInput) error {
 	relations := map[string][]string{}
 	references := map[string][]string{}
 
-	if data.Username != "" {
-		relations["writer"] = []string{data.Username}
-		relations["viewer"] = []string{data.Username}
-	}
 	if data.SurveyUID != "" {
 		references["survey"] = []string{data.SurveyUID}
 	}
-	if data.Project.ProjectUID != "" {
-		references["project"] = []string{data.Project.ProjectUID}
-	}
-	if data.CommitteeUID != "" {
-		references["committee"] = []string{data.CommitteeUID}
+	if data.Username != "" {
+		relations["owner"] = []string{data.Username}
 	}
 
 	// Skip sending access message if there are no relations or references
