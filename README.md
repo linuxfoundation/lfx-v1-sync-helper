@@ -1,6 +1,6 @@
 # Data sync components for LFX One
 
-This repository contains tools and services for synchronizing data between LFX v1 and LFX One (v2) platforms. This solution uses Meltano for data replication into the v2 ecosystem, after which a sync helper service handles data mapping and ingestion.
+This repository contains tools and services for synchronizing data between LFX v1 and LFX One (v2) platforms. This solution uses Meltano for data extraction and loading, a WAL listener for real-time PostgreSQL change streaming, and a sync helper service that handles data mapping and ingestion into the v2 ecosystem.
 
 ## Overview
 
@@ -69,12 +69,12 @@ Data extraction and loading pipeline that extracts data from LFX v1 sources (Dyn
 Go service that monitors NATS KV stores for replicated v1 data and synchronizes it with the LFX v2 platform APIs, handling data transformation and conflict resolution.
 
 ### [Helm charts](./charts/lfx-v1-sync-helper/README.md)
-Kubernetes deployment manifests for the v1-sync-helper service, providing scalable deployment options for production environments.
+Kubernetes deployment manifests for the custom app service and WAL listener component, providing scalable deployment options for production environments.
 
 ## Architecture Diagrams
 
 Regarding the following diagrams:
-- The planned realtime sync for PostgreSQL is included in the diagrams.
+
 - The DynamoDB source (incremental or realtime) is not currently included in the diagrams.
 - The planned bidirectional sync (LFX One changes back to v1) is included in the diagrams.
 - "Projects API" is representative of most data entities. However, v1 Meetings push straight to OpenSearch and OpenFGA (via platform services)—this is not shown.
@@ -134,7 +134,7 @@ sequenceDiagram
     participant opensearch as OpenSearch
 
     v1_kv-)+v1-sync-helper: notification on KV bucket subject
-    v1-sync-helper->>v1-sync-helper: check if delete or upsert
+    v1-sync-helper->>v1-sync-helper: check if delete (hard or soft) or upsert
     v1-sync-helper->>v1-sync-helper: check if upsert was by v1-sync-helper's M2M client ID
     v1-sync-helper->>+mapping-db: check for v1->v2 ID mapping
     mapping-db--)-v1-sync-helper: v2 ID, deletion tombstone, or empty
@@ -155,8 +155,8 @@ sequenceDiagram
     projects-api -) opensearch: index deletion transection (via indexer)
     Note right of v1-sync-helper: if the DELETE fails, notify team and abort
     projects-api --)- v1-sync-helper: 204 (no body)
-    v1-sync-helper -) mapping-db: delete v1->v2 mapping
-    v1-sync-helper -) mapping-db: delete v2->v1 mapping
+    v1-sync-helper -) mapping-db: tombstone 🪦 v1->v2 mapping
+    v1-sync-helper -) mapping-db: tombstone 🪦 v2->v1 mapping
     else item upsert & NOT last-modified-by v1-sync-helper & mapping empty
     Note right of v1-sync-helper: This is a "create" from v1
     v1-sync-helper->>v1-sync-helper: impersonate v1 principal w/ Heimdall key
@@ -291,8 +291,8 @@ sequenceDiagram
     projects-api -) opensearch: index deletion transection (via indexer)
     Note right of v1-sync-helper: if the DELETE fails, notify team and abort
     projects-api --)- v1-sync-helper: 204 (no body)
-    v1-sync-helper -) mapping-db: delete v1->v2 mapping
-    v1-sync-helper -) mapping-db: delete v2->v1 mapping
+    v1-sync-helper -) mapping-db: tombstone 🪦 v1->v2 mapping
+    v1-sync-helper -) mapping-db: tombstone 🪦 v2->v1 mapping
     else item upsert & NOT last-modified-by v1-sync-helper & mapping empty
     Note right of v1-sync-helper: This is a "create" from v1
     v1-sync-helper->>v1-sync-helper: impersonate v1 principal w/ Heimdall key
@@ -339,8 +339,8 @@ sequenceDiagram
     mapping-db--)-v1-sync-helper: v1 ID
     v1-sync-helper->>+lfx_v1: delete in v1
     lfx_v1->>-v1-sync-helper: 204 (no content)
-    v1-sync-helper -) mapping-db: delete v1->v2 mapping
-    v1-sync-helper -) mapping-db: delete v2->v1 mapping
+    v1-sync-helper -) mapping-db: tombstone 🪦 v2->v1 mapping
+    v1-sync-helper -) mapping-db: tombstone 🪦 v1->v2 mapping
     end
     deactivate v1-sync-helper
 ```

@@ -174,6 +174,33 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 	return nil
 }
 
+// deleteProject deletes a project by UID.
+func deleteProject(ctx context.Context, projectUID string, v1Principal string) error {
+	// Fetch current project base to get etag.
+	_, etag, err := fetchProjectBase(ctx, projectUID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch project base for deletion: %w", err)
+	}
+
+	token, err := generateCachedJWTToken(ctx, projectServiceAudience, v1Principal)
+	if err != nil {
+		return fmt.Errorf("failed to generate token for project deletion: %w", err)
+	}
+
+	payload := &projectservice.DeleteProjectPayload{
+		BearerToken: &token,
+		UID:         &projectUID,
+		IfMatch:     stringToStringPtr(etag),
+	}
+
+	err = projectClient.DeleteProject(ctx, payload)
+	if err != nil {
+		return fmt.Errorf("failed to delete project: %w", err)
+	}
+
+	return nil
+}
+
 // projectBasesEqual compares two ProjectBase objects for equality, ignoring system-managed fields.
 func projectBasesEqual(a, b *projectservice.ProjectBase) bool {
 	return stringPtrToString(a.Name) == stringPtrToString(b.Name) &&

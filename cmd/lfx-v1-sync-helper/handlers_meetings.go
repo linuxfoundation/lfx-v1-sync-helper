@@ -847,7 +847,7 @@ func convertMapToInputInviteResponse(v1Data map[string]any) (*inviteResponseInpu
 
 func getInviteResponseTags(inviteResponse *inviteResponseInput) []string {
 	tags := []string{
-		fmt.Sprintf("%s", inviteResponse.ID),
+		inviteResponse.ID,
 		fmt.Sprintf("invite_response_uid:%s", inviteResponse.ID),
 		fmt.Sprintf("meeting_uid:%s", inviteResponse.MeetingID),
 		fmt.Sprintf("registrant_uid:%s", inviteResponse.RegistrantID),
@@ -1384,7 +1384,7 @@ func convertMapToInputPastMeetingInvitee(v1Data map[string]any) (*pastMeetingInv
 
 func getPastMeetingParticipantTags(participant *V2PastMeetingParticipant) []string {
 	tags := []string{
-		fmt.Sprintf("%s", participant.UID),
+		participant.UID,
 		fmt.Sprintf("past_meeting_participant_uid:%s", participant.UID),
 		fmt.Sprintf("past_meeting_uid:%s", participant.PastMeetingUID),
 		fmt.Sprintf("meeting_uid:%s", participant.MeetingUID),
@@ -1955,7 +1955,7 @@ func convertMapToInputPastMeetingRecording(v1Data map[string]any) (*pastMeetingR
 
 func getPastMeetingRecordingTags(recording *pastMeetingRecordingInput) []string {
 	tags := []string{
-		fmt.Sprintf("%s", recording.UID),
+		recording.UID,
 		fmt.Sprintf("past_meeting_recording_uid:%s", recording.UID),
 		fmt.Sprintf("past_meeting_uid:%s", recording.PastMeetingUID),
 		"platform:Zoom",
@@ -1972,7 +1972,7 @@ func getPastMeetingRecordingTags(recording *pastMeetingRecordingInput) []string 
 // Ultimately they are indexed as separate records, so they need their own tags.
 func getPastMeetingTranscriptTags(recording *pastMeetingRecordingInput) []string {
 	tags := []string{
-		fmt.Sprintf("%s", recording.UID),
+		recording.UID,
 		fmt.Sprintf("past_meeting_transcript_uid:%s", recording.UID),
 		fmt.Sprintf("past_meeting_uid:%s", recording.PastMeetingUID),
 		"platform:Zoom",
@@ -2175,7 +2175,7 @@ func convertMapToInputPastMeetingSummary(v1Data map[string]any) (*pastMeetingSum
 
 func getPastMeetingSummaryTags(summary *pastMeetingSummaryInput) []string {
 	tags := []string{
-		fmt.Sprintf("%s", summary.UID),
+		summary.UID,
 		fmt.Sprintf("past_meeting_summary_uid:%s", summary.UID),
 		fmt.Sprintf("past_meeting_uid:%s", summary.PastMeetingUID),
 		fmt.Sprintf("meeting_uid:%s", summary.MeetingUID),

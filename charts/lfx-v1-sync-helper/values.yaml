@@ -1,20 +1,102 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
 ---
-# replicas is the number of service instances to run for horizontal scaling
-replicas: 1
+# serviceAccount is the configuration for the Kubernetes service account (used by multiple components)
+serviceAccount:
+  # create specifies whether a service account should be created
+  create: true
+  # name is the name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+  # annotations to add to the service account
+  annotations: {}
+  # automountServiceAccountToken is a boolean to determine if the service account token should be automatically mounted
+  automountServiceAccountToken: true
 
-# image is the configuration for the container images
-image:
-  # repository is the container image repository
-  repository: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper
-  # tag is the container image tag (overrides appVersion from Chart.yaml)
-  tag: ""
-  # pullPolicy is the image pull policy
-  pullPolicy: IfNotPresent
+# natsResources is the configuration for the NATS resources managed by this chart (used by multiple components)
+natsResources:
+  # kv_bucket_v1_objects is the configuration for the KV bucket for storing v1 objects from Meltano
+  kv_bucket_v1_objects:
+    # creation is a boolean to determine if the KV bucket should be created via the helm chart.
+    # set it to false if you want to use an existing KV bucket.
+    creation: true
+    # keep is a boolean to determine if the KV bucket should be preserved during helm uninstall
+    # set it to false if you want the bucket to be deleted when the chart is uninstalled
+    keep: true
+    # name is the name of the KV bucket for storing v1 objects
+    name: v1-objects
+    # history is the number of history entries to keep for the KV bucket
+    history: 20
+    # storage is the storage type for the KV bucket
+    storage: file
+    # maxValueSize is the maximum size of a value in the KV bucket
+    maxValueSize: 10485760 # 10MB
+    # maxBytes is the maximum number of bytes in the KV bucket
+    maxBytes: 10737418240 # 10GB
+    # compression is a boolean to determine if the KV bucket should be compressed
+    compression: true
+
+  # kv_bucket_v1_mappings is the configuration for the KV bucket for storing v1 ID mappings
+  kv_bucket_v1_mappings:
+    # creation is a boolean to determine if the KV bucket should be created via the helm chart.
+    # set it to false if you want to use an existing KV bucket.
+    creation: true
+    # keep is a boolean to determine if the KV bucket should be preserved during helm uninstall
+    # set it to false if you want the bucket to be deleted when the chart is uninstalled
+    keep: true
+    # name is the name of the KV bucket for storing v1 ID mappings
+    name: v1-mappings
+    # history is the number of history entries to keep for the KV bucket
+    history: 20
+    # storage is the storage type for the KV bucket
+    storage: file
+    # maxValueSize is the maximum size of a value in the KV bucket
+    maxValueSize: 10485760 # 10MB
+    # maxBytes is the maximum number of bytes in the KV bucket
+    maxBytes: 2147483648 # 2GB
+    # compression is a boolean to determine if the KV bucket should be compressed
+    compression: true
+
+  # stream_wal_listener is the configuration for the JetStream stream for wal-listener events
+  stream_wal_listener:
+    # creation is a boolean to determine if the JetStream stream should be created via the helm chart.
+    # set it to false if you want to use an existing stream.
+    creation: true
+    # keep is a boolean to determine if the stream should be preserved during helm uninstall
+    # set it to false if you want the stream to be deleted when the chart is uninstalled
+    keep: true
+    # name is the name of the JetStream stream for wal-listener events
+    name: wal_listener
+    # subjects is the list of subjects this stream will subscribe to
+    subjects:
+      - wal_listener.*
+    # storage is the storage type for the stream
+    storage: file
+    # retention is the retention policy type: "limits", "interest", or "workqueue"
+    retention: limits
+    # maxAge is the maximum age of messages in the stream (uses time.ParseDuration() format)
+    maxAge: 336h # 2 weeks
+    # maxBytes is the maximum number of bytes in the stream (-1 for unlimited)
+    maxBytes: -1
+    # maxMsgs is the maximum number of messages in the stream (-1 for unlimited)
+    maxMsgs: -1
+    # replicas is the number of replicas for the stream (1 for single instance)
+    replicas: 1
+    # compression can be "s2" or "none" (s2 is default)
+    compression: s2
 
 # app is the configuration for the application
 app:
+  # replicas is the number of service instances to run for horizontal scaling
+  replicas: 1
+  # image is the configuration for the container images
+  image:
+    # repository is the container image repository
+    repository: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper
+    # tag is the container image tag (overrides appVersion from Chart.yaml)
+    tag: ""
+    # pullPolicy is the image pull policy
+    pullPolicy: IfNotPresent
   environment:
     # NATS_URL is required
     NATS_URL:
@@ -43,84 +125,250 @@ app:
     # LFX_API_GW is optional - LFX API Gateway URL
     LFX_API_GW:
       value: https://api-gw.dev.platform.linuxfoundation.org/
+    # USE_MSGPACK is optional - Use MessagePack encoding for KV bucket values (default: false for JSON)
+    # Accepts truthy values: "true", "yes", "t", "y", "1" (case-insensitive)
+    USE_MSGPACK:
+      value: "false"
 
-# serviceAccount is the configuration for the Kubernetes service account
-serviceAccount:
-  # create specifies whether a service account should be created
-  create: true
-  # name is the name of the service account to use.
-  # If not set and create is true, a name is generated using the fullname template
-  name: ""
-  # annotations to add to the service account
-  annotations: {}
-  # automountServiceAccountToken is a boolean to determine if the service account token should be automatically mounted
-  automountServiceAccountToken: true
+  # heimdall is the configuration for JWT impersonation of Heimdall-authorized
+  # principals for v1 data ingest.
+  heimdall:
+    enabled: true
+    url: http://lfx-platform-heimdall.lfx.svc.cluster.local:4456
+    # fallback principal for JWT impersonation, without the "@clients" suffix.
+    clientId: v1_sync_helper
+    # secret contains the configuration for JWT signing
+    secret:
+      # name of the secret containing JWT private key and configuration
+      name: heimdall-signer-cert
+      # key in the secret which contains the signing certificate
+      privateKeyKey: signer.pem
 
-# nats is the configuration for the NATS server
-nats:
-  # kv_bucket_v1_objects is the configuration for the KV bucket for storing v1 objects from Meltano
-  kv_bucket_v1_objects:
-    # creation is a boolean to determine if the KV bucket should be created via the helm chart.
-    # set it to false if you want to use an existing KV bucket.
-    creation: true
-    # keep is a boolean to determine if the KV bucket should be preserved during helm uninstall
-    # set it to false if you want the bucket to be deleted when the chart is uninstalled
-    keep: true
-    # name is the name of the KV bucket for storing v1 objects
-    name: v1-objects
-    # history is the number of history entries to keep for the KV bucket
-    history: 20
-    # storage is the storage type for the KV bucket
-    storage: file
-    # maxValueSize is the maximum size of a value in the KV bucket
-    maxValueSize: 10485760  # 10MB
-    # maxBytes is the maximum number of bytes in the KV bucket
-    maxBytes: 10737418240  # 10GB
-    # compression is a boolean to determine if the KV bucket should be compressed
-    compression: true
+  # auth0 is the configuration for Auth0 authentication for v1 API calls
+  auth0:
+    # secret contains the configuration for Auth0 authentication
+    secret:
+      # name of the secret containing Auth0 client ID and private key
+      name: v1-sync-helper-auth0-credentials
+      # key in the secret which contains the Auth0 client ID
+      clientIdKey: client_id
+      # key in the secret which contains the Auth0 private key
+      privateKeyKey: client_private_key
 
-  # kv_bucket_v1_mappings is the configuration for the KV bucket for storing v1 ID mappings
-  kv_bucket_v1_mappings:
-    # creation is a boolean to determine if the KV bucket should be created via the helm chart.
-    # set it to false if you want to use an existing KV bucket.
-    creation: true
-    # keep is a boolean to determine if the KV bucket should be preserved during helm uninstall
-    # set it to false if you want the bucket to be deleted when the chart is uninstalled
-    keep: true
-    # name is the name of the KV bucket for storing v1 ID mappings
-    name: v1-mappings
-    # history is the number of history entries to keep for the KV bucket
-    history: 20
-    # storage is the storage type for the KV bucket
-    storage: file
-    # maxValueSize is the maximum size of a value in the KV bucket
-    maxValueSize: 10485760  # 10MB
-    # maxBytes is the maximum number of bytes in the KV bucket
-    maxBytes: 2147483648  # 2GB
-    # compression is a boolean to determine if the KV bucket should be compressed
-    compression: true
-
-# heimdall is the configuration for JWT impersonation of Heimdall-authorized
-# principals for v1 data ingest.
-heimdall:
+# wal-listener is the configuration for the PostgreSQL WAL listener component
+walListener:
+  # enabled specifies whether the wal-listener should be deployed
   enabled: true
-  url: http://lfx-platform-heimdall.lfx.svc.cluster.local:4456
-  # fallback principal for JWT impersonation, without the "@clients" suffix.
-  clientId: v1_sync_helper
-  # secret contains the configuration for JWT signing
-  secret:
-    # name of the secret containing JWT private key and configuration
-    name: heimdall-signer-cert
-    # key in the secret which contains the signing certificate
-    privateKeyKey: signer.pem
+  # replicas is the number of wal-listener instances to run
+  replicas: 1
+  # image is the configuration for the wal-listener container image
+  image:
+    # repository is the container image repository
+    repository: ihippik/wal-listener
+    # tag is the container image tag
+    tag: latest
+    # pullPolicy is the image pull policy
+    pullPolicy: IfNotPresent
+  # config is the configuration for the wal-listener
+  config:
+    listener:
+      # serverPort is the port for health checks and monitoring
+      serverPort: 8080
+      # slotName is the PostgreSQL replication slot name
+      slotName: lfx_v2
+      # refreshConnection is the connection refresh interval
+      refreshConnection: 30s
+      # heartbeatInterval is the heartbeat interval
+      heartbeatInterval: 10s
+      # filter contains table filtering configuration
+      filter:
+        # tables is a map of table names to operations to listen for
+        # Default tables match those from meltano.yml tap-postgres configuration
+        tables:
+          collaboration__c:
+            - insert
+            - update
+            - delete
+          community__c:
+            - insert
+            - update
+            - delete
+          project__c:
+            - insert
+            - update
+            - delete
+          alternate_email__c:
+            - insert
+            - update
+            - delete
+          merged_user:
+            - insert
+            - update
+            - delete
+    logger:
+      # level is the logging level
+      level: info
+      # fmt is the log format
+      fmt: json
+    database:
+      # PostgreSQL database configuration
+      # Uses the same secret as meltano-el-postgres by default
+      secret:
+        # name is the name of the secret containing database credentials
+        name: v1-platform-db-credentials
+        # hostKey is the key in the secret containing the database host
+        hostKey: host
+        # usernameKey is the key in the secret containing the database username
+        usernameKey: username
+        # passwordKey is the key in the secret containing the database password
+        passwordKey: password
+      # port is the database port
+      port: 5432
+      # name is the database name
+      name: sfdc
+      # TLS configuration for PostgreSQL connection
+      # enableTLS determines whether to use TLS/SSL connection to PostgreSQL
+      enableTLS: false
+      # sslMode specifies the TLS verification mode when enableTLS is true: require, verify-ca, verify-full
+      sslMode: "require"
 
-# auth0 is the configuration for Auth0 authentication for v1 API calls
-auth0:
-  # secret contains the configuration for Auth0 authentication
-  secret:
-    # name of the secret containing Auth0 client ID and private key
-    name: v1-sync-helper-auth0-credentials
-    # key in the secret which contains the Auth0 client ID
-    clientIdKey: client_id
-    # key in the secret which contains the Auth0 private key
-    privateKeyKey: client_private_key
+    publisher:
+      # type is the publisher type (nats or kafka)
+      type: nats
+      # address is the NATS server address (matches meltano.yml default)
+      address: lfx-platform-nats.lfx.svc.cluster.local:4222
+      # topic is the NATS topic to publish to
+      topic: wal_listener
+  # resources is the resource configuration for the wal-listener container
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+# meltano is the configuration for Meltano ETL CronJobs
+meltano:
+  # postgresEtl is the configuration for the PostgreSQL ETL CronJob
+  postgresEtl:
+    # enabled specifies whether the PostgreSQL ETL CronJob should be deployed
+    enabled: true
+    # schedule is the cron schedule for the job (every 5 minutes by default)
+    schedule: "*/5 * * * *"
+    # concurrencyPolicy controls concurrent execution (Forbid, Allow, Replace)
+    concurrencyPolicy: Forbid
+    # successfulJobsHistoryLimit is the number of successful jobs to keep
+    successfulJobsHistoryLimit: 3
+    # failedJobsHistoryLimit is the number of failed jobs to keep
+    failedJobsHistoryLimit: 3
+    # ttlSecondsAfterFinished is the TTL for completed jobs (1 hour)
+    ttlSecondsAfterFinished: 3600
+    # backoffLimit is the number of retries before marking job as failed
+    backoffLimit: 1
+    # image is the configuration for the Meltano container image
+    image:
+      # repository is the container image repository
+      repository: ghcr.io/linuxfoundation/lfx-v1-sync-helper/meltano
+      # tag is the container image tag (overrides appVersion from Chart.yaml)
+      tag: ""
+      # pullPolicy is the image pull policy
+      pullPolicy: IfNotPresent
+    # stateId is the state ID for incremental extractions (used with --state-id)
+    stateId: platform-db-incremental
+    # environment specifies the Meltano environment (dev/staging/prod)
+    # This value is used to:
+    # - Set MELTANO_ENVIRONMENT variable
+    # - Construct S3 state bucket name as: {aws.stateBucketPrefix}-{environment}
+    environment: dev
+    # aws configuration for state backend and data access
+    # Environment variables built: AWS_DEFAULT_REGION, AWS_REGION, MELTANO_STATE_BACKEND_URI
+    aws:
+      # region for AWS services (S3, DynamoDB)
+      region: us-west-2
+      # stateBucketPrefix for S3 state backend naming (becomes: s3://{prefix}-{environment})
+      stateBucketPrefix: lfx-v2-meltano-state
+    # postgres configuration for database connection
+    # Environment variables built: TAP_POSTGRES_HOST, TAP_POSTGRES_PORT, TAP_POSTGRES_DATABASE,
+    # TAP_POSTGRES_USER, TAP_POSTGRES_PASSWORD (from secrets)
+    postgres:
+      # host configuration
+      host:
+        # secret containing PostgreSQL host
+        secret:
+          name: v1-platform-db-credentials
+          key: host
+      # port for PostgreSQL connection
+      port: 5432
+      # database name
+      database: sfdc
+      # username configuration
+      username:
+        secret:
+          name: v1-platform-db-credentials
+          key: username
+      # password configuration
+      password:
+        secret:
+          name: v1-platform-db-credentials
+          key: password
+    # nats configuration for target NATS KV
+    # Environment variables built: TARGET_NATS_KV_URL, TARGET_NATS_KV_BUCKET,
+    # TARGET_NATS_KV_REFRESH_MODE, TARGET_NATS_KV_VALIDATE_RECORDS, TARGET_NATS_KV_MSGPACK
+    nats:
+      # url for NATS connection
+      url: nats://lfx-platform-nats.lfx.svc.cluster.local:4222
+      # bucket name for storing v1 objects
+      bucket: v1-objects
+      # refresh mode for KV operations
+      refreshMode: newer
+      # validate records before storing (true for PostgreSQL, false for DynamoDB)
+      validateRecords: true
+      # use MessagePack encoding
+      useMessagePack: false
+    # resources is the resource configuration for the Meltano container
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "2Gi"
+        cpu: "1000m"
+    # catalog configuration for PostgreSQL tap
+    # Note: Meltano arguments are built dynamically in the correct order:
+    # meltano el [--catalog path] [--state-id id] tap-postgres target-nats-kv
+    #
+    # Users must create their own ConfigMap containing the catalog JSON.
+    # Example ConfigMap creation:
+    #   kubectl create configmap my-postgres-catalog --from-file=catalog.json=./my-catalog.json
+    # Or via YAML manifest:
+    #   apiVersion: v1
+    #   kind: ConfigMap
+    #   metadata:
+    #     name: my-postgres-catalog
+    #   data:
+    #     catalog.json: |
+    #       {
+    #         "streams": [
+    #           {
+    #             "tap_stream_id": "my_table",
+    #             "table_name": "my_table",
+    #             "replication_method": "INCREMENTAL",
+    #             "key_properties": ["id"],
+    #             "schema": {...}
+    #           }
+    #         ]
+    #       }
+    catalog:
+      # enabled specifies whether to use a catalog file for schema discovery
+      # Set to false to rely on Meltano's automatic schema discovery
+      enabled: false
+      # configMap specifies an existing ConfigMap containing the catalog (required if enabled)
+      # Users must create their own ConfigMap with the catalog content before enabling this
+      configMap:
+        # name is the name of an existing ConfigMap containing the catalog (required)
+        name: ""
+        # key is the key in the ConfigMap containing the catalog JSON
+        key: catalog.json
+        # mountPath is where to mount the catalog file in the container
+        mountPath: /catalogs/tap-postgres

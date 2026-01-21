@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // isValidURL checks if a URL value is non-empty and not "nil".
@@ -130,11 +131,8 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 		return
 	}
 
-	// Extract v1Principal from lastmodifiedbyid for JWT generation.
-	v1Principal := ""
-	if lastModifiedBy, ok := v1Data["lastmodifiedbyid"].(string); ok && lastModifiedBy != "" {
-		v1Principal = lastModifiedBy
-	}
+	// Extract v1Principal from v1 data for JWT generation.
+	v1Principal := extractV1Principal(ctx, v1Data)
 
 	// Extract project SFID (primary key).
 	sfid, ok := v1Data["sfid"].(string)
@@ -151,6 +149,10 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 	existingUID := ""
 
 	if entry, err := mappingsKV.Get(ctx, mappingKey); err == nil {
+		if isTombstonedMapping(entry.Value()) {
+			logger.With("sfid", sfid, "slug", slug).WarnContext(ctx, "skipping project upsert - mapping is tombstoned (previously deleted)")
+			return
+		}
 		existingUID = string(entry.Value())
 	}
 
@@ -210,14 +212,65 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 		return
 	}
 
-	// Store the SFID mapping.
+	// Store the SFID mapping and reverse mapping.
 	if uid != "" {
 		if _, err := mappingsKV.Put(ctx, mappingKey, []byte(uid)); err != nil {
 			logger.With(errKey, err, "sfid", sfid, "uid", uid).WarnContext(ctx, "failed to store project mapping")
 		}
+
+		// Store reverse mapping (v2 UID -> v1 SFID).
+		reverseMappingKey := fmt.Sprintf("project.uid.%s", uid)
+		if _, err := mappingsKV.Put(ctx, reverseMappingKey, []byte(sfid)); err != nil {
+			logger.With(errKey, err, "project_uid", uid, "sfid", sfid).WarnContext(ctx, "failed to store project reverse mapping")
+		}
 	}
 
 	logger.With("project_uid", uid, "sfid", sfid, "slug", slug).InfoContext(ctx, "successfully synced project")
+}
+
+// handleProjectDelete processes a project deletion.
+// Returns true if the operation should be retried, false otherwise.
+func handleProjectDelete(ctx context.Context, key string, sfid string, v1Principal string) bool {
+	// Check if we have an existing mapping using SFID.
+	mappingKey := fmt.Sprintf("project.sfid.%s", sfid)
+	entry, err := mappingsKV.Get(ctx, mappingKey)
+	if err != nil {
+		if err == jetstream.ErrKeyNotFound {
+			logger.With("sfid", sfid, "key", key).InfoContext(ctx, "project mapping not found, nothing to delete")
+			return false
+		}
+		logger.With(errKey, err, "sfid", sfid, "key", key).ErrorContext(ctx, "failed to get project mapping for deletion")
+		return true // Retry on error.
+	}
+
+	existingUID := string(entry.Value())
+	if existingUID == "" || isTombstonedMapping(entry.Value()) {
+		logger.With("sfid", sfid, "key", key).InfoContext(ctx, "project mapping empty or tombstoned, nothing to delete")
+		return false
+	}
+
+	// Delete the project using provided v1Principal or v1-sync-helper service credentials.
+	logger.With("project_uid", existingUID, "sfid", sfid, "key", key, "v1_principal", v1Principal).InfoContext(ctx, "deleting project")
+
+	err = deleteProject(ctx, existingUID, v1Principal)
+	if err != nil {
+		logger.With(errKey, err, "project_uid", existingUID, "sfid", sfid, "key", key).ErrorContext(ctx, "failed to delete project")
+		return true // Retry on error.
+	}
+
+	// Tombstone mappings after successful deletion.
+	if err := tombstoneMapping(ctx, mappingKey); err != nil {
+		logger.With(errKey, err, "sfid", sfid, "project_uid", existingUID).WarnContext(ctx, "failed to tombstone project SFID mapping")
+	}
+
+	// Also tombstone reverse mapping (v2 UID -> v1 SFID).
+	reverseMappingKey := fmt.Sprintf("project.uid.%s", existingUID)
+	if err := tombstoneMapping(ctx, reverseMappingKey); err != nil {
+		logger.With(errKey, err, "project_uid", existingUID, "sfid", sfid).WarnContext(ctx, "failed to tombstone project UID mapping")
+	}
+
+	logger.With("project_uid", existingUID, "sfid", sfid, "key", key).InfoContext(ctx, "successfully deleted project")
+	return false
 }
 
 // mapV1DataToProjectCreatePayload converts v1 project data to a CreateProjectPayload.

@@ -62,7 +62,6 @@ const (
 
 var (
 	v1HTTPClient *http.Client
-	auth0Config  *authentication.Authentication
 )
 
 // V1User represents a user from the LFX v1 User Service
@@ -146,8 +145,6 @@ func initV1Client(cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("failed to create Auth0 client configuration: %w", err)
 	}
-
-	auth0Config = authConfig
 
 	// Create HTTP client with Auth0 token source
 	tokenSource := &ClientCredentialsTokenSource{
