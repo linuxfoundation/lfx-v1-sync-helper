@@ -11,6 +11,7 @@ dependencies = [
     "jsonschema>=2.6.0",
     "msgspec>=0.20.0",
     "nats-py>=2.10.0",
+    "nkeys>=0.2.0",
     "simplejson>=3.17.0",
     "singer-python>=6.1.1",
 ]
