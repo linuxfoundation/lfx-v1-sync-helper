@@ -133,7 +133,6 @@ func initV1Client(cfg *Config) error {
 }
 
 // lookupV1User fetches user information from the v1-objects KV bucket (replicated by Meltano)
-// This replaces the User Service API calls for improved performance and v1 decoupling
 func lookupV1User(ctx context.Context, platformID string) (*V1User, error) {
 	// Look up user in the salesforce-merged_user table via v1-objects KV bucket
 	userKey := fmt.Sprintf("salesforce-merged_user.%s", platformID)
@@ -261,7 +260,7 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 	}
 
 	// Check if this is a tombstone marker
-	if isTombstonedKVEntry(entry.Value()) {
+	if isTombstonedMapping(entry.Value()) {
 		return "", false, true, nil
 	}
 
@@ -290,11 +289,6 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 	}
 
 	return email, isPrimary, false, nil
-}
-
-// isTombstonedKVEntry checks if a KV entry value is a tombstone marker
-func isTombstonedKVEntry(value []byte) bool {
-	return string(value) == tombstoneMarker
 }
 
 // getOrganizationFromV1API fetches organization information from the LFX v1 Organization Service
