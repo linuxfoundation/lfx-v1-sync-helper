@@ -77,8 +77,8 @@ The v1-sync-helper service provides a NATS request/reply function for querying v
 
 ### Request/Reply Subject
 
-| Subject | Description |
-|---------|-------------|
+| Subject                 | Description                                 |
+|-------------------------|---------------------------------------------|
 | `lfx.lookup_v1_mapping` | Bidirectional v1↔v2 mapping lookup function |
 
 ### Usage
