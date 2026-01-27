@@ -158,7 +158,7 @@ app:
 # wal-listener is the configuration for the PostgreSQL WAL listener component
 walListener:
   # enabled specifies whether the wal-listener should be deployed
-  enabled: true
+  enabled: false
   # replicas is the number of wal-listener instances to run
   replicas: 1
   # image is the configuration for the wal-listener container image
@@ -253,7 +253,7 @@ meltano:
   # postgresEtl is the configuration for the PostgreSQL ETL CronJob
   postgresEtl:
     # enabled specifies whether the PostgreSQL ETL CronJob should be deployed
-    enabled: true
+    enabled: false
     # schedule is the cron schedule for the job (every 5 minutes by default)
     schedule: "*/5 * * * *"
     # concurrencyPolicy controls concurrent execution (Forbid, Allow, Replace)
