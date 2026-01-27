@@ -272,14 +272,14 @@ func extractV1Principal(ctx context.Context, v1Data map[string]any) string {
 	modifiedTime, err := parseTimestamp(lastModifiedDate)
 	if err != nil {
 		logger.With(errKey, err, "lastmodifieddate", lastModifiedDate).
-			WarnContext(ctx, "failed to parse lastmodifieddate, using system principal")
+			WarnContext(ctx, "failed to parse lastmodifieddate: using system principal instead of lastmodifiedbyid for deletion")
 		return ""
 	}
 
 	deletedTime, err := parseTimestamp(deletedAtStr)
 	if err != nil {
 		logger.With(errKey, err, "_sdc_deleted_at", deletedAtStr).
-			WarnContext(ctx, "failed to parse _sdc_deleted_at, using system principal")
+			WarnContext(ctx, "failed to parse _sdc_deleted_at: using system principal instead of lastmodifiedbyid for deletion")
 		return ""
 	}
 

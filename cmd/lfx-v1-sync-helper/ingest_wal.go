@@ -396,23 +396,35 @@ func getTimestampString(data map[string]interface{}, field string) string {
 
 // parseTimestamp parses a timestamp string in common formats used by Salesforce and PostgreSQL.
 // It tries multiple timestamp formats to handle various datetime representations.
+// For timestamps without timezone designators, it assumes UTC.
 func parseTimestamp(timestampStr string) (time.Time, error) {
 	if timestampStr == "" {
 		return time.Time{}, fmt.Errorf("empty timestamp")
 	}
 
-	// Try common timestamp formats.
-	formats := []string{
-		time.RFC3339,
+	// Try common timestamp formats with timezone information first.
+	formatsWithTZ := []string{
 		time.RFC3339Nano,
-		"2006-01-02T15:04:05.000000Z",
-		"2006-01-02T15:04:05Z",
-		"2006-01-02 15:04:05",
+		time.RFC3339,
 	}
 
-	for _, format := range formats {
+	for _, format := range formatsWithTZ {
 		if t, err := time.Parse(format, timestampStr); err == nil {
 			return t, nil
+		}
+	}
+
+	// Try formats without timezone designators, assuming UTC.
+	// This handles PostgreSQL "timestamp without time zone" columns.
+	formatsWithoutTZ := []string{
+		"2006-01-02T15:04:05.000000",
+		"2006-01-02T15:04:05",
+	}
+
+	for _, format := range formatsWithoutTZ {
+		if t, err := time.Parse(format, timestampStr); err == nil {
+			// Assume UTC for zoneless timestamps.
+			return t.UTC(), nil
 		}
 	}
 
