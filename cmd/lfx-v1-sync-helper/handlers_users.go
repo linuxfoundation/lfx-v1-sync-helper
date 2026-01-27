@@ -145,22 +145,3 @@ func updateEmailsList(currentEmails []string, emailSfid string, isDeleted bool) 
 	// Email already in list, nothing to add.
 	return currentEmails
 }
-
-// handleAlternateEmailDelete processes an alternate email deletion.
-// Returns true if the operation should be retried, false otherwise.
-func handleAlternateEmailDelete(ctx context.Context, key string, sfid string, v1Principal string) bool {
-	// Extract user SFID from the v1 data.
-	// For alternate emails, we need to parse the relationship to find the user.
-	// This would typically require looking up the email record to get the user SFID.
-
-	logger.With("key", key, "sfid", sfid).InfoContext(ctx, "alternate email deletion - processing email removal")
-
-	// For now, we'll mark this as handled but not fully implemented.
-	// A complete implementation would need to:
-	// 1. Look up which user this alternate email belongs to
-	// 2. Call updateUserAlternateEmails with isDeleted=true
-	// 3. Clean up any mappings
-
-	logger.With("key", key, "sfid", sfid, "v1_principal", v1Principal).WarnContext(ctx, "alternate email deletion not fully implemented")
-	return false
-}

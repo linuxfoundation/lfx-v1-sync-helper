@@ -8,21 +8,13 @@ package main
 //
 // This client handles:
 // 1. Auth0 private key JWT authentication for LFX v1 API access
-// 2. User lookup via v1 User Service API with intelligent caching
+// 2. User lookup via v1-objects KV bucket (replicated by Meltano from salesforce-merged_user)
 // 3. Machine user detection (platform IDs ending with "@clients")
-// 4. Concurrent request locking to prevent duplicate API calls
-// 5. Background cache refresh for stale entries
-//
-// Caching Strategy:
-// - User data cached for 1 hour in NATS KV store
-// - Stale cache entries trigger background refresh
-// - Lock mechanism prevents concurrent API calls for same user
-// - Error states are cached to avoid repeated failed lookups
+// 4. Organization lookup via v1 Organization Service API with intelligent caching
 //
 // User Types:
-// - Machine users: platform IDs with "@clients" suffix (no API lookup)
-// - Platform users: regular platform IDs requiring v1 API lookup
-// - Invalid users: empty usernames or API errors (cached to prevent retries)
+// - Machine users: platform IDs with "@clients" suffix (no lookup required)
+// - Platform users: regular platform IDs looked up from v1-objects KV bucket
 
 import (
 	"context"
@@ -37,19 +29,12 @@ import (
 
 	"github.com/auth0/go-auth0/authentication"
 	"github.com/auth0/go-auth0/authentication/oauth"
+	"github.com/nats-io/nats.go/jetstream"
+	"github.com/vmihailenco/msgpack/v5"
 	"golang.org/x/oauth2"
 )
 
 const (
-	// Cache settings for user lookups
-	userCacheKeyPrefix         = "v1_user."
-	userLockKeyPrefix          = "v1_user_lock."
-	userCacheExpiry            = 10 * time.Minute // Treat user data as fresh for 10 minutes
-	userCacheStaleWhileRefresh = 6 * time.Hour    // Use stale data up to 6 hours with background refresh
-	userLockTimeout            = 10 * time.Second // Lock timeout for concurrent requests
-	userLockRetryInterval      = 1 * time.Second  // Retry interval when lock exists
-	userLockRetryAttempts      = 3                // Number of lock acquisition retry attempts
-
 	// Cache settings for organization lookups
 	orgCacheKeyPrefix         = "v1_org."
 	orgLockKeyPrefix          = "v1_org_lock."
@@ -64,18 +49,8 @@ var (
 	v1HTTPClient *http.Client
 )
 
-// V1User represents a user from the LFX v1 User Service
+// V1User represents a user from the v1-objects KV bucket (salesforce-merged_user table)
 type V1User struct {
-	ID          string    `json:"ID"`
-	Username    string    `json:"Username"`
-	Email       string    `json:"Email"`
-	FirstName   string    `json:"FirstName"`
-	LastName    string    `json:"LastName"`
-	LastFetched time.Time `json:"_last_fetched"` // Internal field for cache management
-}
-
-// V1UserResponse represents the API response from v1 User Service
-type V1UserResponse struct {
 	ID        string `json:"ID"`
 	Username  string `json:"Username"`
 	Email     string `json:"Email"`
@@ -158,46 +133,191 @@ func initV1Client(cfg *Config) error {
 	return nil
 }
 
-// getUserFromV1API fetches user information from the LFX v1 User Service
-func getV1UserFromUserSvc(ctx context.Context, platformID string) (*V1User, error) {
-	url := fmt.Sprintf("%suser-service/v1/users/%s", cfg.LFXAPIGateway.String(), platformID)
+// lookupV1User fetches user information from the v1-objects KV bucket (replicated by Meltano)
+func lookupV1User(ctx context.Context, platformID string) (*V1User, error) {
+	// Look up user in the salesforce-merged_user table via v1-objects KV bucket
+	userKey := fmt.Sprintf("salesforce-merged_user.%s", platformID)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	entry, err := v1KV.Get(ctx, userKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		if err == jetstream.ErrKeyNotFound {
+			return nil, fmt.Errorf("user %s not found in v1-objects KV bucket", platformID)
+		}
+		return nil, fmt.Errorf("failed to get user from v1-objects KV bucket: %w", err)
 	}
 
-	resp, err := v1HTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+	// Parse the merged_user data
+	var userData map[string]any
+	if err := json.Unmarshal(entry.Value(), &userData); err != nil {
+		// Try msgpack if JSON fails.
+		if msgpackErr := msgpack.Unmarshal(entry.Value(), &userData); msgpackErr != nil {
+			return nil, fmt.Errorf("failed to unmarshal user data (json: %w, msgpack: %w)", err, msgpackErr)
+		}
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("v1 User Service returned status %d: %s", resp.StatusCode, string(body))
+	// Check if the user record is deleted
+	if isDeleted, ok := userData["isdeleted"].(bool); ok && isDeleted {
+		return nil, fmt.Errorf("user %s is deleted (isdeleted)", platformID)
 	}
 
-	var userResponse V1UserResponse
-	if err := json.Unmarshal(body, &userResponse); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal user response: %w", err)
+	// Also treat WAL-based soft deletes (indicated by _sdc_deleted_at) as deleted.
+	if deletedAt, ok := userData["_sdc_deleted_at"]; ok {
+		if s, okStr := deletedAt.(string); (okStr && strings.TrimSpace(s) != "") || (!okStr && deletedAt != nil) {
+			return nil, fmt.Errorf("user %s is deleted (_sdc_deleted_at))", platformID)
+		}
 	}
 
-	// Convert to internal user format with cache timestamp
+	// Extract user fields from the merged_user record
 	user := &V1User{
-		ID:          userResponse.ID,
-		Username:    userResponse.Username,
-		Email:       userResponse.Email,
-		FirstName:   userResponse.FirstName,
-		LastName:    userResponse.LastName,
-		LastFetched: time.Now().UTC(),
+		ID: platformID,
+	}
+
+	// Map username from username__c field
+	if username, ok := userData["username__c"].(string); ok && username != "" {
+		user.Username = username
+	}
+
+	// Map first name
+	if firstName, ok := userData["firstname"].(string); ok {
+		user.FirstName = firstName
+	}
+
+	// Map last name
+	if lastName, ok := userData["lastname"].(string); ok {
+		user.LastName = lastName
+	}
+
+	// Look up user's primary email from alternate email mappings.
+	if email, emailErr := getPrimaryEmailForUser(ctx, platformID); emailErr == nil && email != "" {
+		user.Email = email
+	} else if emailErr != nil {
+		logger.With("platform_id", platformID, "error", emailErr).DebugContext(ctx, "failed to lookup primary email for user")
+	}
+
+	// Validate that we have at least a username (this is required for Auth0 mapping)
+	if user.Username == "" {
+		return nil, fmt.Errorf("user %s has no username in merged_user record", platformID)
 	}
 
 	return user, nil
+}
+
+// getPrimaryEmailForUser retrieves the primary email address for a user by looking up
+// their alternate emails from the mappings KV bucket and the v1-objects KV bucket
+func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error) {
+	// Get the list of alternate email SFIDs for this user
+	mappingKey := fmt.Sprintf("v1-merged-user.alternate-emails.%s", userSfid)
+
+	entry, err := mappingsKV.Get(ctx, mappingKey)
+	if err != nil {
+		if err == jetstream.ErrKeyNotFound {
+			return "", fmt.Errorf("no alternate emails found for user %s", userSfid)
+		}
+		return "", fmt.Errorf("failed to get alternate emails mapping: %w", err)
+	}
+
+	// Parse the list of email SFIDs
+	var emailSfids []string
+	if err := json.Unmarshal(entry.Value(), &emailSfids); err != nil {
+		return "", fmt.Errorf("failed to unmarshal email SFIDs: %w", err)
+	}
+
+	if len(emailSfids) == 0 {
+		return "", fmt.Errorf("user %s has no alternate emails", userSfid)
+	}
+
+	// Single pass: look for primary email while tracking first valid fallback
+	var fallbackEmail string
+	for _, emailSfid := range emailSfids {
+		email, isPrimary, isTombstoned, err := getAlternateEmailDetails(ctx, emailSfid)
+		if err != nil {
+			logger.With("email_sfid", emailSfid, "error", err).DebugContext(ctx, "failed to get alternate email details")
+			continue
+		}
+		if isTombstoned {
+			logger.With("email_sfid", emailSfid).DebugContext(ctx, "skipping tombstoned email record")
+			continue
+		}
+
+		// Return immediately if we find a primary email
+		if isPrimary && email != "" {
+			return email, nil
+		}
+
+		// Track first valid email as fallback
+		if fallbackEmail == "" && email != "" {
+			fallbackEmail = email
+		}
+	}
+
+	// If no primary email found, return the first valid email as fallback
+	if fallbackEmail != "" {
+		logger.With("user_sfid", userSfid, "email", fallbackEmail).DebugContext(ctx, "using first available email as fallback (no primary found)")
+		return fallbackEmail, nil
+	}
+
+	return "", fmt.Errorf("no valid emails found for user %s", userSfid)
+}
+
+// getAlternateEmailDetails retrieves email address and primary status from the v1-objects KV bucket
+// Returns (email, isPrimary, isTombstoned, error)
+func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email string, isPrimary bool, isTombstoned bool, err error) {
+	emailKey := fmt.Sprintf("salesforce-alternate_email__c.%s", emailSfid)
+
+	entry, err := v1KV.Get(ctx, emailKey)
+	if err != nil {
+		if err == jetstream.ErrKeyNotFound || err == jetstream.ErrKeyDeleted {
+			// Key not found or deleted could mean it was tombstoned/deleted
+			return "", false, true, nil
+		}
+		return "", false, false, fmt.Errorf("failed to get email record %s from v1-objects: %w", emailSfid, err)
+	}
+
+	// Check if this is a tombstone marker
+	if isTombstonedMapping(entry.Value()) {
+		return "", false, true, nil
+	}
+
+	// Parse the alternate email record
+	var emailData map[string]any
+	if err := json.Unmarshal(entry.Value(), &emailData); err != nil {
+		// Try msgpack if JSON fails.
+		if msgpackErr := msgpack.Unmarshal(entry.Value(), &emailData); msgpackErr != nil {
+			return "", false, false, fmt.Errorf("failed to unmarshal email data (json: %w, msgpack: %w)", err, msgpackErr)
+		}
+	}
+
+	// Check if the email record is deleted.
+	if isDeleted, ok := emailData["isdeleted"].(bool); ok && isDeleted {
+		return "", false, true, nil
+	}
+
+	// Also check for WAL-based soft deletes (indicated by _sdc_deleted_at).
+	// This is expected when soft-deleted email records are preserved in v1-objects KV bucket.
+	if deletedAt, ok := emailData["_sdc_deleted_at"]; ok {
+		if s, okStr := deletedAt.(string); (okStr && strings.TrimSpace(s) != "") || (!okStr && deletedAt != nil) {
+			return "", false, true, nil
+		}
+	}
+
+	// Also check if the email is inactive (active__c is not true).
+	if isActive, ok := emailData["active__c"].(bool); !ok || !isActive {
+		return "", false, true, nil
+	}
+
+	// Extract email address
+	if emailAddr, ok := emailData["alternate_email_address__c"].(string); ok && emailAddr != "" {
+		email = emailAddr
+	} else {
+		return "", false, false, fmt.Errorf("email record %s has no email address", emailSfid)
+	}
+
+	// Check if this is the primary email
+	if primaryFlag, ok := emailData["primary_email__c"].(bool); ok {
+		isPrimary = primaryFlag
+	}
+
+	return email, isPrimary, false, nil
 }
 
 // getOrganizationFromV1API fetches organization information from the LFX v1 Organization Service
@@ -240,193 +360,7 @@ func getV1OrganizationFromOrgSvc(ctx context.Context, sfid string) (*V1Organizat
 	return org, nil
 }
 
-// getCachedUser retrieves a user from the mappings KV cache
-func getCachedV1User(ctx context.Context, platformID string) (*V1User, error) {
-	cacheKey := userCacheKeyPrefix + platformID
-
-	entry, err := mappingsKV.Get(ctx, cacheKey)
-	if err != nil {
-		return nil, err // No cached entry
-	}
-
-	var user V1User
-	if err := json.Unmarshal(entry.Value(), &user); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal cached user: %w", err)
-	}
-
-	return &user, nil
-}
-
-// setCachedUser stores a user in the mappings KV cache
-func setCachedV1User(ctx context.Context, platformID string, user *V1User) error {
-	cacheKey := userCacheKeyPrefix + platformID
-
-	data, err := json.Marshal(user)
-	if err != nil {
-		return fmt.Errorf("failed to marshal user for cache: %w", err)
-	}
-
-	_, err = mappingsKV.Put(ctx, cacheKey, data)
-	return err
-}
-
-// acquireUserLock attempts to acquire a lock for user refresh operations with retries
-// Returns (acquired, waited) where waited indicates if any retry attempts were made
-func acquireV1UserLock(ctx context.Context, platformID string, maxRetries int) (bool, bool) {
-	lockKey := userLockKeyPrefix + platformID
-	var waited bool
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		lockValue := strconv.FormatInt(time.Now().Unix(), 10)
-
-		// Try to create the lock (will fail if it already exists)
-		_, err := mappingsKV.Create(ctx, lockKey, []byte(lockValue))
-		if err == nil {
-			return true, waited // Successfully acquired lock
-		}
-
-		// Check if lock already exists and if it's stale
-		if entry, getErr := mappingsKV.Get(ctx, lockKey); getErr == nil {
-			if lockTimestamp, parseErr := strconv.ParseInt(string(entry.Value()), 10, 64); parseErr == nil {
-				lockTime := time.Unix(lockTimestamp, 0)
-				if time.Since(lockTime) > userLockTimeout {
-					// Lock is stale, try to update it
-					if _, updateErr := mappingsKV.Put(ctx, lockKey, []byte(lockValue)); updateErr == nil {
-						return true, waited
-					}
-				}
-			}
-		}
-
-		// If this isn't the last attempt, wait before retrying
-		if attempt < maxRetries {
-			waited = true
-			time.Sleep(userLockRetryInterval)
-		}
-	}
-
-	return false, waited // Failed to acquire lock after all attempts
-}
-
-// releaseUserLock releases a user refresh lock
-func releaseV1UserLock(ctx context.Context, platformID string) error {
-	lockKey := userLockKeyPrefix + platformID
-	return mappingsKV.Delete(ctx, lockKey)
-}
-
-// refreshUserInBackground refreshes user data in the background
-func refreshV1UserInBackground(ctx context.Context, platformID string) {
-	go func() {
-		// Acquire lock for this refresh operation
-		acquired, _ := acquireV1UserLock(ctx, platformID, 1)
-		if !acquired {
-			return // Another process is already refreshing
-		}
-
-		defer func() {
-			if releaseErr := releaseV1UserLock(ctx, platformID); releaseErr != nil {
-				logger.With(errKey, releaseErr, "platform_id", platformID).WarnContext(ctx, "failed to release user cache lock")
-			}
-		}()
-
-		// Fetch fresh user data
-		user, err := getV1UserFromUserSvc(ctx, platformID)
-		if err != nil {
-			logger.With(errKey, err, "platform_id", platformID).WarnContext(ctx, "background user refresh failed")
-			return
-		}
-
-		// Update cache
-		// Update cache with fresh data
-		if cacheErr := setCachedV1User(ctx, platformID, user); cacheErr != nil {
-			logger.With(errKey, cacheErr, "platform_id", platformID).WarnContext(ctx, "failed to update user cache")
-		} else {
-			logger.With("platform_id", platformID, "username", user.Username).DebugContext(ctx, "user cache refreshed in background")
-		}
-	}()
-}
-
-// lookupUser retrieves user information with caching and refresh logic
-func lookupV1User(ctx context.Context, platformID string) (*V1User, error) {
-	// Try to get from cache first
-	cachedUser, err := getCachedV1User(ctx, platformID)
-	if err == nil {
-		age := time.Since(cachedUser.LastFetched)
-		// See if cache is still within the "stale" window.
-		if age <= userCacheStaleWhileRefresh {
-			if age > userCacheExpiry {
-				// Cache is stale: refresh in background.
-				refreshV1UserInBackground(ctx, platformID)
-			}
-			return cachedUser, nil
-		}
-		// Fall through if cache is *too* old (past "stale" window).
-	}
-
-	// Try to acquire lock.
-	acquired, waited := acquireV1UserLock(ctx, platformID, userLockRetryAttempts)
-
-	if acquired {
-		// We got the lock: set up defer to release it.
-		defer func() {
-			if releaseErr := releaseV1UserLock(ctx, platformID); releaseErr != nil {
-				logger.With(errKey, releaseErr, "platform_id", platformID).WarnContext(ctx, "failed to release user cache lock")
-			}
-		}()
-	}
-
-	// If we waited, check cache again - another process might have populated it.
-	if waited {
-		if freshUser, cacheErr := getCachedV1User(ctx, platformID); cacheErr == nil {
-			if time.Since(freshUser.LastFetched) <= userCacheExpiry {
-				// Cache is now fresh, return it
-				return freshUser, nil
-			}
-		}
-		// Fall through to fetch fresh data.
-	}
-
-	// Fetch from API
-	user, err := getV1UserFromUserSvc(ctx, platformID)
-	if err != nil {
-		// Cache the error state to avoid repeated failed lookups
-		errorUser := &V1User{
-			ID:          platformID,
-			Username:    "", // Empty username indicates error state
-			Email:       "",
-			LastFetched: time.Now().UTC(),
-		}
-		if cacheErr := setCachedV1User(ctx, platformID, errorUser); cacheErr != nil {
-			logger.With(errKey, cacheErr, "platform_id", platformID).WarnContext(ctx, "failed to cache error state for user")
-		}
-		return nil, err
-	}
-
-	// Validate required fields
-	if user.Username == "" {
-		logger.With("platform_id", platformID).WarnContext(ctx, "v1 user has empty username")
-		// Cache the invalid state
-		invalidUser := &V1User{
-			ID:          platformID,
-			Username:    "", // Empty username indicates invalid state
-			Email:       "",
-			LastFetched: time.Now().UTC(),
-		}
-		if cacheErr := setCachedV1User(ctx, platformID, invalidUser); cacheErr != nil {
-			logger.With(errKey, cacheErr, "platform_id", platformID).WarnContext(ctx, "failed to cache invalid state for user")
-		}
-		return nil, fmt.Errorf("user %s has invalid data (empty username)", platformID)
-	}
-
-	// Cache the valid user data
-	if err := setCachedV1User(ctx, platformID, user); err != nil {
-		logger.With(errKey, err, "platform_id", platformID).WarnContext(ctx, "failed to cache user data")
-	}
-
-	return user, nil
-}
-
-// getCachedOrg retrieves an organization from the mappings KV cache
+// getCachedV1Org retrieves an organization from the mappings KV cache
 func getCachedV1Org(ctx context.Context, sfid string) (*V1Organization, error) {
 	cacheKey := orgCacheKeyPrefix + sfid
 
