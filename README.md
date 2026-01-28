@@ -71,6 +71,49 @@ Go service that monitors NATS KV stores for replicated v1 data and synchronizes 
 ### [Helm charts](./charts/lfx-v1-sync-helper/README.md)
 Kubernetes deployment manifests for the custom app service and WAL listener component, providing scalable deployment options for production environments.
 
+## NATS API
+
+The v1-sync-helper service provides a NATS request/reply function for querying v1-v2 ID mappings.
+
+### Request/Reply Subject
+
+| Subject                 | Description                                 |
+|-------------------------|---------------------------------------------|
+| `lfx.lookup_v1_mapping` | Bidirectional v1↔v2 mapping lookup function |
+
+### Usage
+
+Send a NATS request to `lfx.lookup_v1_mapping` with the mapping key as the payload. The service will respond with the corresponding mapping value or an error.
+
+**Request Format:**
+```
+Subject: lfx.lookup_v1_mapping
+Payload: <mapping_key>
+```
+
+**Response Format:**
+- **Success**: The mapped value as a string
+- **Not Found**: Empty string (`""`)
+- **Error**: String prefixed with `"error: "` (e.g., `"error: connection timeout"`)
+
+### Available Lookup Patterns
+
+**Note**: While called "sfid", v1 committees and committee members actually store UUIDs in their "sfid" column, so references to `{*_sfid}` for these entities will contain UUIDs.
+
+The following table shows the supported mapping key patterns and their expected response formats:
+
+| Direction | Lookup Key Pattern | Example Key | Response Format | Description |
+|-----------|-------------------|-------------|-----------------|-------------|
+| **Projects** |
+| v1→v2 | `project.sfid.{v1_sfid}` | `project.sfid.a0941000002wBjEAAU` | `{v2_uuid}` | Project SFID to UUID |
+| v2→v1 | `project.uid.{v2_uuid}` | `project.uid.123e4567-e89b-12d3-a456-426614174000` | `{v1_sfid}` | Project UUID to SFID |
+| **Committees** |
+| v1→v2 | `committee.sfid.{v1_sfid}` | `committee.sfid.123e4567-e89b-12d3-a456-426614174003` | `{v2_uuid}` | Committee SFID to UUID |
+| v2→v1 | `committee.uid.{v2_uuid}` | `committee.uid.123e4567-e89b-12d3-a456-426614174001` | `{project_sfid}:{committee_sfid}` | Committee UUID to compound SFID |
+| **Committee Members** |
+| v1→v2 | `committee_member.sfid.{v1_sfid}` | `committee_member.sfid.123e4567-e89b-12d3-a456-426614174004` | `{committee_uuid}:{member_uuid}` | Member SFID to compound UUID |
+| v2→v1 | `committee_member.uid.{v2_member_uuid}` | `committee_member.uid.123e4567-e89b-12d3-a456-426614174002` | `{project_sfid}:{committee_sfid}:{member_sfid}` | Member UUID to compound SFID |
+
 ## Architecture Diagrams
 
 Regarding the following diagrams:

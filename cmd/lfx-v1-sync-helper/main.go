@@ -23,6 +23,8 @@ import (
 const (
 	errKey            = "error"
 	defaultListenPort = "8080"
+	natsQueue         = "lfx.v1-sync-helper.queue"
+	lookupSubject     = "lfx.lookup_v1_mapping"
 	// gracefulShutdownSeconds should be higher than NATS client
 	// request timeout, and lower than the pod or liveness probe's
 	// terminationGracePeriodSeconds.
@@ -259,6 +261,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer walConsumerCtx.Stop()
+
+	// Subscribe to the lookup function for bidirectional v1-v2 mapping queries.
+	// Supports both v1->v2 and v2->v1 lookups depending on the key format used.
+	_, err = natsConn.QueueSubscribe(lookupSubject, natsQueue, lookupHandler)
+	if err != nil {
+		logger.With(errKey, err, "subject", lookupSubject).Error("error subscribing to NATS lookup subject")
+		os.Exit(1)
+	}
 
 	// This next line blocks until SIGINT or SIGTERM is received, or NATS disconnects.
 	<-done
