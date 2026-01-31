@@ -11,7 +11,7 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
-  replicas: {{ .Values.app.replicas | default 1 }}
+  replicas: {{ if hasKey .Values.app "replicas" }}{{ .Values.app.replicas }}{{ else }}1{{ end }}
   selector:
     matchLabels:
       app: {{ .Chart.Name }}
