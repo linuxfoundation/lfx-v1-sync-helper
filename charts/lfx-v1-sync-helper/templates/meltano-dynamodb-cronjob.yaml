@@ -68,7 +68,7 @@ spec:
                   value: {{ .Values.meltano.dynamodbEtl.aws.region | quote }}
                 # DynamoDB tap cross-account assume role configuration
                 - name: TAP_DYNAMODB_AWS_ASSUME_ROLE_ARN
-                  value: "arn:aws:iam::{{ .Values.meltano.dynamodbEtl.aws.itx.accountId }}:role/{{ .Values.meltano.dynamodbEtl.aws.itx.roleName }}"
+                  value: {{ printf "arn:aws:iam::%s:role/%s" (required "meltano.dynamodbEtl.aws.itx.accountId is required when dynamodbEtl is enabled" (.Values.meltano.dynamodbEtl.aws.itx.accountId | toString)) .Values.meltano.dynamodbEtl.aws.itx.roleName | quote }}
                 - name: TAP_DYNAMODB_AWS_DEFAULT_REGION
                   value: {{ .Values.meltano.dynamodbEtl.aws.region | quote }}
                 # DynamoDB table scan filtering for incremental loads
@@ -79,13 +79,13 @@ spec:
                       {{- $duration := .Values.meltano.dynamodbEtl.filtering.duration }}
                       {{- $startTime := now | dateModify (printf "-%s" $duration) | date "2006-01-02T15:04:05Z" }}
                       {{- range $index, $table := $tables_with_modified_at }}
-                      {{ $table | quote }}: {
-                        "FilterExpression": "modified_at > :startTime",
-                        "ExpressionAttributeValues": {
-                          ":startTime": {{ $startTime | quote }}
-                        },
-                        "ConsistentRead": false
-                      }{{ if lt $index (sub (len $tables_with_modified_at) 1) }},{{ end }}
+                        {{ $table | quote }}: {
+                          "FilterExpression": "modified_at > :startTime",
+                          "ExpressionAttributeValues": {
+                            ":startTime": {{ $startTime | quote }}
+                          },
+                          "ConsistentRead": false
+                        }{{ if lt $index (sub (len $tables_with_modified_at) 1) }},{{ end }}
                       {{- end }}
                     }
                 # Target NATS KV configuration

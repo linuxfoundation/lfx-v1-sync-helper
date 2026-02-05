@@ -25,7 +25,9 @@ spec:
         app.kubernetes.io/test-type: dynamodb-list
     spec:
       restartPolicy: Never
-      serviceAccountName: v1-sync-helper-sa
+      # Note: Using Helm chart default service account name for consistency.
+      # This is NOT the actual service account name used in live environments.
+      serviceAccountName: lfx-v1-sync-helper
       containers:
         - name: aws-cli
           image: amazon/aws-cli:2.15.30
