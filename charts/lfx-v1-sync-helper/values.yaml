@@ -372,3 +372,127 @@ meltano:
         key: catalog.json
         # mountPath is where to mount the catalog file in the container
         mountPath: /catalogs/tap-postgres
+
+  # dynamodbEtl is the configuration for the DynamoDB ETL CronJob
+  dynamodbEtl:
+    # enabled specifies whether the DynamoDB ETL CronJob should be deployed
+    enabled: false
+    # schedule is the cron schedule for the job (every hour by default)
+    schedule: "0 * * * *"
+    # concurrencyPolicy controls concurrent execution (Forbid, Allow, Replace)
+    concurrencyPolicy: Forbid
+    # successfulJobsHistoryLimit is the number of successful jobs to keep
+    successfulJobsHistoryLimit: 3
+    # failedJobsHistoryLimit is the number of failed jobs to keep
+    failedJobsHistoryLimit: 3
+    # ttlSecondsAfterFinished is the TTL for completed jobs (1 hour)
+    ttlSecondsAfterFinished: 3600
+    # backoffLimit is the number of retries before marking job as failed
+    backoffLimit: 1
+    # image is the configuration for the Meltano container image
+    image:
+      # repository is the container image repository
+      repository: ghcr.io/linuxfoundation/lfx-v1-sync-helper/meltano
+      # tag is the container image tag (overrides appVersion from Chart.yaml)
+      tag: ""
+      # pullPolicy is the image pull policy
+      pullPolicy: IfNotPresent
+    # stateId is the state ID for incremental extractions (used with --state-id)
+    stateId: itx-dynamodb-incremental
+    # environment specifies the Meltano environment (dev/staging/prod)
+    # This value is used to:
+    # - Set MELTANO_ENVIRONMENT variable
+    # - Construct S3 state bucket name as: {aws.stateBucketPrefix}-{environment}
+    environment: dev
+    # aws configuration for state backend and cross-account DynamoDB access
+    # Environment variables built: AWS_DEFAULT_REGION, AWS_REGION, MELTANO_STATE_BACKEND_URI,
+    # TAP_DYNAMODB_AWS_ASSUME_ROLE_ARN, TAP_DYNAMODB_AWS_DEFAULT_REGION
+    aws:
+      # region for AWS services (S3, DynamoDB)
+      region: us-west-2
+      # stateBucketPrefix for S3 state backend naming (becomes: s3://{prefix}-{environment})
+      stateBucketPrefix: lfx-v2-meltano-state
+      # itx contains ITX account configuration for cross-account assume role
+      itx:
+        # accountId is the ITX AWS account ID for the target environment
+        accountId: ""
+        # roleName is the role name to assume in the ITX account
+        roleName: v1-meltano-sync
+    # filtering configuration for DynamoDB table scans
+    # Environment variables built: TAP_DYNAMODB_TABLE_SCAN_KWARGS
+    filtering:
+      # duration is the time period to look back for modified_at filtering
+      # Format: Go duration string (e.g., "720h" for 30 days, "168h" for 7 days)
+      # This will be converted to a timestamp using Helm's date functions
+      duration: "720h"
+      # tablesWithModifiedAt is the list of tables that support modified_at filtering
+      # Only these tables will have FilterExpression applied for incremental loads
+      tablesWithModifiedAt:
+        - "itx-zoom-meetings-invite-responses-v2"
+        - "itx-zoom-meetings-registrants-v2"
+        - "itx-zoom-meetings-v2"
+        - "itx-zoom-past-meetings"
+        - "itx-zoom-past-meetings-attendees"
+        - "itx-zoom-past-meetings-invitees"
+        - "itx-zoom-past-meetings-recordings"
+        - "itx-zoom-past-meetings-summaries"
+    # nats configuration for target NATS KV
+    # Environment variables built: TARGET_NATS_KV_URL, TARGET_NATS_KV_BUCKET,
+    # TARGET_NATS_KV_REFRESH_MODE, TARGET_NATS_KV_VALIDATE_RECORDS, TARGET_NATS_KV_MSGPACK
+    nats:
+      # url for NATS connection
+      url: nats://lfx-platform-nats.lfx.svc.cluster.local:4222
+      # bucket name for storing v1 objects
+      bucket: v1-objects
+      # refresh mode for KV operations
+      refreshMode: newer
+      # validate records before storing (false for DynamoDB as per meltano.yml comment)
+      validateRecords: false
+      # use MessagePack encoding
+      useMessagePack: false
+    # resources is the resource configuration for the Meltano container
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "2Gi"
+        cpu: "1000m"
+    # catalog configuration for DynamoDB tap
+    # Note: Meltano arguments are built dynamically in the correct order:
+    # meltano el [--catalog path] [--state-id id] tap-dynamodb target-nats-kv
+    #
+    # Users must create their own ConfigMap containing the catalog JSON.
+    # Example ConfigMap creation:
+    #   kubectl create configmap my-dynamodb-catalog --from-file=catalog.json=./my-catalog.json
+    # Or via YAML manifest:
+    #   apiVersion: v1
+    #   kind: ConfigMap
+    #   metadata:
+    #     name: my-dynamodb-catalog
+    #   data:
+    #     catalog.json: |
+    #       {
+    #         "streams": [
+    #           {
+    #             "tap_stream_id": "itx-surveys",
+    #             "table_name": "itx-surveys",
+    #             "replication_method": "FULL_TABLE",
+    #             "key_properties": ["id"],
+    #             "schema": {...}
+    #           }
+    #         ]
+    #       }
+    catalog:
+      # enabled specifies whether to use a catalog file for schema discovery
+      # Set to false to rely on Meltano's automatic schema discovery
+      enabled: false
+      # configMap specifies an existing ConfigMap containing the catalog (required if enabled)
+      # Users must create their own ConfigMap with the catalog content before enabling this
+      configMap:
+        # name is the name of an existing ConfigMap containing the catalog (required)
+        name: ""
+        # key is the key in the ConfigMap containing the catalog JSON
+        key: catalog.json
+        # mountPath is where to mount the catalog file in the container
+        mountPath: /catalogs/tap-dynamodb
