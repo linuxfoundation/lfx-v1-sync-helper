@@ -36,6 +36,7 @@ plugins:
     - salesforce-merged_user.description
     - salesforce-merged_user.createddate
     - salesforce-merged_user.lastmodifieddate
+    - salesforce-merged_user.systemmodstamp
     - salesforce-merged_user.username__c
     - salesforce-merged_user.facebook_id__c
     - salesforce-merged_user.github_id__c
@@ -56,10 +57,13 @@ plugins:
     metadata:
       '*':
         replication-method: INCREMENTAL
-        replication-key: systemmodstamp
-      'platform-collaboration__c':
-        replication-method: INCREMENTAL
         replication-key: lastmodifieddate
+      'platform-community__c':
+        replication-method: INCREMENTAL
+        replication-key: systemmodstamp
+      'salesforce-project__c':
+        replication-method: INCREMENTAL
+        replication-key: systemmodstamp
   - name: tap-dynamodb
     variant: meltanolabs
     pip_url: git+https://github.com/MeltanoLabs/tap-dynamodb.git
