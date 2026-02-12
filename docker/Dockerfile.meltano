@@ -5,11 +5,13 @@
 FROM ghcr.io/astral-sh/uv:0.9.18-python3.12-trixie-slim AS builder
 
 # Install git for tap-dynamodb plugin installation.
+# And install pgrep for liveness check
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
         git \
+        procps \
         && \
     rm -rf /var/lib/apt/lists/*
 
