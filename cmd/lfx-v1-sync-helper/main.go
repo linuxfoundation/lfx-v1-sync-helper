@@ -262,6 +262,40 @@ func main() {
 	}
 	defer walConsumerCtx.Stop()
 
+	// Optionally subscribe to DynamoDB stream events.
+	var dynamodbConsumerCtx jetstream.ConsumeContext
+	if cfg.DynamoDBIngestEnabled {
+		dynamodbStreamName := cfg.DynamoDBStreamName
+		dynamodbConsumerName := "v1-sync-helper-dynamodb-consumer"
+
+		dynamodbConsumer, err := jsContext.CreateOrUpdateConsumer(ctx, dynamodbStreamName, jetstream.ConsumerConfig{
+			Name:          dynamodbConsumerName,
+			Durable:       dynamodbConsumerName,
+			DeliverPolicy: jetstream.DeliverAllPolicy,
+			AckPolicy:     jetstream.AckExplicitPolicy,
+			FilterSubject: dynamodbStreamName + ".>",
+			MaxDeliver:    3,
+			AckWait:       30 * time.Second,
+			MaxAckPending: 100,
+			Description:   "DynamoDB stream consumer for v1-sync-helper",
+		})
+		if err != nil {
+			logger.With(errKey, err, "consumer", dynamodbConsumerName, "stream", dynamodbStreamName).Error("error creating DynamoDB stream consumer")
+			os.Exit(1)
+		}
+
+		dynamodbConsumerCtx, err = dynamodbConsumer.Consume(dynamodbIngestHandler, jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
+			logger.With(errKey, err).Error("DynamoDB stream consumer error encountered")
+		}))
+		if err != nil {
+			logger.With(errKey, err, "consumer", dynamodbConsumerName).Error("error starting DynamoDB stream consumer")
+			os.Exit(1)
+		}
+		defer dynamodbConsumerCtx.Stop()
+
+		logger.With("stream", dynamodbStreamName, "consumer", dynamodbConsumerName).Info("DynamoDB stream consumer started")
+	}
+
 	// Subscribe to the lookup function for bidirectional v1-v2 mapping queries.
 	// Supports both v1->v2 and v2->v1 lookups depending on the key format used.
 	_, err = natsConn.QueueSubscribe(lookupSubject, natsQueue, lookupHandler)
@@ -280,6 +314,9 @@ func main() {
 	// errors in the ConsumeErrHandler.
 	kvConsumerCtx.Drain()
 	walConsumerCtx.Drain()
+	if dynamodbConsumerCtx != nil {
+		dynamodbConsumerCtx.Drain()
+	}
 
 	// Cancel the background context.
 	cancel()

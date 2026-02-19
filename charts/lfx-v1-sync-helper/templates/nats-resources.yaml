@@ -39,6 +39,51 @@ spec:
   compression: {{ .Values.natsResources.kv_bucket_v1_mappings.compression }}
 {{- end }}
 ---
+{{- if .Values.natsResources.kv_bucket_dynamodb_checkpoints.creation }}
+apiVersion: jetstream.nats.io/v1beta2
+kind: KeyValue
+metadata:
+  name: {{ .Values.natsResources.kv_bucket_dynamodb_checkpoints.name }}
+  namespace: {{ .Release.Namespace }}
+  {{- if .Values.natsResources.kv_bucket_dynamodb_checkpoints.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+spec:
+  bucket: {{ .Values.natsResources.kv_bucket_dynamodb_checkpoints.name }}
+  history: {{ .Values.natsResources.kv_bucket_dynamodb_checkpoints.history }}
+  storage: {{ .Values.natsResources.kv_bucket_dynamodb_checkpoints.storage }}
+  maxValueSize: {{ .Values.natsResources.kv_bucket_dynamodb_checkpoints.maxValueSize }}
+  maxBytes: {{ .Values.natsResources.kv_bucket_dynamodb_checkpoints.maxBytes }}
+  compression: {{ .Values.natsResources.kv_bucket_dynamodb_checkpoints.compression }}
+{{- end }}
+---
+{{- if .Values.natsResources.stream_dynamodb_streams.creation }}
+apiVersion: jetstream.nats.io/v1beta2
+kind: Stream
+metadata:
+  name: {{ .Values.natsResources.stream_dynamodb_streams.name | replace "_" "-" }}
+  namespace: {{ .Release.Namespace }}
+  {{- if .Values.natsResources.stream_dynamodb_streams.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+spec:
+  name: {{ .Values.natsResources.stream_dynamodb_streams.name }}
+  subjects:
+  {{- range .Values.natsResources.stream_dynamodb_streams.subjects }}
+    - {{ . }}
+  {{- end }}
+  storage: {{ .Values.natsResources.stream_dynamodb_streams.storage }}
+  retention: {{ .Values.natsResources.stream_dynamodb_streams.retention }}
+  maxAge: {{ .Values.natsResources.stream_dynamodb_streams.maxAge }}
+  maxBytes: {{ .Values.natsResources.stream_dynamodb_streams.maxBytes }}
+  maxMsgs: {{ .Values.natsResources.stream_dynamodb_streams.maxMsgs }}
+  replicas: {{ .Values.natsResources.stream_dynamodb_streams.replicas }}
+  compression: {{ .Values.natsResources.stream_dynamodb_streams.compression }}
+  duplicateWindow: 2m
+{{- end }}
+---
 {{- if .Values.natsResources.stream_wal_listener.creation }}
 apiVersion: jetstream.nats.io/v1beta2
 kind: Stream
