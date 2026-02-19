@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 // DynamoDBStreamEvent mirrors the JSON payload published by the dynamodb-stream-consumer.
@@ -118,11 +117,8 @@ func handleDynamoDBUpsert(ctx context.Context, event *DynamoDBStreamEvent) bool 
 
 		var existingData map[string]interface{}
 		if unmarshalErr := json.Unmarshal(existing.Value(), &existingData); unmarshalErr != nil {
-			if msgpackErr := msgpack.Unmarshal(existing.Value(), &existingData); msgpackErr != nil {
-				logger.With(errKey, unmarshalErr, "msgpack_error", msgpackErr, "key", key).
-					ErrorContext(ctx, "failed to unmarshal existing KV entry")
+				logger.With(errKey, unmarshalErr, "key", key).ErrorContext(ctx, "failed to unmarshal existing KV entry")
 				return false
-			}
 		}
 
 		if !shouldDynamoDBUpdate(ctx, event.NewImage, existingData, key) {
@@ -131,12 +127,7 @@ func handleDynamoDBUpsert(ctx context.Context, event *DynamoDBStreamEvent) bool 
 		}
 	}
 
-	var dataBytes []byte
-	if cfg.UseMsgpack {
-		dataBytes, err = msgpack.Marshal(event.NewImage)
-	} else {
-		dataBytes, err = json.Marshal(event.NewImage)
-	}
+	dataBytes, err := json.Marshal(event.NewImage)
 	if err != nil {
 		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to marshal DynamoDB event data")
 		return false
