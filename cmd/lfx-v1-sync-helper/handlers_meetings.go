@@ -536,18 +536,15 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 		return
 	}
 
-	// Fetch the meeting object from v1-objects KV bucket
+	// Fetch and parse the meeting data.
 	meetingKey := fmt.Sprintf("itx-zoom-meetings-v2.%s", meetingID)
-	meetingEntry, err := v1KV.Get(ctx, meetingKey)
+	meetingData, exists, err := getV1ObjectData(ctx, meetingKey)
 	if err != nil {
-		funcLogger.With(errKey, err, "meeting_id", meetingID).WarnContext(ctx, "failed to fetch meeting from KV bucket, cannot trigger re-index")
+		funcLogger.With(errKey, err, "meeting_id", meetingID).ErrorContext(ctx, "failed to get meeting data from KV bucket")
 		return
 	}
-
-	// Parse the meeting data
-	var meetingData map[string]any
-	if err := json.Unmarshal(meetingEntry.Value(), &meetingData); err != nil {
-		funcLogger.With(errKey, err, "meeting_id", meetingID).ErrorContext(ctx, "failed to unmarshal meeting data")
+	if !exists {
+		funcLogger.With("meeting_id", meetingID).WarnContext(ctx, "meeting data not found or deleted in KV bucket")
 		return
 	}
 
@@ -1251,18 +1248,15 @@ func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data 
 		return
 	}
 
-	// Fetch the past meeting object from v1-objects KV bucket
+	// Fetch and parse the past meeting data.
 	pastMeetingKey := fmt.Sprintf("itx-zoom-past-meetings.%s", meetingAndOccurrenceID)
-	pastMeetingEntry, err := v1KV.Get(ctx, pastMeetingKey)
+	pastMeetingData, exists, err := getV1ObjectData(ctx, pastMeetingKey)
 	if err != nil {
-		funcLogger.With(errKey, err).WarnContext(ctx, "failed to fetch past meeting from KV bucket, cannot trigger re-index")
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to get past meeting data from KV bucket")
 		return
 	}
-
-	// Parse the past meeting data
-	var pastMeetingData map[string]any
-	if err := json.Unmarshal(pastMeetingEntry.Value(), &pastMeetingData); err != nil {
-		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to unmarshal past meeting data")
+	if !exists {
+		funcLogger.WarnContext(ctx, "past meeting data not found or deleted in KV bucket")
 		return
 	}
 
@@ -1440,22 +1434,16 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 	isHost := false
 	registrantID := invitee.RegistrantID
 	if registrantID != "" {
-		// Look up the registrant in the v1-objects KV bucket
+		// Look up the registrant in the v1-objects KV bucket.
 		registrantKey := fmt.Sprintf("itx-zoom-meetings-registrants-v2.%s", registrantID)
-		registrantEntry, err := v1KV.Get(ctx, registrantKey)
-		if err == nil && registrantEntry != nil {
-			// Parse the registrant data
-			var registrantData map[string]any
-			if err := json.Unmarshal(registrantEntry.Value(), &registrantData); err == nil {
-				// Check if the registrant has the host field set to true
-				if hostValue, ok := registrantData["host"].(bool); ok {
-					isHost = hostValue
-				}
-			} else {
-				funcLogger.With(errKey, err, "registrant_id", registrantID).WarnContext(ctx, "failed to unmarshal registrant data")
+		registrantData, exists, err := getV1ObjectData(ctx, registrantKey)
+		if err != nil {
+			funcLogger.With(errKey, err, "registrant_id", registrantID).WarnContext(ctx, "failed to get registrant data")
+		} else if exists {
+			// Check if the registrant has the host field set to true
+			if hostValue, ok := registrantData["host"].(bool); ok {
+				isHost = hostValue
 			}
-		} else {
-			funcLogger.With(errKey, err, "registrant_id", registrantID).WarnContext(ctx, "failed to fetch registrant from KV bucket")
 		}
 	}
 
@@ -1642,23 +1630,17 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 	isRegistrant := false
 	registrantID := attendee.RegistrantID
 	if registrantID != "" {
-		// Look up the registrant in the v1-objects KV bucket
+		// Look up the registrant in the v1-objects KV bucket.
 		registrantKey := fmt.Sprintf("itx-zoom-meetings-registrants-v2.%s", registrantID)
-		registrantEntry, err := v1KV.Get(ctx, registrantKey)
-		if err == nil && registrantEntry != nil {
+		registrantData, exists, err := getV1ObjectData(ctx, registrantKey)
+		if err != nil {
+			funcLogger.With(errKey, err, "registrant_id", registrantID).WarnContext(ctx, "failed to get registrant data")
+		} else if exists {
 			isRegistrant = true
-			// Parse the registrant data
-			var registrantData map[string]any
-			if err := json.Unmarshal(registrantEntry.Value(), &registrantData); err == nil {
-				// Check if the registrant has the host field set to true
-				if hostValue, ok := registrantData["host"].(bool); ok {
-					isHost = hostValue
-				}
-			} else {
-				funcLogger.With(errKey, err, "registrant_id", registrantID).WarnContext(ctx, "failed to unmarshal registrant data")
+			// Check if the registrant has the host field set to true
+			if hostValue, ok := registrantData["host"].(bool); ok {
+				isHost = hostValue
 			}
-		} else {
-			funcLogger.With(errKey, err, "registrant_id", registrantID).WarnContext(ctx, "failed to fetch registrant from KV bucket")
 		}
 	}
 
@@ -2241,18 +2223,13 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 	aiSummaryAccess := ""
 	if summaryInput.PastMeetingUID != "" {
 		pastMeetingKey := fmt.Sprintf("itx-zoom-past-meetings.%s", summaryInput.PastMeetingUID)
-		pastMeetingEntry, err := v1KV.Get(ctx, pastMeetingKey)
-		if err == nil && pastMeetingEntry != nil {
-			var pastMeetingData map[string]any
-			if err := json.Unmarshal(pastMeetingEntry.Value(), &pastMeetingData); err == nil {
-				if aiSummaryAccessValue, ok := pastMeetingData["ai_summary_access"].(string); ok && aiSummaryAccessValue != "" {
-					aiSummaryAccess = aiSummaryAccessValue
-				}
-			} else {
-				funcLogger.With(errKey, err).WarnContext(ctx, "failed to unmarshal past meeting data")
+		pastMeetingData, exists, err := getV1ObjectData(ctx, pastMeetingKey)
+		if err != nil {
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to get past meeting data")
+		} else if exists {
+			if aiSummaryAccessValue, ok := pastMeetingData["ai_summary_access"].(string); ok && aiSummaryAccessValue != "" {
+				aiSummaryAccess = aiSummaryAccessValue
 			}
-		} else {
-			funcLogger.With(errKey, err).WarnContext(ctx, "failed to fetch past meeting from KV bucket")
 		}
 	}
 

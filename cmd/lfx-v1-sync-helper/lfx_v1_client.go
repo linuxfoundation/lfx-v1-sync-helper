@@ -138,33 +138,12 @@ func lookupV1User(ctx context.Context, platformID string) (*V1User, error) {
 	// Look up user in the salesforce-merged_user table via v1-objects KV bucket
 	userKey := fmt.Sprintf("salesforce-merged_user.%s", platformID)
 
-	entry, err := v1KV.Get(ctx, userKey)
+	userData, exists, err := getV1ObjectData(ctx, userKey)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
-			return nil, fmt.Errorf("user %s not found in v1-objects KV bucket", platformID)
-		}
-		return nil, fmt.Errorf("failed to get user from v1-objects KV bucket: %w", err)
+		return nil, fmt.Errorf("failed to get user data: %w", err)
 	}
-
-	// Parse the merged_user data
-	var userData map[string]any
-	if err := json.Unmarshal(entry.Value(), &userData); err != nil {
-		// Try msgpack if JSON fails.
-		if msgpackErr := msgpack.Unmarshal(entry.Value(), &userData); msgpackErr != nil {
-			return nil, fmt.Errorf("failed to unmarshal user data (json: %w, msgpack: %w)", err, msgpackErr)
-		}
-	}
-
-	// Check if the user record is deleted
-	if isDeleted, ok := userData["isdeleted"].(bool); ok && isDeleted {
-		return nil, fmt.Errorf("user %s is deleted (isdeleted)", platformID)
-	}
-
-	// Also treat WAL-based soft deletes (indicated by _sdc_deleted_at) as deleted.
-	if deletedAt, ok := userData["_sdc_deleted_at"]; ok {
-		if s, okStr := deletedAt.(string); (okStr && strings.TrimSpace(s) != "") || (!okStr && deletedAt != nil) {
-			return nil, fmt.Errorf("user %s is deleted (_sdc_deleted_at))", platformID)
-		}
+	if !exists {
+		return nil, fmt.Errorf("user %s not found or is deleted in v1-objects KV bucket", platformID)
 	}
 
 	// Extract user fields from the merged_user record
@@ -264,40 +243,13 @@ func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error
 func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email string, isPrimary bool, isTombstoned bool, err error) {
 	emailKey := fmt.Sprintf("salesforce-alternate_email__c.%s", emailSfid)
 
-	entry, err := v1KV.Get(ctx, emailKey)
+	// Parse the alternate email record.
+	emailData, exists, err := getV1ObjectData(ctx, emailKey)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound || err == jetstream.ErrKeyDeleted {
-			// Key not found or deleted could mean it was tombstoned/deleted
-			return "", false, true, nil
-		}
-		return "", false, false, fmt.Errorf("failed to get email record %s from v1-objects: %w", emailSfid, err)
+		return "", false, false, fmt.Errorf("failed to get email data: %w", err)
 	}
-
-	// Check if this is a tombstone marker
-	if isTombstonedMapping(entry.Value()) {
+	if !exists {
 		return "", false, true, nil
-	}
-
-	// Parse the alternate email record
-	var emailData map[string]any
-	if err := json.Unmarshal(entry.Value(), &emailData); err != nil {
-		// Try msgpack if JSON fails.
-		if msgpackErr := msgpack.Unmarshal(entry.Value(), &emailData); msgpackErr != nil {
-			return "", false, false, fmt.Errorf("failed to unmarshal email data (json: %w, msgpack: %w)", err, msgpackErr)
-		}
-	}
-
-	// Check if the email record is deleted.
-	if isDeleted, ok := emailData["isdeleted"].(bool); ok && isDeleted {
-		return "", false, true, nil
-	}
-
-	// Also check for WAL-based soft deletes (indicated by _sdc_deleted_at).
-	// This is expected when soft-deleted email records are preserved in v1-objects KV bucket.
-	if deletedAt, ok := emailData["_sdc_deleted_at"]; ok {
-		if s, okStr := deletedAt.(string); (okStr && strings.TrimSpace(s) != "") || (!okStr && deletedAt != nil) {
-			return "", false, true, nil
-		}
 	}
 
 	// Also check if the email is inactive (active__c is not true).
@@ -562,4 +514,46 @@ func parseWebsiteURL(website string) string {
 	}
 
 	return ""
+}
+
+// getV1ObjectData retrieves and unmarshals data from the v1-objects KV bucket with dual-format support.
+// It attempts JSON decoding first, then falls back to msgpack if JSON fails.
+// Returns (data, exists, error) where exists indicates if the record exists and is not deleted/tombstoned.
+// This abstraction should be used for all v1-objects bucket reads to ensure consistent
+// dual-format handling across the codebase.
+func getV1ObjectData(ctx context.Context, key string) (map[string]any, bool, error) {
+	entry, err := v1KV.Get(ctx, key)
+	if err != nil {
+		if err == jetstream.ErrKeyNotFound || err == jetstream.ErrKeyDeleted {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("failed to get data from v1-objects KV bucket: %w", err)
+	}
+
+	// Check if this is a tombstone marker.
+	if isTombstonedMapping(entry.Value()) {
+		return nil, false, nil
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(entry.Value(), &data); err != nil {
+		// Try msgpack if JSON fails.
+		if msgpackErr := msgpack.Unmarshal(entry.Value(), &data); msgpackErr != nil {
+			return nil, false, fmt.Errorf("failed to unmarshal data (json: %w, msgpack: %w)", err, msgpackErr)
+		}
+	}
+
+	// Check if the record is deleted.
+	if isDeleted, ok := data["isdeleted"].(bool); ok && isDeleted {
+		return nil, false, nil
+	}
+
+	// Also check for WAL-based soft deletes (indicated by _sdc_deleted_at).
+	if deletedAt, ok := data["_sdc_deleted_at"]; ok {
+		if s, okStr := deletedAt.(string); (okStr && strings.TrimSpace(s) != "") || (!okStr && deletedAt != nil) {
+			return nil, false, nil
+		}
+	}
+
+	return data, true, nil
 }
