@@ -53,7 +53,7 @@ jobs:
         with:
           version: v0.18.0
 
-      - name: Build and publish container image
+      - name: Build and publish lfx-v1-sync-helper image
         run: |
           ko build github.com/linuxfoundation/lfx-v1-sync-helper/cmd/lfx-v1-sync-helper \
             -B \
@@ -62,6 +62,7 @@ jobs:
             -t ${{ steps.prepare.outputs.app_version }} \
             -t latest \
             --sbom spdx
+      - name: Build and publish dynamodb-stream-consumer image
         run: |
           ko build github.com/linuxfoundation/lfx-v1-sync-helper/cmd/dynamodb-stream-consumer \
             -B \
