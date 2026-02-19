@@ -34,3 +34,10 @@ jobs:
             -t ${{ github.sha }} \
             -t development \
             --sbom spdx
+      - run: |
+          ko build github.com/linuxfoundation/lfx-v1-sync-helper/cmd/dynamodb-stream-consumer \
+            -B \
+            --platform linux/amd64,linux/arm64 \
+            -t ${{ github.sha }} \
+            -t development \
+            --sbom spdx

@@ -57,6 +57,54 @@ natsResources:
     # compression is a boolean to determine if the KV bucket should be compressed
     compression: true
 
+  # kv_bucket_dynamodb_checkpoints is the NATS KV bucket used by the dynamodb-stream-consumer
+  # to persist per-shard sequence positions so it can resume after a restart.
+  kv_bucket_dynamodb_checkpoints:
+    # creation is a boolean to determine if the KV bucket should be created via the helm chart.
+    creation: true
+    # keep is a boolean to determine if the bucket should be preserved during helm uninstall
+    keep: true
+    # name is the bucket name (must match CHECKPOINT_BUCKET env var on the consumer)
+    name: dynamodb-stream-checkpoints
+    # history 1 is sufficient – we only need the latest sequence per shard
+    history: 1
+    # storage is the storage type for the KV bucket
+    storage: file
+    # maxValueSize – sequence numbers are short strings; 1KB is ample
+    maxValueSize: 1024
+    # maxBytes is the maximum number of bytes in the KV bucket (-1 for unlimited)
+    maxBytes: -1
+    # compression is a boolean to determine if the KV bucket should be compressed
+    compression: false
+
+  # stream_dynamodb_streams is the configuration for the JetStream stream for DynamoDB stream events
+  stream_dynamodb_streams:
+    # creation is a boolean to determine if the JetStream stream should be created via the helm chart.
+    # set it to false if you want to use an existing stream.
+    creation: true
+    # keep is a boolean to determine if the stream should be preserved during helm uninstall
+    # set it to false if you want the stream to be deleted when the chart is uninstalled
+    keep: true
+    # name is the name of the JetStream stream for DynamoDB stream events
+    name: dynamodb_streams
+    # subjects is the list of subjects this stream will subscribe to
+    subjects:
+      - dynamodb_streams.>
+    # storage is the storage type for the stream
+    storage: file
+    # retention is the retention policy type: "limits", "interest", or "workqueue"
+    retention: limits
+    # maxAge is the maximum age of messages in the stream (uses time.ParseDuration() format)
+    maxAge: 336h # 2 weeks
+    # maxBytes is the maximum number of bytes in the stream (-1 for unlimited)
+    maxBytes: -1
+    # maxMsgs is the maximum number of messages in the stream (-1 for unlimited)
+    maxMsgs: -1
+    # replicas is the number of replicas for the stream (1 for single instance)
+    replicas: 1
+    # compression can be "s2" or "none" (s2 is default)
+    compression: s2
+
   # stream_wal_listener is the configuration for the JetStream stream for wal-listener events
   stream_wal_listener:
     # creation is a boolean to determine if the JetStream stream should be created via the helm chart.
@@ -129,6 +177,13 @@ app:
     # Accepts truthy values: "true", "yes", "t", "y", "1" (case-insensitive)
     USE_MSGPACK:
       value: "false"
+    # DYNAMODB_INGEST_ENABLED enables real-time DynamoDB stream ingestion via the dynamodb-stream-consumer.
+    # Requires the dynamodb_streams NATS stream to exist and dynamodbStreamConsumer to be running.
+    DYNAMODB_INGEST_ENABLED:
+      value: "false"
+    # DYNAMODB_STREAM_NAME is the NATS stream name to consume DynamoDB events from.
+    DYNAMODB_STREAM_NAME:
+      value: "dynamodb_streams"
 
   # heimdall is the configuration for JWT impersonation of Heimdall-authorized
   # principals for v1 data ingest.
@@ -154,6 +209,64 @@ app:
       clientIdKey: client_id
       # key in the secret which contains the Auth0 private key
       privateKeyKey: client_private_key
+
+# dynamodbStreamConsumer is the configuration for the DynamoDB stream consumer component.
+# It reads DynamoDB Streams and publishes change events to the dynamodb_streams NATS stream.
+# Enable DYNAMODB_INGEST_ENABLED on the app to have the sync-helper consume those events.
+dynamodbStreamConsumer:
+  # enabled specifies whether the dynamodb-stream-consumer should be deployed
+  enabled: false
+  # replicas is the number of consumer instances to run.
+  # Note: multiple replicas will each independently consume all shards; keep this at 1
+  # unless you are explicitly partitioning tables across instances.
+  replicas: 1
+  # image is the configuration for the container image
+  image:
+    # repository is the container image repository
+    repository: ghcr.io/linuxfoundation/lfx-v1-sync-helper/dynamodb-stream-consumer
+    # tag is the container image tag (overrides appVersion from Chart.yaml)
+    tag: ""
+    # pullPolicy is the image pull policy
+    pullPolicy: IfNotPresent
+  # serviceAccountName overrides the service account used by this deployment.
+  # Leave empty to use the chart-wide service account. For IRSA, set this to a
+  # dedicated service account annotated with eks.amazonaws.com/role-arn.
+  serviceAccountName: ""
+  environment:
+    # NATS_URL is the NATS server URL
+    NATS_URL:
+      value: nats://lfx-platform-nats.lfx.svc.cluster.local:4222
+    # AWS_REGION is the AWS region for DynamoDB
+    AWS_REGION:
+      value: us-west-2
+    # DYNAMODB_TABLES is a comma-separated list of DynamoDB table names to consume.
+    # Defaults to the full set of tables used by the tap-dynamodb Meltano extractor.
+    DYNAMODB_TABLES:
+      value: "itx-poll,itx-poll-vote,itx-surveys,itx-survey-responses,itx-zoom-meetings-mappings-v2,itx-zoom-meetings-v2,itx-zoom-past-meetings-mappings,itx-zoom-past-meetings,itx-zoom-past-meetings-attendees,itx-zoom-past-meetings-invitees,itx-zoom-past-meetings-recordings,itx-zoom-past-meetings-summaries,itx-zoom-meetings-registrants-v2,itx-zoom-meetings-invite-responses-v2"
+    # START_FROM_LATEST controls the iterator start position for new shards with no checkpoint.
+    # Set to "true" to only receive new records; "false" (default) replays all available records.
+    START_FROM_LATEST:
+      value: "false"
+    # POLL_INTERVAL_MS is the milliseconds to wait between polls when a shard is caught up
+    POLL_INTERVAL_MS:
+      value: "1000"
+    # SHARD_REFRESH_INTERVAL_SEC is how often to re-discover shards per table
+    SHARD_REFRESH_INTERVAL_SEC:
+      value: "10"
+    # PORT is the health check HTTP port
+    PORT:
+      value: "8080"
+    # BIND is the interface to bind the health check server on
+    BIND:
+      value: "*"
+  # resources is the resource configuration for the container
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
 
 # wal-listener is the configuration for the PostgreSQL WAL listener component
 walListener:

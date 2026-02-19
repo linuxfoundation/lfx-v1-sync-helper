@@ -1,0 +1,68 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+---
+{{- if .Values.dynamodbStreamConsumer.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}-dynamodb-stream-consumer
+  namespace: {{ .Release.Namespace }}
+  {{- with .Values.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.dynamodbStreamConsumer.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+      component: dynamodb-stream-consumer
+  template:
+    metadata:
+      labels:
+        app: {{ .Chart.Name }}
+        component: dynamodb-stream-consumer
+    spec:
+      serviceAccountName: {{ .Values.dynamodbStreamConsumer.serviceAccountName | default (.Values.serviceAccount.name | default .Chart.Name) }}
+      containers:
+        - name: dynamodb-stream-consumer
+          image: "{{ .Values.dynamodbStreamConsumer.image.repository }}:{{ .Values.dynamodbStreamConsumer.image.tag | default .Chart.AppVersion }}"
+          securityContext:
+            allowPrivilegeEscalation: false
+          imagePullPolicy: {{ .Values.dynamodbStreamConsumer.image.pullPolicy }}
+          env:
+          {{- range $name, $config := .Values.dynamodbStreamConsumer.environment }}
+          - name: {{ $name }}
+            {{- if $config.value }}
+            value: {{ $config.value | quote }}
+            {{- else if $config.valueFrom }}
+            valueFrom:
+              {{- toYaml $config.valueFrom | nindent 14 }}
+            {{- end }}
+          {{- end }}
+          ports:
+            - containerPort: 8080
+              name: web
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: web
+            failureThreshold: 3
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: web
+            failureThreshold: 1
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: web
+            failureThreshold: 30
+            periodSeconds: 1
+          {{- with .Values.dynamodbStreamConsumer.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

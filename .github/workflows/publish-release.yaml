@@ -62,6 +62,14 @@ jobs:
             -t ${{ steps.prepare.outputs.app_version }} \
             -t latest \
             --sbom spdx
+        run: |
+          ko build github.com/linuxfoundation/lfx-v1-sync-helper/cmd/dynamodb-stream-consumer \
+            -B \
+            --platform linux/amd64,linux/arm64 \
+            -t ${{ github.ref_name }} \
+            -t ${{ steps.prepare.outputs.app_version }} \
+            -t latest \
+            --sbom spdx
 
   publish-meltano:
     name: Publish Meltano Tagged Release

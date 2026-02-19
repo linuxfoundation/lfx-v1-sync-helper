@@ -107,6 +107,10 @@ type Config struct {
 
 	// Data encoding
 	UseMsgpack bool
+
+	// DynamoDB stream ingestion
+	DynamoDBIngestEnabled bool   // Whether to consume dynamodb_streams events (default: false)
+	DynamoDBStreamName    string // NATS stream name to consume (default: "dynamodb_streams")
 }
 
 // LoadConfig loads configuration from environment variables
@@ -129,9 +133,11 @@ func LoadConfig() (*Config, error) {
 		NATSURL:    os.Getenv("NATS_URL"),
 		Port:       os.Getenv("PORT"),
 		Bind:       os.Getenv("BIND"),
-		Debug:      parseBooleanEnv("DEBUG"),
-		HTTPDebug:  parseBooleanEnv("HTTP_DEBUG"),
-		UseMsgpack: parseBooleanEnv("USE_MSGPACK"),
+		Debug:                 parseBooleanEnv("DEBUG"),
+		HTTPDebug:             parseBooleanEnv("HTTP_DEBUG"),
+		UseMsgpack:            parseBooleanEnv("USE_MSGPACK"),
+		DynamoDBIngestEnabled: parseBooleanEnv("DYNAMODB_INGEST_ENABLED"),
+		DynamoDBStreamName:    os.Getenv("DYNAMODB_STREAM_NAME"),
 	}
 
 	// Set defaults
@@ -148,6 +154,10 @@ func LoadConfig() (*Config, error) {
 	}
 
 	// Set defaults
+	if cfg.DynamoDBStreamName == "" {
+		cfg.DynamoDBStreamName = "dynamodb_streams"
+	}
+
 	if cfg.HeimdallClientID == "" {
 		cfg.HeimdallClientID = "v1_sync_helper"
 	}
