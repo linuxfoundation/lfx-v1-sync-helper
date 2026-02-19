@@ -122,6 +122,7 @@ All configuration is via environment variables.
 |---|---|---|
 | `DYNAMODB_TABLES` | *(required)* | Comma-separated list of DynamoDB table names |
 | `AWS_REGION` | `us-west-2` | AWS region |
+| `AWS_ASSUME_ROLE_ARN` | *(unset)* | IAM role ARN to assume via STS for cross-account DynamoDB access |
 | `NATS_URL` | `nats://localhost:4222` | NATS server URL |
 | `NATS_STREAM_NAME` | `dynamodb_streams` | JetStream stream name |
 | `NATS_SUBJECT_PREFIX` | `dynamodb_streams` | Subject prefix |
@@ -133,8 +134,9 @@ All configuration is via environment variables.
 | `BIND` | `*` | Interface to bind the health check server on |
 | `DEBUG` | `false` | Enable debug logging |
 
-AWS credentials are resolved via the standard AWS credential chain (environment
-variables, `~/.aws/credentials`, EC2/ECS instance profile, etc.).
+AWS credentials are resolved via the standard AWS credential chain. When
+`AWS_ASSUME_ROLE_ARN` is set, those credentials are used to assume the specified
+role via STS, enabling cross-account DynamoDB access.
 
 ## Health checks
 

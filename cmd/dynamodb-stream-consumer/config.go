@@ -26,7 +26,8 @@ type Config struct {
 	CheckpointBucket string
 
 	// AWS configuration
-	AWSRegion string
+	AWSRegion     string
+	AssumeRoleARN string // Optional: IAM role ARN to assume via STS for cross-account access
 
 	// DynamoDB tables to consume (comma-separated)
 	Tables []string
@@ -76,6 +77,7 @@ func LoadConfig() (*Config, error) {
 		NATSSubjectPrefix:    os.Getenv("NATS_SUBJECT_PREFIX"),
 		CheckpointBucket:     os.Getenv("CHECKPOINT_BUCKET"),
 		AWSRegion:            os.Getenv("AWS_REGION"),
+		AssumeRoleARN:        os.Getenv("AWS_ASSUME_ROLE_ARN"),
 		Tables:               tables,
 		StartFromLatest:      parseBooleanEnv("START_FROM_LATEST"),
 		PollInterval:         time.Duration(pollIntervalMS) * time.Millisecond,

@@ -239,6 +239,10 @@ dynamodbStreamConsumer:
     # AWS_REGION is the AWS region for DynamoDB
     AWS_REGION:
       value: us-west-2
+    # AWS_ASSUME_ROLE_ARN is an optional IAM role ARN to assume via STS for cross-account
+    # DynamoDB access. Example: "arn:aws:iam::123456789012:role/dynamodb-streams-reader"
+    AWS_ASSUME_ROLE_ARN:
+      value: ""
     # DYNAMODB_TABLES is a comma-separated list of DynamoDB table names to consume.
     # Defaults to the full set of tables used by the tap-dynamodb Meltano extractor.
     DYNAMODB_TABLES:

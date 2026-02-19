@@ -41,8 +41,10 @@ import (
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -181,6 +183,13 @@ func main() {
 	if err != nil {
 		logger.With(errKey, err).Error("error loading AWS config")
 		os.Exit(1)
+	}
+
+	// If a role ARN is configured, assume it via STS for cross-account DynamoDB access.
+	if cfg.AssumeRoleARN != "" {
+		logger.With("role_arn", cfg.AssumeRoleARN).Info("assuming IAM role for DynamoDB access")
+		stsClient := sts.NewFromConfig(awsCfg)
+		awsCfg.Credentials = stscreds.NewAssumeRoleProvider(stsClient, cfg.AssumeRoleARN)
 	}
 
 	dynClient := dynamodb.NewFromConfig(awsCfg)
