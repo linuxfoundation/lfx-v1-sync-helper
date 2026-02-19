@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -188,42 +187,6 @@ func convertMapToInputMeeting(ctx context.Context, v1Data map[string]any) (*meet
 		meeting.Description = description
 	}
 
-	// Convert string fields to integers for v2 system
-	if durationStr, ok := v1Data["duration"].(string); ok && durationStr != "" {
-		if duration, err := strconv.Atoi(durationStr); err == nil {
-			meeting.Duration = duration
-		}
-	}
-	if earlyJoinTimeStr, ok := v1Data["early_join_time"].(string); ok && earlyJoinTimeStr != "" {
-		if earlyJoinTime, err := strconv.Atoi(earlyJoinTimeStr); err == nil {
-			meeting.EarlyJoinTimeMinutes = earlyJoinTime
-		}
-	}
-	if lastEndTimeStr, ok := v1Data["last_end_time"].(string); ok && lastEndTimeStr != "" {
-		if lastEndTime, err := strconv.ParseInt(lastEndTimeStr, 10, 64); err == nil {
-			meeting.LastEndTime = lastEndTime
-		}
-	}
-	if lastBulkRegistrantsJobFailedCountStr, ok := v1Data["last_bulk_registrants_job_failed_count"].(string); ok && lastBulkRegistrantsJobFailedCountStr != "" {
-		if lastBulkRegistrantsJobFailedCount, err := strconv.Atoi(lastBulkRegistrantsJobFailedCountStr); err == nil {
-			meeting.LastBulkRegistrantsJobFailedCount = lastBulkRegistrantsJobFailedCount
-		}
-	}
-	if lastBulkRegistrantsJobWarningCountStr, ok := v1Data["last_bulk_registrants_job_warning_count"].(string); ok && lastBulkRegistrantsJobWarningCountStr != "" {
-		if lastBulkRegistrantsJobWarningCount, err := strconv.Atoi(lastBulkRegistrantsJobWarningCountStr); err == nil {
-			meeting.LastBulkRegistrantsJobWarningCount = lastBulkRegistrantsJobWarningCount
-		}
-	}
-	if lastMailingListMembersSyncJobFailedCountStr, ok := v1Data["last_mailing_list_members_sync_job_failed_count"].(string); ok && lastMailingListMembersSyncJobFailedCountStr != "" {
-		if lastMailingListMembersSyncJobFailedCount, err := strconv.Atoi(lastMailingListMembersSyncJobFailedCountStr); err == nil {
-			meeting.LastMailingListMembersSyncJobFailedCount = lastMailingListMembersSyncJobFailedCount
-		}
-	}
-	if lastMailingListMembersSyncJobWarningCountStr, ok := v1Data["last_mailing_list_members_sync_job_warning_count"].(string); ok && lastMailingListMembersSyncJobWarningCountStr != "" {
-		if lastMailingListMembersSyncJobWarningCount, err := strconv.Atoi(lastMailingListMembersSyncJobWarningCountStr); err == nil {
-			meeting.LastMailingListMembersSyncJobWarningCount = lastMailingListMembersSyncJobWarningCount
-		}
-	}
 	// Use the recording access value to set the artifact visibility.
 	// Otherwise, fallback to the transcript or summary access values.
 	// And as a last resort, fallback to the default value of "meeting_hosts".
@@ -262,94 +225,11 @@ func convertMapToInputMeeting(ctx context.Context, v1Data map[string]any) (*meet
 				if agenda, ok := occMap["agenda"].(string); ok {
 					meeting.UpdatedOccurrences[i].Description = agenda
 				}
-				// Convert duration from string to int
-				if durationStr, ok := occMap["duration"].(string); ok && durationStr != "" {
-					if duration, err := strconv.Atoi(durationStr); err == nil {
-						meeting.UpdatedOccurrences[i].Duration = duration
-					}
-				}
-				// Convert recurrence integer fields from strings
-				if recurrenceData, ok := occMap["recurrence"].(map[string]any); ok {
-					// Ensure recurrence object exists (should be created during unmarshal, but create if missing)
-					if meeting.UpdatedOccurrences[i].Recurrence == nil {
-						meeting.UpdatedOccurrences[i].Recurrence = &ZoomMeetingRecurrence{}
-					}
-
-					if typeStr, ok := recurrenceData["type"].(string); ok && typeStr != "" {
-						if recType, err := strconv.Atoi(typeStr); err == nil {
-							meeting.UpdatedOccurrences[i].Recurrence.Type = recType
-						}
-					}
-					if repeatIntervalStr, ok := recurrenceData["repeat_interval"].(string); ok && repeatIntervalStr != "" {
-						if repeatInterval, err := strconv.Atoi(repeatIntervalStr); err == nil {
-							meeting.UpdatedOccurrences[i].Recurrence.RepeatInterval = repeatInterval
-						}
-					}
-					if monthlyDayStr, ok := recurrenceData["monthly_day"].(string); ok && monthlyDayStr != "" {
-						if monthlyDay, err := strconv.Atoi(monthlyDayStr); err == nil {
-							meeting.UpdatedOccurrences[i].Recurrence.MonthlyDay = monthlyDay
-						}
-					}
-					if monthlyWeekStr, ok := recurrenceData["monthly_week"].(string); ok && monthlyWeekStr != "" {
-						if monthlyWeek, err := strconv.Atoi(monthlyWeekStr); err == nil {
-							meeting.UpdatedOccurrences[i].Recurrence.MonthlyWeek = monthlyWeek
-						}
-					}
-					if monthlyWeekDayStr, ok := recurrenceData["monthly_week_day"].(string); ok && monthlyWeekDayStr != "" {
-						if monthlyWeekDay, err := strconv.Atoi(monthlyWeekDayStr); err == nil {
-							meeting.UpdatedOccurrences[i].Recurrence.MonthlyWeekDay = monthlyWeekDay
-						}
-					}
-					if endTimesStr, ok := recurrenceData["end_times"].(string); ok && endTimesStr != "" {
-						if endTimes, err := strconv.Atoi(endTimesStr); err == nil {
-							meeting.UpdatedOccurrences[i].Recurrence.EndTimes = endTimes
-						}
-					}
-				}
 			}
 		}
 	}
 	if updatedAt, ok := v1Data["modified_at"].(string); ok && updatedAt != "" {
 		meeting.UpdatedAt = updatedAt
-	}
-
-	// Convert recurrence integer fields from strings
-	if recurrenceData, ok := v1Data["recurrence"].(map[string]any); ok {
-		// Ensure recurrence object exists (should be created during unmarshal, but create if missing)
-		if meeting.Recurrence == nil {
-			meeting.Recurrence = &ZoomMeetingRecurrence{}
-		}
-
-		if typeStr, ok := recurrenceData["type"].(string); ok && typeStr != "" {
-			if recType, err := strconv.Atoi(typeStr); err == nil {
-				meeting.Recurrence.Type = recType
-			}
-		}
-		if repeatIntervalStr, ok := recurrenceData["repeat_interval"].(string); ok && repeatIntervalStr != "" {
-			if repeatInterval, err := strconv.Atoi(repeatIntervalStr); err == nil {
-				meeting.Recurrence.RepeatInterval = repeatInterval
-			}
-		}
-		if monthlyDayStr, ok := recurrenceData["monthly_day"].(string); ok && monthlyDayStr != "" {
-			if monthlyDay, err := strconv.Atoi(monthlyDayStr); err == nil {
-				meeting.Recurrence.MonthlyDay = monthlyDay
-			}
-		}
-		if monthlyWeekStr, ok := recurrenceData["monthly_week"].(string); ok && monthlyWeekStr != "" {
-			if monthlyWeek, err := strconv.Atoi(monthlyWeekStr); err == nil {
-				meeting.Recurrence.MonthlyWeek = monthlyWeek
-			}
-		}
-		if monthlyWeekDayStr, ok := recurrenceData["monthly_week_day"].(string); ok && monthlyWeekDayStr != "" {
-			if monthlyWeekDay, err := strconv.Atoi(monthlyWeekDayStr); err == nil {
-				meeting.Recurrence.MonthlyWeekDay = monthlyWeekDay
-			}
-		}
-		if endTimesStr, ok := recurrenceData["end_times"].(string); ok && endTimesStr != "" {
-			if endTimes, err := strconv.Atoi(endTimesStr); err == nil {
-				meeting.Recurrence.EndTimes = endTimes
-			}
-		}
 	}
 
 	occurrences, err := calculateOccurrences(ctx, meeting, false, false, 100)
@@ -985,27 +865,6 @@ func convertMapToInputPastMeeting(ctx context.Context, v1Data map[string]any) (*
 		pastMeeting.Description = description
 	}
 
-	// Convert duration from string to int
-	if durationStr, ok := v1Data["duration"].(string); ok && durationStr != "" {
-		if duration, err := strconv.Atoi(durationStr); err == nil {
-			pastMeeting.Duration = duration
-		}
-	}
-
-	// Convert early join time from string to int
-	if earlyJoinTimeStr, ok := v1Data["early_join_time"].(string); ok && earlyJoinTimeStr != "" {
-		if earlyJoinTime, err := strconv.Atoi(earlyJoinTimeStr); err == nil {
-			pastMeeting.EarlyJoinTimeMinutes = earlyJoinTime
-		}
-	}
-
-	// Convert type from string to int
-	if typeStr, ok := v1Data["type"].(string); ok && typeStr != "" {
-		if typeInt, err := strconv.Atoi(typeStr); err == nil {
-			pastMeeting.Type = typeInt
-		}
-	}
-
 	pastMeeting.ZoomConfig = &ZoomConfig{}
 	if meetingID, ok := v1Data["meeting_id"].(string); ok && meetingID != "" {
 		pastMeeting.ZoomConfig.MeetingID = meetingID
@@ -1018,43 +877,6 @@ func convertMapToInputPastMeeting(ctx context.Context, v1Data map[string]any) (*
 	}
 	if aiSummaryRequireApproval, ok := v1Data["ai_summary_require_approval"].(bool); ok {
 		pastMeeting.ZoomConfig.AISummaryRequireApproval = aiSummaryRequireApproval
-	}
-
-	// Convert recurrence integer fields from strings
-	if recurrenceData, ok := v1Data["recurrence"].(map[string]any); ok {
-		if pastMeeting.Recurrence == nil {
-			pastMeeting.Recurrence = &ZoomMeetingRecurrence{}
-		}
-		if typeStr, ok := recurrenceData["type"].(string); ok && typeStr != "" {
-			if recType, err := strconv.Atoi(typeStr); err == nil {
-				pastMeeting.Recurrence.Type = recType
-			}
-		}
-		if repeatIntervalStr, ok := recurrenceData["repeat_interval"].(string); ok && repeatIntervalStr != "" {
-			if repeatInterval, err := strconv.Atoi(repeatIntervalStr); err == nil {
-				pastMeeting.Recurrence.RepeatInterval = repeatInterval
-			}
-		}
-		if monthlyDayStr, ok := recurrenceData["monthly_day"].(string); ok && monthlyDayStr != "" {
-			if monthlyDay, err := strconv.Atoi(monthlyDayStr); err == nil {
-				pastMeeting.Recurrence.MonthlyDay = monthlyDay
-			}
-		}
-		if monthlyWeekStr, ok := recurrenceData["monthly_week"].(string); ok && monthlyWeekStr != "" {
-			if monthlyWeek, err := strconv.Atoi(monthlyWeekStr); err == nil {
-				pastMeeting.Recurrence.MonthlyWeek = monthlyWeek
-			}
-		}
-		if monthlyWeekDayStr, ok := recurrenceData["monthly_week_day"].(string); ok && monthlyWeekDayStr != "" {
-			if monthlyWeekDay, err := strconv.Atoi(monthlyWeekDayStr); err == nil {
-				pastMeeting.Recurrence.MonthlyWeekDay = monthlyWeekDay
-			}
-		}
-		if endTimesStr, ok := recurrenceData["end_times"].(string); ok && endTimesStr != "" {
-			if endTimes, err := strconv.Atoi(endTimesStr); err == nil {
-				pastMeeting.Recurrence.EndTimes = endTimes
-			}
-		}
 	}
 
 	// Use the recording access value to set the artifact visibility.
@@ -1589,13 +1411,6 @@ func convertMapToInputPastMeetingAttendee(v1Data map[string]any) (*pastMeetingAt
 		return nil, fmt.Errorf("failed to unmarshal JSON into PastMeetingAttendeeInput: %w", err)
 	}
 
-	// Convert average_attendance from string to int
-	if avgAttendanceStr, ok := v1Data["average_attendance"].(string); ok && avgAttendanceStr != "" {
-		if avgAttendance, err := strconv.Atoi(avgAttendanceStr); err == nil {
-			attendee.AverageAttendance = avgAttendance
-		}
-	}
-
 	return &attendee, nil
 }
 
@@ -1901,51 +1716,6 @@ func convertMapToInputPastMeetingRecording(v1Data map[string]any) (*pastMeetingR
 	}
 
 	// Convert recording_count from string to int
-	if recordingCountStr, ok := v1Data["recording_count"].(string); ok && recordingCountStr != "" {
-		if recordingCount, err := strconv.Atoi(recordingCountStr); err == nil {
-			recording.RecordingCount = recordingCount
-		}
-	}
-
-	// Convert total_size from string to int64
-	if totalSizeStr, ok := v1Data["total_size"].(string); ok && totalSizeStr != "" {
-		if totalSize, err := strconv.Atoi(totalSizeStr); err == nil {
-			recording.TotalSize = totalSize
-		}
-	}
-
-	// Convert integer fields in RecordingSessions (if they exist)
-	if sessionsData, ok := v1Data["sessions"].([]any); ok {
-		for i, sessionData := range sessionsData {
-			if sessionMap, ok := sessionData.(map[string]any); ok {
-				if i < len(recording.Sessions) {
-					// Convert total_size from string to int64 for session
-					if totalSizeStr, ok := sessionMap["total_size"].(string); ok && totalSizeStr != "" {
-						if totalSize, err := strconv.Atoi(totalSizeStr); err == nil {
-							recording.Sessions[i].TotalSize = totalSize
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Convert integer fields in RecordingFiles (if they exist)
-	if filesData, ok := v1Data["recording_files"].([]any); ok {
-		for i, fileData := range filesData {
-			if fileMap, ok := fileData.(map[string]any); ok {
-				if i < len(recording.RecordingFiles) {
-					// Convert file_size from string to int64
-					if fileSizeStr, ok := fileMap["file_size"].(string); ok && fileSizeStr != "" {
-						if fileSize, err := strconv.Atoi(fileSizeStr); err == nil {
-							recording.RecordingFiles[i].FileSize = fileSize
-						}
-					}
-				}
-			}
-		}
-	}
-
 	if modifiedAt, ok := v1Data["modified_at"].(string); ok && modifiedAt != "" {
 		recording.UpdatedAt = modifiedAt
 	}

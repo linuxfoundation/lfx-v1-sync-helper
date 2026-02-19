@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 
 	indexerConstants "github.com/linuxfoundation/lfx-v2-indexer-service/pkg/constants"
 	indexerTypes "github.com/linuxfoundation/lfx-v2-indexer-service/pkg/types"
@@ -142,57 +141,28 @@ func convertMapToInputVote(ctx context.Context, v1Data map[string]any) (*InputVo
 
 	// Convert PollDB to InputVote, converting string ints to proper ints
 	vote := InputVote{
-		UID:                   pollDB.ID, // Use poll_id as UID for v2 system
-		PollID:                pollDB.ID,
-		Name:                  pollDB.Name,
-		Description:           pollDB.Description,
-		CreationTime:          pollDB.CreationTime,
-		LastModifiedTime:      pollDB.LastModifiedTime,
-		EndTime:               pollDB.EndTime,
-		Status:                pollDB.Status,
-		ProjectID:             pollDB.ProjectID,
-		ProjectName:           pollDB.ProjectName,
-		CommitteeID:           pollDB.CommitteeID,
-		CommitteeName:         pollDB.CommitteeName,
-		CommitteeType:         pollDB.CommitteeType,
-		CommitteeVotingStatus: pollDB.CommitteeVotingStatus,
-		CommitteeFilters:      pollDB.CommitteeFilters,
-		PollQuestions:         pollDB.PollQuestions,
-		PollType:              pollDB.PollType,
-		PseudoAnonymity:       pollDB.PseudoAnonymity,
-		AllowAbstain:          pollDB.AllowAbstain,
-	}
-
-	// Convert string int fields to actual ints
-	if pollDB.TotalVotingRequestInvitations != "" {
-		if val, err := strconv.Atoi(pollDB.TotalVotingRequestInvitations); err == nil {
-			vote.TotalVotingRequestInvitations = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "total_voting_request_invitations").
-				With("value", pollDB.TotalVotingRequestInvitations).
-				WarnContext(ctx, "failed to convert string to int")
-		}
-	}
-	if pollDB.NumResponseReceived != "" {
-		if val, err := strconv.Atoi(pollDB.NumResponseReceived); err == nil {
-			vote.NumResponseReceived = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "num_response_received").
-				With("value", pollDB.NumResponseReceived).
-				WarnContext(ctx, "failed to convert string to int")
-		}
-	}
-	if pollDB.NumWinners != "" {
-		if val, err := strconv.Atoi(pollDB.NumWinners); err == nil {
-			vote.NumWinners = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "num_winners").
-				With("value", pollDB.NumWinners).
-				WarnContext(ctx, "failed to convert string to int")
-		}
+		UID:                           pollDB.ID, // Use poll_id as UID for v2 system
+		PollID:                        pollDB.ID,
+		Name:                          pollDB.Name,
+		Description:                   pollDB.Description,
+		CreationTime:                  pollDB.CreationTime,
+		LastModifiedTime:              pollDB.LastModifiedTime,
+		EndTime:                       pollDB.EndTime,
+		Status:                        pollDB.Status,
+		ProjectID:                     pollDB.ProjectID,
+		ProjectName:                   pollDB.ProjectName,
+		CommitteeID:                   pollDB.CommitteeID,
+		CommitteeName:                 pollDB.CommitteeName,
+		CommitteeType:                 pollDB.CommitteeType,
+		CommitteeVotingStatus:         pollDB.CommitteeVotingStatus,
+		CommitteeFilters:              pollDB.CommitteeFilters,
+		PollQuestions:                 pollDB.PollQuestions,
+		PollType:                      pollDB.PollType,
+		PseudoAnonymity:               pollDB.PseudoAnonymity,
+		NumWinners:                    pollDB.NumWinners,
+		AllowAbstain:                  pollDB.AllowAbstain,
+		TotalVotingRequestInvitations: pollDB.TotalVotingRequestInvitations,
+		NumResponseReceived:           pollDB.NumResponseReceived,
 	}
 
 	// Use the v1 project ID to get the v2 project UID.
@@ -454,22 +424,12 @@ func convertMapToInputVoteResponse(ctx context.Context, v1Data map[string]any) (
 			GenericUserChoice: pa.GenericUserChoice,
 		}
 
-		// Convert RankedUserChoice with string choice_rank to int choice_rank
+		// Convert RankedUserChoice
 		for _, rc := range pa.RankedUserChoice {
 			rankedChoiceInput := RankedChoiceAnswerInput{
 				ChoiceID:   rc.ChoiceID,
 				ChoiceText: rc.ChoiceText,
-			}
-			// Convert string choice_rank to int
-			if rc.ChoiceRank != "" {
-				if val, err := strconv.Atoi(rc.ChoiceRank); err == nil {
-					rankedChoiceInput.ChoiceRank = val
-				} else {
-					funcLogger.With(errKey, err).
-						With("field", "choice_rank").
-						With("value", rc.ChoiceRank).
-						WarnContext(ctx, "failed to convert string to int")
-				}
+				ChoiceRank: rc.ChoiceRank,
 			}
 			pollAnswerInput.RankedUserChoice = append(pollAnswerInput.RankedUserChoice, rankedChoiceInput)
 		}

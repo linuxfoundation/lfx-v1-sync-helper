@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 
 	indexerConstants "github.com/linuxfoundation/lfx-v2-indexer-service/pkg/constants"
 	indexerTypes "github.com/linuxfoundation/lfx-v2-indexer-service/pkg/types"
@@ -198,241 +197,38 @@ func convertMapToInputSurvey(ctx context.Context, v1Data map[string]any) (*Surve
 		CommitteeCategory:      surveyDB.CommitteeCategory,
 		CommitteeVotingEnabled: surveyDB.CommitteeVotingEnabled,
 		SurveyStatus:           surveyDB.SurveyStatus,
+		SurveyReminderRateDays: surveyDB.SurveyReminderRateDays,
+		NPSValue:               surveyDB.NPSValue,
+		NumPromoters:           surveyDB.NumPromoters,
+		NumPassives:            surveyDB.NumPassives,
+		NumDetractors:          surveyDB.NumDetractors,
+		TotalRecipients:        surveyDB.TotalRecipients,
+		TotalSentRecipients:    surveyDB.TotalSentRecipients,
+		TotalResponses:         surveyDB.TotalResponses,
+		TotalRecipientsOpened:  surveyDB.TotalRecipientsOpened,
+		TotalRecipientsClicked: surveyDB.TotalRecipientsClicked,
+		TotalDeliveryErrors:    surveyDB.TotalDeliveryErrors,
 		IsNPSSurvey:            surveyDB.IsNPSSurvey,
 		CollectorURL:           surveyDB.CollectorURL,
 	}
 
-	// Convert string int fields to actual ints
-	if surveyDB.SurveyReminderRateDays != "" {
-		if val, err := strconv.Atoi(surveyDB.SurveyReminderRateDays); err == nil {
-			survey.SurveyReminderRateDays = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "survey_reminder_rate_days").
-				With("value", surveyDB.SurveyReminderRateDays).
-				WarnContext(ctx, "failed to convert string to int")
-		}
-	}
-	if surveyDB.NPSValue != "" {
-		if val, err := strconv.Atoi(surveyDB.NPSValue); err == nil {
-			survey.NPSValue = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "nps_value").
-				With("value", surveyDB.NPSValue).
-				WarnContext(ctx, "failed to convert string to int")
-		}
-	}
-	if surveyDB.NumPromoters != "" {
-		if val, err := strconv.Atoi(surveyDB.NumPromoters); err == nil {
-			survey.NumPromoters = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "num_promoters").
-				With("value", surveyDB.NumPromoters).
-				WarnContext(ctx, "failed to convert string to int")
-		}
-	}
-	if surveyDB.NumPassives != "" {
-		if val, err := strconv.Atoi(surveyDB.NumPassives); err == nil {
-			survey.NumPassives = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "num_passives").
-				With("value", surveyDB.NumPassives).
-				WarnContext(ctx, "failed to convert string to int")
-		}
-	}
-	if surveyDB.NumDetractors != "" {
-		if val, err := strconv.Atoi(surveyDB.NumDetractors); err == nil {
-			survey.NumDetractors = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "num_detractors").
-				With("value", surveyDB.NumDetractors).
-				WarnContext(ctx, "failed to convert string to int")
-		}
-	}
-	if surveyDB.TotalRecipients != "" {
-		if val, err := strconv.Atoi(surveyDB.TotalRecipients); err == nil {
-			survey.TotalRecipients = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "total_recipients").
-				With("value", surveyDB.TotalRecipients).
-				WarnContext(ctx, "failed to convert string to int")
-		}
-	}
-	if surveyDB.TotalSentRecipients != "" {
-		if val, err := strconv.Atoi(surveyDB.TotalSentRecipients); err == nil {
-			survey.TotalSentRecipients = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "total_sent_recipients").
-				With("value", surveyDB.TotalSentRecipients).
-				WarnContext(ctx, "failed to convert string to int")
-		}
-	}
-	if surveyDB.TotalResponses != "" {
-		if val, err := strconv.Atoi(surveyDB.TotalResponses); err == nil {
-			survey.TotalResponses = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "total_responses").
-				With("value", surveyDB.TotalResponses).
-				WarnContext(ctx, "failed to convert string to int")
-		}
-	}
-	if surveyDB.TotalRecipientsOpened != "" {
-		if val, err := strconv.Atoi(surveyDB.TotalRecipientsOpened); err == nil {
-			survey.TotalRecipientsOpened = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "total_recipients_opened").
-				With("value", surveyDB.TotalRecipientsOpened).
-				WarnContext(ctx, "failed to convert string to int")
-		}
-	}
-	if surveyDB.TotalRecipientsClicked != "" {
-		if val, err := strconv.Atoi(surveyDB.TotalRecipientsClicked); err == nil {
-			survey.TotalRecipientsClicked = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "total_recipients_clicked").
-				With("value", surveyDB.TotalRecipientsClicked).
-				WarnContext(ctx, "failed to convert string to int")
-		}
-	}
-	if surveyDB.TotalDeliveryErrors != "" {
-		if val, err := strconv.Atoi(surveyDB.TotalDeliveryErrors); err == nil {
-			survey.TotalDeliveryErrors = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "total_delivery_errors").
-				With("value", surveyDB.TotalDeliveryErrors).
-				WarnContext(ctx, "failed to convert string to int")
-		}
-	}
-
-	// Convert committees from SurveyCommittee (string ints) to SurveyCommitteeInput (proper ints)
+	// Convert committees
 	for _, committee := range surveyDB.Committees {
 		committeeInput := SurveyCommitteeInput{
-			CommitteeID:   committee.CommitteeID,
-			CommitteeName: committee.CommitteeName,
-			ProjectID:     committee.ProjectID,
-			ProjectName:   committee.ProjectName,
-		}
-
-		// Convert string int fields to actual ints
-		if committee.NPSValue != "" {
-			if val, err := strconv.Atoi(committee.NPSValue); err == nil {
-				committeeInput.NPSValue = val
-			} else {
-				funcLogger.With(errKey, err).
-					With("field", "committee.nps_value").
-					With("value", committee.NPSValue).
-					With("committee_id", committee.CommitteeID).
-					WarnContext(ctx, "failed to convert string to int")
-			}
-		}
-		if committee.NumPromoters != "" {
-			if val, err := strconv.Atoi(committee.NumPromoters); err == nil {
-				committeeInput.NumPromoters = val
-			} else {
-				funcLogger.With(errKey, err).
-					With("field", "committee.num_promoters").
-					With("value", committee.NumPromoters).
-					With("committee_id", committee.CommitteeID).
-					WarnContext(ctx, "failed to convert string to int")
-			}
-		}
-		if committee.NumPassives != "" {
-			if val, err := strconv.Atoi(committee.NumPassives); err == nil {
-				committeeInput.NumPassives = val
-			} else {
-				funcLogger.With(errKey, err).
-					With("field", "committee.num_passives").
-					With("value", committee.NumPassives).
-					With("committee_id", committee.CommitteeID).
-					WarnContext(ctx, "failed to convert string to int")
-			}
-		}
-		if committee.NumDetractors != "" {
-			if val, err := strconv.Atoi(committee.NumDetractors); err == nil {
-				committeeInput.NumDetractors = val
-			} else {
-				funcLogger.With(errKey, err).
-					With("field", "committee.num_detractors").
-					With("value", committee.NumDetractors).
-					With("committee_id", committee.CommitteeID).
-					WarnContext(ctx, "failed to convert string to int")
-			}
-		}
-		if committee.TotalRecipients != "" {
-			if val, err := strconv.Atoi(committee.TotalRecipients); err == nil {
-				committeeInput.TotalRecipients = val
-			} else {
-				funcLogger.With(errKey, err).
-					With("field", "committee.total_recipients").
-					With("value", committee.TotalRecipients).
-					With("committee_id", committee.CommitteeID).
-					WarnContext(ctx, "failed to convert string to int")
-			}
-		}
-		if committee.TotalSentRecipients != "" {
-			if val, err := strconv.Atoi(committee.TotalSentRecipients); err == nil {
-				committeeInput.TotalSentRecipients = val
-			} else {
-				funcLogger.With(errKey, err).
-					With("field", "committee.total_sent_recipients").
-					With("value", committee.TotalSentRecipients).
-					With("committee_id", committee.CommitteeID).
-					WarnContext(ctx, "failed to convert string to int")
-			}
-		}
-		if committee.TotalResponses != "" {
-			if val, err := strconv.Atoi(committee.TotalResponses); err == nil {
-				committeeInput.TotalResponses = val
-			} else {
-				funcLogger.With(errKey, err).
-					With("field", "committee.total_responses").
-					With("value", committee.TotalResponses).
-					With("committee_id", committee.CommitteeID).
-					WarnContext(ctx, "failed to convert string to int")
-			}
-		}
-		if committee.TotalRecipientsOpened != "" {
-			if val, err := strconv.Atoi(committee.TotalRecipientsOpened); err == nil {
-				committeeInput.TotalRecipientsOpened = val
-			} else {
-				funcLogger.With(errKey, err).
-					With("field", "committee.total_recipients_opened").
-					With("value", committee.TotalRecipientsOpened).
-					With("committee_id", committee.CommitteeID).
-					WarnContext(ctx, "failed to convert string to int")
-			}
-		}
-		if committee.TotalRecipientsClicked != "" {
-			if val, err := strconv.Atoi(committee.TotalRecipientsClicked); err == nil {
-				committeeInput.TotalRecipientsClicked = val
-			} else {
-				funcLogger.With(errKey, err).
-					With("field", "committee.total_recipients_clicked").
-					With("value", committee.TotalRecipientsClicked).
-					With("committee_id", committee.CommitteeID).
-					WarnContext(ctx, "failed to convert string to int")
-			}
-		}
-		if committee.TotalDeliveryErrors != "" {
-			if val, err := strconv.Atoi(committee.TotalDeliveryErrors); err == nil {
-				committeeInput.TotalDeliveryErrors = val
-			} else {
-				funcLogger.With(errKey, err).
-					With("field", "committee.total_delivery_errors").
-					With("value", committee.TotalDeliveryErrors).
-					With("committee_id", committee.CommitteeID).
-					WarnContext(ctx, "failed to convert string to int")
-			}
+			CommitteeID:            committee.CommitteeID,
+			CommitteeName:          committee.CommitteeName,
+			ProjectID:              committee.ProjectID,
+			ProjectName:            committee.ProjectName,
+			NPSValue:               committee.NPSValue,
+			NumPromoters:           committee.NumPromoters,
+			NumPassives:            committee.NumPassives,
+			NumDetractors:          committee.NumDetractors,
+			TotalRecipients:        committee.TotalRecipients,
+			TotalSentRecipients:    committee.TotalSentRecipients,
+			TotalResponses:         committee.TotalResponses,
+			TotalRecipientsOpened:  committee.TotalRecipientsOpened,
+			TotalRecipientsClicked: committee.TotalRecipientsClicked,
+			TotalDeliveryErrors:    committee.TotalDeliveryErrors,
 		}
 
 		// Look up v2 committee UID from v1 committee ID
@@ -654,63 +450,43 @@ func convertMapToInputSurveyResponse(ctx context.Context, v1Data map[string]any)
 
 	// Convert SurveyResponseDatabase to SurveyResponseInput, converting string ints to proper ints
 	surveyResponse := SurveyResponseInput{
-		UID:                         responseDB.ID, // Use ID as UID for v2 system
-		ID:                          responseDB.ID,
-		SurveyID:                    responseDB.SurveyID,
-		SurveyUID:                   responseDB.SurveyID, // Use survey_id as SurveyUID
-		SurveyMonkeyRespondent:      responseDB.SurveyMonkeyRespondent,
-		Email:                       responseDB.Email,
-		CommitteeMemberID:           responseDB.CommitteeMemberID,
-		FirstName:                   responseDB.FirstName,
-		LastName:                    responseDB.LastName,
-		CreatedAt:                   responseDB.CreatedAt,
-		ResponseDatetime:            responseDB.ResponseDatetime,
-		LastReceivedTime:            responseDB.LastReceivedTime,
-		Username:                    mapUsernameToAuthSub(responseDB.Username),
-		VotingStatus:                responseDB.VotingStatus,
-		Role:                        responseDB.Role,
-		JobTitle:                    responseDB.JobTitle,
-		MembershipTier:              responseDB.MembershipTier,
-		Organization:                responseDB.Organization,
-		CommitteeID:                 responseDB.CommitteeID,
-		CommitteeVotingEnabled:      responseDB.CommitteeVotingEnabled,
-		SurveyLink:                  responseDB.SurveyLink,
-		SurveyMonkeyQuestionAnswers: responseDB.SurveyMonkeyQuestionAnswers,
-		SESMessageID:                responseDB.SESMessageID,
-		SESDeliverySuccessful:       responseDB.SESDeliverySuccessful,
-		SESBounceType:               responseDB.SESBounceType,
-		SESBounceSubtype:            responseDB.SESBounceSubtype,
-		SESBounceDiagnosticCode:     responseDB.SESBounceDiagnosticCode,
-		SESComplaintExists:          responseDB.SESComplaintExists,
-		SESComplaintType:            responseDB.SESComplaintType,
-		SESComplaintDate:            responseDB.SESComplaintDate,
-		EmailOpenedFirstTime:        responseDB.EmailOpenedFirstTime,
-		EmailOpenedLastTime:         responseDB.EmailOpenedLastTime,
-		LinkClickedFirstTime:        responseDB.LinkClickedFirstTime,
-		LinkClickedLastTime:         responseDB.LinkClickedLastTime,
-		Excluded:                    responseDB.Excluded,
-	}
-
-	// Convert string int fields to actual ints
-	if responseDB.NumAutomatedRemindersReceived != "" {
-		if val, err := strconv.Atoi(responseDB.NumAutomatedRemindersReceived); err == nil {
-			surveyResponse.NumAutomatedRemindersReceived = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "num_automated_reminders_received").
-				With("value", responseDB.NumAutomatedRemindersReceived).
-				WarnContext(ctx, "failed to convert string to int")
-		}
-	}
-	if responseDB.NPSValue != "" {
-		if val, err := strconv.Atoi(responseDB.NPSValue); err == nil {
-			surveyResponse.NPSValue = val
-		} else {
-			funcLogger.With(errKey, err).
-				With("field", "nps_value").
-				With("value", responseDB.NPSValue).
-				WarnContext(ctx, "failed to convert string to int")
-		}
+		UID:                           responseDB.ID, // Use ID as UID for v2 system
+		ID:                            responseDB.ID,
+		SurveyID:                      responseDB.SurveyID,
+		SurveyUID:                     responseDB.SurveyID, // Use survey_id as SurveyUID
+		SurveyMonkeyRespondent:        responseDB.SurveyMonkeyRespondent,
+		Email:                         responseDB.Email,
+		CommitteeMemberID:             responseDB.CommitteeMemberID,
+		FirstName:                     responseDB.FirstName,
+		LastName:                      responseDB.LastName,
+		CreatedAt:                     responseDB.CreatedAt,
+		ResponseDatetime:              responseDB.ResponseDatetime,
+		LastReceivedTime:              responseDB.LastReceivedTime,
+		Username:                      mapUsernameToAuthSub(responseDB.Username),
+		VotingStatus:                  responseDB.VotingStatus,
+		Role:                          responseDB.Role,
+		JobTitle:                      responseDB.JobTitle,
+		MembershipTier:                responseDB.MembershipTier,
+		Organization:                  responseDB.Organization,
+		CommitteeID:                   responseDB.CommitteeID,
+		CommitteeVotingEnabled:        responseDB.CommitteeVotingEnabled,
+		SurveyLink:                    responseDB.SurveyLink,
+		SurveyMonkeyQuestionAnswers:   responseDB.SurveyMonkeyQuestionAnswers,
+		SESMessageID:                  responseDB.SESMessageID,
+		SESDeliverySuccessful:         responseDB.SESDeliverySuccessful,
+		SESBounceType:                 responseDB.SESBounceType,
+		SESBounceSubtype:              responseDB.SESBounceSubtype,
+		SESBounceDiagnosticCode:       responseDB.SESBounceDiagnosticCode,
+		SESComplaintExists:            responseDB.SESComplaintExists,
+		SESComplaintType:              responseDB.SESComplaintType,
+		SESComplaintDate:              responseDB.SESComplaintDate,
+		EmailOpenedFirstTime:          responseDB.EmailOpenedFirstTime,
+		NumAutomatedRemindersReceived: responseDB.NumAutomatedRemindersReceived,
+		NPSValue:                      responseDB.NPSValue,
+		EmailOpenedLastTime:           responseDB.EmailOpenedLastTime,
+		LinkClickedFirstTime:          responseDB.LinkClickedFirstTime,
+		LinkClickedLastTime:           responseDB.LinkClickedLastTime,
+		Excluded:                      responseDB.Excluded,
 	}
 
 	// Convert project from SurveyResponseProject to SurveyResponseProjectInput

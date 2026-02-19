@@ -18,11 +18,11 @@ import (
 
 // DynamoDBStreamEvent is the event payload published to NATS for each DynamoDB stream record.
 type DynamoDBStreamEvent struct {
-	EventID                 string                 `json:"event_id"`
-	EventName               string                 `json:"event_name"` // INSERT, MODIFY, REMOVE
-	TableName               string                 `json:"table_name"`
-	SequenceNumber          string                 `json:"sequence_number"`
-	ApproximateCreationTime time.Time              `json:"approximate_creation_time"`
+	EventID                 string    `json:"event_id"`
+	EventName               string    `json:"event_name"` // INSERT, MODIFY, REMOVE
+	TableName               string    `json:"table_name"`
+	SequenceNumber          string    `json:"sequence_number"`
+	ApproximateCreationTime time.Time `json:"approximate_creation_time"`
 	// Keys contains only the primary key attribute(s) of the item (partition key +
 	// optional sort key). Consumers can use this to construct a stable record
 	// identifier without needing to know the full item schema.

@@ -6,6 +6,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -78,6 +80,150 @@ func (r ZoomMeetingRecurrence) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// UnmarshalJSON implements custom unmarshaling to handle both string and int inputs for numeric fields.
+func (r *ZoomMeetingRecurrence) UnmarshalJSON(data []byte) error {
+	tmp := struct {
+		Type           interface{} `json:"type"`
+		RepeatInterval interface{} `json:"repeat_interval"`
+		WeeklyDays     string      `json:"weekly_days,omitempty"`
+		MonthlyDay     interface{} `json:"monthly_day"`
+		MonthlyWeek    interface{} `json:"monthly_week"`
+		MonthlyWeekDay interface{} `json:"monthly_week_day"`
+		EndTimes       interface{} `json:"end_times"`
+		EndDateTime    string      `json:"end_date_time,omitempty"`
+	}{}
+
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return err
+	}
+
+	// Handle Type
+	switch v := tmp.Type.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			r.Type = val
+		}
+	case float64:
+		r.Type = int(v)
+	case int:
+		r.Type = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for type: %T", v)
+		}
+	}
+
+	// Handle RepeatInterval
+	switch v := tmp.RepeatInterval.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			r.RepeatInterval = val
+		}
+	case float64:
+		r.RepeatInterval = int(v)
+	case int:
+		r.RepeatInterval = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for repeat_interval: %T", v)
+		}
+	}
+
+	// Handle MonthlyDay
+	switch v := tmp.MonthlyDay.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			r.MonthlyDay = val
+		}
+	case float64:
+		r.MonthlyDay = int(v)
+	case int:
+		r.MonthlyDay = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for monthly_day: %T", v)
+		}
+	}
+
+	// Handle MonthlyWeek
+	switch v := tmp.MonthlyWeek.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			r.MonthlyWeek = val
+		}
+	case float64:
+		r.MonthlyWeek = int(v)
+	case int:
+		r.MonthlyWeek = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for monthly_week: %T", v)
+		}
+	}
+
+	// Handle MonthlyWeekDay
+	switch v := tmp.MonthlyWeekDay.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			r.MonthlyWeekDay = val
+		}
+	case float64:
+		r.MonthlyWeekDay = int(v)
+	case int:
+		r.MonthlyWeekDay = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for monthly_week_day: %T", v)
+		}
+	}
+
+	// Handle EndTimes
+	switch v := tmp.EndTimes.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			r.EndTimes = val
+		}
+	case float64:
+		r.EndTimes = int(v)
+	case int:
+		r.EndTimes = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for end_times: %T", v)
+		}
+	}
+
+	// Assign other fields
+	r.WeeklyDays = tmp.WeeklyDays
+	r.EndDateTime = tmp.EndDateTime
+
+	return nil
+}
+
 // UpdatedOccurrence is the schema for an updated meeting occurrence
 type UpdatedOccurrence struct {
 	// OldOccurrenceID is the original occurrence ID, which is the original start time of the occurrence
@@ -120,6 +266,55 @@ func (u UpdatedOccurrence) MarshalJSON() ([]byte, error) {
 		Duration: u.Duration,
 		Alias:    (*Alias)(&u),
 	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to handle both string and int inputs for Duration.
+func (u *UpdatedOccurrence) UnmarshalJSON(data []byte) error {
+	tmp := struct {
+		OldOccurrenceID string                 `json:"old_occurrence_id"`
+		NewOccurrenceID string                 `json:"new_occurrence_id"`
+		Timezone        string                 `json:"timezone"`
+		Duration        interface{}            `json:"duration"`
+		Title           string                 `json:"title"`
+		Description     string                 `json:"description"`
+		Recurrence      *ZoomMeetingRecurrence `json:"recurrence"`
+		AllFollowing    bool                   `json:"all_following"`
+	}{}
+
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return err
+	}
+
+	// Handle Duration
+	switch v := tmp.Duration.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			u.Duration = val
+		}
+	case float64:
+		u.Duration = int(v)
+	case int:
+		u.Duration = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for duration: %T", v)
+		}
+	}
+
+	// Assign other fields
+	u.OldOccurrenceID = tmp.OldOccurrenceID
+	u.NewOccurrenceID = tmp.NewOccurrenceID
+	u.Timezone = tmp.Timezone
+	u.Title = tmp.Title
+	u.Description = tmp.Description
+	u.Recurrence = tmp.Recurrence
+	u.AllFollowing = tmp.AllFollowing
+
+	return nil
 }
 
 // Committee represents a committee with optional filters.
@@ -341,6 +536,258 @@ func (m meetingInput) MarshalJSON() ([]byte, error) {
 		LastMailingListMembersSyncJobWarningCount: m.LastMailingListMembersSyncJobWarningCount,
 		Alias: (*Alias)(&m),
 	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to handle both string and int inputs for numeric fields.
+// This struct is large, so only the 7 fields that need flexible type handling are listed as interface{}.
+func (m *meetingInput) UnmarshalJSON(data []byte) error {
+	tmp := struct {
+		UID                                       string                  `json:"uid"`
+		MeetingID                                 string                  `json:"meeting_id"`
+		ProjectSFID                               string                  `json:"project_sfid"`
+		ProjectUID                                string                  `json:"project_uid"`
+		Committee                                 string                  `json:"committee"`
+		CommitteeFilters                          []string                `json:"committee_filters"`
+		Committees                                []Committee             `json:"committees,omitempty"`
+		User                                      string                  `json:"user_id"`
+		Title                                     string                  `json:"title"`
+		Description                               string                  `json:"description"`
+		Visibility                                string                  `json:"visibility"`
+		MeetingType                               string                  `json:"meeting_type"`
+		StartTime                                 string                  `json:"start_time"`
+		Timezone                                  string                  `json:"timezone"`
+		Duration                                  interface{}             `json:"duration"`
+		EarlyJoinTimeMinutes                      interface{}             `json:"early_join_time_minutes"`
+		LastEndTime                               interface{}             `json:"last_end_time"`
+		HostKey                                   string                  `json:"host_key"`
+		JoinURL                                   string                  `json:"join_url"`
+		Password                                  string                  `json:"password"`
+		Restricted                                bool                    `json:"restricted"`
+		ArtifactVisibility                        string                  `json:"artifact_visibility"`
+		RecordingEnabled                          bool                    `json:"recording_enabled"`
+		TranscriptEnabled                         bool                    `json:"transcript_enabled"`
+		RecordingAccess                           string                  `json:"recording_access"`
+		TranscriptAccess                          string                  `json:"transcript_access"`
+		CreatedAt                                 string                  `json:"created_at"`
+		UpdatedAt                                 string                  `json:"updated_at"`
+		CreatedBy                                 CreatedBy               `json:"created_by"`
+		UpdatedBy                                 UpdatedBy               `json:"updated_by"`
+		UpdatedByList                             []UpdatedBy             `json:"updated_by_list,omitempty"`
+		UseNewInviteEmailAddress                  bool                    `json:"use_new_invite_email_address"`
+		Recurrence                                *ZoomMeetingRecurrence  `json:"recurrence,omitempty"`
+		Occurrences                               []ZoomMeetingOccurrence `json:"occurrences,omitempty"`
+		CancelledOccurrences                      []string                `json:"cancelled_occurrences,omitempty"`
+		UpdatedOccurrences                        []UpdatedOccurrence     `json:"updated_occurrences,omitempty"`
+		IcsUIDTimezone                            string                  `json:"ics_uid_timezone,omitempty"`
+		IcsAdditionalUids                         []string                `json:"ics_additional_uids,omitempty"`
+		ZoomConfig                                ZoomConfig              `json:"zoom_config"`
+		AISummaryAccess                           string                  `json:"ai_summary_access,omitempty"`
+		YoutubeUploadEnabled                      bool                    `json:"youtube_upload_enabled,omitempty"`
+		ConcurrentZoomUserEnabled                 bool                    `json:"concurrent_zoom_user_enabled,omitempty"`
+		LastBulkRegistrantJobStatus               string                  `json:"last_bulk_registrant_job_status"`
+		LastBulkRegistrantsJobFailedCount         interface{}             `json:"last_bulk_registrants_job_failed_count"`
+		LastBulkRegistrantsJobWarningCount        interface{}             `json:"last_bulk_registrants_job_warning_count"`
+		LastMailingListMembersSyncJobStatus       string                  `json:"last_mailing_list_members_sync_job_status"`
+		LastMailingListMembersSyncJobFailedCount  interface{}             `json:"last_mailing_list_members_sync_job_failed_count"`
+		MailingListGroupIDs                       []string                `json:"mailing_list_group_ids"`
+		LastMailingListMembersSyncJobWarningCount interface{}             `json:"last_mailing_list_members_sync_job_warning_count"`
+		UseUniqueICSUID                           string                  `json:"use_unique_ics_uid"`
+		ShowMeetingAttendees                      bool                    `json:"show_meeting_attendees"`
+	}{}
+
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return err
+	}
+
+	// Handle Duration
+	switch v := tmp.Duration.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			m.Duration = val
+		}
+	case float64:
+		m.Duration = int(v)
+	case int:
+		m.Duration = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for duration: %T", v)
+		}
+	}
+
+	// Handle EarlyJoinTimeMinutes
+	switch v := tmp.EarlyJoinTimeMinutes.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			m.EarlyJoinTimeMinutes = val
+		}
+	case float64:
+		m.EarlyJoinTimeMinutes = int(v)
+	case int:
+		m.EarlyJoinTimeMinutes = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for early_join_time_minutes: %T", v)
+		}
+	}
+
+	// Handle LastEndTime (int64)
+	switch v := tmp.LastEndTime.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return err
+			}
+			m.LastEndTime = val
+		}
+	case float64:
+		m.LastEndTime = int64(v)
+	case int64:
+		m.LastEndTime = v
+	case int:
+		m.LastEndTime = int64(v)
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for last_end_time: %T", v)
+		}
+	}
+
+	// Handle LastBulkRegistrantsJobFailedCount
+	switch v := tmp.LastBulkRegistrantsJobFailedCount.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			m.LastBulkRegistrantsJobFailedCount = val
+		}
+	case float64:
+		m.LastBulkRegistrantsJobFailedCount = int(v)
+	case int:
+		m.LastBulkRegistrantsJobFailedCount = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for last_bulk_registrants_job_failed_count: %T", v)
+		}
+	}
+
+	// Handle LastBulkRegistrantsJobWarningCount
+	switch v := tmp.LastBulkRegistrantsJobWarningCount.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			m.LastBulkRegistrantsJobWarningCount = val
+		}
+	case float64:
+		m.LastBulkRegistrantsJobWarningCount = int(v)
+	case int:
+		m.LastBulkRegistrantsJobWarningCount = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for last_bulk_registrants_job_warning_count: %T", v)
+		}
+	}
+
+	// Handle LastMailingListMembersSyncJobFailedCount
+	switch v := tmp.LastMailingListMembersSyncJobFailedCount.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			m.LastMailingListMembersSyncJobFailedCount = val
+		}
+	case float64:
+		m.LastMailingListMembersSyncJobFailedCount = int(v)
+	case int:
+		m.LastMailingListMembersSyncJobFailedCount = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for last_mailing_list_members_sync_job_failed_count: %T", v)
+		}
+	}
+
+	// Handle LastMailingListMembersSyncJobWarningCount
+	switch v := tmp.LastMailingListMembersSyncJobWarningCount.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			m.LastMailingListMembersSyncJobWarningCount = val
+		}
+	case float64:
+		m.LastMailingListMembersSyncJobWarningCount = int(v)
+	case int:
+		m.LastMailingListMembersSyncJobWarningCount = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for last_mailing_list_members_sync_job_warning_count: %T", v)
+		}
+	}
+
+	// Assign all other fields
+	m.UID = tmp.UID
+	m.MeetingID = tmp.MeetingID
+	m.ProjectSFID = tmp.ProjectSFID
+	m.ProjectUID = tmp.ProjectUID
+	m.Committee = tmp.Committee
+	m.CommitteeFilters = tmp.CommitteeFilters
+	m.Committees = tmp.Committees
+	m.User = tmp.User
+	m.Title = tmp.Title
+	m.Description = tmp.Description
+	m.Visibility = tmp.Visibility
+	m.MeetingType = tmp.MeetingType
+	m.StartTime = tmp.StartTime
+	m.Timezone = tmp.Timezone
+	m.HostKey = tmp.HostKey
+	m.JoinURL = tmp.JoinURL
+	m.Password = tmp.Password
+	m.Restricted = tmp.Restricted
+	m.ArtifactVisibility = tmp.ArtifactVisibility
+	m.RecordingEnabled = tmp.RecordingEnabled
+	m.TranscriptEnabled = tmp.TranscriptEnabled
+	m.RecordingAccess = tmp.RecordingAccess
+	m.TranscriptAccess = tmp.TranscriptAccess
+	m.CreatedAt = tmp.CreatedAt
+	m.UpdatedAt = tmp.UpdatedAt
+	m.CreatedBy = tmp.CreatedBy
+	m.UpdatedBy = tmp.UpdatedBy
+	m.UpdatedByList = tmp.UpdatedByList
+	m.UseNewInviteEmailAddress = tmp.UseNewInviteEmailAddress
+	m.Recurrence = tmp.Recurrence
+	m.Occurrences = tmp.Occurrences
+	m.CancelledOccurrences = tmp.CancelledOccurrences
+	m.UpdatedOccurrences = tmp.UpdatedOccurrences
+	m.IcsUIDTimezone = tmp.IcsUIDTimezone
+	m.IcsAdditionalUids = tmp.IcsAdditionalUids
+	m.ZoomConfig = tmp.ZoomConfig
+	m.AISummaryAccess = tmp.AISummaryAccess
+	m.YoutubeUploadEnabled = tmp.YoutubeUploadEnabled
+	m.ConcurrentZoomUserEnabled = tmp.ConcurrentZoomUserEnabled
+	m.LastBulkRegistrantJobStatus = tmp.LastBulkRegistrantJobStatus
+	m.LastMailingListMembersSyncJobStatus = tmp.LastMailingListMembersSyncJobStatus
+	m.MailingListGroupIDs = tmp.MailingListGroupIDs
+	m.UseUniqueICSUID = tmp.UseUniqueICSUID
+	m.ShowMeetingAttendees = tmp.ShowMeetingAttendees
+
+	return nil
 }
 
 // ZoomConfig is the configuration of the meeting in Zoom.
@@ -758,6 +1205,85 @@ func (p pastMeetingInput) MarshalJSON() ([]byte, error) {
 		Type:                 p.Type,
 		Alias:                (*Alias)(&p),
 	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to handle both string and int inputs for numeric fields.
+func (p *pastMeetingInput) UnmarshalJSON(data []byte) error {
+	type Alias pastMeetingInput
+	tmp := struct {
+		Duration             interface{} `json:"duration"`
+		EarlyJoinTimeMinutes interface{} `json:"early_join_time_minutes"`
+		Type                 interface{} `json:"type"`
+		*Alias
+	}{
+		Alias: (*Alias)(p),
+	}
+
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return err
+	}
+
+	// Handle Duration
+	switch v := tmp.Duration.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			p.Duration = val
+		}
+	case float64:
+		p.Duration = int(v)
+	case int:
+		p.Duration = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for duration: %T", v)
+		}
+	}
+
+	// Handle EarlyJoinTimeMinutes
+	switch v := tmp.EarlyJoinTimeMinutes.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			p.EarlyJoinTimeMinutes = val
+		}
+	case float64:
+		p.EarlyJoinTimeMinutes = int(v)
+	case int:
+		p.EarlyJoinTimeMinutes = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for early_join_time_minutes: %T", v)
+		}
+	}
+
+	// Handle Type
+	switch v := tmp.Type.(type) {
+	case string:
+		if v != "" {
+			val, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
+			p.Type = val
+		}
+	case float64:
+		p.Type = int(v)
+	case int:
+		p.Type = v
+	default:
+		if v != nil {
+			return fmt.Errorf("invalid type for type: %T", v)
+		}
+	}
+
+	return nil
 }
 
 // ZoomPastMeetingMappingDB is the schema for a past meeting mapping in DynamoDB table.

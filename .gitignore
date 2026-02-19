@@ -11,7 +11,7 @@
 .vscode/
 *.swp
 *~
-.env
+.env*
 *.env
 *.pem
 

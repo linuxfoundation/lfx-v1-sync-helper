@@ -130,9 +130,9 @@ func LoadConfig() (*Config, error) {
 		Auth0ClientID:   os.Getenv("AUTH0_CLIENT_ID"),
 		Auth0PrivateKey: os.Getenv("AUTH0_PRIVATE_KEY"),
 		// Other configuration
-		NATSURL:    os.Getenv("NATS_URL"),
-		Port:       os.Getenv("PORT"),
-		Bind:       os.Getenv("BIND"),
+		NATSURL:               os.Getenv("NATS_URL"),
+		Port:                  os.Getenv("PORT"),
+		Bind:                  os.Getenv("BIND"),
 		Debug:                 parseBooleanEnv("DEBUG"),
 		HTTPDebug:             parseBooleanEnv("HTTP_DEBUG"),
 		UseMsgpack:            parseBooleanEnv("USE_MSGPACK"),
