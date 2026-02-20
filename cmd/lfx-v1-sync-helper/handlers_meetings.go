@@ -728,9 +728,13 @@ func getInviteResponseTags(inviteResponse *inviteResponseInput) []string {
 	tags := []string{
 		inviteResponse.ID,
 		fmt.Sprintf("invite_response_uid:%s", inviteResponse.ID),
-		fmt.Sprintf("meeting_uid:%s", inviteResponse.MeetingID),
+		fmt.Sprintf("meeting_and_occurrence_id:%s", inviteResponse.MeetingAndOccurrenceID),
+		fmt.Sprintf("meeting_id:%s", inviteResponse.MeetingID),
 		fmt.Sprintf("registrant_uid:%s", inviteResponse.RegistrantID),
 		fmt.Sprintf("email:%s", inviteResponse.Email),
+	}
+	if inviteResponse.Username != "" {
+		tags = append(tags, fmt.Sprintf("username:%s", inviteResponse.Username))
 	}
 	return tags
 }
