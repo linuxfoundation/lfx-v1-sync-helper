@@ -31,3 +31,4 @@ __pycache__/
 
 # Go build artifacts
 /bin/
+lfx-v1-sync-helper
