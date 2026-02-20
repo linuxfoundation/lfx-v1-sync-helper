@@ -107,40 +107,32 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 		handleVoteUpdate(ctx, key, v1Data)
 		return false
 	case "itx-poll-vote":
-		handleVoteResponseUpdate(ctx, key, v1Data)
-		return false
+		return handleVoteResponseUpdate(ctx, key, v1Data)
 	case "itx-surveys":
 		handleSurveyUpdate(ctx, key, v1Data)
 		return false
 	case "itx-survey-responses":
-		handleSurveyResponseUpdate(ctx, key, v1Data)
-		return false
+		return handleSurveyResponseUpdate(ctx, key, v1Data)
 	case "itx-zoom-meetings-v2":
 		handleZoomMeetingUpdate(ctx, key, v1Data)
 		return false
 	case "itx-zoom-meetings-registrants-v2":
-		handleZoomMeetingRegistrantUpdate(ctx, key, v1Data)
-		return false
+		return handleZoomMeetingRegistrantUpdate(ctx, key, v1Data)
+	case "itx-zoom-past-meetings-attendees":
+		return handleZoomPastMeetingAttendeeUpdate(ctx, key, v1Data)
+	case "itx-zoom-past-meetings-invitees":
+		return handleZoomPastMeetingInviteeUpdate(ctx, key, v1Data)
+	case "itx-zoom-past-meetings-recordings":
+		return handleZoomPastMeetingRecordingUpdate(ctx, key, v1Data)
+	case "itx-zoom-past-meetings-summaries":
+		return handleZoomPastMeetingSummaryUpdate(ctx, key, v1Data)
+	case "itx-zoom-meetings-invite-responses-v2":
+		return handleZoomMeetingInviteResponseUpdate(ctx, key, v1Data)
 	case "itx-zoom-meetings-mappings-v2":
 		handleZoomMeetingMappingUpdate(ctx, key, v1Data)
 		return false
-	case "itx-zoom-meetings-invite-responses-v2":
-		handleZoomMeetingInviteResponseUpdate(ctx, key, v1Data)
-		return false
-	case "itx-zoom-past-meetings-attendees":
-		handleZoomPastMeetingAttendeeUpdate(ctx, key, v1Data)
-		return false
-	case "itx-zoom-past-meetings-invitees":
-		handleZoomPastMeetingInviteeUpdate(ctx, key, v1Data)
-		return false
 	case "itx-zoom-past-meetings-mappings":
 		handleZoomPastMeetingMappingUpdate(ctx, key, v1Data)
-		return false
-	case "itx-zoom-past-meetings-recordings":
-		handleZoomPastMeetingRecordingUpdate(ctx, key, v1Data)
-		return false
-	case "itx-zoom-past-meetings-summaries":
-		handleZoomPastMeetingSummaryUpdate(ctx, key, v1Data)
 		return false
 	case "itx-zoom-past-meetings":
 		handleZoomPastMeetingUpdate(ctx, key, v1Data)

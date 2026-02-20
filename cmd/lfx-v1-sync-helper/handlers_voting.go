@@ -454,10 +454,11 @@ func convertMapToInputVoteResponse(ctx context.Context, v1Data map[string]any) (
 }
 
 // handleVoteResponseUpdate processes a vote response update from itx-poll-vote records.
-func handleVoteResponseUpdate(ctx context.Context, key string, v1Data map[string]any) {
+// Returns true if the operation should be retried, false otherwise.
+func handleVoteResponseUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
-		return
+		return false
 	}
 
 	funcLogger := logger.With("key", key)
@@ -468,24 +469,27 @@ func handleVoteResponseUpdate(ctx context.Context, key string, v1Data map[string
 	voteResponse, err := convertMapToInputVoteResponse(ctx, v1Data)
 	if err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to VoteResponseInput")
-		return
+		return false
 	}
 
 	// Extract the individual vote UID
 	uid := voteResponse.UID
 	if uid == "" {
 		funcLogger.ErrorContext(ctx, "missing or invalid uid in v1 vote response data")
-		return
+		return false
 	}
 	funcLogger = funcLogger.With("vote_response_id", uid)
 
-	// Check if parent project exists in mappings before proceeding. Because
-	// convertMapToInputVoteResponse has already looked up the SFID project ID
-	// mapping, we don't need to do it again: we can just check if ProjectID (v2
-	// UID) is set.
-	if voteResponse.ProjectUID == "" {
-		funcLogger.With("project_id", voteResponse.ProjectID).InfoContext(ctx, "skipping vote response sync - parent project not found in mappings")
-		return
+	// Check if parent vote exists in mappings before proceeding
+	if voteResponse.PollID == "" {
+		funcLogger.ErrorContext(ctx, "vote response missing required parent vote ID")
+		return false
+	}
+	funcLogger = funcLogger.With("poll_id", voteResponse.PollID)
+	voteMappingKey := fmt.Sprintf("vote.%s", voteResponse.PollID)
+	if _, err := mappingsKV.Get(ctx, voteMappingKey); err != nil {
+		funcLogger.With(errKey, err).InfoContext(ctx, "parent vote not found in mappings, will retry vote response sync")
+		return true
 	}
 
 	mappingKey := fmt.Sprintf("vote_response.%s", uid)
@@ -496,12 +500,12 @@ func handleVoteResponseUpdate(ctx context.Context, key string, v1Data map[string
 
 	if err := sendVoteResponseIndexerMessage(ctx, IndexVoteResponseSubject, indexerAction, *voteResponse); err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send vote response indexer message")
-		return
+		return false
 	}
 
 	if err := sendVoteResponseAccessMessage(*voteResponse); err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send vote response access message")
-		return
+		return false
 	}
 
 	if uid != "" {
@@ -511,4 +515,5 @@ func handleVoteResponseUpdate(ctx context.Context, key string, v1Data map[string
 	}
 
 	funcLogger.InfoContext(ctx, "successfully sent vote response indexer and access messages")
+	return false
 }

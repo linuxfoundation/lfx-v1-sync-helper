@@ -525,10 +525,11 @@ func convertMapToInputSurveyResponse(ctx context.Context, v1Data map[string]any)
 }
 
 // handleSurveyResponseUpdate processes a survey response update from itx-survey-response records.
-func handleSurveyResponseUpdate(ctx context.Context, key string, v1Data map[string]any) {
+// Returns true if the operation should be retried, false otherwise.
+func handleSurveyResponseUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
-		return
+		return false
 	}
 
 	funcLogger := logger.With("key", key)
@@ -539,21 +540,27 @@ func handleSurveyResponseUpdate(ctx context.Context, key string, v1Data map[stri
 	surveyResponse, err := convertMapToInputSurveyResponse(ctx, v1Data)
 	if err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to SurveyResponseInput")
-		return
+		return false
 	}
 
 	// Extract the survey response UID
 	uid := surveyResponse.UID
 	if uid == "" {
 		funcLogger.ErrorContext(ctx, "missing or invalid uid in v1 survey response data")
-		return
+		return false
 	}
 	funcLogger = funcLogger.With("survey_response_id", uid)
 
-	// Check if parent survey/project/committee exists in mappings before proceeding
-	if surveyResponse.SurveyUID == "" && surveyResponse.Project.ProjectUID == "" && surveyResponse.CommitteeUID == "" {
-		funcLogger.InfoContext(ctx, "skipping survey response sync - no parent survey, project, or committee found in mappings")
-		return
+	// Check if parent survey exists in mappings before proceeding
+	if surveyResponse.SurveyID == "" {
+		funcLogger.ErrorContext(ctx, "survey response missing required parent survey ID")
+		return false
+	}
+	funcLogger = funcLogger.With("survey_id", surveyResponse.SurveyID)
+	surveyMappingKey := fmt.Sprintf("survey.%s", surveyResponse.SurveyID)
+	if _, err := mappingsKV.Get(ctx, surveyMappingKey); err != nil {
+		funcLogger.With(errKey, err).InfoContext(ctx, "parent survey not found in mappings, will retry survey response sync")
+		return true
 	}
 
 	mappingKey := fmt.Sprintf("survey_response.%s", uid)
@@ -564,12 +571,12 @@ func handleSurveyResponseUpdate(ctx context.Context, key string, v1Data map[stri
 
 	if err := sendSurveyResponseIndexerMessage(ctx, IndexSurveyResponseSubject, indexerAction, *surveyResponse); err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send survey response indexer message")
-		return
+		return false
 	}
 
 	if err := sendSurveyResponseAccessMessage(*surveyResponse); err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send survey response access message")
-		return
+		return false
 	}
 
 	if uid != "" {
@@ -579,4 +586,5 @@ func handleSurveyResponseUpdate(ctx context.Context, key string, v1Data map[stri
 	}
 
 	funcLogger.InfoContext(ctx, "successfully sent survey response indexer and access messages")
+	return false
 }
