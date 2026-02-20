@@ -585,10 +585,11 @@ func getRegistrantTags(registrant *registrantInput) []string {
 }
 
 // handleZoomMeetingRegistrantUpdate processes a zoom meeting registrant update from itx-zoom-meetings-registrants-v2 records.
-func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data map[string]any) {
+// Returns true if the operation should be retried, false otherwise.
+func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
-		return
+		return false
 	}
 
 	funcLogger := logger.With("key", key)
@@ -599,14 +600,14 @@ func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data m
 	registrant, err := convertMapToInputRegistrant(v1Data)
 	if err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to registrantInput")
-		return
+		return false
 	}
 
 	// Extract the registrant ID
 	registrantID := registrant.UID
 	if registrantID == "" {
 		funcLogger.ErrorContext(ctx, "missing or invalid id in v1 registrant data")
-		return
+		return false
 	}
 	funcLogger = funcLogger.With("registrant_id", registrantID)
 
@@ -625,13 +626,13 @@ func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data m
 	// Check if parent meeting exists in mappings before proceeding.
 	if registrant.MeetingID == "" {
 		funcLogger.ErrorContext(ctx, "meeting registrant missing required parent meeting ID")
-		return
+		return false
 	}
 	funcLogger = funcLogger.With("meeting_id", registrant.MeetingID)
 	meetingMappingKey := fmt.Sprintf("v1_meetings.%s", registrant.MeetingID)
 	if _, err := mappingsKV.Get(ctx, meetingMappingKey); err != nil {
-		funcLogger.With(errKey, err).InfoContext(ctx, "skipping meeting registrant sync - parent meeting not found in mappings")
-		return
+		funcLogger.With(errKey, err).InfoContext(ctx, "parent meeting not found in mappings, will retry meeting registrant sync")
+		return true // Retry - meeting might be stored shortly
 	}
 
 	mappingKey := fmt.Sprintf("v1_meeting_registrants.%s", registrantID)
@@ -643,7 +644,7 @@ func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data m
 	tags := getRegistrantTags(registrant)
 	if err := sendIndexerMessage(ctx, IndexV1MeetingRegistrantSubject, indexerAction, registrant, tags); err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send registrant indexer message")
-		return
+		return false
 	}
 
 	// We only send the access message if the registrant has a username.
@@ -660,12 +661,12 @@ func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data m
 		accessMsgBytes, err := json.Marshal(accessMsg)
 		if err != nil {
 			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal access message")
-			return
+			return false
 		}
 
 		if err := sendAccessMessage(V1MeetingRegistrantPutSubject, accessMsgBytes); err != nil {
 			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send registrant put message")
-			return
+			return false
 		}
 	}
 
@@ -676,6 +677,7 @@ func handleZoomMeetingRegistrantUpdate(ctx context.Context, key string, v1Data m
 	}
 
 	funcLogger.InfoContext(ctx, "successfully sent registrant indexer and put messages")
+	return false
 }
 
 func convertMapToInputInviteResponse(v1Data map[string]any) (*inviteResponseInput, error) {
@@ -733,10 +735,12 @@ func getInviteResponseTags(inviteResponse *inviteResponseInput) []string {
 	return tags
 }
 
-func handleZoomMeetingInviteResponseUpdate(ctx context.Context, key string, v1Data map[string]any) {
+// handleZoomMeetingInviteResponseUpdate processes a zoom meeting invite response update from itx-zoom-meetings-invite-responses-v2 records.
+// Returns true if the operation should be retried, false otherwise.
+func handleZoomMeetingInviteResponseUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
-		return
+		return false
 	}
 
 	funcLogger := logger.With("key", key)
@@ -747,12 +751,12 @@ func handleZoomMeetingInviteResponseUpdate(ctx context.Context, key string, v1Da
 	inviteResponse, err := convertMapToInputInviteResponse(v1Data)
 	if err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to inviteResponseInput")
-		return
+		return false
 	}
 
 	// Skip sync for Mailer Daemon email addresses.
 	if inviteResponse.Email == "MAILER-DAEMON@us-west-2.amazonses.com" {
-		return
+		return false
 	}
 
 	// If username is blank but we have a v1 Platform ID (user_id), lookup the username.
@@ -771,7 +775,7 @@ func handleZoomMeetingInviteResponseUpdate(ctx context.Context, key string, v1Da
 	inviteResponseID := inviteResponse.ID
 	if inviteResponseID == "" {
 		funcLogger.ErrorContext(ctx, "missing or invalid id in v1 invite response data")
-		return
+		return false
 	}
 
 	funcLogger = funcLogger.With("invite_response_id", inviteResponseID)
@@ -779,13 +783,13 @@ func handleZoomMeetingInviteResponseUpdate(ctx context.Context, key string, v1Da
 	// Check if parent meeting exists in mappings before proceeding.
 	if inviteResponse.MeetingID == "" {
 		funcLogger.ErrorContext(ctx, "invite response missing required parent meeting ID")
-		return
+		return false
 	}
 	funcLogger = funcLogger.With("meeting_id", inviteResponse.MeetingID)
 	meetingMappingKey := fmt.Sprintf("v1_meetings.%s", inviteResponse.MeetingID)
 	if _, err := mappingsKV.Get(ctx, meetingMappingKey); err != nil {
-		funcLogger.With("meeting_mapping_key", meetingMappingKey).InfoContext(ctx, "skipping invite response sync - parent meeting not found in mappings")
-		return
+		funcLogger.With(errKey, err).InfoContext(ctx, "parent meeting not found in mappings, will retry invite response sync")
+		return true
 	}
 
 	mappingKey := fmt.Sprintf("v1_invite_responses.%s", inviteResponseID)
@@ -797,7 +801,7 @@ func handleZoomMeetingInviteResponseUpdate(ctx context.Context, key string, v1Da
 	tags := getInviteResponseTags(inviteResponse)
 	if err := sendIndexerMessage(ctx, IndexV1MeetingInviteResponseSubject, indexerAction, inviteResponse, tags); err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send invite response indexer message")
-		return
+		return false
 	}
 
 	if _, err := mappingsKV.Put(ctx, mappingKey, []byte("1")); err != nil {
@@ -805,6 +809,7 @@ func handleZoomMeetingInviteResponseUpdate(ctx context.Context, key string, v1Da
 	}
 
 	funcLogger.InfoContext(ctx, "successfully sent invite response indexer message")
+	return false
 }
 
 // PastMeetingAccessMessage is the schema for the data in the message sent to the fga-sync service.
@@ -1215,11 +1220,12 @@ func getPastMeetingParticipantTags(participant *V2PastMeetingParticipant) []stri
 	return tags
 }
 
-// handleZoomPastMeetingInviteeUpdate processes a zoom past meeting invitee update from itx-zoom-past-meetings-invitees-v2 records.
-func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data map[string]any) {
+// handleZoomPastMeetingInviteeUpdate processes a zoom past meeting invitee update from itx-zoom-past-meetings-invitees records.
+// Returns true if the operation should be retried, false otherwise.
+func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
-		return
+		return false
 	}
 
 	funcLogger := logger.With("key", key)
@@ -1230,27 +1236,27 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 	invitee, err := convertMapToInputPastMeetingInvitee(v1Data)
 	if err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to PastMeetingInviteeInput")
-		return
+		return false
 	}
 
 	// Extract the invitee ID
 	inviteeID := invitee.ID
 	if inviteeID == "" {
 		funcLogger.ErrorContext(ctx, "missing or invalid id in v1 past meeting invitee data")
-		return
+		return false
 	}
 	funcLogger = funcLogger.With("invitee_id", inviteeID)
 
 	// Check if parent past meeting exists in mappings before proceeding.
 	if invitee.MeetingAndOccurrenceID == "" {
 		funcLogger.ErrorContext(ctx, "past meeting invitee missing required parent past meeting ID")
-		return
+		return false
 	}
 	funcLogger = funcLogger.With("meeting_and_occurrence_id", invitee.MeetingAndOccurrenceID)
 	pastMeetingMappingKey := fmt.Sprintf("v1_past_meetings.%s", invitee.MeetingAndOccurrenceID)
 	if _, err := mappingsKV.Get(ctx, pastMeetingMappingKey); err != nil {
-		funcLogger.InfoContext(ctx, "skipping past meeting invitee sync - parent past meeting not found in mappings")
-		return
+		funcLogger.With(errKey, err).InfoContext(ctx, "parent past meeting not found in mappings, will retry past meeting invitee sync")
+		return true
 	}
 
 	// Determine if this invitee is a host by looking up their registrant record
@@ -1273,7 +1279,7 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 	v2Participant, err := convertInviteeToV2Participant(invitee, isHost)
 	if err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert invitee to V2 participant")
-		return
+		return false
 	}
 
 	// If username is blank but we have a v1 Platform ID (lf_user_id), lookup the username.
@@ -1298,7 +1304,7 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 	tags := getPastMeetingParticipantTags(v2Participant)
 	if err := sendIndexerMessage(ctx, IndexV1PastMeetingParticipantSubject, indexerAction, v2Participant, tags); err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send invitee indexer message")
-		return
+		return false
 	}
 
 	if invitee.LFSSO != "" {
@@ -1316,12 +1322,12 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 		accessMsgBytes, err := json.Marshal(accessMsg)
 		if err != nil {
 			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal invitee access message")
-			return
+			return false
 		}
 
 		if err := sendAccessMessage(V1PastMeetingParticipantPutSubject, accessMsgBytes); err != nil {
 			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send invitee access message")
-			return
+			return false
 		}
 	}
 
@@ -1330,6 +1336,7 @@ func handleZoomPastMeetingInviteeUpdate(ctx context.Context, key string, v1Data 
 	}
 
 	funcLogger.InfoContext(ctx, "successfully sent invitee indexer and access messages")
+	return false
 }
 
 func convertInviteeToV2Participant(invitee *pastMeetingInviteeInput, isHost bool) (*V2PastMeetingParticipant, error) {
@@ -1404,10 +1411,11 @@ func convertMapToInputPastMeetingAttendee(v1Data map[string]any) (*pastMeetingAt
 }
 
 // handleZoomPastMeetingAttendeeUpdate processes a zoom past meeting attendee update from itx-zoom-past-meetings-attendees-v2 records.
-func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data map[string]any) {
+// Returns true if the operation should be retried, false otherwise.
+func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
-		return
+		return false
 	}
 
 	funcLogger := logger.With("key", key)
@@ -1418,27 +1426,27 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 	attendee, err := convertMapToInputPastMeetingAttendee(v1Data)
 	if err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to PastMeetingAttendeeInput")
-		return
+		return false
 	}
 
 	// Extract the attendee ID
 	attendeeID := attendee.ID
 	if attendeeID == "" {
 		funcLogger.ErrorContext(ctx, "missing or invalid id in v1 past meeting attendee data")
-		return
+		return false
 	}
 	funcLogger = funcLogger.With("attendee_id", attendeeID)
 
 	// Check if parent past meeting exists in mappings before proceeding.
 	if attendee.MeetingAndOccurrenceID == "" {
 		funcLogger.ErrorContext(ctx, "past meeting attendee missing required parent past meeting ID")
-		return
+		return false
 	}
 	funcLogger = funcLogger.With("meeting_and_occurrence_id", attendee.MeetingAndOccurrenceID)
 	pastMeetingMappingKey := fmt.Sprintf("v1_past_meetings.%s", attendee.MeetingAndOccurrenceID)
 	if _, err := mappingsKV.Get(ctx, pastMeetingMappingKey); err != nil {
-		funcLogger.InfoContext(ctx, "skipping past meeting attendee sync - parent past meeting not found in mappings")
-		return
+		funcLogger.With(errKey, err).InfoContext(ctx, "parent past meeting not found in mappings, will retry past meeting attendee sync")
+		return true
 	}
 
 	// Determine if this attendee is a host by looking up their registrant record
@@ -1469,7 +1477,7 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 	v2Participant, err := convertAttendeeToV2Participant(attendee, isHost, isRegistrant)
 	if err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert attendee to V2 participant")
-		return
+		return false
 	}
 
 	// If username is blank but we have a v1 Platform ID (lf_user_id), lookup the username.
@@ -1488,7 +1496,7 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 	tags := getPastMeetingParticipantTags(v2Participant)
 	if err := sendIndexerMessage(ctx, IndexV1PastMeetingParticipantSubject, indexerAction, v2Participant, tags); err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send attendee indexer message")
-		return
+		return false
 	}
 
 	if attendee.LFSSO != "" {
@@ -1506,12 +1514,12 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 		accessMsgBytes, err := json.Marshal(accessMsg)
 		if err != nil {
 			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal attendee access message")
-			return
+			return false
 		}
 
 		if err := sendAccessMessage(V1PastMeetingParticipantPutSubject, accessMsgBytes); err != nil {
 			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send attendee access message")
-			return
+			return false
 		}
 	}
 
@@ -1522,6 +1530,7 @@ func handleZoomPastMeetingAttendeeUpdate(ctx context.Context, key string, v1Data
 	}
 
 	funcLogger.InfoContext(ctx, "successfully sent attendee indexer and access messages")
+	return false
 }
 
 func convertAttendeeToV2Participant(attendee *pastMeetingAttendeeInput, isHost bool, isRegistrant bool) (*V2PastMeetingParticipant, error) {
@@ -1739,10 +1748,12 @@ func getPastMeetingTranscriptTags(recording *pastMeetingRecordingInput) []string
 
 // handleZoomPastMeetingRecordingUpdate handles the v1 past meeting recording update event.
 // It sends NATS messages for both recording and transcript indexing and access control.
-func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Data map[string]any) {
+// handleZoomPastMeetingRecordingUpdate processes a zoom past meeting recording update from itx-zoom-past-meetings-recordings records.
+// Returns true if the operation should be retried, false otherwise.
+func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
-		return
+		return false
 	}
 
 	funcLogger := logger.With("key", key)
@@ -1753,22 +1764,22 @@ func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Dat
 	recordingInput, err := convertMapToInputPastMeetingRecording(v1Data)
 	if err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to PastMeetingRecordingInput")
-		return
+		return false
 	}
 
 	// Extract the ID (MeetingAndOccurrenceID)
 	id := recordingInput.MeetingAndOccurrenceID
 	if id == "" {
 		funcLogger.ErrorContext(ctx, "missing meeting_and_occurrence_id in past meeting recording data")
-		return
+		return false
 	}
 	funcLogger = funcLogger.With("meeting_and_occurrence_id", id)
 
 	// Check if parent past meeting exists in mappings before proceeding.
 	pastMeetingMappingKey := fmt.Sprintf("v1_past_meetings.%s", id)
 	if _, err := mappingsKV.Get(ctx, pastMeetingMappingKey); err != nil {
-		funcLogger.InfoContext(ctx, "skipping past meeting recording sync - parent past meeting not found in mappings")
-		return
+		funcLogger.With(errKey, err).InfoContext(ctx, "parent past meeting not found in mappings, will retry past meeting recording sync")
+		return true
 	}
 
 	// Determine action based on mapping existence
@@ -1782,7 +1793,7 @@ func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Dat
 	recordingTags := getPastMeetingRecordingTags(recordingInput)
 	if err := sendIndexerMessage(ctx, IndexV1PastMeetingRecordingSubject, indexerAction, recordingInput, recordingTags); err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send recording indexer message")
-		return
+		return false
 	}
 
 	// Construct recording access message
@@ -1796,20 +1807,20 @@ func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Dat
 	recordingAccessMsgBytes, err := json.Marshal(recordingAccessMsg)
 	if err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal recording access message")
-		return
+		return false
 	}
 
 	// Send recording access message
 	if err := sendAccessMessage(V1PastMeetingRecordingUpdateAccessSubject, recordingAccessMsgBytes); err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send recording access message")
-		return
+		return false
 	}
 
 	// Send transcript indexer message
 	transcriptTags := getPastMeetingTranscriptTags(recordingInput)
 	if err := sendIndexerMessage(ctx, IndexV1PastMeetingTranscriptSubject, indexerAction, recordingInput, transcriptTags); err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send transcript indexer message")
-		return
+		return false
 	}
 
 	// Construct transcript access message
@@ -1823,13 +1834,13 @@ func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Dat
 	transcriptAccessMsgBytes, err := json.Marshal(transcriptAccessMsg)
 	if err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal transcript access message")
-		return
+		return false
 	}
 
 	// Send transcript access message
 	if err := sendAccessMessage(V1PastMeetingTranscriptUpdateAccessSubject, transcriptAccessMsgBytes); err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send transcript access message")
-		return
+		return false
 	}
 
 	if id != "" {
@@ -1839,6 +1850,7 @@ func handleZoomPastMeetingRecordingUpdate(ctx context.Context, key string, v1Dat
 	}
 
 	funcLogger.InfoContext(ctx, "successfully sent recording and transcript indexer and access messages")
+	return false
 }
 
 // PastMeetingSummaryAccessMessage is the schema for the data in the message sent to the fga-sync service.
@@ -1940,10 +1952,12 @@ func getPastMeetingSummaryTags(summary *pastMeetingSummaryInput) []string {
 
 // handleZoomPastMeetingSummaryUpdate handles the v1 past meeting summary update event.
 // It sends NATS messages for summary indexing and access control.
-func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data map[string]any) {
+// handleZoomPastMeetingSummaryUpdate processes a zoom past meeting summary update from itx-zoom-past-meetings-summaries records.
+// Returns true if the operation should be retried, false otherwise.
+func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
-		return
+		return false
 	}
 
 	funcLogger := logger.With("key", key)
@@ -1954,27 +1968,27 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 	summaryInput, err := convertMapToInputPastMeetingSummary(v1Data)
 	if err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to convert v1Data to PastMeetingSummaryInput")
-		return
+		return false
 	}
 
 	// Extract the UID (ID)
 	uid := summaryInput.ID
 	if uid == "" {
 		funcLogger.ErrorContext(ctx, "missing id in past meeting summary data")
-		return
+		return false
 	}
 	funcLogger = funcLogger.With("summary_id", uid)
 
 	// Check if parent past meeting exists in mappings before proceeding.
 	if summaryInput.MeetingAndOccurrenceID == "" {
 		funcLogger.ErrorContext(ctx, "past meeting summary missing required parent past meeting ID")
-		return
+		return false
 	}
 	funcLogger = funcLogger.With("meeting_and_occurrence_id", summaryInput.MeetingAndOccurrenceID)
 	pastMeetingMappingKey := fmt.Sprintf("v1_past_meetings.%s", summaryInput.MeetingAndOccurrenceID)
 	if _, err := mappingsKV.Get(ctx, pastMeetingMappingKey); err != nil {
-		funcLogger.InfoContext(ctx, "skipping past meeting summary sync - parent past meeting not found in mappings")
-		return
+		funcLogger.With(errKey, err).InfoContext(ctx, "parent past meeting not found in mappings, will retry past meeting summary sync")
+		return true
 	}
 
 	// Determine action based on mapping existence
@@ -1988,7 +2002,7 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 	tags := getPastMeetingSummaryTags(summaryInput)
 	if err := sendIndexerMessage(ctx, IndexV1PastMeetingSummarySubject, indexerAction, summaryInput, tags); err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send summary indexer message")
-		return
+		return false
 	}
 
 	aiSummaryAccess := ""
@@ -2014,13 +2028,13 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 	summaryAccessMsgBytes, err := json.Marshal(summaryAccessMsg)
 	if err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal summary access message")
-		return
+		return false
 	}
 
 	// Send summary access message
 	if err := sendAccessMessage(V1PastMeetingSummaryUpdateAccessSubject, summaryAccessMsgBytes); err != nil {
 		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send summary access message")
-		return
+		return false
 	}
 
 	if uid != "" {
@@ -2030,6 +2044,7 @@ func handleZoomPastMeetingSummaryUpdate(ctx context.Context, key string, v1Data 
 	}
 
 	funcLogger.InfoContext(ctx, "successfully sent summary indexer and access messages")
+	return false
 }
 
 func shouldShowMeetingAttendees(m meetingInput) bool {
