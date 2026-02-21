@@ -39,8 +39,14 @@ const (
 	// V1MeetingRegistrantPutSubject is the subject for adding v1 meeting registrants.
 	V1MeetingRegistrantPutSubject = "lfx.put_registrant.v1_meeting"
 
+	// V1MeetingRegistrantRemoveSubject is the subject for removing a v1 meeting registrant's access.
+	V1MeetingRegistrantRemoveSubject = "lfx.remove_registrant.v1_meeting"
+
 	// IndexV1MeetingInviteResponseSubject is the subject for the v1 meeting invite response indexing.
 	IndexV1MeetingInviteResponseSubject = "lfx.index.v1_meeting_rsvp"
+
+	// DeleteAllAccessV1MeetingSubject is the subject for deleting all access control entries for a v1 meeting.
+	DeleteAllAccessV1MeetingSubject = "lfx.delete_all_access.v1_meeting"
 
 	// IndexV1PastMeetingSubject is the subject for the v1 past meeting indexing.
 	IndexV1PastMeetingSubject = "lfx.index.v1_past_meeting"
@@ -357,6 +363,132 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 	}
 
 	funcLogger.InfoContext(ctx, "successfully sent meeting indexer and access messages")
+}
+
+// meetingDeleteConfig holds the configuration for deleting a meeting-related resource.
+type meetingDeleteConfig struct {
+	// indexerSubject is the NATS subject to send the indexer delete message to.
+	indexerSubject string
+	// deleteAllAccessSubject is the NATS subject to send the delete-all-access message to.
+	// Leave empty to skip sending an access control delete message.
+	deleteAllAccessSubject string
+	// tombstoneKeyFmts are fmt format strings (each with one %s for the ID) for
+	// mappings that should be tombstoned on delete.
+	tombstoneKeyFmts []string
+}
+
+// handleMeetingTypeDelete is a generic delete handler for meeting-related resources.
+// It sends the indexer delete message, optionally sends a delete-all-access message,
+// and tombstones any configured mapping keys.
+// message is the pre-built payload for the access message; callers are responsible for constructing it.
+// Returns true if the operation should be retried, false otherwise.
+func handleMeetingTypeDelete(ctx context.Context, key, id string, message []byte, cfg meetingDeleteConfig) bool {
+	funcLogger := logger.With("key", key, "id", id)
+	funcLogger.DebugContext(ctx, "processing meeting-related delete")
+
+	if err := sendIndexerMessage(ctx, cfg.indexerSubject, MessageActionDeleted, id, []string{}); err != nil {
+		funcLogger.With(errKey, err, "subject", cfg.indexerSubject).ErrorContext(ctx, "failed to send delete indexer message")
+		return true
+	}
+
+	if cfg.deleteAllAccessSubject != "" {
+		if err := sendAccessMessage(cfg.deleteAllAccessSubject, message); err != nil {
+			funcLogger.With(errKey, err, "subject", cfg.deleteAllAccessSubject).ErrorContext(ctx, "failed to send delete-all-access message")
+			return true
+		}
+	}
+
+	for _, keyFmt := range cfg.tombstoneKeyFmts {
+		if err := tombstoneMapping(ctx, fmt.Sprintf(keyFmt, id)); err != nil {
+			funcLogger.With(errKey, err, "mapping_key", fmt.Sprintf(keyFmt, id)).WarnContext(ctx, "failed to tombstone mapping")
+		}
+	}
+
+	funcLogger.InfoContext(ctx, "successfully processed delete")
+	return false
+}
+
+// handleZoomMeetingDelete processes a deletion of an itx-zoom-meetings-v2 record.
+// Returns true if the operation should be retried, false otherwise.
+func handleZoomMeetingDelete(ctx context.Context, key string, meetingID string) bool {
+	funcLogger := logger.With("key", key, "meeting_id", meetingID)
+
+	// Skip if already tombstoned — prevents double processing when the DynamoDB path
+	// has already handled the delete before the KV watcher fires.
+	mappingKey := fmt.Sprintf("v1_meetings.%s", meetingID)
+	if entry, err := mappingsKV.Get(ctx, mappingKey); err == nil && isTombstonedMapping(entry.Value()) {
+		funcLogger.DebugContext(ctx, "meeting delete already processed, skipping")
+		return false
+	}
+
+	return handleMeetingTypeDelete(ctx, key, meetingID, []byte(meetingID), meetingDeleteConfig{
+		indexerSubject:         IndexV1MeetingSubject,
+		deleteAllAccessSubject: DeleteAllAccessV1MeetingSubject,
+		tombstoneKeyFmts:       []string{"v1_meetings.%s", "v1-mappings.meeting-mappings.%s"},
+	})
+}
+
+// handleZoomMeetingRegistrantDelete processes a deletion of an itx-zoom-meetings-registrants-v2 record.
+// v1Data should be the old_image from the source event when available; nil falls back to sending registrantID only.
+// Returns true if the operation should be retried, false otherwise.
+func handleZoomMeetingRegistrantDelete(ctx context.Context, key string, registrantID string, v1Data map[string]any) bool {
+	funcLogger := logger.With("key", key, "registrant_id", registrantID)
+
+	// Skip if already tombstoned — prevents double processing when the DynamoDB path
+	// has already handled the delete before the KV watcher fires.
+	mappingKey := fmt.Sprintf("v1_meeting_registrants.%s", registrantID)
+	if entry, err := mappingsKV.Get(ctx, mappingKey); err == nil && isTombstonedMapping(entry.Value()) {
+		funcLogger.DebugContext(ctx, "registrant delete already processed, skipping")
+		return false
+	}
+
+	if v1Data == nil {
+		funcLogger.WarnContext(ctx, "no v1Data available for registrant delete, skipping")
+		return false
+	}
+
+	// Extract meeting_id - return early if missing, consistent with update handler.
+	meetingID, ok := v1Data["meeting_id"].(string)
+	if !ok || meetingID == "" {
+		funcLogger.ErrorContext(ctx, "missing or invalid meeting_id in v1Data for registrant delete")
+		return false
+	}
+	funcLogger = funcLogger.With("meeting_id", meetingID)
+
+	// Extract username and host fields.
+	username, _ := v1Data["username"].(string)
+	host, _ := v1Data["host"].(bool)
+
+	var message []byte
+	var deleteAllAccessSubject string
+
+	// Only construct and send the access message if username is present, consistent with update handler.
+	// Without a username, access control cannot identify which user to remove access for.
+	if username != "" {
+		accessMsg := MeetingRegistrantAccessMessage{
+			ID:        registrantID,
+			MeetingID: meetingID,
+			Username:  mapUsernameToAuthSub(username),
+			Host:      host,
+		}
+		var err error
+		if message, err = json.Marshal(accessMsg); err != nil {
+			funcLogger.With(errKey, err).ErrorContext(ctx, "failed to marshal registrant access message")
+			return false
+		}
+		deleteAllAccessSubject = V1MeetingRegistrantRemoveSubject
+	} else {
+		// No username - skip access control message (cannot identify user without username).
+		funcLogger.DebugContext(ctx, "no username in v1Data, skipping access control message for registrant delete")
+		message = []byte(registrantID)
+		deleteAllAccessSubject = "" // Empty string skips access control message
+	}
+
+	return handleMeetingTypeDelete(ctx, key, registrantID, message, meetingDeleteConfig{
+		indexerSubject:         IndexV1MeetingRegistrantSubject,
+		deleteAllAccessSubject: deleteAllAccessSubject,
+		tombstoneKeyFmts:       []string{"v1_meeting_registrants.%s"},
+	})
 }
 
 // convertMapToInputMeeting converts a map[string]any to an InputMeeting struct.

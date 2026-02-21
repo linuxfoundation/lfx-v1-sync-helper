@@ -156,7 +156,7 @@ func handleKVDelete(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 	key := entry.Key()
 
 	logger.With("key", key).InfoContext(ctx, "processing hard delete from KV bucket")
-	return handleResourceDelete(ctx, key, "")
+	return handleResourceDelete(ctx, key, "", nil)
 }
 
 // handleKVSoftDelete processes a soft delete (record with _sdc_deleted_at field).
@@ -164,12 +164,14 @@ func handleKVDelete(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 func handleKVSoftDelete(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Extract v1 principal for soft deletes.
 	v1Principal := extractV1Principal(ctx, v1Data)
-	return handleResourceDelete(ctx, key, v1Principal)
+	return handleResourceDelete(ctx, key, v1Principal, v1Data)
 }
 
 // handleResourceDelete handles deletion of resources by key prefix with specified principal.
+// v1Data carries the record's field values when available (e.g. soft deletes, DynamoDB old_image);
+// nil is acceptable and handlers must fall back gracefully.
 // Returns true if the operation should be retried, false otherwise.
-func handleResourceDelete(ctx context.Context, key string, v1Principal string) bool {
+func handleResourceDelete(ctx context.Context, key string, v1Principal string, v1Data map[string]any) bool {
 	// Extract the prefix (everything before the first period) for faster lookup.
 	prefix := key
 	if dotIndex := strings.Index(key, "."); dotIndex != -1 {
@@ -207,7 +209,11 @@ func handleResourceDelete(ctx context.Context, key string, v1Principal string) b
 		// TODO: Should clean up (remove) soft-deleted email SFIDs from v1-merged-user.alternate-emails.{userSfid} mapping records.
 		logger.With("key", key).DebugContext(ctx, "salesforce-alternate_email__c record deleted")
 		return false
-	case "itx-zoom-meetings-v2", "itx-zoom-meetings-registrants-v2", "itx-zoom-meetings-mappings-v2", "itx-zoom-meetings-invite-responses-v2", "itx-zoom-past-meetings-attendees", "itx-zoom-past-meetings-invitees", "itx-zoom-past-meetings-mappings", "itx-zoom-past-meetings-recordings", "itx-zoom-past-meetings-summaries", "itx-zoom-past-meetings":
+	case "itx-zoom-meetings-v2":
+		return handleZoomMeetingDelete(ctx, key, sfid)
+	case "itx-zoom-meetings-registrants-v2":
+		return handleZoomMeetingRegistrantDelete(ctx, key, sfid, v1Data)
+	case "itx-zoom-meetings-mappings-v2", "itx-zoom-meetings-invite-responses-v2", "itx-zoom-past-meetings-attendees", "itx-zoom-past-meetings-invitees", "itx-zoom-past-meetings-mappings", "itx-zoom-past-meetings-recordings", "itx-zoom-past-meetings-summaries", "itx-zoom-past-meetings":
 		logger.With("key", key).DebugContext(ctx, "meeting-related delete not yet implemented")
 		return false
 	default:

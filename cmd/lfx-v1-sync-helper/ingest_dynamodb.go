@@ -38,7 +38,7 @@ func (e *DynamoDBStreamEvent) IsValid() bool {
 
 // dynamodbIngestHandler processes events from the dynamodb_streams NATS stream.
 // INSERT/MODIFY events upsert the new image into the v1-objects KV bucket.
-// REMOVE events hard-delete the KV entry.
+// REMOVE events write a soft-deleted record (with _sdc_deleted_at) to the KV bucket.
 // The KV key format is "{tableName}.{keyValue}", matching the prefix convention
 // used by the existing kvHandler dispatch chain.
 func dynamodbIngestHandler(msg jetstream.Msg) {
@@ -171,17 +171,71 @@ func handleDynamoDBUpsert(ctx context.Context, event *DynamoDBStreamEvent) bool 
 	return false
 }
 
-// handleDynamoDBRemove hard-deletes the KV entry for a REMOVE event.
-// Returns true only on a KV revision mismatch that warrants a retry.
+// handleDynamoDBRemove processes a REMOVE event by marking the record as deleted in the
+// v1-objects KV bucket. It adds a "_sdc_deleted_at" timestamp to the OldImage data and
+// writes it to KV as a soft delete. The KV watcher will pick up this update and route
+// it to the appropriate delete handlers based on the _sdc_deleted_at marker.
+// This approach maintains separation between ingest (populating KV) and handlers (consuming KV).
+// Returns true only on an error that warrants a retry.
 func handleDynamoDBRemove(ctx context.Context, event *DynamoDBStreamEvent) bool {
 	key := dynamodbKVKey(event.TableName, event.Keys)
 
-	if err := v1KV.Delete(ctx, key); err != nil && err != jetstream.ErrKeyNotFound {
-		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to delete KV entry from DynamoDB REMOVE event")
+	// If no old image is available, we can't create a soft delete record.
+	// This shouldn't happen in practice since DynamoDB streams are configured to include old images.
+	if len(event.OldImage) == 0 {
+		logger.With("key", key, "table", event.TableName).WarnContext(ctx, "DynamoDB REMOVE event has no old image, cannot create soft delete marker")
 		return false
 	}
 
-	logger.With("key", key).InfoContext(ctx, "deleted KV entry from DynamoDB REMOVE event")
+	// Add Singer-compatible metadata to mark this as deleted.
+	event.OldImage["_sdc_deleted_at"] = event.ApproximateCreationTime.Format(time.RFC3339)
+	event.OldImage["_sdc_extracted_at"] = event.ApproximateCreationTime.Format(time.RFC3339)
+	event.OldImage["_sdc_received_at"] = time.Now().UTC().Format(time.RFC3339)
+
+	// Encode the data with the deletion marker.
+	var dataBytes []byte
+	var err error
+	if cfg.UseMsgpack {
+		dataBytes, err = msgpack.Marshal(event.OldImage)
+	} else {
+		dataBytes, err = json.Marshal(event.OldImage)
+	}
+	if err != nil {
+		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to marshal DynamoDB deletion marker data")
+		return false
+	}
+
+	// Check if the key exists to get the current revision.
+	existing, err := v1KV.Get(ctx, key)
+	if err != nil && err != jetstream.ErrKeyNotFound {
+		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to get existing KV entry for delete")
+		return false
+	}
+
+	if err == jetstream.ErrKeyNotFound {
+		// Key doesn't exist, create it with the deletion marker.
+		if _, err := v1KV.Create(ctx, key, dataBytes); err != nil {
+			if isRevisionMismatchError(err) {
+				logger.With(errKey, err, "key", key).WarnContext(ctx, "KV create conflict on delete, will retry")
+				return true
+			}
+			logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to create KV entry with deletion marker from DynamoDB event")
+			return false
+		}
+		logger.With("key", key, "encoding", getEncodingFormat()).InfoContext(ctx, "created KV entry with deletion marker from DynamoDB REMOVE event")
+	} else {
+		// Key exists, update it with the deletion marker.
+		if _, err := v1KV.Update(ctx, key, dataBytes, existing.Revision()); err != nil {
+			if isRevisionMismatchError(err) {
+				logger.With(errKey, err, "key", key, "revision", existing.Revision()).WarnContext(ctx, "KV revision mismatch on delete, will retry")
+				return true
+			}
+			logger.With(errKey, err, "key", key, "revision", existing.Revision()).ErrorContext(ctx, "failed to update KV entry with deletion marker from DynamoDB event")
+			return false
+		}
+		logger.With("key", key, "revision", existing.Revision(), "encoding", getEncodingFormat()).InfoContext(ctx, "updated KV entry with deletion marker from DynamoDB REMOVE event")
+	}
+
 	return false
 }
 
