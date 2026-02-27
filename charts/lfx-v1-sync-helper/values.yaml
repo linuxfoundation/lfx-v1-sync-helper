@@ -246,7 +246,7 @@ dynamodbStreamConsumer:
     # DYNAMODB_TABLES is a comma-separated list of DynamoDB table names to consume.
     # Defaults to the full set of tables used by the tap-dynamodb Meltano extractor.
     DYNAMODB_TABLES:
-      value: "itx-poll,itx-poll-vote,itx-surveys,itx-survey-responses,itx-zoom-meetings-mappings-v2,itx-zoom-meetings-v2,itx-zoom-past-meetings-mappings,itx-zoom-past-meetings,itx-zoom-past-meetings-attendees,itx-zoom-past-meetings-invitees,itx-zoom-past-meetings-recordings,itx-zoom-past-meetings-summaries,itx-zoom-meetings-registrants-v2,itx-zoom-meetings-invite-responses-v2"
+      value: "itx-poll,itx-poll-vote,itx-surveys,itx-survey-responses,itx-zoom-meetings-mappings-v2,itx-zoom-meetings-v2,itx-zoom-past-meetings-mappings,itx-zoom-past-meetings,itx-zoom-past-meetings-attendees,itx-zoom-past-meetings-invitees,itx-zoom-past-meetings-recordings,itx-zoom-past-meetings-summaries,itx-zoom-meetings-registrants-v2,itx-zoom-meetings-invite-responses-v2,itx-zoom-meetings-attachments-v2,itx-zoom-past-meetings-attachments"
     # START_FROM_LATEST controls the iterator start position for new shards with no checkpoint.
     # Set to "true" to only receive new records; "false" (default) replays all available records.
     START_FROM_LATEST:
