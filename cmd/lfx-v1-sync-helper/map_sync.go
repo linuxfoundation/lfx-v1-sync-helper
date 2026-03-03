@@ -36,10 +36,13 @@ import (
 
 const (
 	// Lock key prefix and default settings for meeting-mapping operations.
-	meetingMappingLockKeyPrefix     = "v1_meeting_mapping_lock."
-	meetingMappingLockTimeout       = 10 * time.Second
-	meetingMappingLockRetryInterval = 500 * time.Millisecond
-	meetingMappingLockRetryAttempts = 5
+	meetingMappingLockKeyPrefix = "v1_meeting_mapping_lock."
+	// Lock key prefix for past-meeting-mapping operations.
+	pastMeetingMappingLockKeyPrefix = "v1_past_meeting_mapping_lock."
+
+	mappingLockTimeout       = 10 * time.Second
+	mappingLockRetryInterval = 500 * time.Millisecond
+	mappingLockRetryAttempts = 5
 )
 
 // mappingLocker is the interface for acquiring and releasing locks over shared
@@ -71,19 +74,19 @@ type lockerConfig struct {
 // lockerOption is a functional option for configuring a kvMappingLocker.
 type lockerOption func(*lockerConfig)
 
-// withTimeout sets the duration after which an existing lock is considered
+// withLockerOptionTimeout sets the duration after which an existing lock is considered
 // stale and may be forcibly reclaimed.
-func withTimeout(d time.Duration) lockerOption {
+func withLockerOptionTimeout(d time.Duration) lockerOption {
 	return func(c *lockerConfig) { c.timeout = d }
 }
 
-// withRetryInterval sets the sleep duration between consecutive acquire attempts.
-func withRetryInterval(d time.Duration) lockerOption {
+// withLockerOptionRetryInterval sets the sleep duration between consecutive acquire attempts.
+func withLockerOptionRetryInterval(d time.Duration) lockerOption {
 	return func(c *lockerConfig) { c.retryInterval = d }
 }
 
-// withMaxRetries sets the maximum number of acquire attempts before giving up.
-func withMaxRetries(n int) lockerOption {
+// withLockerOptionMaxRetries sets the maximum number of acquire attempts before giving up.
+func withLockerOptionMaxRetries(n int) lockerOption {
 	return func(c *lockerConfig) { c.maxRetries = n }
 }
 
@@ -96,11 +99,7 @@ type kvMappingLocker struct {
 // newKVMappingLocker creates a kvMappingLocker backed by the given KV bucket.
 // Default settings match the meeting-mapping use case; override them via opts.
 func newKVMappingLocker(kv jetstream.KeyValue, opts ...lockerOption) *kvMappingLocker {
-	cfg := lockerConfig{
-		timeout:       meetingMappingLockTimeout,
-		retryInterval: meetingMappingLockRetryInterval,
-		maxRetries:    meetingMappingLockRetryAttempts,
-	}
+	cfg := lockerConfig{}
 	for _, opt := range opts {
 		opt(&cfg)
 	}

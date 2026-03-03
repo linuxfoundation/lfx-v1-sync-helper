@@ -135,8 +135,7 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 	case "itx-zoom-meetings-mappings-v2":
 		return handleZoomMeetingMappingUpdate(ctx, key, v1Data)
 	case "itx-zoom-past-meetings-mappings":
-		handleZoomPastMeetingMappingUpdate(ctx, key, v1Data)
-		return false
+		return handleZoomPastMeetingMappingUpdate(ctx, key, v1Data)
 	case "itx-zoom-past-meetings":
 		handleZoomPastMeetingUpdate(ctx, key, v1Data)
 		return false
@@ -227,8 +226,7 @@ func handleResourceDelete(ctx context.Context, key string, v1Principal string, v
 	case "itx-zoom-meetings-mappings-v2":
 		return handleZoomMeetingMappingDelete(ctx, key, sfid, v1Data)
 	case "itx-zoom-past-meetings-mappings":
-		logger.With("key", key).DebugContext(ctx, "meeting-related delete not yet implemented")
-		return false
+		return handleZoomPastMeetingMappingDelete(ctx, key, sfid, v1Data)
 	case "itx-zoom-past-meetings-recordings":
 		return handleZoomPastMeetingRecordingDelete(ctx, key, sfid)
 	case "itx-zoom-past-meetings-summaries":

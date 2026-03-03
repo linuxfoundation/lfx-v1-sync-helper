@@ -211,7 +211,11 @@ func main() {
 	}
 
 	// Initialize the distributed sync singleton backed by the mappings KV bucket.
-	distributedSync = newKVMappingLocker(mappingsKV)
+	distributedSync = newKVMappingLocker(mappingsKV,
+		withLockerOptionMaxRetries(mappingLockRetryAttempts),
+		withLockerOptionRetryInterval(mappingLockRetryInterval),
+		withLockerOptionTimeout(mappingLockTimeout),
+	)
 
 	// Create or get the JetStream pull consumer for v1 objects KV bucket
 	// This replaces the KV Watch() method to enable horizontal scaling
