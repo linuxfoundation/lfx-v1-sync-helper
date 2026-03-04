@@ -41,6 +41,7 @@ import (
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
@@ -189,7 +190,7 @@ func main() {
 	if cfg.AssumeRoleARN != "" {
 		logger.With("role_arn", cfg.AssumeRoleARN).Info("assuming IAM role for DynamoDB access")
 		stsClient := sts.NewFromConfig(awsCfg)
-		awsCfg.Credentials = stscreds.NewAssumeRoleProvider(stsClient, cfg.AssumeRoleARN)
+		awsCfg.Credentials = aws.NewCredentialsCache(stscreds.NewAssumeRoleProvider(stsClient, cfg.AssumeRoleARN))
 	}
 
 	dynClient := dynamodb.NewFromConfig(awsCfg)
