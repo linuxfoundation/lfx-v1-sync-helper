@@ -17,6 +17,7 @@ package main
 // - Platform users: regular platform IDs looked up from v1-objects KV bucket
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -499,6 +500,154 @@ func lookupV1Org(ctx context.Context, sfid string) (*V1Organization, error) {
 	}
 
 	return org, nil
+}
+
+// projectServiceCommitteeCreate is the request body for POST /v2/projects/{projectId}/committees.
+type projectServiceCommitteeCreate struct {
+	Name            string `json:"Name"`
+	Category        string `json:"Category"`
+	Description     string `json:"Description,omitempty"`
+	Website         string `json:"CommitteeWebsite,omitempty"`
+	CommitteeID     string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
+	SSOGroupEnabled bool   `json:"SSOGroupEnabled,omitempty"`
+	PublicEnabled   bool   `json:"PublicEnabled,omitempty"`
+	PublicName      string `json:"PublicName,omitempty"`
+}
+
+// projectServiceCommitteeUpdate is the request body for PATCH /v2/projects/{projectId}/committees/{committeeID}.
+type projectServiceCommitteeUpdate struct {
+	Name            string `json:"Name,omitempty"`
+	Category        string `json:"Category,omitempty"`
+	Description     string `json:"Description,omitempty"`
+	Website         string `json:"CommitteeWebsite,omitempty"`
+	CommitteeID     string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
+	SSOGroupEnabled bool   `json:"SSOGroupEnabled,omitempty"`
+	PublicEnabled   bool   `json:"PublicEnabled,omitempty"`
+	PublicName      string `json:"PublicName,omitempty"`
+}
+
+// projectServiceCommitteeResponse is the response from the project service for creating and updating committees.
+type projectServiceCommitteeResponse struct {
+	ID              string `json:"ID"`
+	Name            string `json:"Name"`
+	Category        string `json:"Category"`
+	Description     string `json:"Description"`
+	Website         string `json:"CommitteeWebsite"`
+	CommitteeID     string `json:"CommitteeID"`
+	SSOGroupEnabled bool   `json:"SSOGroupEnabled"`
+	PublicEnabled   bool   `json:"PublicEnabled"`
+	PublicName      string `json:"PublicName"`
+}
+
+// createCommittee creates a committee in Postgres via the Project Service v2 API.
+// projectSFID is the v1 Salesforce ID of the parent project.
+func createV1Committee(ctx context.Context, projectSFID string, payload projectServiceCommitteeCreate) (*projectServiceCommitteeResponse, error) {
+	apiURL := fmt.Sprintf("%sproject-service/v2/projects/%s/committees", cfg.LFXAPIGateway.String(), projectSFID)
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal create committee payload: %w", err)
+	}
+
+	logger.DebugContext(ctx, "createV1Committee request", "url", apiURL, "payload", string(body))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send create committee request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read create committee response: %w", err)
+	}
+
+	logger.DebugContext(ctx, "createV1Committee response", "status", resp.StatusCode, "url", resp.Request.URL.String(), "body", string(respBody))
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("project service returned status %d creating committee for project %s: %s", resp.StatusCode, projectSFID, string(respBody))
+	}
+
+	var result projectServiceCommitteeResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal create committee response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// updateV1Committee updates a committee in Postgres via the Project Service v2 API.
+// projectSFID is the v1 Salesforce ID of the parent project.
+// committeeSFID is the v1 Salesforce ID of the committee.
+func updateV1Committee(ctx context.Context, projectSFID, committeeSFID string, payload projectServiceCommitteeUpdate) error {
+	apiURL := fmt.Sprintf("%sproject-service/v2/projects/%s/committees/%s", cfg.LFXAPIGateway.String(), projectSFID, committeeSFID)
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal update committee payload: %w", err)
+	}
+
+	logger.DebugContext(ctx, "updateV1Committee request", "url", apiURL, "payload", string(body))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send update committee request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read update committee response: %w", err)
+	}
+
+	logger.DebugContext(ctx, "updateV1Committee response", "status", resp.StatusCode, "body", string(respBody))
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("project service returned status %d updating committee %s for project %s: %s", resp.StatusCode, committeeSFID, projectSFID, string(respBody))
+	}
+
+	return nil
+}
+
+// deleteV1Committee deletes a committee in Postgres via the Project Service v2 API.
+// projectSFID is the v1 Salesforce ID of the parent project.
+// committeeSFID is the v1 Salesforce ID of the committee.
+func deleteV1Committee(ctx context.Context, projectSFID, committeeSFID string) error {
+	apiURL := fmt.Sprintf("%sproject-service/v2/projects/%s/committees/%s", cfg.LFXAPIGateway.String(), projectSFID, committeeSFID)
+
+	logger.DebugContext(ctx, "deleteV1Committee request", "url", apiURL)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, apiURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send delete committee request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	logger.DebugContext(ctx, "deleteV1Committee response", "status", resp.StatusCode, "body", string(respBody))
+
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("project service returned status %d deleting committee %s for project %s: %s", resp.StatusCode, committeeSFID, projectSFID, string(respBody))
+	}
+
+	return nil
 }
 
 // parseWebsiteURL attempts to parse and normalize a website URL from organization website data.
