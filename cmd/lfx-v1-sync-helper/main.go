@@ -321,6 +321,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Subscribe to indexer domain events for bidirectional committee sync.
+	// The indexer publishes lfx.{object_type}.{action} after every successful OpenSearch write.
+	indexerEventSubscriptions := map[string]func(*nats.Msg){
+		"lfx.committee.created":        committeeIndexerEventHandler,
+		"lfx.committee.updated":        committeeIndexerEventHandler,
+		"lfx.committee.deleted":        committeeIndexerEventHandler,
+		"lfx.committee_member.created": committeeMemberIndexerEventHandler,
+		"lfx.committee_member.updated": committeeMemberIndexerEventHandler,
+		"lfx.committee_member.deleted": committeeMemberIndexerEventHandler,
+	}
+	for subject, handler := range indexerEventSubscriptions {
+		if _, err = natsConn.QueueSubscribe(subject, natsQueue, handler); err != nil {
+			logger.With(errKey, err, "subject", subject).Error("error subscribing to indexer event subject")
+			os.Exit(1)
+		}
+	}
+
 	// This next line blocks until SIGINT or SIGTERM is received, or NATS disconnects.
 	<-done
 

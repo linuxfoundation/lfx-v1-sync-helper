@@ -653,40 +653,40 @@ func deleteV1Committee(ctx context.Context, projectSFID, committeeSFID string) e
 // projectServiceCommitteeMemberCreate is the request body for POST /v2/projects/{projectId}/committees/{committeeID}/members.
 // Maps to the project-committee-members-platform-create swagger schema.
 type projectServiceCommitteeMemberCreate struct {
-	Email          string `json:"Email"` // required
-	MemberID       string `json:"MemberID,omitempty"`
-	OrganizationID string `json:"OrganizationID,omitempty"`
-	FirstName      string `json:"FirstName,omitempty"`
-	LastName       string `json:"LastName,omitempty"`
-	Title          string `json:"Title,omitempty"`
-	Role           string `json:"Role,omitempty"`
-	RoleStartDate  string `json:"RoleStartDate,omitempty"`
-	RoleEndDate    string `json:"RoleEndDate,omitempty"`
-	Status         string `json:"Status,omitempty"`
-	AppointedBy    string `json:"AppointedBy,omitempty"`
-	VotingStatus   string `json:"VotingStatus,omitempty"`
+	Email           string `json:"Email"` // required
+	MemberID        string `json:"MemberID,omitempty"`
+	OrganizationID  string `json:"OrganizationID,omitempty"`
+	FirstName       string `json:"FirstName,omitempty"`
+	LastName        string `json:"LastName,omitempty"`
+	Title           string `json:"Title,omitempty"`
+	Role            string `json:"Role,omitempty"`
+	RoleStartDate   string `json:"RoleStartDate,omitempty"`
+	RoleEndDate     string `json:"RoleEndDate,omitempty"`
+	Status          string `json:"Status,omitempty"`
+	AppointedBy     string `json:"AppointedBy,omitempty"`
+	VotingStatus    string `json:"VotingStatus,omitempty"`
 	VotingStartDate string `json:"VotingStartDate,omitempty"`
-	VotingEndDate  string `json:"VotingEndDate,omitempty"`
-	Agency         string `json:"Agency,omitempty"`
-	Country        string `json:"Country,omitempty"`
+	VotingEndDate   string `json:"VotingEndDate,omitempty"`
+	Agency          string `json:"Agency,omitempty"`
+	Country         string `json:"Country,omitempty"`
 }
 
 // projectServiceCommitteeMemberUpdate is the request body for PATCH /v2/projects/{projectId}/committees/{committeeID}/members/{memberID}.
 // Maps to the project-committee-members-platform-patch swagger schema.
 type projectServiceCommitteeMemberUpdate struct {
-	Email          string `json:"Email,omitempty"`
-	OrganizationID string `json:"OrganizationID,omitempty"`
-	Title          string `json:"Title,omitempty"`
-	Role           string `json:"Role,omitempty"`
-	RoleStartDate  string `json:"RoleStartDate,omitempty"`
-	RoleEndDate    string `json:"RoleEndDate,omitempty"`
-	Status         string `json:"Status,omitempty"`
-	AppointedBy    string `json:"AppointedBy,omitempty"`
-	VotingStatus   string `json:"VotingStatus,omitempty"`
+	Email           string `json:"Email,omitempty"`
+	OrganizationID  string `json:"OrganizationID,omitempty"`
+	Title           string `json:"Title,omitempty"`
+	Role            string `json:"Role,omitempty"`
+	RoleStartDate   string `json:"RoleStartDate,omitempty"`
+	RoleEndDate     string `json:"RoleEndDate,omitempty"`
+	Status          string `json:"Status,omitempty"`
+	AppointedBy     string `json:"AppointedBy,omitempty"`
+	VotingStatus    string `json:"VotingStatus,omitempty"`
 	VotingStartDate string `json:"VotingStartDate,omitempty"`
-	VotingEndDate  string `json:"VotingEndDate,omitempty"`
-	Agency         string `json:"Agency,omitempty"`
-	Country        string `json:"Country,omitempty"`
+	VotingEndDate   string `json:"VotingEndDate,omitempty"`
+	Agency          string `json:"Agency,omitempty"`
+	Country         string `json:"Country,omitempty"`
 }
 
 // projectServiceCommitteeMemberResponse is the relevant subset of the response returned
