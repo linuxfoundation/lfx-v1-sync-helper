@@ -650,6 +650,165 @@ func deleteV1Committee(ctx context.Context, projectSFID, committeeSFID string) e
 	return nil
 }
 
+// projectServiceCommitteeMemberCreate is the request body for POST /v2/projects/{projectId}/committees/{committeeID}/members.
+// Maps to the project-committee-members-platform-create swagger schema.
+type projectServiceCommitteeMemberCreate struct {
+	Email          string `json:"Email"` // required
+	MemberID       string `json:"MemberID,omitempty"`
+	OrganizationID string `json:"OrganizationID,omitempty"`
+	FirstName      string `json:"FirstName,omitempty"`
+	LastName       string `json:"LastName,omitempty"`
+	Title          string `json:"Title,omitempty"`
+	Role           string `json:"Role,omitempty"`
+	RoleStartDate  string `json:"RoleStartDate,omitempty"`
+	RoleEndDate    string `json:"RoleEndDate,omitempty"`
+	Status         string `json:"Status,omitempty"`
+	AppointedBy    string `json:"AppointedBy,omitempty"`
+	VotingStatus   string `json:"VotingStatus,omitempty"`
+	VotingStartDate string `json:"VotingStartDate,omitempty"`
+	VotingEndDate  string `json:"VotingEndDate,omitempty"`
+	Agency         string `json:"Agency,omitempty"`
+	Country        string `json:"Country,omitempty"`
+}
+
+// projectServiceCommitteeMemberUpdate is the request body for PATCH /v2/projects/{projectId}/committees/{committeeID}/members/{memberID}.
+// Maps to the project-committee-members-platform-patch swagger schema.
+type projectServiceCommitteeMemberUpdate struct {
+	Email          string `json:"Email,omitempty"`
+	OrganizationID string `json:"OrganizationID,omitempty"`
+	Title          string `json:"Title,omitempty"`
+	Role           string `json:"Role,omitempty"`
+	RoleStartDate  string `json:"RoleStartDate,omitempty"`
+	RoleEndDate    string `json:"RoleEndDate,omitempty"`
+	Status         string `json:"Status,omitempty"`
+	AppointedBy    string `json:"AppointedBy,omitempty"`
+	VotingStatus   string `json:"VotingStatus,omitempty"`
+	VotingStartDate string `json:"VotingStartDate,omitempty"`
+	VotingEndDate  string `json:"VotingEndDate,omitempty"`
+	Agency         string `json:"Agency,omitempty"`
+	Country        string `json:"Country,omitempty"`
+}
+
+// projectServiceCommitteeMemberResponse is the relevant subset of the response returned
+// by the create committee member operation.
+type projectServiceCommitteeMemberResponse struct {
+	ID             string `json:"ID"`
+	MemberID       string `json:"MemberID"`
+	OrganizationID string `json:"OrganizationID"`
+	Email          string `json:"Email"`
+	FirstName      string `json:"FirstName"`
+	LastName       string `json:"LastName"`
+	Role           string `json:"Role"`
+	Status         string `json:"Status"`
+	VotingStatus   string `json:"VotingStatus"`
+}
+
+// createV1CommitteeMember adds a member to a committee via the Project Service v2 API.
+func createV1CommitteeMember(ctx context.Context, projectSFID, committeeSFID string, payload projectServiceCommitteeMemberCreate) (*projectServiceCommitteeMemberResponse, error) {
+	apiURL := fmt.Sprintf("%sproject-service/v2/projects/%s/committees/%s/members", cfg.LFXAPIGateway.String(), projectSFID, committeeSFID)
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal create committee member payload: %w", err)
+	}
+
+	logger.DebugContext(ctx, "createV1CommitteeMember request", "url", apiURL, "payload", string(body))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send create committee member request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read create committee member response: %w", err)
+	}
+
+	logger.DebugContext(ctx, "createV1CommitteeMember response", "status", resp.StatusCode, "body", string(respBody))
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("project service returned status %d creating member for committee %s: %s", resp.StatusCode, committeeSFID, string(respBody))
+	}
+
+	var result projectServiceCommitteeMemberResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal create committee member response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// updateV1CommitteeMember updates a committee member via the Project Service v2 API.
+func updateV1CommitteeMember(ctx context.Context, projectSFID, committeeSFID, memberSFID string, payload projectServiceCommitteeMemberUpdate) error {
+	apiURL := fmt.Sprintf("%sproject-service/v2/projects/%s/committees/%s/members/%s", cfg.LFXAPIGateway.String(), projectSFID, committeeSFID, memberSFID)
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal update committee member payload: %w", err)
+	}
+
+	logger.DebugContext(ctx, "updateV1CommitteeMember request", "url", apiURL, "payload", string(body))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send update committee member request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read update committee member response: %w", err)
+	}
+
+	logger.DebugContext(ctx, "updateV1CommitteeMember response", "status", resp.StatusCode, "body", string(respBody))
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("project service returned status %d updating member %s in committee %s: %s", resp.StatusCode, memberSFID, committeeSFID, string(respBody))
+	}
+
+	return nil
+}
+
+// deleteV1CommitteeMember removes a member from a committee via the Project Service v2 API.
+func deleteV1CommitteeMember(ctx context.Context, projectSFID, committeeSFID, memberSFID string) error {
+	apiURL := fmt.Sprintf("%sproject-service/v2/projects/%s/committees/%s/members/%s", cfg.LFXAPIGateway.String(), projectSFID, committeeSFID, memberSFID)
+
+	logger.DebugContext(ctx, "deleteV1CommitteeMember request", "url", apiURL)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, apiURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send delete committee member request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	logger.DebugContext(ctx, "deleteV1CommitteeMember response", "status", resp.StatusCode, "body", string(respBody))
+
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("project service returned status %d deleting member %s from committee %s: %s", resp.StatusCode, memberSFID, committeeSFID, string(respBody))
+	}
+
+	return nil
+}
+
 // parseWebsiteURL attempts to parse and normalize a website URL from organization website data.
 // Returns empty string if no valid URL can be constructed.
 func parseWebsiteURL(website string) string {

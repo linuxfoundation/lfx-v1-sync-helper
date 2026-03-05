@@ -10,6 +10,7 @@
 // Run with:
 //
 //	source cmd/lfx-v1-sync-helper/.env && go test -tags=integration -v -run TestCommitteeClientIntegration ./cmd/lfx-v1-sync-helper/
+//	source cmd/lfx-v1-sync-helper/.env && go test -tags=integration -v -run TestCommitteeMemberClientIntegration ./cmd/lfx-v1-sync-helper/
 
 package main
 
@@ -108,4 +109,63 @@ func TestCommitteeClientIntegration(t *testing.T) {
 		t.Fatalf("updateV1Committee: %v", err)
 	}
 	t.Logf("updated committee %s", created.ID)
+}
+
+// TestCommitteeMemberClientIntegration exercises createV1CommitteeMember, updateV1CommitteeMember,
+// and deleteV1CommitteeMember against the real dev API, cleaning up after itself.
+func TestCommitteeMemberClientIntegration(t *testing.T) {
+	setupIntegrationTest(t)
+	ctx := context.Background()
+
+	// Create a parent committee to use for member operations.
+	committee, err := createV1Committee(ctx, integrationTestProjectSFID, projectServiceCommitteeCreate{
+		Name:     "v1-sync-helper member test committee",
+		Category: "Working Group",
+	})
+	if err != nil {
+		t.Fatalf("createV1Committee (setup): %v", err)
+	}
+	t.Logf("created parent committee: ID=%s", committee.ID)
+	t.Cleanup(func() {
+		if err := deleteV1Committee(ctx, integrationTestProjectSFID, committee.ID); err != nil {
+			t.Errorf("deleteV1Committee cleanup: %v", err)
+		} else {
+			t.Logf("deleted parent committee %s", committee.ID)
+		}
+	})
+
+	// --- Create member ---
+	member, err := createV1CommitteeMember(ctx, integrationTestProjectSFID, committee.ID, projectServiceCommitteeMemberCreate{
+		Email:     "integration-test@example.com",
+		FirstName: "Integration",
+		LastName:  "Test",
+		Role:      "None",
+		Status:    "Active",
+	})
+	if err != nil {
+		t.Fatalf("createV1CommitteeMember: %v", err)
+	}
+	t.Logf("created member: ID=%s Email=%s", member.ID, member.Email)
+
+	if member.ID == "" {
+		t.Fatal("expected non-empty member ID in create response")
+	}
+
+	// Always clean up the member, even if the update step fails.
+	t.Cleanup(func() {
+		if err := deleteV1CommitteeMember(ctx, integrationTestProjectSFID, committee.ID, member.ID); err != nil {
+			t.Errorf("deleteV1CommitteeMember cleanup: %v", err)
+		} else {
+			t.Logf("deleted member %s", member.ID)
+		}
+	})
+
+	// --- Update member ---
+	if err := updateV1CommitteeMember(ctx, integrationTestProjectSFID, committee.ID, member.ID, projectServiceCommitteeMemberUpdate{
+		Role:   "Chair",
+		Status: "Active",
+	}); err != nil {
+		t.Fatalf("updateV1CommitteeMember: %v", err)
+	}
+	t.Logf("updated member %s", member.ID)
 }
