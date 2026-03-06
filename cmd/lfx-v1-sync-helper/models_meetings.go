@@ -1066,6 +1066,7 @@ type MeetingAttachmentDB struct {
 	Link             string     `json:"link" dynamodbav:"link"`
 	Name             string     `json:"name" dynamodbav:"name"`
 	Description      string     `json:"description" dynamodbav:"description"`
+	Source           string     `json:"source" dynamodbav:"source,omitempty"`
 	FileName         string     `json:"file_name" dynamodbav:"file_name,omitempty"`
 	FileSize         int        `json:"file_size" dynamodbav:"file_size,omitempty"`
 	FileURL          string     `json:"file_url" dynamodbav:"file_url,omitempty"`
@@ -1126,6 +1127,7 @@ type InputMeetingAttachment struct {
 	Link             string     `json:"link"`
 	Name             string     `json:"name"`
 	Description      string     `json:"description"`
+	Source           string     `json:"source,omitempty"`
 	FileName         string     `json:"file_name,omitempty"`
 	FileSize         int        `json:"file_size,omitempty"`
 	FileURL          string     `json:"file_url,omitempty"`
@@ -1411,6 +1413,7 @@ type PastMeetingAttachmentDB struct {
 	Link                   string     `json:"link" dynamodbav:"link"`
 	Name                   string     `json:"name" dynamodbav:"name"`
 	Description            string     `json:"description" dynamodbav:"description"`
+	Source                 string     `json:"source" dynamodbav:"source,omitempty"`
 	FileName               string     `json:"file_name" dynamodbav:"file_name,omitempty"`
 	FileSize               int        `json:"file_size" dynamodbav:"file_size,omitempty"`
 	FileURL                string     `json:"file_url" dynamodbav:"file_url,omitempty"`
@@ -1472,6 +1475,7 @@ type InputPastMeetingAttachment struct {
 	Link                   string     `json:"link"`
 	Name                   string     `json:"name"`
 	Description            string     `json:"description"`
+	Source                 string     `json:"source,omitempty"`
 	FileName               string     `json:"file_name,omitempty"`
 	FileSize               int        `json:"file_size,omitempty"`
 	FileURL                string     `json:"file_url,omitempty"`
