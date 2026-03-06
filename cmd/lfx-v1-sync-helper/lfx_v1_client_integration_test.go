@@ -72,13 +72,15 @@ func TestCommitteeClientIntegration(t *testing.T) {
 	ctx := context.Background()
 
 	// --- Create ---
+	publicEnabled := true
+	ssoGroupEnabled := false
 	created, err := createV1Committee(ctx, integrationTestProjectSFID, projectServiceCommitteeCreate{
 		Name:            "v1-sync-helper integration test committee",
 		Category:        "Working Group",
 		Description:     "Temporary committee created by integration test — safe to delete",
 		Website:         "https://example.com/test-committee",
-		PublicEnabled:   true,
-		SSOGroupEnabled: false,
+		PublicEnabled:   &publicEnabled,
+		SSOGroupEnabled: &ssoGroupEnabled,
 	})
 	if err != nil {
 		t.Fatalf("createV1Committee: %v", err)
@@ -100,10 +102,11 @@ func TestCommitteeClientIntegration(t *testing.T) {
 	})
 
 	// --- Update ---
+	publicDisabled := false
 	if err := updateV1Committee(ctx, integrationTestProjectSFID, created.ID, projectServiceCommitteeUpdate{
 		Name:          "v1-sync-helper integration test committee (updated)",
 		Description:   "Updated by integration test",
-		PublicEnabled: false,
+		PublicEnabled: &publicDisabled,
 		PublicName:    "Test Committee Public Name",
 	}); err != nil {
 		t.Fatalf("updateV1Committee: %v", err)

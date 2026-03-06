@@ -163,7 +163,7 @@ func committeeMemberIndexerEventHandler(msg *nats.Msg) {
 		}
 		logger.With("member_uid", event.ObjectID, "committee_uid", committeeUID, "project_sfid", projectSFID).
 			InfoContext(ctx, "committee member created in v2 — ensuring v1 is in sync")
-		syncCommitteeMemberCreateToV1(ctx, event.ObjectID, projectSFID, committeeSFID, body.Data)
+		syncCommitteeMemberCreateToV1(ctx, event.ObjectID, committeeUID, projectSFID, committeeSFID, body.Data)
 
 	case "updated":
 		reverseMappingKey := "committee_member.uid." + event.ObjectID
@@ -307,8 +307,8 @@ func syncCommitteeDeleteToV1(ctx context.Context, committeeUID, projectSFID, com
 }
 
 // syncCommitteeMemberCreateToV1 ensures a v2-created committee member exists in v1.
-func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, projectSFID, committeeSFID string, data map[string]any) {
-	log := logger.With("member_uid", memberUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID)
+func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID, projectSFID, committeeSFID string, data map[string]any) {
+	log := logger.With("member_uid", memberUID, "committee_uid", committeeUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID)
 
 	// A non-tombstoned reverse mapping means this was created from v1; skip.
 	reverseKey := "committee_member.uid." + memberUID
@@ -371,9 +371,10 @@ func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, projectSFID, 
 		return
 	}
 
-	// Store forward mapping (v1 SFID -> v2 UID) and reverse mapping (v2 UID -> projectSFID:committeeSFID:memberSFID).
+	// Store forward mapping (v1 SFID -> committeeUID:memberUID) and reverse mapping (v2 UID -> projectSFID:committeeSFID:memberSFID).
 	memberSFID := result.MemberID
-	if _, err := mappingsKV.Put(ctx, "committee_member.sfid."+memberSFID, []byte(memberUID)); err != nil {
+	forwardMappingValue := committeeUID + ":" + memberUID
+	if _, err := mappingsKV.Put(ctx, "committee_member.sfid."+memberSFID, []byte(forwardMappingValue)); err != nil {
 		log.With(errKey, err, "member_sfid", memberSFID).
 			WarnContext(ctx, "failed to store committee member forward mapping after v1 create")
 	}
