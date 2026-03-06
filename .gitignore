@@ -14,6 +14,7 @@
 .env*
 *.env
 *.pem
+tmp/
 
 # Rendered templates
 **/templates/*.rendered
