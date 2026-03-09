@@ -4,7 +4,7 @@ This repository contains tools and services for synchronizing data between LFX v
 
 ## Overview
 
-Most data entities are synced from v1 into native LFX One entities. A bi-directional sync is also planned.
+Most data entities are synced from v1 into native LFX One entities. Bidirectional sync is implemented for committees and committee members.
 
 However, due to the size, complexity, and number of external interactions the LFX Meetings stack has, v1 and v2 meetings will be kept separate, though v1 meetings will be made avaliable as read-only, natively-permissioned entities within LFX One via the query service.
 
@@ -230,7 +230,9 @@ sequenceDiagram
 
 ### LFX One to v1 bidirectional sync
 
-Planned.
+Implemented for **committees** and **committee members**. The v1-sync-helper subscribes to indexer domain events (`lfx.committee.*`, `lfx.committee_member.*`) published after every successful OpenSearch write and mirrors the change to the v1 API via the Project Service v2 API.
+
+Loop detection: if a non-tombstoned reverse mapping already exists for the v2 object, the event originated from v1 and is skipped to prevent infinite sync loops.
 
 ```mermaid
 sequenceDiagram
