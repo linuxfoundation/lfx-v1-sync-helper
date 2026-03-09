@@ -86,6 +86,9 @@ plugins:
       - itx-zoom-meetings-registrants-v2
       - itx-zoom-meetings-invite-responses-v2
       - itx-zoom-meetings-attachments-v2
+      - itx-groupsio-v2-service
+      - itx-groupsio-v2-subgroup
+      - itx-groupsio-v2-member
       metadata:
         '*':
           # Setting the replication key allows conditional loads for
@@ -114,6 +117,12 @@ plugins:
           replication-key: 'updated_at'
         itx-zoom-past-meetings-attachments:
           replication-key: 'updated_at'
+        itx-groupsio-v2-service:
+          replication-key: 'last_modified_at'
+        itx-groupsio-v2-subgroup:
+          replication-key: 'last_modified_at'
+        itx-groupsio-v2-member:
+          replication-key: 'last_modified_at'
       use_aws_env_vars: true
     schema:
       # Override auto-detected schema for alternate columns and datatypes that

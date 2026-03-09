@@ -146,6 +146,12 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 		return false
 	case "salesforce-alternate_email__c":
 		return handleAlternateEmailUpdate(ctx, key, v1Data)
+	case "itx-groupsio-v2-service":
+		return handleGroupsioServiceUpdate(ctx, key, v1Data)
+	case "itx-groupsio-v2-subgroup":
+		return handleGroupsioSubgroupUpdate(ctx, key, v1Data)
+	case "itx-groupsio-v2-member":
+		return handleGroupsioMemberUpdate(ctx, key, v1Data)
 	default:
 		logger.With("key", key).WarnContext(ctx, "unknown object type, ignoring")
 		return false
@@ -237,6 +243,12 @@ func handleResourceDelete(ctx context.Context, key string, v1Principal string, v
 	case "itx-zoom-past-meetings-attachments":
 		logger.With("key", key).DebugContext(ctx, "past meeting attachment delete not yet implemented")
 		return false
+	case "itx-groupsio-v2-service":
+		return handleGroupsioServiceDelete(ctx, key, sfid)
+	case "itx-groupsio-v2-subgroup":
+		return handleGroupsioSubgroupDelete(ctx, key, sfid)
+	case "itx-groupsio-v2-member":
+		return handleGroupsioMemberDelete(ctx, key, sfid)
 	default:
 		logger.With("key", key).WarnContext(ctx, "unknown object type for deletion, ignoring")
 		return false
