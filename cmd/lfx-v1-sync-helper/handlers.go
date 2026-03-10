@@ -238,11 +238,9 @@ func handleResourceDelete(ctx context.Context, key string, v1Principal string, v
 	case "itx-zoom-past-meetings-summaries":
 		return handleZoomPastMeetingSummaryDelete(ctx, key, sfid)
 	case "itx-zoom-meetings-attachments-v2":
-		logger.With("key", key).DebugContext(ctx, "meeting attachment delete not yet implemented")
-		return false
+		return handleMeetingAttachmentDelete(ctx, key, sfid)
 	case "itx-zoom-past-meetings-attachments":
-		logger.With("key", key).DebugContext(ctx, "past meeting attachment delete not yet implemented")
-		return false
+		return handlePastMeetingAttachmentDelete(ctx, key, sfid)
 	case "itx-groupsio-v2-service":
 		return handleGroupsioServiceDelete(ctx, key, sfid)
 	case "itx-groupsio-v2-subgroup":

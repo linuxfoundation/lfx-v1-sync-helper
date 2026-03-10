@@ -1,6 +1,6 @@
 # LFX v1 Sync Helper
 
-The LFX v1 Sync Helper is a Go microservice that synchronizes v1 data from NATS KV buckets to LFX One services via authenticated API calls. It uses a JetStream consumer-based architecture that enables horizontal scaling across multiple service instances for processing v1 data updates.
+The LFX v1 Sync Helper is a Go microservice that synchronizes data between LFX v1 and LFX One (v2). It syncs v1 data from NATS KV buckets into v2 services via authenticated API calls, and also makes authenticated API calls back to LFX v1 endpoints to keep v1 in sync with changes originating in v2. It uses a JetStream consumer-based architecture that enables horizontal scaling across multiple service instances for processing v1 data updates.
 
 ## Architecture Overview
 
@@ -21,9 +21,13 @@ flowchart LR
     v1-KV[v1-objects<br />KV Bucket]
     v1-sync-helper["JetStream Consumer<br />(Load Balanced)"]
     v2_api[Project/Committee Services]
+    indexer[Indexer Service]
+    v1_api[LFX v1 API Gateway]
     meltano -->|puts into| v1-KV
     v1-KV -->|watched by| v1-sync-helper
     v1-sync-helper -->|makes API<br />calls to| v2_api
+    indexer -->|publishes domain<br />events to| v1-sync-helper
+    v1-sync-helper -->|makes API<br />calls to| v1_api
 ```
 
 ## Horizontal Scaling
@@ -48,8 +52,23 @@ maxAckPending: 1000
 
 ### Supported Objects
 
+#### v1 → v2 (KV bucket watch)
+
 - **Projects**: LFX project nested hierarchy (PCC / Salesforce)
 - **Committees & members**: LFX committees (PCC)
+
+#### v2 → v1 (indexer domain events)
+
+|NATS Subject|Action|
+|---|---|
+|`lfx.committee.created`|Create committee in v1 via Project Service API|
+|`lfx.committee.updated`|Update committee in v1 via Project Service API|
+|`lfx.committee.deleted`|Delete committee in v1 via Project Service API|
+|`lfx.committee_member.created`|Add member to committee in v1 via Project Service API|
+|`lfx.committee_member.updated`|Update committee member in v1 via Project Service API|
+|`lfx.committee_member.deleted`|Remove member from committee in v1 via Project Service API|
+
+Loop detection prevents infinite sync cycles: if a non-tombstoned reverse mapping already exists for the object UID, the event originated from v1 and is skipped.
 
 ## Configuration
 
