@@ -68,7 +68,7 @@ spec:
               # Check specific ITX tables we need access to
               echo ""
               echo "=== Checking specific ITX tables ==="
-              for table in "itx-poll" "itx-poll-vote" "itx-surveys" "itx-survey-responses" "itx-zoom-meetings-mappings-v2" "itx-zoom-meetings-v2" "itx-zoom-past-meetings-mappings" "itx-zoom-past-meetings" "itx-zoom-past-meetings-attendees" "itx-zoom-past-meetings-invitees" "itx-zoom-past-meetings-recordings" "itx-zoom-past-meetings-summaries" "itx-zoom-meetings-registrants-v2" "itx-zoom-meetings-invite-responses-v2" "itx-zoom-meetings-attachments-v2" "itx-zoom-past-meetings-attachments"; do
+              for table in "itx-poll" "itx-poll-vote" "itx-surveys" "itx-survey-responses" "itx-zoom-meetings-mappings-v2" "itx-zoom-meetings-v2" "itx-zoom-past-meetings-mappings" "itx-zoom-past-meetings" "itx-zoom-past-meetings-attendees" "itx-zoom-past-meetings-invitees" "itx-zoom-past-meetings-recordings" "itx-zoom-past-meetings-summaries" "itx-zoom-meetings-registrants-v2" "itx-zoom-meetings-invite-responses-v2" "itx-zoom-meetings-attachments-v2" "itx-zoom-past-meetings-attachments" "itx-groupsio-v2-service" "itx-groupsio-v2-subgroup" "itx-groupsio-v2-member"; do
                 echo "Checking table: $table"
                 aws dynamodb describe-table --table-name "$table" --region ${AWS_DEFAULT_REGION} --query 'Table.{TableName:TableName,Status:TableStatus,ItemCount:ItemCount}' --output table || echo "Failed to access table: $table"
               done
