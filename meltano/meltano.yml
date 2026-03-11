@@ -37,17 +37,23 @@ plugins:
           replication-method: INCREMENTAL
           replication-key: lastmodifieddate
         platform-community__c:
-          replication-method: INCREMENTAL
           replication-key: systemmodstamp
         salesforce-project__c:
-          replication-method: INCREMENTAL
           replication-key: systemmodstamp
+        salesforce_b2b-Account:
+          replication-key: SystemModstamp
+        salesforce_b2b-Asset:
+          replication-key: SystemModstamp
+        salesforce_b2b-Product2:
+          replication-key: SystemModstamp
+        salesforce_b2b-Contact:
+          replication-key: SystemModstamp
         salesforce_b2b-Alternate_Email__c:
-          replication-method: INCREMENTAL
-          replication-key: systemmodstamp
+          replication-key: SystemModstamp
+        salesforce_b2b-Project__c:
+          replication-key: SystemModstamp
         salesforce_b2b-Project_Role__c:
-          replication-method: INCREMENTAL
-          replication-key: systemmodstamp
+          replication-key: SystemModstamp
     - name: tap-dynamodb
       variant: meltanolabs
       pip_url: git+https://github.com/MeltanoLabs/tap-dynamodb.git
