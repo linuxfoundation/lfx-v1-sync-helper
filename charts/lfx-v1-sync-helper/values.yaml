@@ -302,23 +302,64 @@ walListener:
         # tables is a map of table names to operations to listen for
         # Default tables match those from meltano.yml tap-postgres configuration
         tables:
+          # platform.collaboration__c
           collaboration__c:
             - insert
             - update
             - delete
+          # platform.community__c
           community__c:
             - insert
             - update
             - delete
+          # salesforce.project__c
           project__c:
             - insert
             - update
             - delete
+          # salesforce.alternate_email__c
           alternate_email__c:
             - insert
             - update
             - delete
+          # salesforce.merged_user
           merged_user:
+            - insert
+            - update
+            - delete
+          # salesforce_b2b schema tables for member service replication.
+          # salesforce_b2b."Account"
+          Account:
+            - insert
+            - update
+            - delete
+          # salesforce_b2b."Asset"
+          Asset:
+            - insert
+            - update
+            - delete
+          # salesforce_b2b."Product2"
+          Product2:
+            - insert
+            - update
+            - delete
+          # salesforce_b2b."Contact"
+          Contact:
+            - insert
+            - update
+            - delete
+          # salesforce_b2b."Alternate_Email__c"
+          Alternate_Email__c:
+            - insert
+            - update
+            - delete
+          # salesforce_b2b."Project__c"
+          Project__c:
+            - insert
+            - update
+            - delete
+          # salesforce_b2b."Project_Role__c"
+          Project_Role__c:
             - insert
             - update
             - delete

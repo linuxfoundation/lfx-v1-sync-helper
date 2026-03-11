@@ -146,6 +146,17 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 		return false
 	case "salesforce-alternate_email__c":
 		return handleAlternateEmailUpdate(ctx, key, v1Data)
+	case "salesforce_b2b-Account",
+		"salesforce_b2b-Asset",
+		"salesforce_b2b-Product2",
+		"salesforce_b2b-Contact",
+		"salesforce_b2b-Alternate_Email__c",
+		"salesforce_b2b-Project__c",
+		"salesforce_b2b-Project_Role__c":
+		// salesforce_b2b records are replicated to v1-objects KV for consumption by the member service.
+		// No additional v2 API processing needed here; the member service reads directly from KV.
+		logger.With("key", key).DebugContext(ctx, "salesforce_b2b record updated, stored in KV for member service")
+		return false
 	case "itx-groupsio-v2-service":
 		return handleGroupsioServiceUpdate(ctx, key, v1Data)
 	case "itx-groupsio-v2-subgroup":
@@ -241,6 +252,17 @@ func handleResourceDelete(ctx context.Context, key string, v1Principal string, v
 		return handleMeetingAttachmentDelete(ctx, key, sfid)
 	case "itx-zoom-past-meetings-attachments":
 		return handlePastMeetingAttachmentDelete(ctx, key, sfid)
+	case "salesforce_b2b-Account",
+		"salesforce_b2b-Asset",
+		"salesforce_b2b-Product2",
+		"salesforce_b2b-Contact",
+		"salesforce_b2b-Alternate_Email__c",
+		"salesforce_b2b-Project__c",
+		"salesforce_b2b-Project_Role__c":
+		// salesforce_b2b records are soft-deleted in v1-objects KV by the WAL handler via _sdc_deleted_at.
+		// No additional v2 API processing needed here; the member service handles deletions reactively.
+		logger.With("key", key).DebugContext(ctx, "salesforce_b2b record deleted, member service will handle reactively")
+		return false
 	case "itx-groupsio-v2-service":
 		return handleGroupsioServiceDelete(ctx, key, sfid)
 	case "itx-groupsio-v2-subgroup":

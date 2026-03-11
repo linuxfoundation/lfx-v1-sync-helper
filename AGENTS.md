@@ -218,6 +218,47 @@ JSON-formatted logs with consistent fields:
 ### Debug Mode
 Enable with `DEBUG=true` environment variable for detailed operation logs.
 
+## Adding New PostgreSQL Tables to Replication
+
+When adding a new table from PostgreSQL to the `v1-objects` NATS KV replication pipeline, three places must be updated:
+
+### 1. `meltano/meltano.yml` — Meltano backfill extractor
+
+Add a `select` entry for the table under the `tap-postgres` extractor (use a wildcard, e.g. `myschema-mytable.*`), add the schema to `filter_schemas` if not already present, and add a `metadata` entry specifying `INCREMENTAL` replication with the appropriate replication key (`lastmodifieddate` or `systemmodstamp`).
+
+After editing, or if the file was last written by the Meltano CLI (which uses non-standard sequence indentation), reformat it with prettier before committing:
+
+```bash
+npx prettier --write meltano/meltano.yml
+```
+
+### 2. `charts/lfx-v1-sync-helper/values.yaml` — WAL listener table filter
+
+Add the table to `walListener.config.listener.filter.tables` with `insert`, `update`, and `delete` operations. Use only the bare table name (no schema prefix), since wal-listener filters on `item.Table` alone (e.g. `Account`, not `salesforce_b2b.Account`). Table names are case-sensitive.
+
+### 3. PostgreSQL `wal-listener` publication — per-environment, ad hoc
+
+The `wal-listener` publication on the PostgreSQL server is managed manually and must be updated in each environment (dev, staging, prod) by running:
+
+```sql
+ALTER PUBLICATION "wal-listener" ADD TABLE myschema."MyTable";
+```
+
+This is not managed by Helm or any IaC — it must be applied directly against the `sfdc` database in each environment. Verify the current publication contents with:
+
+```sql
+SELECT schemaname, tablename
+FROM pg_publication_tables
+WHERE pubname = 'wal-listener'
+ORDER BY schemaname, tablename;
+```
+
+Note: The replication slot is named `lfx_v2` (not `wal-listener`). The publication and slot names differ.
+
+### 4. `cmd/lfx-v1-sync-helper/handlers.go` — suppress unknown-object warnings (optional)
+
+If the new table's records should only be stored in KV for downstream consumption (no v2 API side-effects), add the key prefix (e.g. `"myschema-mytable"`) as an explicit `case` in both `handleKVPut` and `handleResourceDelete` with a debug-level log statement. This prevents spurious "unknown object type" warnings in the logs.
+
 ## Contributing Workflow
 
 1. **Code Changes**: Follow language-specific standards

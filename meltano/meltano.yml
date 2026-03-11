@@ -4,177 +4,161 @@
 default_environment: dev
 project_id: c434d4f0-1d51-43c4-b350-d048b0f93055
 environments:
-- name: dev
-- name: staging
-- name: prod
+  - name: dev
+  - name: staging
+  - name: prod
 plugins:
   extractors:
-  - name: tap-postgres
-    variant: meltanolabs
-    pip_url: meltanolabs-tap-postgres
-    config:
-      database: sfdc
-      user: lfit
-      filter_schemas:
-      - platform
-      - salesforce
-    select:
-    - platform-collaboration__c.*
-    - platform-community__c.*
-    - salesforce-project__c.*
-    - salesforce-alternate_email__c.*
-    - salesforce-merged_user.sfid
-    - salesforce-merged_user.isdeleted
-    - salesforce-merged_user.lastname
-    - salesforce-merged_user.firstname
-    - salesforce-merged_user.salutation
-    - salesforce-merged_user.middlename
-    - salesforce-merged_user.suffix
-    - salesforce-merged_user.name
-    - salesforce-merged_user.title
-    - salesforce-merged_user.photourl
-    - salesforce-merged_user.description
-    - salesforce-merged_user.createddate
-    - salesforce-merged_user.lastmodifieddate
-    - salesforce-merged_user.systemmodstamp
-    - salesforce-merged_user.username__c
-    - salesforce-merged_user.facebook_id__c
-    - salesforce-merged_user.github_id__c
-    - salesforce-merged_user.linkedin_id__c
-    - salesforce-merged_user.twitter_id__c
-    - salesforce-merged_user.gitlab_id__c
-    - salesforce-merged_user.bio__c
-    - salesforce-merged_user.photo_url__c
-    - salesforce-merged_user.technology__c
-    - salesforce-merged_user.timezone__c
-    - salesforce-merged_user.company
-    - salesforce-merged_user.website
-    - salesforce-merged_user.preferred_language__c
-    - salesforce-merged_user.accountid
-    - salesforce-merged_user.sfid_b2b
-    - salesforce-merged_user.createdbyid
-    - salesforce-merged_user.lastmodifiedbyid
-    metadata:
-      '*':
-        replication-method: INCREMENTAL
-        replication-key: lastmodifieddate
-      'platform-community__c':
-        replication-method: INCREMENTAL
-        replication-key: systemmodstamp
-      'salesforce-project__c':
-        replication-method: INCREMENTAL
-        replication-key: systemmodstamp
-  - name: tap-dynamodb
-    variant: meltanolabs
-    pip_url: git+https://github.com/MeltanoLabs/tap-dynamodb.git
-    config:
-      aws_default_region: us-west-2
-      tables:
-      - itx-poll
-      - itx-poll-vote
-      - itx-surveys
-      - itx-survey-responses
-      - itx-zoom-meetings-mappings-v2
-      - itx-zoom-meetings-v2
-      - itx-zoom-past-meetings-mappings
-      - itx-zoom-past-meetings
-      - itx-zoom-past-meetings-attendees
-      - itx-zoom-past-meetings-invitees
-      - itx-zoom-past-meetings-recordings
-      - itx-zoom-past-meetings-summaries
-      - itx-zoom-past-meetings-attachments
-      - itx-zoom-meetings-registrants-v2
-      - itx-zoom-meetings-invite-responses-v2
-      - itx-zoom-meetings-attachments-v2
-      - itx-groupsio-v2-service
-      - itx-groupsio-v2-subgroup
-      - itx-groupsio-v2-member
+    - name: tap-postgres
+      variant: meltanolabs
+      pip_url: meltanolabs-tap-postgres
+      config:
+        database: sfdc
+        user: lfit
+        filter_schemas:
+          - platform
+          - salesforce
+          - salesforce_b2b
+      select:
+        - platform-collaboration__c.*
+        - platform-community__c.*
+        - salesforce-project__c.*
+        - salesforce-alternate_email__c.*
+        - salesforce-merged_user.*
+        - salesforce_b2b-Account.*
+        - salesforce_b2b-Asset.*
+        - salesforce_b2b-Product2.*
+        - salesforce_b2b-Contact.*
+        - salesforce_b2b-Alternate_Email__c.*
+        - salesforce_b2b-Project__c.*
+        - salesforce_b2b-Project_Role__c.*
       metadata:
-        '*':
-          # Setting the replication key allows conditional loads for
-          # target-nats-kv, even though Meltano's tap-dynamodb doesn't support
-          # INCREMENTAL or LOG_BASED replication methods.
-          replication-key: modified_at
-        itx-poll:
-          # No timestamp field for this table.
-          replication-key: ''
-        itx-poll-vote:
-          # No timestamp field for this table.
-          replication-key: ''
-        itx-surveys:
-          # No timestamp field for this table.
-          replication-key: ''
-        itx-survey-responses:
-          # No timestamp field for this table.
-          replication-key: ''
-        itx-zoom-meetings-mappings-v2:
-          # No timestamp field for this table.
-          replication-key: ''
-        itx-zoom-past-meetings-mappings:
-          # No timestamp field for this table.
-          replication-key: ''
-        itx-zoom-meetings-attachments-v2:
-          replication-key: 'updated_at'
-        itx-zoom-past-meetings-attachments:
-          replication-key: 'updated_at'
-        itx-groupsio-v2-service:
-          replication-key: 'last_modified_at'
-        itx-groupsio-v2-subgroup:
-          replication-key: 'last_modified_at'
-        itx-groupsio-v2-member:
-          replication-key: 'last_modified_at'
-      use_aws_env_vars: true
-    schema:
-      # Override auto-detected schema for alternate columns and datatypes that
-      # weren't seen in the sample data.
-      itx-zoom-meetings-registrants-v2:
-        occurrence:
-          type: [string, 'null']
-      itx-zoom-meetings-v2:
-        # Matches both `.recurrence` and `.updated_occurrences[].recurrence`.
-        '*recurrence.monthly_day':
-          type: [integer, 'null']
-        '*recurrence.end_times':
-          type: [integer, 'null']
-        use_unique_ics_uid:
-          type: [string, 'null']
-      itx-zoom-past-meetings:
-        '*recurrence.monthly_day':
-          type: [integer, 'null']
-        '*recurrence.end_times':
-          type: [integer, 'null']
-      itx-zoom-past-meetings-attendees:
-        is_auto_matched:
-          type: [boolean, 'null']
+        "*":
+          replication-method: INCREMENTAL
+          replication-key: lastmodifieddate
+        platform-community__c:
+          replication-method: INCREMENTAL
+          replication-key: systemmodstamp
+        salesforce-project__c:
+          replication-method: INCREMENTAL
+          replication-key: systemmodstamp
+        salesforce_b2b-Alternate_Email__c:
+          replication-method: INCREMENTAL
+          replication-key: systemmodstamp
+        salesforce_b2b-Project_Role__c:
+          replication-method: INCREMENTAL
+          replication-key: systemmodstamp
+    - name: tap-dynamodb
+      variant: meltanolabs
+      pip_url: git+https://github.com/MeltanoLabs/tap-dynamodb.git
+      config:
+        aws_default_region: us-west-2
+        tables:
+          - itx-poll
+          - itx-poll-vote
+          - itx-surveys
+          - itx-survey-responses
+          - itx-zoom-meetings-mappings-v2
+          - itx-zoom-meetings-v2
+          - itx-zoom-past-meetings-mappings
+          - itx-zoom-past-meetings
+          - itx-zoom-past-meetings-attendees
+          - itx-zoom-past-meetings-invitees
+          - itx-zoom-past-meetings-recordings
+          - itx-zoom-past-meetings-summaries
+          - itx-zoom-past-meetings-attachments
+          - itx-zoom-meetings-registrants-v2
+          - itx-zoom-meetings-invite-responses-v2
+          - itx-zoom-meetings-attachments-v2
+          - itx-groupsio-v2-service
+          - itx-groupsio-v2-subgroup
+          - itx-groupsio-v2-member
+        metadata:
+          "*":
+            # Setting the replication key allows conditional loads for
+            # target-nats-kv, even though Meltano's tap-dynamodb doesn't support
+            # INCREMENTAL or LOG_BASED replication methods.
+            replication-key: modified_at
+          itx-poll:
+            # No timestamp field for this table.
+            replication-key: ""
+          itx-poll-vote:
+            # No timestamp field for this table.
+            replication-key: ""
+          itx-surveys:
+            # No timestamp field for this table.
+            replication-key: ""
+          itx-survey-responses:
+            # No timestamp field for this table.
+            replication-key: ""
+          itx-zoom-meetings-mappings-v2:
+            # No timestamp field for this table.
+            replication-key: ""
+          itx-zoom-past-meetings-mappings:
+            # No timestamp field for this table.
+            replication-key: ""
+          itx-zoom-meetings-attachments-v2:
+            replication-key: updated_at
+          itx-zoom-past-meetings-attachments:
+            replication-key: updated_at
+          itx-groupsio-v2-service:
+            replication-key: last_modified_at
+          itx-groupsio-v2-subgroup:
+            replication-key: last_modified_at
+          itx-groupsio-v2-member:
+            replication-key: last_modified_at
+        use_aws_env_vars: true
+      schema:
+        # Override auto-detected schema for alternate columns and datatypes that
+        # weren't seen in the sample data.
+        itx-zoom-meetings-registrants-v2:
+          occurrence:
+            type: [string, "null"]
+        itx-zoom-meetings-v2:
+          # Matches both `.recurrence` and `.updated_occurrences[].recurrence`.
+          "*recurrence.monthly_day":
+            type: [integer, "null"]
+          "*recurrence.end_times":
+            type: [integer, "null"]
+          use_unique_ics_uid:
+            type: [string, "null"]
+        itx-zoom-past-meetings:
+          "*recurrence.monthly_day":
+            type: [integer, "null"]
+          "*recurrence.end_times":
+            type: [integer, "null"]
+        itx-zoom-past-meetings-attendees:
+          is_auto_matched:
+            type: [boolean, "null"]
   loaders:
-  - name: target-nats-kv
-    namespace: target_nats_kv
-    pip_url: -e load/target-nats-kv
-    executable: target-nats-kv
-    settings:
-    - name: url
-      value: nats://lfx-platform-nats.lfx.svc.cluster.local:4222
-    - name: bucket
-      value: v1-objects
-    - name: user
-    - name: password
-      sensitive: true
-    - name: msgpack
-      kind: boolean
-      value: false
-    - name: creds
-      kind: file
-    - name: key_prefix
-    - name: refresh_mode
-      kind: options
-      value: newer
-      options:
-      - label: All
-        value: all
-      - label: Same or newer
-        value: same
-      - label: Newer only
-        value: newer
-    - name: validate_records
-      kind: boolean
-      value: true
+    - name: target-nats-kv
+      namespace: target_nats_kv
+      pip_url: -e load/target-nats-kv
+      executable: target-nats-kv
+      settings:
+        - name: url
+          value: nats://lfx-platform-nats.lfx.svc.cluster.local:4222
+        - name: bucket
+          value: v1-objects
+        - name: user
+        - name: password
+          sensitive: true
+        - name: msgpack
+          kind: boolean
+          value: false
+        - name: creds
+          kind: file
+        - name: key_prefix
+        - name: refresh_mode
+          kind: options
+          value: newer
+          options:
+            - label: All
+              value: all
+            - label: Same or newer
+              value: same
+            - label: Newer only
+              value: newer
+        - name: validate_records
+          kind: boolean
+          value: true
