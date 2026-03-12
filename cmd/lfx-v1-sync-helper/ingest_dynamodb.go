@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -252,7 +253,13 @@ func dynamodbKVKey(tableName string, keys map[string]interface{}) string {
 
 	parts := make([]string, 0, len(attrNames))
 	for _, k := range attrNames {
-		parts = append(parts, fmt.Sprintf("%v", keys[k]))
+		value := fmt.Sprintf("%v", keys[k])
+		if f, ok := keys[k].(float64); ok {
+			// JSON numbers unmarshal as float64; format as integer to avoid scientific
+			// notation (e.g. "1.4985347e+07") which contains "+" invalid in NATS KV keys.
+			value = strconv.FormatInt(int64(f), 10)
+		}
+		parts = append(parts, value)
 	}
 
 	return tableName + "." + strings.Join(parts, "#")
