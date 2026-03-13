@@ -4,50 +4,13 @@ This repository contains tools and services for synchronizing data between LFX v
 
 ## Overview
 
-Most data entities are synced from v1 into native LFX One entities. Bidirectional sync is implemented for committees and committee members.
+This repository serves two distinct purposes:
 
-However, due to the size, complexity, and number of external interactions the LFX Meetings stack has, v1 and v2 meetings will be kept separate, though v1 meetings will be made avaliable as read-only, natively-permissioned entities within LFX One via the query service.
+1. **Real-time streaming replication.** PostgreSQL WAL events (via `wal-listener`) and DynamoDB Streams are replicated in real time—alongside periodic Meltano backfills—into a `v1-objects` NATS KV bucket. LFX One wrapper services subscribe to this bucket to drive indexing pipelines (OpenSearch via the indexer service) and access-control pipelines (OpenFGA via fga-sync), without needing to integrate directly with ITX eventing.
 
-```mermaid
-flowchart TD
-    V1[LFX v1 Meetings] --> Sync[Data Sync Process]
-    Projects --> Sync2[Data Backfill]
-    Committees --> Sync3[Data Backfill]
-    Sync --> ShadowV1[**v1 Meetings**<br/>- Synced from v1<br/>- Read-only in LFX One<br/>- Separate from native v2]
-    Sync2 --> ProjectsV2
-    Sync3 --> CommitteesV2
+2. **Bidirectional sync for "core" resources.** Projects and committees are fully synced in both directions between LFX v1 and LFX One. This gives LFX One a self-contained stack for these entity types, which simplifies developer environment stand-up by removing the dependency on the highly-interconnected LFX/Salesforce/ITX stack.
 
-    NativeV2[**Native v2 Meetings**<br/>- Created directly in v2<br/>- Full CRUD operations]
-    ProjectsV2[Native v2 Projects]
-    CommitteesV2[Native v2 Committees]
-
-    ShadowV1 --> LFXOne[LFX One UI]
-    NativeV2 --> LFXOne
-    ProjectsV2 & CommitteesV2 --> LFXOne
-
-    LFXOne --> Search[Search & Query<br/>Services]
-    LFXOne --> FGA[OpenFGA<br/>Access Control]
-    LFXOne --> JoinFlow[Meeting Join Flow]
-
-    subgraph "LFX One Platform"
-        Search
-        FGA
-        JoinFlow
-    end
-
-    subgraph "v1 Data"
-        V1
-        Projects
-        Committees
-    end
-
-    subgraph "v2 Data"
-        ShadowV1
-        NativeV2
-        ProjectsV2
-        CommitteesV2
-    end
-```
+ITX-hosted resources such as Meetings are handled by v2 "wrapper" services that sit in front of the ITX APIs and rely on the NATS KV replication above for eventing; they do **not** get their own native v2 entity storage. See the [ITX wrappers component diagram](#itx-wrappers-component-diagram) in the Architecture Diagrams section for how this fits together.
 
 ## Prerequisites
 
@@ -116,11 +79,80 @@ The following table shows the supported mapping key patterns and their expected 
 
 ## Architecture Diagrams
 
-Regarding the following diagrams:
+Regarding the following sequence diagrams:
 
 - The DynamoDB source (incremental or realtime) is not currently included in the diagrams.
 - The planned bidirectional sync (LFX One changes back to v1) is included in the diagrams.
-- "Projects API" is representative of most data entities. However, v1 Meetings push straight to OpenSearch and OpenFGA (via platform services)—this is not shown.
+- "Projects API" is representative of the core resources that have bidirectional sync (projects, committees). ITX-hosted resources such as Meetings are handled by wrapper services that subscribe to the NATS KV bucket instead—see the component diagram below.
+
+### ITX wrappers component diagram
+
+This diagram shows how the LFX One platform, the v1-sync-helper replication pipeline, and ITX-hosted services fit together at the component level.
+
+```mermaid
+flowchart TD
+    %%{init: {'flowchart': {'defaultRenderer': 'elk' }}}%%
+
+    user[User]
+
+    subgraph lfxv2["LFX Platform (k8s)"]
+        traefik[Traefik]
+        heimdall[Heimdall]
+        subgraph fga-sync
+        fga-sync-update-access[update-access]
+        fga-sync-access-check[access-check]
+        end
+        indexer
+        query-svc[Query Service]
+        opensearch[OpenSearch]
+        openfga[OpenFGA]
+
+        xyz-wrapper@{ shape: processes, label: "Entity services (wrappers)" }
+
+        traefik -.->|calls authz middleware| heimdall
+        traefik --->|"proxies all list (search) requests to"| query-svc
+        heimdall -.->|checks relations via| openfga
+        query-svc -->|queries from| opensearch
+        query-svc -.->|checks access via NATS| fga-sync-access-check
+        indexer -.->|stores to| opensearch
+        fga-sync-update-access -.->|syncs relations to| openfga
+        fga-sync-access-check -.->|checks access via| openfga
+
+        traefik -->|proxies authorized resource create/get/put requests to| xyz-wrapper
+
+        xyz-wrapper -.->|upsert via NATS| indexer
+        xyz-wrapper -.->|push relations via NATS| fga-sync-update-access
+
+        %%wal-listener
+        v1-sync-helper
+        v1-objects[(v1 replica<br />KV bucket)]
+        %%wal-listener -.->|NATS stream| v1-sync-helper
+        v1-sync-helper -.->|NATS KV operations| v1-objects
+
+        v1-objects -.->|subscribes to bucket events via NATS| xyz-wrapper
+    end
+
+    subgraph itx-aws[ITX AWS]
+        itx-api-gw[API Gateway]
+        itx-svc-authz[Authorizer Lambda]
+        itx-service-xyz@{ shape: processes, label: "ITX services (Lambdas)"}
+        dynamodb[(DynamoDB)]
+
+        itx-api-gw -.-> itx-svc-authz
+        itx-api-gw --> itx-service-xyz
+        itx-service-xyz --> dynamodb
+    end
+
+    third-party-svcs@{ shape: processes, label: "Third-party services (Zoom, etc)"}
+    itx-service-xyz --> third-party-svcs
+
+    xyz-wrapper -->|authorized<br />create/get/put| itx-api-gw
+
+    dynamodb -.->|consumed by streams| v1-sync-helper
+
+    user -->|old| PIS[PIS or User Service] -->|authorized create/get/put/list| itx-api-gw
+    user -->|new| traefik
+```
 
 ### Data extraction/replication sequence diagram
 
