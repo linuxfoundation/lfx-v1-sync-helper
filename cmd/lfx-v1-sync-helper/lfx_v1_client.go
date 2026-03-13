@@ -513,7 +513,7 @@ type projectServiceCommitteeCreate struct {
 	PublicEnabled    *bool  `json:"PublicEnabled,omitempty"`
 	PublicName       string `json:"PublicName,omitempty"`
 	JoinMode         string `json:"JoinMode,omitempty"`
-	MailingListEmail string `json:"MailingListEmail,omitempty"`
+	MailingList string `json:"MailingList,omitempty"`
 	ChatChannel      string `json:"ChatChannel,omitempty"`
 }
 
@@ -528,7 +528,7 @@ type projectServiceCommitteeUpdate struct {
 	PublicEnabled    *bool  `json:"PublicEnabled,omitempty"`
 	PublicName       string `json:"PublicName,omitempty"`
 	JoinMode         string `json:"JoinMode,omitempty"`
-	MailingListEmail string `json:"MailingListEmail,omitempty"`
+	MailingList string `json:"MailingList,omitempty"`
 	ChatChannel      string `json:"ChatChannel,omitempty"`
 }
 

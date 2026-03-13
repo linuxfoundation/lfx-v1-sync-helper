@@ -416,7 +416,7 @@ func mapV1DataToCommitteeCreatePayload(ctx context.Context, v1Data map[string]an
 		logger.With("join_mode", joinMode).DebugContext(ctx, "mapped committee join mode field")
 	}
 	if mailingListEmail, ok := v1Data["mailing_list_email"].(string); ok && mailingListEmail != "" {
-		payload.MailingListEmail = &mailingListEmail
+		payload.MailingList = &mailingListEmail
 		logger.With("mailing_list_email", mailingListEmail).DebugContext(ctx, "mapped committee mailing list email field")
 	}
 	if chatChannel, ok := v1Data["chat_channel"].(string); ok && chatChannel != "" {
@@ -494,7 +494,7 @@ func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID str
 		logger.With("join_mode", joinMode).DebugContext(ctx, "mapped committee join mode field for update")
 	}
 	if mailingListEmail, ok := v1Data["mailing_list_email"].(string); ok && mailingListEmail != "" {
-		payload.MailingListEmail = &mailingListEmail
+		payload.MailingList = &mailingListEmail
 		logger.With("mailing_list_email", mailingListEmail).DebugContext(ctx, "mapped committee mailing list email field for update")
 	}
 	if chatChannel, ok := v1Data["chat_channel"].(string); ok && chatChannel != "" {

@@ -240,7 +240,7 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 		payload.JoinMode = joinMode
 	}
 	if mailingListEmail, ok := data["mailing_list_email"].(string); ok {
-		payload.MailingListEmail = mailingListEmail
+		payload.MailingList = mailingListEmail
 	}
 	if chatChannel, ok := data["chat_channel"].(string); ok {
 		payload.ChatChannel = chatChannel
@@ -291,7 +291,7 @@ func syncCommitteeUpdateToV1(ctx context.Context, committeeUID, projectSFID, com
 		payload.JoinMode = joinMode
 	}
 	if mailingListEmail, ok := data["mailing_list_email"].(string); ok {
-		payload.MailingListEmail = mailingListEmail
+		payload.MailingList = mailingListEmail
 	}
 	if chatChannel, ok := data["chat_channel"].(string); ok {
 		payload.ChatChannel = chatChannel
