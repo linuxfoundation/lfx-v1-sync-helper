@@ -504,26 +504,32 @@ func lookupV1Org(ctx context.Context, sfid string) (*V1Organization, error) {
 
 // projectServiceCommitteeCreate is the request body for POST /v2/projects/{projectId}/committees.
 type projectServiceCommitteeCreate struct {
-	Name            string `json:"Name"`
-	Category        string `json:"Category"`
-	Description     string `json:"Description,omitempty"`
-	Website         string `json:"CommitteeWebsite,omitempty"`
-	CommitteeID     string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
-	SSOGroupEnabled *bool  `json:"SSOGroupEnabled,omitempty"`
-	PublicEnabled   *bool  `json:"PublicEnabled,omitempty"`
-	PublicName      string `json:"PublicName,omitempty"`
+	Name             string `json:"Name"`
+	Category         string `json:"Category"`
+	Description      string `json:"Description,omitempty"`
+	Website          string `json:"CommitteeWebsite,omitempty"`
+	CommitteeID      string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
+	SSOGroupEnabled  *bool  `json:"SSOGroupEnabled,omitempty"`
+	PublicEnabled    *bool  `json:"PublicEnabled,omitempty"`
+	PublicName       string `json:"PublicName,omitempty"`
+	JoinMode         string `json:"JoinMode,omitempty"`
+	MailingListEmail string `json:"MailingListEmail,omitempty"`
+	ChatChannel      string `json:"ChatChannel,omitempty"`
 }
 
 // projectServiceCommitteeUpdate is the request body for PATCH /v2/projects/{projectId}/committees/{committeeID}.
 type projectServiceCommitteeUpdate struct {
-	Name            string `json:"Name,omitempty"`
-	Category        string `json:"Category,omitempty"`
-	Description     string `json:"Description,omitempty"`
-	Website         string `json:"CommitteeWebsite,omitempty"`
-	CommitteeID     string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
-	SSOGroupEnabled *bool  `json:"SSOGroupEnabled,omitempty"`
-	PublicEnabled   *bool  `json:"PublicEnabled,omitempty"`
-	PublicName      string `json:"PublicName,omitempty"`
+	Name             string `json:"Name,omitempty"`
+	Category         string `json:"Category,omitempty"`
+	Description      string `json:"Description,omitempty"`
+	Website          string `json:"CommitteeWebsite,omitempty"`
+	CommitteeID      string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
+	SSOGroupEnabled  *bool  `json:"SSOGroupEnabled,omitempty"`
+	PublicEnabled    *bool  `json:"PublicEnabled,omitempty"`
+	PublicName       string `json:"PublicName,omitempty"`
+	JoinMode         string `json:"JoinMode,omitempty"`
+	MailingListEmail string `json:"MailingListEmail,omitempty"`
+	ChatChannel      string `json:"ChatChannel,omitempty"`
 }
 
 // projectServiceCommitteeResponse is the response from the project service for creating and updating committees.

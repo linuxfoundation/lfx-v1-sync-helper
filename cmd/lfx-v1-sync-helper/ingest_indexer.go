@@ -236,6 +236,15 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 	if website, ok := data["website"].(string); ok {
 		payload.Website = website
 	}
+	if joinMode, ok := data["join_mode"].(string); ok {
+		payload.JoinMode = joinMode
+	}
+	if mailingListEmail, ok := data["mailing_list_email"].(string); ok {
+		payload.MailingListEmail = mailingListEmail
+	}
+	if chatChannel, ok := data["chat_channel"].(string); ok {
+		payload.ChatChannel = chatChannel
+	}
 
 	log.With("payload_category", payload.Category).InfoContext(ctx, "creating committee in v1")
 
@@ -277,6 +286,15 @@ func syncCommitteeUpdateToV1(ctx context.Context, committeeUID, projectSFID, com
 	}
 	if website, ok := data["website"].(string); ok {
 		payload.Website = website
+	}
+	if joinMode, ok := data["join_mode"].(string); ok {
+		payload.JoinMode = joinMode
+	}
+	if mailingListEmail, ok := data["mailing_list_email"].(string); ok {
+		payload.MailingListEmail = mailingListEmail
+	}
+	if chatChannel, ok := data["chat_channel"].(string); ok {
+		payload.ChatChannel = chatChannel
 	}
 
 	if err := updateV1Committee(ctx, projectSFID, committeeSFID, payload); err != nil {
