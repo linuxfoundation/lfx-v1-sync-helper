@@ -157,12 +157,12 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 		// No additional v2 API processing needed here; the member service reads directly from KV.
 		logger.With("key", key).DebugContext(ctx, "salesforce_b2b record updated, stored in KV for member service")
 		return false
-	case "itx-groupsio-v2-service":
-		return handleGroupsioServiceUpdate(ctx, key, v1Data)
-	case "itx-groupsio-v2-subgroup":
-		return handleGroupsioSubgroupUpdate(ctx, key, v1Data)
-	case "itx-groupsio-v2-member":
-		return handleGroupsioMemberUpdate(ctx, key, v1Data)
+	case "itx-groupsio-v2-service",
+		"itx-groupsio-v2-subgroup",
+		"itx-groupsio-v2-member":
+		// Groups.io records are processed by lfx-v2-mailing-list-service eventing processor.
+		logger.With("key", key).DebugContext(ctx, "groupsio record updated, processed by lfx-v2-mailing-list-service")
+		return false
 	default:
 		logger.With("key", key).WarnContext(ctx, "unknown object type, ignoring")
 		return false
@@ -263,12 +263,12 @@ func handleResourceDelete(ctx context.Context, key string, v1Principal string, v
 		// No additional v2 API processing needed here; the member service handles deletions reactively.
 		logger.With("key", key).DebugContext(ctx, "salesforce_b2b record deleted, member service will handle reactively")
 		return false
-	case "itx-groupsio-v2-service":
-		return handleGroupsioServiceDelete(ctx, key, sfid)
-	case "itx-groupsio-v2-subgroup":
-		return handleGroupsioSubgroupDelete(ctx, key, sfid)
-	case "itx-groupsio-v2-member":
-		return handleGroupsioMemberDelete(ctx, key, sfid)
+	case "itx-groupsio-v2-service",
+		"itx-groupsio-v2-subgroup",
+		"itx-groupsio-v2-member":
+		// Groups.io records are processed by lfx-v2-mailing-list-service eventing processor.
+		logger.With("key", key).DebugContext(ctx, "groupsio record deleted, processed by lfx-v2-mailing-list-service")
+		return false
 	default:
 		logger.With("key", key).WarnContext(ctx, "unknown object type for deletion, ignoring")
 		return false
