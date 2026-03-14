@@ -81,8 +81,6 @@ The following table shows the supported mapping key patterns and their expected 
 
 Regarding the following sequence diagrams:
 
-- The DynamoDB source (incremental or realtime) is not currently included in the diagrams.
-- The planned bidirectional sync (LFX One changes back to v1) is included in the diagrams.
 - "Projects API" is representative of the core resources that have bidirectional sync (projects, committees). ITX-hosted resources such as Meetings are handled by wrapper services that subscribe to the NATS KV bucket instead—see the component diagram below.
 
 ### ITX wrappers component diagram
@@ -161,6 +159,8 @@ sequenceDiagram
     participant lfx_v1 as LFX v1 API
     participant postgres as Platform Database<br/>(PostgreSQL)
     participant wal-listener
+    participant dynamodb as DynamoDB
+    participant dynamo-stream as dynamodb-stream-consumer
     participant meltano as Meltano<br/>(custom NATS<br/>exporter)
     participant v1_kv as "v1" NATS KV bucket
     participant v1-sync-helper
@@ -172,6 +172,11 @@ sequenceDiagram
     wal-listener-)+v1-sync-helper: notification on "wal-listener" subject
     deactivate wal-listener
     v1-sync-helper-)-v1_kv: store record (or soft-deletion) by v1 ID
+    lfx_v1 ->> dynamodb: create/update/delete (via ITX API)
+    dynamodb-)+dynamo-stream: DynamoDB Streams event
+    dynamo-stream-)+v1-sync-helper: notification on "dynamodb_streams" subject
+    deactivate dynamo-stream
+    v1-sync-helper-)-v1_kv: store record (or soft-deletion) by v1 ID
 
     Note over lfx_v1,v1_kv: Data backfill (full sync & incremental gap-fill)
     meltano->>meltano: scheduled task invoke (weekly/monthly)
@@ -179,6 +184,8 @@ sequenceDiagram
     meltano->>meltano: load state from S3<br/>(incremental state bookmark)
     meltano->>+postgres: query records >= LAST_SYNC<br/>(full re-sync also supported)
     postgres--)-meltano: results
+    meltano->>+dynamodb: Scan tables >= LAST_MONTH<br/>(full re-scan also supported)
+    dynamodb--)-meltano: results
     loop for each record
     meltano->>+v1_kv: fetch KV item by v1 ID
     v1_kv--)-meltano: KV item, soft-deletion, or empty
@@ -306,6 +313,8 @@ sequenceDiagram
     participant lfx_v1 as LFX v1 API
     participant postgres as Platform Database<br/>(PostgreSQL)
     participant wal-listener
+    participant dynamodb as DynamoDB
+    participant dynamo-stream as dynamodb-stream-consumer
     participant meltano as Meltano<br/>(custom NATS<br/>exporter)
     participant v1_kv as "v1" NATS KV bucket
     participant v1-sync-helper
@@ -322,6 +331,11 @@ sequenceDiagram
     wal-listener-)+v1-sync-helper: notification on "wal-listener" subject
     deactivate wal-listener
     v1-sync-helper-)-v1_kv: store record (or soft-deletion) by v1 ID
+    lfx_v1 ->> dynamodb: create/update/delete (via ITX API)
+    dynamodb-)+dynamo-stream: DynamoDB Streams event
+    dynamo-stream-)+v1-sync-helper: notification on "dynamodb_streams" subject
+    deactivate dynamo-stream
+    v1-sync-helper-)-v1_kv: store record (or soft-deletion) by v1 ID
 
     Note over lfx_v1,v1_kv: Data backfill (full sync & incremental gap-fill)
     meltano->>meltano: scheduled task invoke (weekly/monthly)
@@ -329,6 +343,8 @@ sequenceDiagram
     meltano->>meltano: load state from S3<br/>(incremental state bookmark)
     meltano->>+postgres: query records >= LAST_SYNC<br/>(full re-sync also supported)
     postgres--)-meltano: results
+    meltano->>+dynamodb: Scan tables >= LAST_MONTH<br/>(full re-scan also supported)
+    dynamodb--)-meltano: results
     loop for each record
     meltano->>+v1_kv: fetch KV item by v1 ID
     v1_kv--)-meltano: KV item, soft-deletion, or empty
