@@ -74,10 +74,14 @@ github.com/lestrrat-go/jwx/v2 v2.1.6 h1:hxM1gfDILk/l5ylers6BX/Eq1m/pnxe9NBwW6lVf
 github.com/lestrrat-go/jwx/v2 v2.1.6/go.mod h1:Y722kU5r/8mV7fYDifjug0r8FK8mZdw0K0GpJw/l8pU=
 github.com/lestrrat-go/option v1.0.1 h1:oAzP2fvZGQKWkvHa1/SAcFolBEca1oN+mQ7eooNBEYU=
 github.com/lestrrat-go/option v1.0.1/go.mod h1:5ZHFbivi4xwXxhxY9XHDe2FHo6/Z7WWmtT7T5nBBp3I=
-github.com/linuxfoundation/lfx-v2-committee-service v0.2.19 h1:xMeqXvf7NLk9JlfAEpNHBpwFtvtNTnwR/bOjxY/5Fa4=
-github.com/linuxfoundation/lfx-v2-committee-service v0.2.19/go.mod h1:vhFiTH/CEDcs2kHmDofKzJclW1ZtBlfaRH0brL6lfek=
+github.com/linuxfoundation/lfx-v2-committee-service v0.2.21 h1:UVijQzkz/7VGNC8lVPqgoOG3jqHylbBrl8n7Fx8JTE8=
+github.com/linuxfoundation/lfx-v2-committee-service v0.2.21/go.mod h1:zhJDE23mzaiUv1ZACoelN8w9JoUb/Kt9TPuHxU89T9Q=
+github.com/linuxfoundation/lfx-v2-committee-service v0.2.22 h1:/zrQGAT4zrRd02BRkpJUWp4Rrx5+ihIptWMiVA1AQ4Y=
+github.com/linuxfoundation/lfx-v2-committee-service v0.2.22/go.mod h1:8Jry9qGxz9bMDKrukMK60w4CkElPJC61wm0omZU63Sk=
 github.com/linuxfoundation/lfx-v2-indexer-service v0.4.14 h1:GQpAYAjEUNJgg/r4gxGG/teWAAp0eN5+pt/eiM3uaXo=
 github.com/linuxfoundation/lfx-v2-indexer-service v0.4.14/go.mod h1:j013GdKST/hMWFhciRuzJd0sy764sNtlmO3gqmsnaCA=
+github.com/linuxfoundation/lfx-v2-indexer-service v0.4.16 h1:pOcjVN+KQo2h80je1glL0p69aekwpxmzcTE0VHDwQ/8=
+github.com/linuxfoundation/lfx-v2-indexer-service v0.4.16/go.mod h1:hLf2Hl39PsUg2qtl5os0noXxCXWHrkO26EPT+G0RhmA=
 github.com/linuxfoundation/lfx-v2-project-service v0.5.6 h1:TvSfGXuI1tZ72eVAc4MbAcn8+evtUhVyvas7W90lPNk=
 github.com/linuxfoundation/lfx-v2-project-service v0.5.6/go.mod h1:+CMLc9XBQ4uUUAAa9ioYklcdamVwGkU+DrR+tz/PqZ8=
 github.com/nats-io/nats.go v1.48.0 h1:pSFyXApG+yWU/TgbKCjmm5K4wrHu86231/w84qRVR+U=
