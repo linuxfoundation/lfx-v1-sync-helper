@@ -412,7 +412,7 @@ func mapV1DataToCommitteeCreatePayload(ctx context.Context, v1Data map[string]an
 
 	// Map governance fields (requires lfx-v2-committee-service >= v0.3.0 with PR #61 merged).
 	if joinMode, ok := v1Data["join_mode"].(string); ok && joinMode != "" {
-		payload.JoinMode = &joinMode
+		payload.JoinMode = joinMode
 		logger.With("join_mode", joinMode).DebugContext(ctx, "mapped committee join mode field")
 	}
 	if mailingListEmail, ok := v1Data["mailing_list_email"].(string); ok && mailingListEmail != "" {
@@ -489,10 +489,7 @@ func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID str
 	// UpdateCommitteeBasePayload does not support BusinessEmailRequired field.
 
 	// Map governance fields (requires lfx-v2-committee-service >= v0.3.0 with PR #61 merged).
-	if joinMode, ok := v1Data["join_mode"].(string); ok && joinMode != "" {
-		payload.JoinMode = &joinMode
-		logger.With("join_mode", joinMode).DebugContext(ctx, "mapped committee join mode field for update")
-	}
+	// Note: JoinMode is not available on UpdateCommitteeBasePayload.
 	if mailingListEmail, ok := v1Data["mailing_list_email"].(string); ok && mailingListEmail != "" {
 		payload.MailingList = &mailingListEmail
 		logger.With("mailing_list_email", mailingListEmail).DebugContext(ctx, "mapped committee mailing list email field for update")
