@@ -1,0 +1,66 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+---
+name: Publish Container Branch
+
+"on":
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish Container
+    if: ${{ github.event.pull_request.head.repo.fork == false }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+      - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5.4.0
+        with:
+          go-version-file: go.mod
+      - uses: ko-build/setup-ko@d006021bd0c28d1ce33a07e7943d48b079944c8d  # v0.9
+        with:
+          version: v0.18.0
+      - name: Prepare container tag
+        id: container_tag
+        env:
+          HEAD_REF: "${{ github.head_ref }}"
+        run: |
+          container_tag=$(echo "$HEAD_REF" | sed 's/[^_0-9a-zA-Z]/-/g' | cut -c -127)
+          echo tag="$container_tag" >> "$GITHUB_OUTPUT"
+      - name: Build lfx-v1-sync-helper for PR
+        env:
+          VERSION: ${{ steps.container_tag.outputs.tag }}
+          GIT_COMMIT: ${{ github.sha }}
+        run: |
+          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+          export BUILD_TIME
+          GIT_COMMIT=${GIT_COMMIT:0:7}
+          export GIT_COMMIT
+          ko build github.com/linuxfoundation/lfx-v1-sync-helper/cmd/lfx-v1-sync-helper \
+            -B \
+            --platform linux/amd64,linux/arm64 \
+            -t ${{ github.sha }} \
+            -t ${{ steps.container_tag.outputs.tag }} \
+            --sbom spdx
+      - name: Build dynamodb-stream-consumer for PR
+        env:
+          VERSION: ${{ steps.container_tag.outputs.tag }}
+          GIT_COMMIT: ${{ github.sha }}
+        run: |
+          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+          export BUILD_TIME
+          GIT_COMMIT=${GIT_COMMIT:0:7}
+          export GIT_COMMIT
+          ko build github.com/linuxfoundation/lfx-v1-sync-helper/cmd/dynamodb-stream-consumer \
+            -B \
+            --platform linux/amd64,linux/arm64 \
+            -t ${{ github.sha }} \
+            -t ${{ steps.container_tag.outputs.tag }} \
+            --sbom spdx
