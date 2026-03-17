@@ -410,6 +410,20 @@ func mapV1DataToCommitteeCreatePayload(ctx context.Context, v1Data map[string]an
 		logger.With("business_email_required", businessEmailRequired).DebugContext(ctx, "mapped committee business email required field")
 	}
 
+	// Map governance fields (requires lfx-v2-committee-service >= v0.3.0 with PR #61 merged).
+	if joinMode, ok := v1Data["join_mode"].(string); ok && joinMode != "" {
+		payload.JoinMode = &joinMode
+		logger.With("join_mode", joinMode).DebugContext(ctx, "mapped committee join mode field")
+	}
+	if mailingListEmail, ok := v1Data["mailing_list_email"].(string); ok && mailingListEmail != "" {
+		payload.MailingList = &mailingListEmail
+		logger.With("mailing_list_email", mailingListEmail).DebugContext(ctx, "mapped committee mailing list email field")
+	}
+	if chatChannel, ok := v1Data["chat_channel"].(string); ok && chatChannel != "" {
+		payload.ChatChannel = &chatChannel
+		logger.With("chat_channel", chatChannel).DebugContext(ctx, "mapped committee chat channel field")
+	}
+
 	return payload, nil
 }
 
@@ -473,6 +487,20 @@ func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID str
 
 	// Map business email required field - only available in create payload.
 	// UpdateCommitteeBasePayload does not support BusinessEmailRequired field.
+
+	// Map governance fields (requires lfx-v2-committee-service >= v0.3.0 with PR #61 merged).
+	if joinMode, ok := v1Data["join_mode"].(string); ok && joinMode != "" {
+		payload.JoinMode = &joinMode
+		logger.With("join_mode", joinMode).DebugContext(ctx, "mapped committee join mode field for update")
+	}
+	if mailingListEmail, ok := v1Data["mailing_list_email"].(string); ok && mailingListEmail != "" {
+		payload.MailingList = &mailingListEmail
+		logger.With("mailing_list_email", mailingListEmail).DebugContext(ctx, "mapped committee mailing list email field for update")
+	}
+	if chatChannel, ok := v1Data["chat_channel"].(string); ok && chatChannel != "" {
+		payload.ChatChannel = &chatChannel
+		logger.With("chat_channel", chatChannel).DebugContext(ctx, "mapped committee chat channel field for update")
+	}
 
 	return payload, nil
 }
