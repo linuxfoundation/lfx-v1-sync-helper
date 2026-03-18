@@ -17,6 +17,7 @@ spec:
   storage: {{ .Values.natsResources.kv_bucket_v1_objects.storage }}
   maxValueSize: {{ .Values.natsResources.kv_bucket_v1_objects.maxValueSize }}
   maxBytes: {{ .Values.natsResources.kv_bucket_v1_objects.maxBytes }}
+  replicas: {{ .Values.natsResources.kv_bucket_v1_objects.replicas }}
   compression: {{ .Values.natsResources.kv_bucket_v1_objects.compression }}
 {{- end }}
 ---
@@ -36,6 +37,7 @@ spec:
   storage: {{ .Values.natsResources.kv_bucket_v1_mappings.storage }}
   maxValueSize: {{ .Values.natsResources.kv_bucket_v1_mappings.maxValueSize }}
   maxBytes: {{ .Values.natsResources.kv_bucket_v1_mappings.maxBytes }}
+  replicas: {{ .Values.natsResources.kv_bucket_v1_mappings.replicas }}
   compression: {{ .Values.natsResources.kv_bucket_v1_mappings.compression }}
 {{- end }}
 ---
@@ -55,6 +57,7 @@ spec:
   storage: {{ .Values.natsResources.kv_bucket_dynamodb_checkpoints.storage }}
   maxValueSize: {{ .Values.natsResources.kv_bucket_dynamodb_checkpoints.maxValueSize }}
   maxBytes: {{ .Values.natsResources.kv_bucket_dynamodb_checkpoints.maxBytes }}
+  replicas: {{ .Values.natsResources.kv_bucket_dynamodb_checkpoints.replicas }}
   compression: {{ .Values.natsResources.kv_bucket_dynamodb_checkpoints.compression }}
 {{- end }}
 ---
