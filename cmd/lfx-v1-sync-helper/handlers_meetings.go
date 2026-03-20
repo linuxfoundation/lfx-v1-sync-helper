@@ -198,6 +198,14 @@ func convertMapToInputMeeting(ctx context.Context, v1Data map[string]any) (*meet
 		}
 	}
 
+	// Resolve the primary committee SFID to its v2 UID.
+	if meeting.Committee != "" {
+		committeeMappingKey := fmt.Sprintf("committee.sfid.%s", meeting.Committee)
+		if entry, err := mappingsKV.Get(ctx, committeeMappingKey); err == nil {
+			meeting.CommitteeUID = string(entry.Value())
+		}
+	}
+
 	// Set show_meeting_attendees (an attribute that does not exist in PCC)
 	meeting.ShowMeetingAttendees = shouldShowMeetingAttendees(meeting)
 
@@ -314,6 +322,7 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 
 	// Try to get committee mappings from the index first
 	var committees []string
+	meeting.Committees = []Committee{}
 	committeeMappings := make(map[string]mappingCommittee)
 	indexKey := fmt.Sprintf("v1-mappings.meeting-mappings.%s", meetingID)
 	indexEntry, err := mappingsKV.Get(ctx, indexKey)
@@ -321,20 +330,38 @@ func handleZoomMeetingUpdate(ctx context.Context, key string, v1Data map[string]
 		if err := json.Unmarshal(indexEntry.Value(), &committeeMappings); err != nil {
 			funcLogger.With(errKey, err).WarnContext(ctx, "failed to unmarshal meeting mapping index")
 		} else {
-			// Extract committee IDs from the mappings
-			for committeeID := range committeeMappings {
-				committees = append(committees, committeeID)
+			// Resolve each committee's v1 SFID to its v2 UID via the committee.sfid mapping.
+			for _, cm := range committeeMappings {
+				committeeMappingKey := fmt.Sprintf("committee.sfid.%s", cm.CommitteeID)
+				if entry, err := mappingsKV.Get(ctx, committeeMappingKey); err == nil {
+					committeeUID := string(entry.Value())
+					committees = append(committees, committeeUID)
+					meeting.Committees = append(meeting.Committees, Committee{
+						UID:                   committeeUID,
+						AllowedVotingStatuses: cm.CommitteeFilters,
+					})
+				} else {
+					funcLogger.With("committee_sfid", cm.CommitteeID).WarnContext(ctx, "committee SFID not found in mappings, skipping")
+				}
 			}
 		}
 	}
 
-	// Fallback: Extract committees from v1Data if no mappings found
+	// Fallback: Extract committees from v1Data if no mappings found.
+	// committee["uid"] in v1Data is a v1 SFID — resolve it to the v2 UID.
 	if len(committees) == 0 {
 		if committeesData, ok := v1Data["committees"].([]any); ok {
 			for _, c := range committeesData {
 				if committee, ok := c.(map[string]any); ok {
-					if committeeUID, ok := committee["uid"].(string); ok && committeeUID != "" {
-						committees = append(committees, committeeUID)
+					if committeeSFID, ok := committee["uid"].(string); ok && committeeSFID != "" {
+						committeeMappingKey := fmt.Sprintf("committee.sfid.%s", committeeSFID)
+						if entry, err := mappingsKV.Get(ctx, committeeMappingKey); err == nil {
+							committeeUID := string(entry.Value())
+							committees = append(committees, committeeUID)
+							meeting.Committees = append(meeting.Committees, Committee{UID: committeeUID})
+						} else {
+							funcLogger.With("committee_sfid", committeeSFID).WarnContext(ctx, "committee SFID not found in mappings (fallback), skipping")
+						}
 					}
 				}
 			}
@@ -635,15 +662,21 @@ func handleZoomMeetingMappingUpdate(ctx context.Context, key string, v1Data map[
 		funcLogger.With(errKey, err).WarnContext(ctx, "failed to release meeting mapping lock")
 	}
 
-	// Build the committee list from the now-complete index.
+	// Build the committee list from the now-complete index, resolving each v1 SFID to its v2 UID.
 	committees := []string{}
 	meeting.Committees = []Committee{}
 	for _, committee := range committeeMappings {
-		committees = append(committees, committee.CommitteeID)
-		meeting.Committees = append(meeting.Committees, Committee{
-			UID:                   committee.CommitteeID,
-			AllowedVotingStatuses: committee.CommitteeFilters,
-		})
+		committeeMappingKey := fmt.Sprintf("committee.sfid.%s", committee.CommitteeID)
+		if entry, err := mappingsKV.Get(ctx, committeeMappingKey); err == nil {
+			committeeUID := string(entry.Value())
+			committees = append(committees, committeeUID)
+			meeting.Committees = append(meeting.Committees, Committee{
+				UID:                   committeeUID,
+				AllowedVotingStatuses: committee.CommitteeFilters,
+			})
+		} else {
+			funcLogger.With("committee_sfid", committee.CommitteeID).WarnContext(ctx, "committee SFID not found in mappings, skipping")
+		}
 	}
 
 	tags := getMeetingTags(meeting)
@@ -746,11 +779,17 @@ func handleZoomMeetingMappingDelete(ctx context.Context, key string, mappingID s
 	committees := []string{}
 	meeting.Committees = []Committee{}
 	for _, committee := range committeeMappings {
-		committees = append(committees, committee.CommitteeID)
-		meeting.Committees = append(meeting.Committees, Committee{
-			UID:                   committee.CommitteeID,
-			AllowedVotingStatuses: committee.CommitteeFilters,
-		})
+		committeeMappingKey := fmt.Sprintf("committee.sfid.%s", committee.CommitteeID)
+		if entry, err := mappingsKV.Get(ctx, committeeMappingKey); err == nil {
+			committeeUID := string(entry.Value())
+			committees = append(committees, committeeUID)
+			meeting.Committees = append(meeting.Committees, Committee{
+				UID:                   committeeUID,
+				AllowedVotingStatuses: committee.CommitteeFilters,
+			})
+		} else {
+			funcLogger.With("committee_sfid", committee.CommitteeID).WarnContext(ctx, "committee SFID not found in mappings, skipping")
+		}
 	}
 
 	tags := getMeetingTags(meeting)
@@ -1254,6 +1293,7 @@ func handleZoomPastMeetingUpdate(ctx context.Context, key string, v1Data map[str
 
 	// Try to get committee mappings from the index first
 	var committees []string
+	pastMeeting.Committees = []Committee{}
 	committeeMappings := make(map[string]mappingCommittee)
 	indexKey := fmt.Sprintf("v1-mappings.past-meeting-mappings.%s", uid)
 	indexEntry, err := mappingsKV.Get(ctx, indexKey)
@@ -1261,20 +1301,38 @@ func handleZoomPastMeetingUpdate(ctx context.Context, key string, v1Data map[str
 		if err := json.Unmarshal(indexEntry.Value(), &committeeMappings); err != nil {
 			funcLogger.With(errKey, err).WarnContext(ctx, "failed to unmarshal past meeting mapping index")
 		} else {
-			// Extract committee IDs from the mappings
-			for committeeID := range committeeMappings {
-				committees = append(committees, committeeID)
+			// Resolve each committee's v1 SFID to its v2 UID via the committee.sfid mapping.
+			for _, cm := range committeeMappings {
+				committeeMappingKey := fmt.Sprintf("committee.sfid.%s", cm.CommitteeID)
+				if entry, err := mappingsKV.Get(ctx, committeeMappingKey); err == nil {
+					committeeUID := string(entry.Value())
+					committees = append(committees, committeeUID)
+					pastMeeting.Committees = append(pastMeeting.Committees, Committee{
+						UID:                   committeeUID,
+						AllowedVotingStatuses: cm.CommitteeFilters,
+					})
+				} else {
+					funcLogger.With("committee_sfid", cm.CommitteeID).WarnContext(ctx, "committee SFID not found in mappings, skipping")
+				}
 			}
 		}
 	}
 
-	// Fallback: Extract committees from v1Data if no mappings found
+	// Fallback: Extract committees from v1Data if no mappings found.
+	// committee["uid"] in v1Data is a v1 SFID — resolve it to the v2 UID.
 	if len(committees) == 0 {
 		if committeesData, ok := v1Data["committees"].([]any); ok {
 			for _, c := range committeesData {
 				if committee, ok := c.(map[string]any); ok {
-					if committeeUID, ok := committee["uid"].(string); ok && committeeUID != "" {
-						committees = append(committees, committeeUID)
+					if committeeSFID, ok := committee["uid"].(string); ok && committeeSFID != "" {
+						committeeMappingKey := fmt.Sprintf("committee.sfid.%s", committeeSFID)
+						if entry, err := mappingsKV.Get(ctx, committeeMappingKey); err == nil {
+							committeeUID := string(entry.Value())
+							committees = append(committees, committeeUID)
+							pastMeeting.Committees = append(pastMeeting.Committees, Committee{UID: committeeUID})
+						} else {
+							funcLogger.With("committee_sfid", committeeSFID).WarnContext(ctx, "committee SFID not found in mappings (fallback), skipping")
+						}
 					}
 				}
 			}
@@ -1451,15 +1509,21 @@ func handleZoomPastMeetingMappingUpdate(ctx context.Context, key string, v1Data 
 		funcLogger.With(errKey, err).WarnContext(ctx, "failed to release past meeting mapping lock")
 	}
 
-	// Build the committee list from the now-complete index and populate the past meeting struct.
+	// Build the committee list from the now-complete index, resolving each v1 SFID to its v2 UID.
 	committees := []string{}
 	pastMeeting.Committees = []Committee{}
 	for _, committee := range committeeMappings {
-		committees = append(committees, committee.CommitteeID)
-		pastMeeting.Committees = append(pastMeeting.Committees, Committee{
-			UID:                   committee.CommitteeID,
-			AllowedVotingStatuses: committee.CommitteeFilters,
-		})
+		committeeMappingKey := fmt.Sprintf("committee.sfid.%s", committee.CommitteeID)
+		if entry, err := mappingsKV.Get(ctx, committeeMappingKey); err == nil {
+			committeeUID := string(entry.Value())
+			committees = append(committees, committeeUID)
+			pastMeeting.Committees = append(pastMeeting.Committees, Committee{
+				UID:                   committeeUID,
+				AllowedVotingStatuses: committee.CommitteeFilters,
+			})
+		} else {
+			funcLogger.With("committee_sfid", committee.CommitteeID).WarnContext(ctx, "committee SFID not found in mappings, skipping")
+		}
 	}
 
 	tags := getPastMeetingTags(pastMeeting)
@@ -1562,11 +1626,17 @@ func handleZoomPastMeetingMappingDelete(ctx context.Context, key string, mapping
 	committees := []string{}
 	pastMeeting.Committees = []Committee{}
 	for _, committee := range committeeMappings {
-		committees = append(committees, committee.CommitteeID)
-		pastMeeting.Committees = append(pastMeeting.Committees, Committee{
-			UID:                   committee.CommitteeID,
-			AllowedVotingStatuses: committee.CommitteeFilters,
-		})
+		committeeMappingKey := fmt.Sprintf("committee.sfid.%s", committee.CommitteeID)
+		if entry, err := mappingsKV.Get(ctx, committeeMappingKey); err == nil {
+			committeeUID := string(entry.Value())
+			committees = append(committees, committeeUID)
+			pastMeeting.Committees = append(pastMeeting.Committees, Committee{
+				UID:                   committeeUID,
+				AllowedVotingStatuses: committee.CommitteeFilters,
+			})
+		} else {
+			funcLogger.With("committee_sfid", committee.CommitteeID).WarnContext(ctx, "committee SFID not found in mappings, skipping")
+		}
 	}
 
 	tags := getPastMeetingTags(pastMeeting)
