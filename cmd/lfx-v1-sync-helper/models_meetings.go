@@ -343,6 +343,9 @@ type meetingInput struct {
 	// It is a Global Secondary Index on the meeting table.
 	Committee string `json:"committee"`
 
+	// CommitteeUID is the v2 UID of the committee.
+	CommitteeUID string `json:"committee_uid,omitempty"`
+
 	// CommitteeFilters is the list of filters associated with the committee
 	CommitteeFilters []string `json:"committee_filters"`
 
@@ -548,6 +551,7 @@ func (m *meetingInput) UnmarshalJSON(data []byte) error {
 		ProjectSFID                               string                  `json:"project_sfid"`
 		ProjectUID                                string                  `json:"project_uid"`
 		Committee                                 string                  `json:"committee"`
+		CommitteeUID                              string                  `json:"committee_uid,omitempty"`
 		CommitteeFilters                          []string                `json:"committee_filters"`
 		Committees                                []Committee             `json:"committees,omitempty"`
 		User                                      string                  `json:"user_id"`
@@ -747,6 +751,7 @@ func (m *meetingInput) UnmarshalJSON(data []byte) error {
 	m.ProjectSFID = tmp.ProjectSFID
 	m.ProjectUID = tmp.ProjectUID
 	m.Committee = tmp.Committee
+	m.CommitteeUID = tmp.CommitteeUID
 	m.CommitteeFilters = tmp.CommitteeFilters
 	m.Committees = tmp.Committees
 	m.User = tmp.User

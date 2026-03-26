@@ -26,13 +26,21 @@ Please see each component for further setup instructions.
 This repository contains three main components:
 
 ### [Meltano](./meltano/README.md)
+
 Data extraction and loading pipeline that extracts data from LFX v1 sources (DynamoDB for meetings, PostgreSQL for projects/committees) and loads it into NATS KV stores for processing by the v2 platform.
 
 ### [v1-sync-helper](./cmd/lfx-v1-sync-helper/README.md)
+
 Go service that monitors NATS KV stores for replicated v1 data and synchronizes it with the LFX v2 platform APIs, handling data transformation and conflict resolution.
 
 ### [Helm charts](./charts/lfx-v1-sync-helper/README.md)
+
 Kubernetes deployment manifests for the custom app service and WAL listener component, providing scalable deployment options for production environments.
+
+## Research & guides
+
+- [Adding a new DynamoDB table](./research/adding-dynamodb-table.md) — step-by-step checklist for onboarding a new DynamoDB table into the Meltano pipeline and stream consumer, with a worked example.
+- [Meetings v1 vs v2](./research/meetings-v1-vs-v2.md) — comparison of the v1 and v2 meetings data models.
 
 ## NATS API
 
@@ -49,12 +57,14 @@ The v1-sync-helper service provides a NATS request/reply function for querying v
 Send a NATS request to `lfx.lookup_v1_mapping` with the mapping key as the payload. The service will respond with the corresponding mapping value or an error.
 
 **Request Format:**
+
 ```
 Subject: lfx.lookup_v1_mapping
 Payload: <mapping_key>
 ```
 
 **Response Format:**
+
 - **Success**: The mapped value as a string
 - **Not Found**: Empty string (`""`)
 - **Error**: String prefixed with `"error: "` (e.g., `"error: connection timeout"`)

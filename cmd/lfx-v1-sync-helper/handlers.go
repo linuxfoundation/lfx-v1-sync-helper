@@ -103,16 +103,14 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 	case "platform-community__c":
 		handleCommitteeMemberUpdate(ctx, key, v1Data)
 		return false
-	case "itx-poll":
-		handleVoteUpdate(ctx, key, v1Data)
+	case "itx-poll", "itx-poll-vote":
+		// Voting records are handled by lfx-v2-voting-service.
+		logger.With("key", key).DebugContext(ctx, "voting record, handled by lfx-v2-voting-service")
 		return false
-	case "itx-poll-vote":
-		return handleVoteResponseUpdate(ctx, key, v1Data)
-	case "itx-surveys":
-		handleSurveyUpdate(ctx, key, v1Data)
+	case "itx-surveys", "itx-survey-responses", "surveymonkey-surveys":
+		// Survey records are handled by lfx-v2-survey-service.
+		logger.With("key", key).DebugContext(ctx, "survey record, handled by lfx-v2-survey-service")
 		return false
-	case "itx-survey-responses":
-		return handleSurveyResponseUpdate(ctx, key, v1Data)
 	case "itx-zoom-meetings-v2":
 		handleZoomMeetingUpdate(ctx, key, v1Data)
 		return false
@@ -252,6 +250,14 @@ func handleResourceDelete(ctx context.Context, key string, v1Principal string, v
 		return handleMeetingAttachmentDelete(ctx, key, sfid)
 	case "itx-zoom-past-meetings-attachments":
 		return handlePastMeetingAttachmentDelete(ctx, key, sfid)
+	case "itx-poll", "itx-poll-vote":
+		// Voting records are handled by lfx-v2-voting-service.
+		logger.With("key", key).DebugContext(ctx, "voting record deleted, handled by lfx-v2-voting-service")
+		return false
+	case "itx-surveys", "itx-survey-responses", "surveymonkey-surveys":
+		// Survey records are handled by lfx-v2-survey-service.
+		logger.With("key", key).DebugContext(ctx, "survey record deleted, handled by lfx-v2-survey-service")
+		return false
 	case "salesforce_b2b-Account",
 		"salesforce_b2b-Asset",
 		"salesforce_b2b-Product2",

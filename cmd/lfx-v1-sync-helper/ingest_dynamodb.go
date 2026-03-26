@@ -268,16 +268,23 @@ func dynamodbKVKey(tableName string, keys map[string]interface{}) string {
 // shouldDynamoDBUpdate returns true when the incoming new image should overwrite
 // the existing KV entry. It compares modified_at timestamps when both are present,
 // falling back to last_modified_at for tables that use that field instead (e.g.
-// Groups.io tables). If either timestamp is missing or unparseable the write
+// Groups.io tables), then date_modified for tables that use that field instead (e.g.
+// surveymonkey-surveys). If either timestamp is missing or unparseable the write
 // proceeds (stream events are treated as authoritative).
 func shouldDynamoDBUpdate(ctx context.Context, newData, existingData map[string]interface{}, key string) bool {
 	newModifiedAt := getTimestampString(newData, "modified_at")
 	if newModifiedAt == "" {
 		newModifiedAt = getTimestampString(newData, "last_modified_at")
 	}
+	if newModifiedAt == "" {
+		newModifiedAt = getTimestampString(newData, "date_modified")
+	}
 	existingModifiedAt := getTimestampString(existingData, "modified_at")
 	if existingModifiedAt == "" {
 		existingModifiedAt = getTimestampString(existingData, "last_modified_at")
+	}
+	if existingModifiedAt == "" {
+		existingModifiedAt = getTimestampString(existingData, "date_modified")
 	}
 
 	if newModifiedAt == "" || existingModifiedAt == "" {

@@ -236,6 +236,15 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 	if website, ok := data["website"].(string); ok {
 		payload.Website = website
 	}
+	if joinMode, ok := data["join_mode"].(string); ok {
+		payload.JoinMode = joinMode
+	}
+	if mailingListEmail, ok := data["mailing_list_email"].(string); ok {
+		payload.MailingList = mailingListEmail
+	}
+	if chatChannel, ok := data["chat_channel"].(string); ok {
+		payload.ChatChannel = chatChannel
+	}
 
 	log.With("payload_category", payload.Category).InfoContext(ctx, "creating committee in v1")
 
@@ -277,6 +286,15 @@ func syncCommitteeUpdateToV1(ctx context.Context, committeeUID, projectSFID, com
 	}
 	if website, ok := data["website"].(string); ok {
 		payload.Website = website
+	}
+	if joinMode, ok := data["join_mode"].(string); ok {
+		payload.JoinMode = joinMode
+	}
+	if mailingListEmail, ok := data["mailing_list_email"].(string); ok {
+		payload.MailingList = mailingListEmail
+	}
+	if chatChannel, ok := data["chat_channel"].(string); ok {
+		payload.ChatChannel = chatChannel
 	}
 
 	if err := updateV1Committee(ctx, projectSFID, committeeSFID, payload); err != nil {
@@ -359,10 +377,10 @@ func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID,
 			payload.VotingEndDate = ved
 		}
 	}
-	if org, ok := data["organization"].(map[string]any); ok {
-		if orgID, ok := org["id"].(string); ok {
-			payload.OrganizationID = orgID
-		}
+	if orgID, err := resolveOrgIDFromEventData(ctx, data); err != nil {
+		log.With(errKey, err).WarnContext(ctx, "failed to resolve organization ID, proceeding without org")
+	} else if orgID != "" {
+		payload.OrganizationID = orgID
 	}
 
 	result, err := createV1CommitteeMember(ctx, projectSFID, committeeSFID, payload)
@@ -424,10 +442,10 @@ func syncCommitteeMemberUpdateToV1(ctx context.Context, memberUID, projectSFID, 
 			payload.VotingEndDate = ved
 		}
 	}
-	if org, ok := data["organization"].(map[string]any); ok {
-		if orgID, ok := org["id"].(string); ok {
-			payload.OrganizationID = orgID
-		}
+	if orgID, err := resolveOrgIDFromEventData(ctx, data); err != nil {
+		log.With(errKey, err).WarnContext(ctx, "failed to resolve organization ID, proceeding without org")
+	} else if orgID != "" {
+		payload.OrganizationID = orgID
 	}
 
 	if err := updateV1CommitteeMember(ctx, projectSFID, committeeSFID, memberSFID, payload); err != nil {
@@ -455,6 +473,25 @@ func syncCommitteeMemberDeleteToV1(ctx context.Context, memberUID, projectSFID, 
 	}
 
 	log.InfoContext(ctx, "successfully deleted committee member in v1 from indexer event")
+}
+
+// resolveOrgIDFromEventData extracts and resolves an organization SFID from committee member event data.
+// Returns empty string (no error) if no organization data is present or fields are all empty.
+func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string, error) {
+	org, ok := data["organization"].(map[string]any)
+	if !ok {
+		return "", nil
+	}
+	orgID, _ := org["id"].(string)
+	orgName, _ := org["name"].(string)
+	orgWebsite, _ := org["website"].(string)
+	if orgID != "" {
+		return orgID, nil
+	}
+	if orgName == "" && orgWebsite == "" {
+		return "", nil
+	}
+	return resolveV1OrgID(ctx, orgName, orgWebsite)
 }
 
 // splitTwoParts splits an "a:b" string into its two parts.

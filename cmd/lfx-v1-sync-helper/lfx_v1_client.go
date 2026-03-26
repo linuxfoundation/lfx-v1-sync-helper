@@ -74,6 +74,17 @@ type V1OrganizationResponse struct {
 	Domain string `json:"Domains"`
 }
 
+// V1OrganizationListResponse represents the list response from GET /v1/orgs/search
+type V1OrganizationListResponse struct {
+	Data []V1OrganizationResponse `json:"Data"`
+}
+
+// V1OrganizationCreateRequest is the request body for POST /v1/orgs
+type V1OrganizationCreateRequest struct {
+	Name    string `json:"Name"`
+	Website string `json:"Website"`
+}
+
 // ClientCredentialsTokenSource implements oauth2.TokenSource for Auth0 private key JWT
 type ClientCredentialsTokenSource struct {
 	ctx        context.Context
@@ -313,6 +324,133 @@ func getV1OrganizationFromOrgSvc(ctx context.Context, sfid string) (*V1Organizat
 	return org, nil
 }
 
+// searchV1OrgsByNameAndWebsite searches for organizations in the v1 Organization Service by name and/or website.
+// Returns the first matching organization, or nil if none found.
+func searchV1OrgsByNameAndWebsite(ctx context.Context, name, website string) (*V1Organization, error) {
+	baseURL := fmt.Sprintf("%sorganization-service/v1/orgs/search", cfg.LFXAPIGateway.String())
+	params := url.Values{}
+	if name != "" {
+		params.Set("name", name)
+	}
+	if website != "" {
+		params.Add("website-array", website)
+	}
+	fullURL := baseURL + "?" + params.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create org search request: %w", err)
+	}
+
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send org search request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read org search response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("org service returned status %d searching by name=%q website=%q: %s", resp.StatusCode, name, website, string(body))
+	}
+
+	var listResp V1OrganizationListResponse
+	if err := json.Unmarshal(body, &listResp); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal org search response: %w", err)
+	}
+
+	if len(listResp.Data) == 0 {
+		return nil, nil
+	}
+
+	first := listResp.Data[0]
+	return &V1Organization{
+		ID:          first.ID,
+		Name:        first.Name,
+		Domain:      first.Domain,
+		LastFetched: time.Now().UTC(),
+	}, nil
+}
+
+// createV1OrgInOrgSvc creates a new organization in the v1 Organization Service.
+func createV1OrgInOrgSvc(ctx context.Context, name, website string) (*V1Organization, error) {
+	apiURL := fmt.Sprintf("%sorganization-service/v1/orgs", cfg.LFXAPIGateway.String())
+
+	reqBody, err := json.Marshal(V1OrganizationCreateRequest{Name: name, Website: website})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal org create request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create org create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send org create request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read org create response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("org service returned status %d creating org name=%q website=%q: %s", resp.StatusCode, name, website, string(body))
+	}
+
+	var orgResp V1OrganizationResponse
+	if err := json.Unmarshal(body, &orgResp); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal org create response: %w", err)
+	}
+
+	return &V1Organization{
+		ID:          orgResp.ID,
+		Name:        orgResp.Name,
+		Domain:      orgResp.Domain,
+		LastFetched: time.Now().UTC(),
+	}, nil
+}
+
+// resolveV1OrgID resolves a v1 Organization SFID from name and/or website.
+// It searches first; if not found and both name and website are provided, it creates a new org.
+func resolveV1OrgID(ctx context.Context, name, website string) (string, error) {
+	if name == "" && website == "" {
+		return "", fmt.Errorf("cannot resolve org: both name and website are empty")
+	}
+
+	org, err := searchV1OrgsByNameAndWebsite(ctx, name, website)
+	if err != nil {
+		return "", fmt.Errorf("org search failed: %w", err)
+	}
+	if org != nil {
+		return org.ID, nil
+	}
+
+	if name == "" || website == "" {
+		return "", fmt.Errorf("org not found and cannot create: missing %s", func() string {
+			if name == "" && website == "" {
+				return "name and website"
+			} else if name == "" {
+				return "name"
+			}
+			return "website"
+		}())
+	}
+
+	created, err := createV1OrgInOrgSvc(ctx, name, website)
+	if err != nil {
+		return "", fmt.Errorf("org create failed: %w", err)
+	}
+	return created.ID, nil
+}
+
 // getCachedV1Org retrieves an organization from the mappings KV cache
 func getCachedV1Org(ctx context.Context, sfid string) (*V1Organization, error) {
 	cacheKey := orgCacheKeyPrefix + sfid
@@ -504,26 +642,32 @@ func lookupV1Org(ctx context.Context, sfid string) (*V1Organization, error) {
 
 // projectServiceCommitteeCreate is the request body for POST /v2/projects/{projectId}/committees.
 type projectServiceCommitteeCreate struct {
-	Name            string `json:"Name"`
-	Category        string `json:"Category"`
-	Description     string `json:"Description,omitempty"`
-	Website         string `json:"CommitteeWebsite,omitempty"`
-	CommitteeID     string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
-	SSOGroupEnabled *bool  `json:"SSOGroupEnabled,omitempty"`
-	PublicEnabled   *bool  `json:"PublicEnabled,omitempty"`
-	PublicName      string `json:"PublicName,omitempty"`
+	Name             string `json:"Name"`
+	Category         string `json:"Category"`
+	Description      string `json:"Description,omitempty"`
+	Website          string `json:"CommitteeWebsite,omitempty"`
+	CommitteeID      string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
+	SSOGroupEnabled  *bool  `json:"SSOGroupEnabled,omitempty"`
+	PublicEnabled    *bool  `json:"PublicEnabled,omitempty"`
+	PublicName       string `json:"PublicName,omitempty"`
+	JoinMode         string `json:"JoinMode,omitempty"`
+	MailingList string `json:"MailingList,omitempty"`
+	ChatChannel      string `json:"ChatChannel,omitempty"`
 }
 
 // projectServiceCommitteeUpdate is the request body for PATCH /v2/projects/{projectId}/committees/{committeeID}.
 type projectServiceCommitteeUpdate struct {
-	Name            string `json:"Name,omitempty"`
-	Category        string `json:"Category,omitempty"`
-	Description     string `json:"Description,omitempty"`
-	Website         string `json:"CommitteeWebsite,omitempty"`
-	CommitteeID     string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
-	SSOGroupEnabled *bool  `json:"SSOGroupEnabled,omitempty"`
-	PublicEnabled   *bool  `json:"PublicEnabled,omitempty"`
-	PublicName      string `json:"PublicName,omitempty"`
+	Name             string `json:"Name,omitempty"`
+	Category         string `json:"Category,omitempty"`
+	Description      string `json:"Description,omitempty"`
+	Website          string `json:"CommitteeWebsite,omitempty"`
+	CommitteeID      string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
+	SSOGroupEnabled  *bool  `json:"SSOGroupEnabled,omitempty"`
+	PublicEnabled    *bool  `json:"PublicEnabled,omitempty"`
+	PublicName       string `json:"PublicName,omitempty"`
+	JoinMode         string `json:"JoinMode,omitempty"`
+	MailingList string `json:"MailingList,omitempty"`
+	ChatChannel      string `json:"ChatChannel,omitempty"`
 }
 
 // projectServiceCommitteeResponse is the response from the project service for creating and updating committees.
