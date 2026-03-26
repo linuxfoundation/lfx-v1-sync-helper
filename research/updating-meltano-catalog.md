@@ -23,12 +23,20 @@ kubectl get configmap tap-dynamodb-catalog -n v1-sync-helper -o yaml
 
 ## Regenerate and apply
 
-**Prerequisites:** AWS credentials for the target environment and a working Python/uv environment (see [meltano/README.md](../meltano/README.md)).
+**Prerequisites:**
+- AWS credentials for the target environment (`aws-vault` or `AWS_PROFILE`)
+- `jq` (used by the script to validate and compact the catalog JSON)
+- A working Python/uv environment (see [meltano/README.md](../meltano/README.md))
 
 With your `kubectl` context pointed at the target cluster, generate and apply the updated catalog:
 
 ```bash
+# Using aws-vault
 aws-vault exec <aws-profile> -- ./scripts/generate-catalog-configmaps.sh \
+  -e <meltano-environment> tap-dynamodb | kubectl apply -n v1-sync-helper -f -
+
+# Using AWS_PROFILE instead
+AWS_PROFILE=<aws-profile> ./scripts/generate-catalog-configmaps.sh \
   -e <meltano-environment> tap-dynamodb | kubectl apply -n v1-sync-helper -f -
 ```
 
