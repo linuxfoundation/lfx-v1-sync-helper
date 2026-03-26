@@ -103,6 +103,10 @@ Add a corresponding test case in `cmd/lfx-v1-sync-helper/ingest_dynamodb_test.go
 
 If your table already uses one of the three fields above, no change is needed here.
 
+### 6. Regenerate and apply the Meltano catalog ConfigMap
+
+Adding a new table requires refreshing the catalog ConfigMap in each cluster. See [updating-meltano-catalog.md](./updating-meltano-catalog.md) for the full process.
+
 ---
 
 ## Worked example: `surveymonkey-surveys`
