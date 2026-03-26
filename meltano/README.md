@@ -110,3 +110,7 @@ For additional PostgreSQL extractor settings, see the [tap-postgres documentatio
 - `TARGET_NATS_KV_CREDS`: Path to NATS credentials file (optional)
 - `TARGET_NATS_KV_KEY_PREFIX`: Key prefix for NATS KV operations (optional)
 - `TARGET_NATS_KV_REFRESH_MODE`: Controls how the NATS KV target handles existing entries
+
+## Adding a new DynamoDB table
+
+See [research/adding-dynamodb-table.md](../research/adding-dynamodb-table.md) for a step-by-step guide on adding a new DynamoDB table to this pipeline, including a worked example using `surveymonkey-surveys`.

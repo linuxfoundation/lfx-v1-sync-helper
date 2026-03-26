@@ -64,6 +64,7 @@ plugins:
           - itx-poll-vote
           - itx-surveys
           - itx-survey-responses
+          - surveymonkey-surveys
           - itx-zoom-meetings-mappings-v2
           - itx-zoom-meetings-v2
           - itx-zoom-past-meetings-mappings
@@ -92,11 +93,12 @@ plugins:
             # No timestamp field for this table.
             replication-key: ""
           itx-surveys:
-            # No timestamp field for this table.
-            replication-key: ""
+            replication-key: last_modified_at
           itx-survey-responses:
             # No timestamp field for this table.
             replication-key: ""
+          surveymonkey-surveys:
+            replication-key: date_modified
           itx-zoom-meetings-mappings-v2:
             # No timestamp field for this table.
             replication-key: ""
