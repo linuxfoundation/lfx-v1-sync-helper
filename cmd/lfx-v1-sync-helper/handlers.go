@@ -107,7 +107,7 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 		// Voting records are handled by lfx-v2-voting-service.
 		logger.With("key", key).DebugContext(ctx, "voting record, handled by lfx-v2-voting-service")
 		return false
-	case "itx-surveys", "itx-survey-responses":
+	case "itx-surveys", "itx-survey-responses", "surveymonkey-surveys":
 		// Survey records are handled by lfx-v2-survey-service.
 		logger.With("key", key).DebugContext(ctx, "survey record, handled by lfx-v2-survey-service")
 		return false
@@ -254,7 +254,7 @@ func handleResourceDelete(ctx context.Context, key string, v1Principal string, v
 		// Voting records are handled by lfx-v2-voting-service.
 		logger.With("key", key).DebugContext(ctx, "voting record deleted, handled by lfx-v2-voting-service")
 		return false
-	case "itx-surveys", "itx-survey-responses":
+	case "itx-surveys", "itx-survey-responses", "surveymonkey-surveys":
 		// Survey records are handled by lfx-v2-survey-service.
 		logger.With("key", key).DebugContext(ctx, "survey record deleted, handled by lfx-v2-survey-service")
 		return false
