@@ -4,7 +4,7 @@ This guide walks through every place you need to touch when adding a new DynamoD
 
 ## Overview of the pipeline
 
-```
+```text
 DynamoDB table
     │
     ├─► Meltano (tap-dynamodb)          ← batch / incremental load
@@ -90,18 +90,15 @@ The `shouldDynamoDBUpdate` function guards against a batch-load record overwriti
 2. `last_modified_at`
 3. `date_modified`
 
-If the new table uses a **different** timestamp field name, extend the fallback chain in `shouldDynamoDBUpdate`:
+If the new table uses a **different** timestamp field name, add it to `knownTimestampFields` in `ingest_dynamodb.go`:
 
 ```go
-// Example: if your table uses "updated_at"
-if newModifiedAt == "" {
-    newModifiedAt = getTimestampString(newData, "updated_at")
-}
+var knownTimestampFields = []string{"modified_at", "last_modified_at", "date_modified", "updated_at"}
 ```
 
 Add a corresponding test case in `cmd/lfx-v1-sync-helper/ingest_dynamodb_test.go`.
 
-If your table already uses one of the three fields above, no change is needed here.
+If your table already uses one of the existing fields, no change is needed here.
 
 ### 6. Regenerate and apply the Meltano catalog ConfigMap
 
@@ -114,7 +111,7 @@ Adding a new table requires refreshing the catalog ConfigMap in each cluster. Se
 Here is every change made when this table was added:
 
 | File | Change |
-|---|---|
+| --- | --- |
 | `meltano/meltano.yml` | Added `surveymonkey-surveys` to `tables:` list; added `replication-key: date_modified` override in `metadata:` |
 | `charts/lfx-v1-sync-helper/values.yaml` | Added `surveymonkey-surveys` to `DYNAMODB_TABLES` env var |
 | `manifests/dynamodb-list-tables-job.yaml` | Added `surveymonkey-surveys` to the access-check loop |
