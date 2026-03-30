@@ -265,27 +265,17 @@ func dynamodbKVKey(tableName string, keys map[string]interface{}) string {
 	return tableName + "." + strings.Join(parts, "#")
 }
 
-// shouldDynamoDBUpdate returns true when the incoming new image should overwrite
-// the existing KV entry. It compares modified_at timestamps when both are present,
-// falling back to last_modified_at for tables that use that field instead (e.g.
-// Groups.io tables), then date_modified for tables that use that field instead (e.g.
-// surveymonkey-surveys). If either timestamp is missing or unparseable the write
-// proceeds (stream events are treated as authoritative).
+// knownTimestampFields is the ordered list of timestamp field names checked when
+// comparing records. Add new field names here when onboarding tables that use a
+// different timestamp field.
+var knownTimestampFields = []string{"modified_at", "last_modified_at", "date_modified"}
+
+// shouldDynamoDBUpdate returns true when the new image should overwrite the
+// existing KV entry. If either record has no recognisable timestamp the write
+// proceeds; stream events are treated as authoritative.
 func shouldDynamoDBUpdate(ctx context.Context, newData, existingData map[string]interface{}, key string) bool {
-	newModifiedAt := getTimestampString(newData, "modified_at")
-	if newModifiedAt == "" {
-		newModifiedAt = getTimestampString(newData, "last_modified_at")
-	}
-	if newModifiedAt == "" {
-		newModifiedAt = getTimestampString(newData, "date_modified")
-	}
-	existingModifiedAt := getTimestampString(existingData, "modified_at")
-	if existingModifiedAt == "" {
-		existingModifiedAt = getTimestampString(existingData, "last_modified_at")
-	}
-	if existingModifiedAt == "" {
-		existingModifiedAt = getTimestampString(existingData, "date_modified")
-	}
+	newModifiedAt := firstTimestamp(newData, knownTimestampFields...)
+	existingModifiedAt := firstTimestamp(existingData, knownTimestampFields...)
 
 	if newModifiedAt == "" || existingModifiedAt == "" {
 		return true
@@ -301,4 +291,15 @@ func shouldDynamoDBUpdate(ctx context.Context, newData, existingData map[string]
 	}
 
 	return newTime.After(existingTime)
+}
+
+// firstTimestamp returns the first non-empty timestamp string found in data
+// for the given field names, or "" if none are present.
+func firstTimestamp(data map[string]interface{}, fields ...string) string {
+	for _, f := range fields {
+		if v := getTimestampString(data, f); v != "" {
+			return v
+		}
+	}
+	return ""
 }
