@@ -40,6 +40,7 @@ Kubernetes deployment manifests for the custom app service and WAL listener comp
 ## Research & guides
 
 - [Adding a new DynamoDB table](./research/adding-dynamodb-table.md) — step-by-step checklist for onboarding a new DynamoDB table into the Meltano pipeline and stream consumer, with a worked example.
+- [Updating the Meltano catalog ConfigMap](./research/updating-meltano-catalog.md) — how to regenerate and apply the schema cache when tables or columns change.
 - [Meetings v1 vs v2](./research/meetings-v1-vs-v2.md) — comparison of the v1 and v2 meetings data models.
 
 ## NATS API
