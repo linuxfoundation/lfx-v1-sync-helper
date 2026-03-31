@@ -329,7 +329,7 @@ func getV1OrganizationFromOrgSvc(ctx context.Context, sfid string) (*V1Organizat
 func searchV1OrgsByDomain(ctx context.Context, domain string) (*V1Organization, error) {
 	baseURL := fmt.Sprintf("%sorganization-service/v1/orgs/search", cfg.LFXAPIGateway.String())
 	params := url.Values{}
-	params.Set("domain", domain)
+	params.Set("website", domain)
 	fullURL := baseURL + "?" + params.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
@@ -349,7 +349,7 @@ func searchV1OrgsByDomain(ctx context.Context, domain string) (*V1Organization, 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("org service returned status %d searching by domain=%q: %s", resp.StatusCode, domain, string(body))
+		return nil, fmt.Errorf("org service returned status %d searching by website=%q: %s", resp.StatusCode, domain, string(body))
 	}
 
 	var listResp V1OrganizationListResponse
