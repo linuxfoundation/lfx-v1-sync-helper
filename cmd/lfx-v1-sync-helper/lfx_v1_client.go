@@ -324,17 +324,12 @@ func getV1OrganizationFromOrgSvc(ctx context.Context, sfid string) (*V1Organizat
 	return org, nil
 }
 
-// searchV1OrgsByNameAndWebsite searches for organizations in the v1 Organization Service by name and/or website.
+// searchV1OrgsByDomain searches for organizations in the v1 Organization Service by domain.
 // Returns the first matching organization, or nil if none found.
-func searchV1OrgsByNameAndWebsite(ctx context.Context, name, website string) (*V1Organization, error) {
+func searchV1OrgsByDomain(ctx context.Context, domain string) (*V1Organization, error) {
 	baseURL := fmt.Sprintf("%sorganization-service/v1/orgs/search", cfg.LFXAPIGateway.String())
 	params := url.Values{}
-	if name != "" {
-		params.Set("name", name)
-	}
-	if website != "" {
-		params.Add("website-array", website)
-	}
+	params.Set("domain", domain)
 	fullURL := baseURL + "?" + params.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
@@ -354,7 +349,7 @@ func searchV1OrgsByNameAndWebsite(ctx context.Context, name, website string) (*V
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("org service returned status %d searching by name=%q website=%q: %s", resp.StatusCode, name, website, string(body))
+		return nil, fmt.Errorf("org service returned status %d searching by domain=%q: %s", resp.StatusCode, domain, string(body))
 	}
 
 	var listResp V1OrganizationListResponse
@@ -418,33 +413,27 @@ func createV1OrgInOrgSvc(ctx context.Context, name, website string) (*V1Organiza
 	}, nil
 }
 
-// resolveV1OrgID resolves a v1 Organization SFID from name and/or website.
-// It searches first; if not found and both name and website are provided, it creates a new org.
-func resolveV1OrgID(ctx context.Context, name, website string) (string, error) {
-	if name == "" && website == "" {
-		return "", fmt.Errorf("cannot resolve org: both name and website are empty")
+// resolveV1OrgID resolves a v1 Organization SFID by searching by domain first.
+// If not found and both name and domain are provided, it creates a new org.
+// Returns empty string (no error) if the org cannot be found and there is insufficient data to create one.
+func resolveV1OrgID(ctx context.Context, name, domain string) (string, error) {
+	if domain != "" {
+		org, err := searchV1OrgsByDomain(ctx, domain)
+		if err != nil {
+			return "", fmt.Errorf("org search failed: %w", err)
+		}
+		if org != nil {
+			return org.ID, nil
+		}
 	}
 
-	org, err := searchV1OrgsByNameAndWebsite(ctx, name, website)
-	if err != nil {
-		return "", fmt.Errorf("org search failed: %w", err)
-	}
-	if org != nil {
-		return org.ID, nil
+	if name == "" || domain == "" {
+		logger.With("name", name, "domain", domain).
+			DebugContext(ctx, "insufficient data to create v1 organization, skipping org resolution")
+		return "", nil
 	}
 
-	if name == "" || website == "" {
-		return "", fmt.Errorf("org not found and cannot create: missing %s", func() string {
-			if name == "" && website == "" {
-				return "name and website"
-			} else if name == "" {
-				return "name"
-			}
-			return "website"
-		}())
-	}
-
-	created, err := createV1OrgInOrgSvc(ctx, name, website)
+	created, err := createV1OrgInOrgSvc(ctx, name, domain)
 	if err != nil {
 		return "", fmt.Errorf("org create failed: %w", err)
 	}
@@ -642,32 +631,32 @@ func lookupV1Org(ctx context.Context, sfid string) (*V1Organization, error) {
 
 // projectServiceCommitteeCreate is the request body for POST /v2/projects/{projectId}/committees.
 type projectServiceCommitteeCreate struct {
-	Name             string `json:"Name"`
-	Category         string `json:"Category"`
-	Description      string `json:"Description,omitempty"`
-	Website          string `json:"CommitteeWebsite,omitempty"`
-	CommitteeID      string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
-	SSOGroupEnabled  *bool  `json:"SSOGroupEnabled,omitempty"`
-	PublicEnabled    *bool  `json:"PublicEnabled,omitempty"`
-	PublicName       string `json:"PublicName,omitempty"`
-	JoinMode         string `json:"JoinMode,omitempty"`
-	MailingList string `json:"MailingList,omitempty"`
-	ChatChannel      string `json:"ChatChannel,omitempty"`
+	Name            string `json:"Name"`
+	Category        string `json:"Category"`
+	Description     string `json:"Description,omitempty"`
+	Website         string `json:"CommitteeWebsite,omitempty"`
+	CommitteeID     string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
+	SSOGroupEnabled *bool  `json:"SSOGroupEnabled,omitempty"`
+	PublicEnabled   *bool  `json:"PublicEnabled,omitempty"`
+	PublicName      string `json:"PublicName,omitempty"`
+	JoinMode        string `json:"JoinMode,omitempty"`
+	MailingList     string `json:"MailingList,omitempty"`
+	ChatChannel     string `json:"ChatChannel,omitempty"`
 }
 
 // projectServiceCommitteeUpdate is the request body for PATCH /v2/projects/{projectId}/committees/{committeeID}.
 type projectServiceCommitteeUpdate struct {
-	Name             string `json:"Name,omitempty"`
-	Category         string `json:"Category,omitempty"`
-	Description      string `json:"Description,omitempty"`
-	Website          string `json:"CommitteeWebsite,omitempty"`
-	CommitteeID      string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
-	SSOGroupEnabled  *bool  `json:"SSOGroupEnabled,omitempty"`
-	PublicEnabled    *bool  `json:"PublicEnabled,omitempty"`
-	PublicName       string `json:"PublicName,omitempty"`
-	JoinMode         string `json:"JoinMode,omitempty"`
-	MailingList string `json:"MailingList,omitempty"`
-	ChatChannel      string `json:"ChatChannel,omitempty"`
+	Name            string `json:"Name,omitempty"`
+	Category        string `json:"Category,omitempty"`
+	Description     string `json:"Description,omitempty"`
+	Website         string `json:"CommitteeWebsite,omitempty"`
+	CommitteeID     string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
+	SSOGroupEnabled *bool  `json:"SSOGroupEnabled,omitempty"`
+	PublicEnabled   *bool  `json:"PublicEnabled,omitempty"`
+	PublicName      string `json:"PublicName,omitempty"`
+	JoinMode        string `json:"JoinMode,omitempty"`
+	MailingList     string `json:"MailingList,omitempty"`
+	ChatChannel     string `json:"ChatChannel,omitempty"`
 }
 
 // projectServiceCommitteeResponse is the response from the project service for creating and updating committees.
