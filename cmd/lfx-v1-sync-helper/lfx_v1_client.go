@@ -324,12 +324,12 @@ func getV1OrganizationFromOrgSvc(ctx context.Context, sfid string) (*V1Organizat
 	return org, nil
 }
 
-// searchV1OrgsByDomain searches for organizations in the v1 Organization Service by domain.
+// searchV1OrgsByWebsite searches for organizations in the v1 Organization Service by website.
 // Returns the first matching organization, or nil if none found.
-func searchV1OrgsByDomain(ctx context.Context, domain string) (*V1Organization, error) {
+func searchV1OrgsByWebsite(ctx context.Context, website string) (*V1Organization, error) {
 	baseURL := fmt.Sprintf("%sorganization-service/v1/orgs/search", cfg.LFXAPIGateway.String())
 	params := url.Values{}
-	params.Set("website", domain)
+	params.Set("website", website)
 	fullURL := baseURL + "?" + params.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
@@ -349,7 +349,7 @@ func searchV1OrgsByDomain(ctx context.Context, domain string) (*V1Organization, 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("org service returned status %d searching by website=%q: %s", resp.StatusCode, domain, string(body))
+		return nil, fmt.Errorf("org service returned status %d searching by website=%q: %s", resp.StatusCode, website, string(body))
 	}
 
 	var listResp V1OrganizationListResponse
@@ -418,7 +418,7 @@ func createV1OrgInOrgSvc(ctx context.Context, name, website string) (*V1Organiza
 // Returns empty string (no error) if the org cannot be found and there is insufficient data to create one.
 func resolveV1OrgID(ctx context.Context, name, domain string) (string, error) {
 	if domain != "" {
-		org, err := searchV1OrgsByDomain(ctx, domain)
+		org, err := searchV1OrgsByWebsite(ctx, domain)
 		if err != nil {
 			return "", fmt.Errorf("org search failed: %w", err)
 		}
