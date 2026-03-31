@@ -413,12 +413,12 @@ func createV1OrgInOrgSvc(ctx context.Context, name, website string) (*V1Organiza
 	}, nil
 }
 
-// resolveV1OrgID resolves a v1 Organization SFID by searching by domain first.
-// If not found and both name and domain are provided, it creates a new org.
+// resolveV1OrgID resolves a v1 Organization SFID by searching by website first.
+// If not found and both name and website are provided, it creates a new org.
 // Returns empty string (no error) if the org cannot be found and there is insufficient data to create one.
-func resolveV1OrgID(ctx context.Context, name, domain string) (string, error) {
-	if domain != "" {
-		org, err := searchV1OrgsByWebsite(ctx, domain)
+func resolveV1OrgID(ctx context.Context, name, website string) (string, error) {
+	if website != "" {
+		org, err := searchV1OrgsByWebsite(ctx, website)
 		if err != nil {
 			return "", fmt.Errorf("org search failed: %w", err)
 		}
@@ -427,13 +427,13 @@ func resolveV1OrgID(ctx context.Context, name, domain string) (string, error) {
 		}
 	}
 
-	if name == "" || domain == "" {
-		logger.With("name", name, "domain", domain).
+	if name == "" || website == "" {
+		logger.With("name", name, "website", website).
 			DebugContext(ctx, "insufficient data to create v1 organization, skipping org resolution")
 		return "", nil
 	}
 
-	created, err := createV1OrgInOrgSvc(ctx, name, domain)
+	created, err := createV1OrgInOrgSvc(ctx, name, website)
 	if err != nil {
 		return "", fmt.Errorf("org create failed: %w", err)
 	}
