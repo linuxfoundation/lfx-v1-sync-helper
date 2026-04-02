@@ -4,6 +4,9 @@
 package main
 
 import (
+	"context"
+	"log/slog"
+	"os"
 	"testing"
 )
 
@@ -63,6 +66,105 @@ func TestDynamodbKVKey(t *testing.T) {
 			got := dynamodbKVKey(tt.tableName, tt.keys)
 			if got != tt.expected {
 				t.Errorf("dynamodbKVKey(%q, %v) = %q, want %q", tt.tableName, tt.keys, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestShouldDynamoDBUpdate(t *testing.T) {
+	logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		newData     map[string]interface{}
+		existingData map[string]interface{}
+		expected    bool
+	}{
+		// modified_at cases
+		{
+			name:        "new modified_at is newer – should update",
+			newData:     map[string]interface{}{"modified_at": "2024-06-02T10:00:00Z"},
+			existingData: map[string]interface{}{"modified_at": "2024-06-01T10:00:00Z"},
+			expected:    true,
+		},
+		{
+			name:        "new modified_at is older – should not update",
+			newData:     map[string]interface{}{"modified_at": "2024-06-01T10:00:00Z"},
+			existingData: map[string]interface{}{"modified_at": "2024-06-02T10:00:00Z"},
+			expected:    false,
+		},
+		{
+			name:        "same modified_at – should not update",
+			newData:     map[string]interface{}{"modified_at": "2024-06-01T10:00:00Z"},
+			existingData: map[string]interface{}{"modified_at": "2024-06-01T10:00:00Z"},
+			expected:    false,
+		},
+		// last_modified_at cases (Groups.io tables)
+		{
+			name:        "new last_modified_at is newer – should update",
+			newData:     map[string]interface{}{"last_modified_at": "2024-06-02T10:00:00Z"},
+			existingData: map[string]interface{}{"last_modified_at": "2024-06-01T10:00:00Z"},
+			expected:    true,
+		},
+		{
+			name:        "new last_modified_at is older – should not update",
+			newData:     map[string]interface{}{"last_modified_at": "2024-06-01T10:00:00Z"},
+			existingData: map[string]interface{}{"last_modified_at": "2024-06-02T10:00:00Z"},
+			expected:    false,
+		},
+		// date_modified cases (surveymonkey-surveys)
+		{
+			name:        "new date_modified is newer – should update",
+			newData:     map[string]interface{}{"date_modified": "2024-06-02T10:00:00Z"},
+			existingData: map[string]interface{}{"date_modified": "2024-06-01T10:00:00Z"},
+			expected:    true,
+		},
+		{
+			name:        "new date_modified is older – should not update",
+			newData:     map[string]interface{}{"date_modified": "2024-06-01T10:00:00Z"},
+			existingData: map[string]interface{}{"date_modified": "2024-06-02T10:00:00Z"},
+			expected:    false,
+		},
+		{
+			name:        "same date_modified – should not update",
+			newData:     map[string]interface{}{"date_modified": "2024-06-01T10:00:00Z"},
+			existingData: map[string]interface{}{"date_modified": "2024-06-01T10:00:00Z"},
+			expected:    false,
+		},
+		// missing timestamp cases
+		{
+			name:        "no timestamp in either – should update",
+			newData:     map[string]interface{}{"title": "survey"},
+			existingData: map[string]interface{}{"title": "old survey"},
+			expected:    true,
+		},
+		{
+			name:        "no timestamp in new data – should update",
+			newData:     map[string]interface{}{"title": "survey"},
+			existingData: map[string]interface{}{"date_modified": "2024-06-01T10:00:00Z"},
+			expected:    true,
+		},
+		{
+			name:        "no timestamp in existing data – should update",
+			newData:     map[string]interface{}{"date_modified": "2024-06-01T10:00:00Z"},
+			existingData: map[string]interface{}{"title": "old survey"},
+			expected:    true,
+		},
+		// unparseable timestamp cases
+		{
+			name:        "unparseable date_modified – should update",
+			newData:     map[string]interface{}{"date_modified": "not-a-date"},
+			existingData: map[string]interface{}{"date_modified": "also-not-a-date"},
+			expected:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldDynamoDBUpdate(ctx, tt.newData, tt.existingData, "test-key")
+			if got != tt.expected {
+				t.Errorf("shouldDynamoDBUpdate() = %v, want %v", got, tt.expected)
 			}
 		})
 	}

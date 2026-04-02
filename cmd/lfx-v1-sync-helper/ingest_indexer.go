@@ -488,9 +488,6 @@ func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string
 	if orgID != "" {
 		return orgID, nil
 	}
-	if orgName == "" && orgWebsite == "" {
-		return "", nil
-	}
 	return resolveV1OrgID(ctx, orgName, orgWebsite)
 }
 

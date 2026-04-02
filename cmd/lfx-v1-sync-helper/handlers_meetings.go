@@ -1285,12 +1285,6 @@ func handleZoomPastMeetingUpdate(ctx context.Context, key string, v1Data map[str
 		indexerAction = MessageActionUpdated
 	}
 
-	tags := getPastMeetingTags(pastMeeting)
-	if err := sendIndexerMessage(ctx, IndexV1PastMeetingSubject, indexerAction, pastMeeting, tags); err != nil {
-		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send past meeting indexer message")
-		return
-	}
-
 	// Try to get committee mappings from the index first
 	var committees []string
 	pastMeeting.Committees = []Committee{}
@@ -1337,6 +1331,12 @@ func handleZoomPastMeetingUpdate(ctx context.Context, key string, v1Data map[str
 				}
 			}
 		}
+	}
+
+	tags := getPastMeetingTags(pastMeeting)
+	if err := sendIndexerMessage(ctx, IndexV1PastMeetingSubject, indexerAction, pastMeeting, tags); err != nil {
+		funcLogger.With(errKey, err).ErrorContext(ctx, "failed to send past meeting indexer message")
+		return
 	}
 
 	accessMsg := PastMeetingAccessMessage{
