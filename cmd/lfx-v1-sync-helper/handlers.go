@@ -157,7 +157,8 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 		return false
 	case "itx-groupsio-v2-service",
 		"itx-groupsio-v2-subgroup",
-		"itx-groupsio-v2-member":
+		"itx-groupsio-v2-member",
+		"itx-groupsio-v2-artifact":
 		// Groups.io records are processed by lfx-v2-mailing-list-service eventing processor.
 		logger.With("key", key).DebugContext(ctx, "groupsio record updated, processed by lfx-v2-mailing-list-service")
 		return false
@@ -271,7 +272,8 @@ func handleResourceDelete(ctx context.Context, key string, v1Principal string, v
 		return false
 	case "itx-groupsio-v2-service",
 		"itx-groupsio-v2-subgroup",
-		"itx-groupsio-v2-member":
+		"itx-groupsio-v2-member",
+		"itx-groupsio-v2-artifact":
 		// Groups.io records are processed by lfx-v2-mailing-list-service eventing processor.
 		logger.With("key", key).DebugContext(ctx, "groupsio record deleted, processed by lfx-v2-mailing-list-service")
 		return false
