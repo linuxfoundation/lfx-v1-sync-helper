@@ -205,6 +205,15 @@ app:
       # key in the secret which contains the signing certificate
       privateKeyKey: signer.pem
 
+  # resources is the resource configuration for the app container
+  resources:
+    requests:
+      memory: "32Mi"
+      cpu: "10m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+
   # auth0 is the configuration for Auth0 authentication for v1 API calls
   auth0:
     # secret contains the configuration for Auth0 authentication
