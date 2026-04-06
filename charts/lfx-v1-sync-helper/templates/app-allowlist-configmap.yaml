@@ -1,0 +1,69 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+{{- if not (lookup "v1" "ConfigMap" .Release.Namespace .Values.allowlist.configMap.name) }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.allowlist.configMap.name }}
+  namespace: {{ .Release.Namespace }}
+data:
+  # PROJECT_ALLOWLIST contains project slugs synced WITHOUT their child projects.
+  # Slugs are case-insensitive.
+  PROJECT_ALLOWLIST: |
+    - tlf
+    - lfprojects
+    - lf-charities
+    - jdf
+    - jdf-llc
+    - jdf-international
+    - lfproducts
+    # - lfenergy
+  # PROJECT_FAMILY_ALLOWLIST contains project slugs synced TOGETHER WITH all
+  # of their descendants. Slugs are case-insensitive.
+  PROJECT_FAMILY_ALLOWLIST: |
+    - test-project-group
+    - agentic-ai-foundation
+    # - tazama
+    # - chiplet
+    # - cnab
+    # - spif
+    # - uptane
+    # - isac-simo
+    # - oeew
+    # - mlf
+    # - co-packaged-optics-collaboration
+    # - clusterduck
+    # - liquid-prep
+    # - authentication
+    # - quantum-ir
+    # - claims-and-credentials
+    # - secure-data-storage
+    # - aomedia
+    # - iovisor
+    # - lfc
+    # - spdx-working-group
+    # - droneaid
+    # - open-chain-working-group
+    # - murmur-project
+    # - rend-o-matic
+    # - easycla
+    # - identifiers-and-discovery
+    # - korg
+    # - lottie-animation-community
+    # - cii
+    # - did-communication
+    # - 3mf-working-group
+    # - call-for-code
+    # - pyrrha
+    # - decentralized-identity-foundation-dif
+    # - spif-working-group
+    # - opentempus
+    # - open-yvy
+    # - openharvest
+    # - jdf3mf
+    # - racial-justice
+    # - celf
+    # - sdog
+    # - project-origin
+{{- end }}

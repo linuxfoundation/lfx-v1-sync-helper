@@ -10,12 +10,13 @@ import (
 	"os"
 	"slices"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
-// projectAllowlist contains the list of project slugs that are allowed to be
-// synced, but whose child projects are NOT, unless explicitly listed. *All
-// entries must be lowercase* (lookups downcase for case-insensitive matching).
-var projectAllowlist = []string{
+// defaultProjectAllowlist is the built-in fallback used when
+// PROJECT_ALLOWLIST is not set. Entries must be lowercase.
+var defaultProjectAllowlist = []string{
 	"tlf",
 	"lfprojects",
 	"lf-charities",
@@ -23,57 +24,13 @@ var projectAllowlist = []string{
 	"jdf-llc",
 	"jdf-international",
 	"lfproducts",
-	// "lfenergy",
 }
 
-// projectFamilyAllowlist contains the list of project slugs that are allowed
-// to be synced along with their child projects. *All entries must be
-// lowercase* (lookups downcase for case-insensitive matching).
-var projectFamilyAllowlist = []string{
+// defaultProjectFamilyAllowlist is the built-in fallback used when
+// PROJECT_FAMILY_ALLOWLIST is not set. Entries must be lowercase.
+var defaultProjectFamilyAllowlist = []string{
 	"test-project-group",
 	"agentic-ai-foundation",
-	// "tazama",
-	// "chiplet",
-	// "cnab",
-	// "spif",
-	// "uptane",
-	// "isac-simo",
-	// "oeew",
-	// "mlf",
-	// "co-packaged-optics-collaboration",
-	// "clusterduck",
-	// "liquid-prep",
-	// "authentication",
-	// "quantum-ir",
-	// "claims-and-credentials",
-	// "secure-data-storage",
-	// "aomedia",
-	// "iovisor",
-	// "lfc",
-	// "spdx-working-group",
-	// "droneaid",
-	// "open-chain-working-group",
-	// "murmur-project",
-	// "rend-o-matic",
-	// "easycla",
-	// "identifiers-and-discovery",
-	// "korg",
-	// "lottie-animation-community",
-	// "cii",
-	// "did-communication",
-	// "3mf-working-group",
-	// "call-for-code",
-	// "pyrrha",
-	// "decentralized-identity-foundation-dif",
-	// "spif-working-group",
-	// "opentempus",
-	// "open-yvy",
-	// "openharvest",
-	// "jdf3mf",
-	// "racial-justice",
-	// "celf",
-	// "sdog",
-	// "project-origin",
 }
 
 // Config holds all configuration values for the v1-sync-helper service
@@ -111,6 +68,15 @@ type Config struct {
 	// DynamoDB stream ingestion
 	DynamoDBIngestEnabled bool   // Whether to consume dynamodb_streams events (default: false)
 	DynamoDBStreamName    string // NATS stream name to consume (default: "dynamodb_streams")
+
+	// Project allowlists — file paths (PROJECT_ALLOWLIST_FILE /
+	// PROJECT_FAMILY_ALLOWLIST_FILE) take precedence over comma-separated env
+	// vars (PROJECT_ALLOWLIST / PROJECT_FAMILY_ALLOWLIST), which fall back to
+	// built-in defaults. All entries are stored lowercase.
+	ProjectAllowlistFile       string   // Path to a YAML list file; overrides PROJECT_ALLOWLIST
+	ProjectFamilyAllowlistFile string   // Path to a YAML list file; overrides PROJECT_FAMILY_ALLOWLIST
+	ProjectAllowlist           []string // Root slugs synced without their children
+	ProjectFamilyAllowlist     []string // Root slugs synced together with all descendants
 }
 
 // LoadConfig loads configuration from environment variables
@@ -136,8 +102,35 @@ func LoadConfig() (*Config, error) {
 		Debug:                 parseBooleanEnv("DEBUG"),
 		HTTPDebug:             parseBooleanEnv("HTTP_DEBUG"),
 		UseMsgpack:            parseBooleanEnv("USE_MSGPACK"),
-		DynamoDBIngestEnabled: parseBooleanEnv("DYNAMODB_INGEST_ENABLED"),
-		DynamoDBStreamName:    os.Getenv("DYNAMODB_STREAM_NAME"),
+		DynamoDBIngestEnabled:      parseBooleanEnv("DYNAMODB_INGEST_ENABLED"),
+		DynamoDBStreamName:         os.Getenv("DYNAMODB_STREAM_NAME"),
+		ProjectAllowlistFile:       os.Getenv("PROJECT_ALLOWLIST_FILE"),
+		ProjectFamilyAllowlistFile: os.Getenv("PROJECT_FAMILY_ALLOWLIST_FILE"),
+	}
+
+	// Project allowlists — file path overrides env var overrides built-in defaults.
+	var err error
+	if strings.TrimSpace(cfg.ProjectAllowlistFile) != "" {
+		cfg.ProjectAllowlist, err = readYAMLListFile(cfg.ProjectAllowlistFile)
+		if err != nil {
+			return nil, fmt.Errorf("loading PROJECT_ALLOWLIST: %w", err)
+		}
+	} else {
+		cfg.ProjectAllowlist = parseStringListEnv("PROJECT_ALLOWLIST")
+	}
+	if len(cfg.ProjectAllowlist) == 0 {
+		cfg.ProjectAllowlist = defaultProjectAllowlist
+	}
+	if cfg.ProjectFamilyAllowlistFile != "" {
+		cfg.ProjectFamilyAllowlist, err = readYAMLListFile(cfg.ProjectFamilyAllowlistFile)
+		if err != nil {
+			return nil, fmt.Errorf("loading PROJECT_FAMILY_ALLOWLIST: %w", err)
+		}
+	} else {
+		cfg.ProjectFamilyAllowlist = parseStringListEnv("PROJECT_FAMILY_ALLOWLIST")
+	}
+	if len(cfg.ProjectFamilyAllowlist) == 0 {
+		cfg.ProjectFamilyAllowlist = defaultProjectFamilyAllowlist
 	}
 
 	// Set defaults
@@ -215,6 +208,47 @@ func LoadConfig() (*Config, error) {
 	cfg.CommitteeServiceURL = committeeServiceURL
 
 	return cfg, nil
+}
+
+// parseStringListEnv parses a comma-separated environment variable into a
+// lowercase string slice, trimming whitespace from each element and dropping
+// empty entries. Returns nil when the variable is unset or empty.
+func parseStringListEnv(envVar string) []string {
+	raw := strings.TrimSpace(os.Getenv(envVar))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// readYAMLListFile reads a YAML file containing a sequence of strings and
+// returns the entries as a lowercase slice with whitespace trimmed.
+func readYAMLListFile(path string) ([]string, error) {
+	path = strings.TrimSpace(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	var items []string
+	if err := yaml.Unmarshal(data, &items); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.ToLower(strings.TrimSpace(item))
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out, nil
 }
 
 // parseBooleanEnv parses a boolean environment variable with common truthy values.

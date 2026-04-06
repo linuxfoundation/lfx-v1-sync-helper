@@ -190,7 +190,6 @@ app:
     # DYNAMODB_STREAM_NAME is the NATS stream name to consume DynamoDB events from.
     DYNAMODB_STREAM_NAME:
       value: "dynamodb_streams"
-
   # heimdall is the configuration for JWT impersonation of Heimdall-authorized
   # principals for v1 data ingest.
   heimdall:
@@ -633,3 +632,13 @@ meltano:
         key: catalog.json
         # mountPath is where to mount the catalog file in the container
         mountPath: /catalogs/tap-dynamodb
+
+# allowlist is the configuration for the project allow list ConfigMap.
+# The ConfigMap is only created if it does not already exist, so its contents
+# can be edited in-cluster without being overwritten on helm upgrade.
+allowlist:
+  configMap:
+    # name is the name of the ConfigMap
+    name: lfx-v1-sync-helper-allowlists
+    # mountPath is where the ConfigMap is mounted inside the app container
+    mountPath: /etc/lfx/allowlists

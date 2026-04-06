@@ -62,7 +62,7 @@ func isProjectAllowed(ctx context.Context, v1Data map[string]any) (bool, string)
 	slug = strings.ToLower(slug)
 
 	// Check if the project's slug is in either allowlist.
-	if slices.Contains(projectAllowlist, slug) || slices.Contains(projectFamilyAllowlist, slug) {
+	if slices.Contains(cfg.ProjectAllowlist, slug) || slices.Contains(cfg.ProjectFamilyAllowlist, slug) {
 		return true, "project slug is in allowlist"
 	}
 
@@ -99,7 +99,7 @@ func isProjectAllowed(ctx context.Context, v1Data map[string]any) (bool, string)
 
 	// Check if parent is one of the "overarching" grouping projects which does
 	// not allow all children.
-	if slices.Contains(projectAllowlist, parentSlug) {
+	if slices.Contains(cfg.ProjectAllowlist, parentSlug) {
 		// For children of overarching projects, only allow if child slug is in allowlist.
 		return false, fmt.Sprintf("child of overarching project %s but child slug not in allowlist", parentSlug)
 	}
