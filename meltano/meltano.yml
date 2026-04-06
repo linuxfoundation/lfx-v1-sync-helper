@@ -80,6 +80,7 @@ plugins:
           - itx-groupsio-v2-service
           - itx-groupsio-v2-subgroup
           - itx-groupsio-v2-member
+          - itx-groupsio-v2-artifact
         metadata:
           "*":
             # Setting the replication key allows conditional loads for
@@ -114,6 +115,8 @@ plugins:
           itx-groupsio-v2-subgroup:
             replication-key: last_modified_at
           itx-groupsio-v2-member:
+            replication-key: last_modified_at
+          itx-groupsio-v2-artifact:
             replication-key: last_modified_at
         use_aws_env_vars: true
       schema:
