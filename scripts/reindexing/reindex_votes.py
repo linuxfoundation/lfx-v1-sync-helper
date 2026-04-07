@@ -39,7 +39,9 @@ class Stats:
 
 
 def fetch_all_by_type(client: httpx.Client, object_type: str) -> List[str]:
-    """Fetch all object_ids of the given type from OpenSearch using scroll pagination."""
+    """Fetch all object_ids of the given type from OpenSearch using
+    scroll pagination.
+    """
     ids: List[str] = []
     scroll_id = None
 
