@@ -84,6 +84,10 @@ github.com/linuxfoundation/lfx-v2-indexer-service v0.4.16 h1:pOcjVN+KQo2h80je1gl
 github.com/linuxfoundation/lfx-v2-indexer-service v0.4.16/go.mod h1:hLf2Hl39PsUg2qtl5os0noXxCXWHrkO26EPT+G0RhmA=
 github.com/linuxfoundation/lfx-v2-project-service v0.5.6 h1:TvSfGXuI1tZ72eVAc4MbAcn8+evtUhVyvas7W90lPNk=
 github.com/linuxfoundation/lfx-v2-project-service v0.5.6/go.mod h1:+CMLc9XBQ4uUUAAa9ioYklcdamVwGkU+DrR+tz/PqZ8=
+github.com/linuxfoundation/lfx-v2-project-service v0.6.1-0.20260407205545-de9716158f7d h1:DbsPy3UWr3uQCOGgl7NyTdOVKZaP1IqWNYn8UNF8vzg=
+github.com/linuxfoundation/lfx-v2-project-service v0.6.1-0.20260407205545-de9716158f7d/go.mod h1:pwUWh2KKmV8Ji+wCSrlidvZC7VOn0gVCfSFv7Cyoe5o=
+github.com/linuxfoundation/lfx-v2-project-service v0.6.1 h1:Cv2a0qGFYriC3Rwjo3cXwD92kZrFRCjQzLGwi+Wq9cg=
+github.com/linuxfoundation/lfx-v2-project-service v0.6.1/go.mod h1:pwUWh2KKmV8Ji+wCSrlidvZC7VOn0gVCfSFv7Cyoe5o=
 github.com/nats-io/nats.go v1.48.0 h1:pSFyXApG+yWU/TgbKCjmm5K4wrHu86231/w84qRVR+U=
 github.com/nats-io/nats.go v1.48.0/go.mod h1:iRWIPokVIFbVijxuMQq4y9ttaBTMe0SFdlZfMDd+33g=
 github.com/nats-io/nkeys v0.4.15 h1:JACV5jRVO9V856KOapQ7x+EY8Jo3qw1vJt/9Jpwzkk4=
