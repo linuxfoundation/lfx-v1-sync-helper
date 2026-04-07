@@ -34,7 +34,8 @@ from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 
 from nats.aio.client import Client as NATS
-from opensearchpy import NotFoundError, OpenSearch
+from nats.js.errors import KeyNotFoundError
+from opensearchpy import OpenSearch
 
 
 SCROLL_SIZE = 500
@@ -176,17 +177,15 @@ class OpenSearchNATSAuditor:
         for doc in docs:
             doc_id = doc["_id"]  # OpenSearch document _id
             # Also check the `id` field in _source for the uuid
-            source_id = doc.get("_source", {}).get("object_id") or doc_id
+            source_id = doc.get("_source", {}).get("id") or doc_id
 
             # Strip to bare UUID (last segment if namespaced)
             uuid = source_id.split(":")[-1] if ":" in source_id else source_id
 
             try:
-                entry = await kv.get(uuid)
-                if entry is None:
-                    raise NotFoundError(404, "key not found", {})
+                await kv.get(uuid)
                 s.in_nats += 1
-            except Exception:
+            except KeyNotFoundError:
                 s.missing_in_nats += 1
                 s.missing_ids.append(doc_id)
 
@@ -200,6 +199,9 @@ class OpenSearchNATSAuditor:
                     except Exception as e:
                         s.errors += 1
                         print(f"  ERROR deleting {doc_id}: {e}")
+            except Exception as e:
+                s.errors += 1
+                print(f"  ERROR checking {doc_id}: {e}")
 
         return s
 

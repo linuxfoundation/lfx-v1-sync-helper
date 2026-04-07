@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import boto3
 from boto3.dynamodb.conditions import Key
 from nats.aio.client import Client as NATS
+from nats.js.errors import KeyNotFoundError
 
 
 # Table configuration
@@ -246,14 +247,14 @@ class DynamoDBNATSReindexer:
                 batch = parent_keys_list[i:i + 100]
                 keys = [{config.primary_key: pk} for pk in batch]
 
-                response = self.dynamodb.batch_get_item(
+                response = self.dynamodb.meta.client.batch_get_item(
                     RequestItems={config.name: {"Keys": keys}}
                 )
                 items.extend(response.get("Responses", {}).get(config.name, []))
 
                 # Handle unprocessed keys
                 while response.get("UnprocessedKeys"):
-                    response = self.dynamodb.batch_get_item(
+                    response = self.dynamodb.meta.client.batch_get_item(
                         RequestItems=response["UnprocessedKeys"]
                     )
                     items.extend(response.get("Responses", {}).get(config.name, []))
@@ -292,11 +293,6 @@ class DynamoDBNATSReindexer:
             assert self.kv is not None, "NATS KV not connected"
             entry = await self.kv.get(kv_key)
 
-            if entry is None:
-                print(f"  ✗ Missing: {kv_key}")
-                self.stats.add_missing(table_name, primary_key_value)
-                return False
-
             # Entry exists - trigger reindex if not in dry-run mode
             if not self.dry_run:
                 # Update with the same value to trigger reindex
@@ -306,6 +302,10 @@ class DynamoDBNATSReindexer:
 
             return True
 
+        except KeyNotFoundError:
+            print(f"  ✗ Missing: {kv_key}")
+            self.stats.add_missing(table_name, primary_key_value)
+            return False
         except Exception as e:
             print(f"  ✗ Error checking {kv_key}: {e}")
             self.stats.add_error(table_name)

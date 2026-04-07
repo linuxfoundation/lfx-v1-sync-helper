@@ -20,6 +20,7 @@ from typing import List
 
 import httpx
 from nats.aio.client import Client as NATS
+from nats.js.errors import KeyNotFoundError
 
 
 OPENSEARCH_URL = "http://localhost:9200"
@@ -38,36 +39,54 @@ class Stats:
 
 
 def fetch_all_by_type(client: httpx.Client, object_type: str) -> List[str]:
-    """Fetch all object_ids of the given type from OpenSearch using pagination."""
-    ids = []
-    offset = 0
+    """Fetch all object_ids of the given type from OpenSearch using scroll pagination."""
+    ids: List[str] = []
+    scroll_id = None
 
-    while True:
+    try:
         response = client.post(
             f"{OPENSEARCH_URL}/{INDEX}/_search",
+            params={"scroll": "1m"},
             json={
                 "query": {"term": {"object_type": object_type}},
                 "size": PAGE_SIZE,
-                "from": offset,
                 "_source": ["object_id"],
+                "sort": ["_doc"],
             },
         )
         response.raise_for_status()
         data = response.json()
 
-        hits = data["hits"]["hits"]
-        if not hits:
-            break
+        scroll_id = data.get("_scroll_id")
+        hits = data.get("hits", {}).get("hits", [])
 
-        for hit in hits:
-            oid = hit["_source"].get("object_id")
-            if oid:
-                ids.append(oid)
+        while hits:
+            for hit in hits:
+                oid = (hit.get("_source") or {}).get("object_id")
+                if oid:
+                    ids.append(oid)
 
-        total = data["hits"]["total"]["value"]
-        offset += len(hits)
-        if offset >= total:
-            break
+            if not scroll_id:
+                break
+
+            response = client.post(
+                f"{OPENSEARCH_URL}/_search/scroll",
+                json={"scroll": "1m", "scroll_id": scroll_id},
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            scroll_id = data.get("_scroll_id")
+            hits = data.get("hits", {}).get("hits", [])
+    finally:
+        if scroll_id:
+            try:
+                client.delete(
+                    f"{OPENSEARCH_URL}/_search/scroll",
+                    json={"scroll_id": [scroll_id]},
+                )
+            except Exception:
+                pass
 
     return ids
 
@@ -79,11 +98,6 @@ async def reindex_entry(kv, kv_prefix: str, item_id: str, dry_run: bool, stats: 
 
     try:
         entry = await kv.get(kv_key)
-        if entry is None:
-            print(f"  MISSING: {kv_key}")
-            stats.missing += 1
-            stats.missing_keys.append(item_id)
-            return
 
         if not dry_run:
             await kv.put(kv_key, entry.value)
@@ -92,9 +106,12 @@ async def reindex_entry(kv, kv_prefix: str, item_id: str, dry_run: bool, stats: 
         else:
             print(f"  found: {kv_key}")
 
+    except KeyNotFoundError:
+        print(f"  MISSING: {kv_key}")
+        stats.missing += 1
+        stats.missing_keys.append(item_id)
     except Exception as e:
         print(f"  ERROR {kv_key}: {e}")
-        stats.missing += 1
         stats.errors += 1
 
 

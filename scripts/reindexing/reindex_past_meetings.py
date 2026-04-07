@@ -26,6 +26,7 @@ from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 
 from nats.aio.client import Client as NATS
+from nats.js.errors import KeyNotFoundError
 from opensearchpy import OpenSearch
 
 
@@ -145,11 +146,6 @@ class PastMeetingReindexer:
         try:
             assert self.kv is not None, "NATS KV not connected"
             entry = await self.kv.get(kv_key)
-            if entry is None:
-                print(f"  MISSING: {kv_key}")
-                self.stats.missing += 1
-                self.stats.missing_keys.append(meeting_and_occurrence_id)
-                return
 
             if not self.dry_run:
                 await self.kv.put(kv_key, entry.value)
@@ -158,9 +154,12 @@ class PastMeetingReindexer:
             else:
                 print(f"  found: {kv_key}")
 
+        except KeyNotFoundError:
+            print(f"  MISSING: {kv_key}")
+            self.stats.missing += 1
+            self.stats.missing_keys.append(meeting_and_occurrence_id)
         except Exception as e:
             print(f"  ERROR {kv_key}: {e}")
-            self.stats.missing += 1
             self.stats.errors += 1
 
     async def run(self):

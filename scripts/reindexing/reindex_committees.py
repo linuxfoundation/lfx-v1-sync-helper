@@ -23,10 +23,13 @@ from typing import Dict, List
 
 import httpx
 from nats.aio.client import Client as NATS
+from nats.js.errors import KeyNotFoundError
 
 
-# API_BASE = "https://api-gw.platform.linuxfoundation.org/project-service/v2"
-API_BASE = "https://api-gw.dev.platform.linuxfoundation.org/project-service/v2"
+API_BASE = os.environ.get(
+    "API_BASE",
+    "https://api-gw.platform.linuxfoundation.org/project-service/v2",
+)
 KV_BUCKET = "v1-objects"
 COMMITTEE_KV_PREFIX = "platform-collaboration__c"
 MEMBER_KV_PREFIX = "platform-community__c"
@@ -112,11 +115,6 @@ class CommitteeReindexer:
         try:
             assert self.kv is not None, "NATS KV not connected"
             entry = await self.kv.get(kv_key)
-            if entry is None:
-                print(f"  MISSING: {kv_key}")
-                s.missing += 1
-                s.missing_keys.append(item_id)
-                return
 
             if not self.dry_run:
                 await self.kv.put(kv_key, entry.value)
@@ -125,10 +123,12 @@ class CommitteeReindexer:
             else:
                 print(f"  found: {kv_key}")
 
+        except KeyNotFoundError:
+            print(f"  MISSING: {kv_key}")
+            s.missing += 1
+            s.missing_keys.append(item_id)
         except Exception as e:
             print(f"  ERROR {kv_key}: {e}")
-            s = self._stats(kv_prefix)
-            s.missing += 1
             s.errors += 1
 
     async def run(self, project_id: str):

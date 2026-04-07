@@ -5,10 +5,10 @@
 Groups.io Service Reindexer
 
 Given a project_id, this script:
-1. Looks up the groupsio service entry in itx-v2-groupsio-service
-2. Finds all subgroups/mailing lists via itx-v2-groupsio-subgroup (parent_id_index)
+1. Looks up the groupsio service entry in itx-groupsio-v2-service
+2. Finds all subgroups/mailing lists via itx-groupsio-v2-subgroup (parent_id_index)
 3. Reindexes each subgroup entry in the v1-objects NATS KV bucket
-4. For each subgroup, finds all members via itx-v2-groupsio-member (group_id_index)
+4. For each subgroup, finds all members via itx-groupsio-v2-member (group_id_index)
 5. Reindexes each member entry in the v1-objects NATS KV bucket
 6. Prints a summary report
 """
@@ -22,6 +22,7 @@ from typing import Dict, List, Optional
 import boto3
 from boto3.dynamodb.conditions import Key
 from nats.aio.client import Client as NATS
+from nats.js.errors import KeyNotFoundError
 
 
 SERVICE_TABLE = "itx-groupsio-v2-service"
@@ -97,11 +98,6 @@ class GroupsioReindexer:
         try:
             assert self.kv is not None, "NATS KV not connected"
             entry = await self.kv.get(kv_key)
-            if entry is None:
-                print(f"  MISSING: {kv_key}")
-                s.missing += 1
-                s.missing_keys.append(item_id)
-                return
 
             if not self.dry_run:
                 await self.kv.put(kv_key, entry.value)
@@ -110,9 +106,12 @@ class GroupsioReindexer:
             else:
                 print(f"  found: {kv_key}")
 
+        except KeyNotFoundError:
+            print(f"  MISSING: {kv_key}")
+            s.missing += 1
+            s.missing_keys.append(item_id)
         except Exception as e:
             print(f"  ERROR {kv_key}: {e}")
-            s.missing += 1
             s.errors += 1
 
     async def run(self, project_id: str):
