@@ -14,25 +14,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// defaultProjectAllowlist is the built-in fallback used when
-// PROJECT_ALLOWLIST is not set. Entries must be lowercase.
-var defaultProjectAllowlist = []string{
-	"tlf",
-	"lfprojects",
-	"lf-charities",
-	"jdf",
-	"jdf-llc",
-	"jdf-international",
-	"lfproducts",
-}
-
-// defaultProjectFamilyAllowlist is the built-in fallback used when
-// PROJECT_FAMILY_ALLOWLIST is not set. Entries must be lowercase.
-var defaultProjectFamilyAllowlist = []string{
-	"test-project-group",
-	"agentic-ai-foundation",
-}
-
 // Config holds all configuration values for the v1-sync-helper service
 type Config struct {
 	// JWT/Heimdall configuration for LFX v2 services
@@ -118,9 +99,6 @@ func LoadConfig() (*Config, error) {
 	} else {
 		cfg.ProjectAllowlist = parseStringListEnv("PROJECT_ALLOWLIST")
 	}
-	if len(cfg.ProjectAllowlist) == 0 {
-		cfg.ProjectAllowlist = defaultProjectAllowlist
-	}
 	if strings.TrimSpace(cfg.ProjectFamilyAllowlistFile) != "" {
 		cfg.ProjectFamilyAllowlist, err = readYAMLListFile(cfg.ProjectFamilyAllowlistFile)
 		if err != nil {
@@ -129,10 +107,6 @@ func LoadConfig() (*Config, error) {
 	} else {
 		cfg.ProjectFamilyAllowlist = parseStringListEnv("PROJECT_FAMILY_ALLOWLIST")
 	}
-	if len(cfg.ProjectFamilyAllowlist) == 0 {
-		cfg.ProjectFamilyAllowlist = defaultProjectFamilyAllowlist
-	}
-
 	// Set defaults
 	if cfg.NATSURL == "" {
 		cfg.NATSURL = "nats://nats:4222"

@@ -60,9 +60,9 @@ spec:
                 key: {{ .Values.app.auth0.secret.privateKeyKey }}
           # Allow list file paths from ConfigMap mount
           - name: PROJECT_ALLOWLIST_FILE
-            value: {{ .Values.allowlist.configMap.mountPath }}/PROJECT_ALLOWLIST
+            value: {{ .Values.allowlist.configMap.mountPath }}/project_allowlist
           - name: PROJECT_FAMILY_ALLOWLIST_FILE
-            value: {{ .Values.allowlist.configMap.mountPath }}/PROJECT_FAMILY_ALLOWLIST
+            value: {{ .Values.allowlist.configMap.mountPath }}/project_family_allowlist
           ports:
             - containerPort: 8080
               name: web

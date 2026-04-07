@@ -71,37 +71,22 @@ func TestParseStringListEnv(t *testing.T) {
 }
 
 func TestProjectAllowlistDefault(t *testing.T) {
-	// When PROJECT_ALLOWLIST is unset, LoadConfig should use the built-in default.
-	// We can test parseStringListEnv returns nil and that defaults are applied.
+	// When PROJECT_ALLOWLIST is unset, parseStringListEnv should return nil.
 	t.Setenv("PROJECT_ALLOWLIST", "")
 
 	got := parseStringListEnv("PROJECT_ALLOWLIST")
 	if got != nil {
 		t.Errorf("expected nil for empty PROJECT_ALLOWLIST, got %v", got)
 	}
-
-	// Verify defaults contain expected slugs.
-	for _, slug := range []string{"tlf", "lfprojects", "lf-charities", "jdf"} {
-		if !slices.Contains(defaultProjectAllowlist, slug) {
-			t.Errorf("defaultProjectAllowlist missing expected slug %q", slug)
-		}
-	}
 }
 
 func TestProjectFamilyAllowlistDefault(t *testing.T) {
-	// When PROJECT_FAMILY_ALLOWLIST is unset, LoadConfig should use the built-in default.
+	// When PROJECT_FAMILY_ALLOWLIST is unset, parseStringListEnv should return nil.
 	t.Setenv("PROJECT_FAMILY_ALLOWLIST", "")
 
 	got := parseStringListEnv("PROJECT_FAMILY_ALLOWLIST")
 	if got != nil {
 		t.Errorf("expected nil for empty PROJECT_FAMILY_ALLOWLIST, got %v", got)
-	}
-
-	// Verify defaults contain expected slugs.
-	for _, slug := range []string{"test-project-group", "agentic-ai-foundation"} {
-		if !slices.Contains(defaultProjectFamilyAllowlist, slug) {
-			t.Errorf("defaultProjectFamilyAllowlist missing expected slug %q", slug)
-		}
 	}
 }
 
@@ -121,10 +106,10 @@ func TestProjectAllowlistOverride(t *testing.T) {
 		}
 	}
 
-	// Verify default slugs are not present when overridden.
-	for _, slug := range defaultProjectAllowlist {
+	// Verify non-configured slugs are not present.
+	for _, slug := range []string{"tlf", "lfprojects"} {
 		if slices.Contains(got, slug) {
-			t.Errorf("expected default slug %q to be absent when env var is overridden", slug)
+			t.Errorf("unexpected slug %q present in parsed list", slug)
 		}
 	}
 }
@@ -295,11 +280,11 @@ func TestLoadConfigAllowlistPrecedence_DefaultsWhenEnvEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
-	if !slices.Equal(cfg.ProjectAllowlist, defaultProjectAllowlist) {
-		t.Errorf("ProjectAllowlist = %v, want defaults %v", cfg.ProjectAllowlist, defaultProjectAllowlist)
+	if len(cfg.ProjectAllowlist) != 0 {
+		t.Errorf("ProjectAllowlist = %v, want empty", cfg.ProjectAllowlist)
 	}
-	if !slices.Equal(cfg.ProjectFamilyAllowlist, defaultProjectFamilyAllowlist) {
-		t.Errorf("ProjectFamilyAllowlist = %v, want defaults %v", cfg.ProjectFamilyAllowlist, defaultProjectFamilyAllowlist)
+	if len(cfg.ProjectFamilyAllowlist) != 0 {
+		t.Errorf("ProjectFamilyAllowlist = %v, want empty", cfg.ProjectFamilyAllowlist)
 	}
 }
 
