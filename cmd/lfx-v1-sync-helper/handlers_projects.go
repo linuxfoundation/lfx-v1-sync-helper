@@ -396,20 +396,7 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any)
 	}
 
 	// Map executive director from v1 Salesforce contact SFID.
-	if edSFID, ok := v1Data["executive_director__c"].(string); ok && edSFID != "" {
-		user, err := lookupV1User(ctx, edSFID)
-		if err != nil {
-			logger.With(errKey, err, "ed_sfid", edSFID).WarnContext(ctx, "failed to lookup executive director user from v1, leaving field unset")
-		} else {
-			authSub := mapUsernameToAuthSub(user.Username)
-			fullName := strings.TrimSpace(user.FirstName + " " + user.LastName)
-			payload.ExecutiveDirector = &projectservice.UserInfo{
-				Username: &authSub,
-				Name:     &fullName,
-				Email:    &user.Email,
-			}
-		}
-	}
+	payload.ExecutiveDirector = lookupExecutiveDirector(ctx, v1Data)
 
 	// Handle parent project logic.
 	parentProjectID := ""
@@ -642,22 +629,37 @@ func mapV1DataToProjectUpdateSettingsPayload(ctx context.Context, projectUID str
 	}
 
 	// Map executive director from v1 Salesforce contact SFID.
-	if edSFID, ok := v1Data["executive_director__c"].(string); ok && edSFID != "" {
-		user, err := lookupV1User(ctx, edSFID)
-		if err != nil {
-			logger.With(errKey, err, "ed_sfid", edSFID).WarnContext(ctx, "failed to lookup executive director user from v1, leaving field unset")
-		} else {
-			authSub := mapUsernameToAuthSub(user.Username)
-			fullName := strings.TrimSpace(user.FirstName + " " + user.LastName)
-			payload.ExecutiveDirector = &projectservice.UserInfo{
-				Username: &authSub,
-				Name:     &fullName,
-				Email:    &user.Email,
-			}
-		}
-	}
+	payload.ExecutiveDirector = lookupExecutiveDirector(ctx, v1Data)
 
 	return payload, nil
+}
+
+// lookupExecutiveDirector resolves the executive_director__c Salesforce contact SFID from v1 data
+// to a UserInfo. Returns nil if the field is absent, empty, or the user lookup fails.
+func lookupExecutiveDirector(ctx context.Context, v1Data map[string]any) *projectservice.UserInfo {
+	edSFID, ok := v1Data["executive_director__c"].(string)
+	edSFID = strings.TrimSpace(edSFID)
+	if !ok || edSFID == "" {
+		return nil
+	}
+
+	user, err := lookupV1User(ctx, edSFID)
+	if err != nil {
+		logger.With(errKey, err, "ed_sfid", edSFID).WarnContext(ctx, "failed to lookup executive director user from v1, leaving field unset")
+		return nil
+	}
+
+	authSub := mapUsernameToAuthSub(user.Username)
+	info := &projectservice.UserInfo{
+		Username: &authSub,
+	}
+	if fullName := strings.TrimSpace(user.FirstName + " " + user.LastName); fullName != "" {
+		info.Name = &fullName
+	}
+	if user.Email != "" {
+		info.Email = &user.Email
+	}
+	return info
 }
 
 // calculatePublicStatus determines if a project should be public based on its stage and parent's public status.
