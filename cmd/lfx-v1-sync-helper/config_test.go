@@ -230,6 +230,99 @@ func TestReadYAMLListFileMissing(t *testing.T) {
 	}
 }
 
+// setRequiredEnvs sets the minimum environment variables required for
+// LoadConfig to succeed, then restores them via t.Cleanup.
+func setRequiredEnvs(t *testing.T) {
+	t.Helper()
+	t.Setenv("HEIMDALL_PRIVATE_KEY", "test-key")
+	t.Setenv("AUTH0_TENANT", "test-tenant")
+	t.Setenv("AUTH0_CLIENT_ID", "test-client-id")
+	t.Setenv("AUTH0_PRIVATE_KEY", "test-auth0-key")
+	t.Setenv("PROJECT_SERVICE_URL", "http://project-service")
+	t.Setenv("COMMITTEE_SERVICE_URL", "http://committee-service")
+}
+
+func TestLoadConfigAllowlistPrecedence_FileOverridesEnv(t *testing.T) {
+	setRequiredEnvs(t)
+	// env var value that should be ignored
+	t.Setenv("PROJECT_ALLOWLIST", "from-env")
+	t.Setenv("PROJECT_FAMILY_ALLOWLIST", "family-from-env")
+
+	allowlistFile := writeAllowlistFile(t, "- from-file\n")
+	familyFile := writeAllowlistFile(t, "- family-from-file\n")
+	t.Setenv("PROJECT_ALLOWLIST_FILE", allowlistFile)
+	t.Setenv("PROJECT_FAMILY_ALLOWLIST_FILE", familyFile)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if !slices.Equal(cfg.ProjectAllowlist, []string{"from-file"}) {
+		t.Errorf("ProjectAllowlist = %v, want [from-file]", cfg.ProjectAllowlist)
+	}
+	if !slices.Equal(cfg.ProjectFamilyAllowlist, []string{"family-from-file"}) {
+		t.Errorf("ProjectFamilyAllowlist = %v, want [family-from-file]", cfg.ProjectFamilyAllowlist)
+	}
+}
+
+func TestLoadConfigAllowlistPrecedence_EnvOverridesDefaults(t *testing.T) {
+	setRequiredEnvs(t)
+	t.Setenv("PROJECT_ALLOWLIST_FILE", "")
+	t.Setenv("PROJECT_FAMILY_ALLOWLIST_FILE", "")
+	t.Setenv("PROJECT_ALLOWLIST", "env-slug")
+	t.Setenv("PROJECT_FAMILY_ALLOWLIST", "env-family-slug")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if !slices.Equal(cfg.ProjectAllowlist, []string{"env-slug"}) {
+		t.Errorf("ProjectAllowlist = %v, want [env-slug]", cfg.ProjectAllowlist)
+	}
+	if !slices.Equal(cfg.ProjectFamilyAllowlist, []string{"env-family-slug"}) {
+		t.Errorf("ProjectFamilyAllowlist = %v, want [env-family-slug]", cfg.ProjectFamilyAllowlist)
+	}
+}
+
+func TestLoadConfigAllowlistPrecedence_DefaultsWhenEnvEmpty(t *testing.T) {
+	setRequiredEnvs(t)
+	t.Setenv("PROJECT_ALLOWLIST_FILE", "")
+	t.Setenv("PROJECT_FAMILY_ALLOWLIST_FILE", "")
+	t.Setenv("PROJECT_ALLOWLIST", "")
+	t.Setenv("PROJECT_FAMILY_ALLOWLIST", "")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if !slices.Equal(cfg.ProjectAllowlist, defaultProjectAllowlist) {
+		t.Errorf("ProjectAllowlist = %v, want defaults %v", cfg.ProjectAllowlist, defaultProjectAllowlist)
+	}
+	if !slices.Equal(cfg.ProjectFamilyAllowlist, defaultProjectFamilyAllowlist) {
+		t.Errorf("ProjectFamilyAllowlist = %v, want defaults %v", cfg.ProjectFamilyAllowlist, defaultProjectFamilyAllowlist)
+	}
+}
+
+func TestLoadConfigAllowlistPrecedence_WhitespaceFilePathFallsBack(t *testing.T) {
+	setRequiredEnvs(t)
+	// Whitespace-only file paths should fall back to env var.
+	t.Setenv("PROJECT_ALLOWLIST_FILE", "   ")
+	t.Setenv("PROJECT_FAMILY_ALLOWLIST_FILE", "   ")
+	t.Setenv("PROJECT_ALLOWLIST", "env-slug")
+	t.Setenv("PROJECT_FAMILY_ALLOWLIST", "env-family-slug")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if !slices.Equal(cfg.ProjectAllowlist, []string{"env-slug"}) {
+		t.Errorf("ProjectAllowlist = %v, want [env-slug]", cfg.ProjectAllowlist)
+	}
+	if !slices.Equal(cfg.ProjectFamilyAllowlist, []string{"env-family-slug"}) {
+		t.Errorf("ProjectFamilyAllowlist = %v, want [env-family-slug]", cfg.ProjectFamilyAllowlist)
+	}
+}
+
 func TestProjectAllowlistCaseInsensitive(t *testing.T) {
 	// Allowlist entries should be stored lowercase regardless of input case.
 	t.Setenv("PROJECT_ALLOWLIST", "MyProject,ANOTHER-PROJECT,Mixed-Case")

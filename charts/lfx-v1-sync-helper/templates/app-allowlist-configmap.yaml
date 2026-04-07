@@ -7,6 +7,9 @@ kind: ConfigMap
 metadata:
   name: {{ .Values.allowlist.configMap.name }}
   namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Chart.Name }}
+    component: app-allowlist
 data:
   # PROJECT_ALLOWLIST contains project slugs synced WITHOUT their child projects.
   # Slugs are case-insensitive.

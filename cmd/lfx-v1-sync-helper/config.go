@@ -113,7 +113,7 @@ func LoadConfig() (*Config, error) {
 	if strings.TrimSpace(cfg.ProjectAllowlistFile) != "" {
 		cfg.ProjectAllowlist, err = readYAMLListFile(cfg.ProjectAllowlistFile)
 		if err != nil {
-			return nil, fmt.Errorf("loading PROJECT_ALLOWLIST: %w", err)
+			return nil, fmt.Errorf("loading PROJECT_ALLOWLIST_FILE (%s): %w", cfg.ProjectAllowlistFile, err)
 		}
 	} else {
 		cfg.ProjectAllowlist = parseStringListEnv("PROJECT_ALLOWLIST")
@@ -121,10 +121,10 @@ func LoadConfig() (*Config, error) {
 	if len(cfg.ProjectAllowlist) == 0 {
 		cfg.ProjectAllowlist = defaultProjectAllowlist
 	}
-	if cfg.ProjectFamilyAllowlistFile != "" {
+	if strings.TrimSpace(cfg.ProjectFamilyAllowlistFile) != "" {
 		cfg.ProjectFamilyAllowlist, err = readYAMLListFile(cfg.ProjectFamilyAllowlistFile)
 		if err != nil {
-			return nil, fmt.Errorf("loading PROJECT_FAMILY_ALLOWLIST: %w", err)
+			return nil, fmt.Errorf("loading PROJECT_FAMILY_ALLOWLIST_FILE %q: %w", cfg.ProjectFamilyAllowlistFile, err)
 		}
 	} else {
 		cfg.ProjectFamilyAllowlist = parseStringListEnv("PROJECT_FAMILY_ALLOWLIST")
