@@ -659,6 +659,9 @@ func lookupExecutiveDirector(ctx context.Context, v1Data map[string]any) *projec
 	if user.Email != "" {
 		info.Email = &user.Email
 	}
+	if user.Avatar != "" {
+		info.Avatar = &user.Avatar
+	}
 	return info
 }
 
