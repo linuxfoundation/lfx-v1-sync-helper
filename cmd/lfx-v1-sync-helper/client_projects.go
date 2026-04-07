@@ -128,7 +128,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 	}
 
 	// Handle settings update if provided.
-	if settingsPayload != nil {
+	if settingsPayload != nil && (settingsPayload.MissionStatement != nil || settingsPayload.AnnouncementDate != nil || settingsPayload.ExecutiveDirector != nil) {
 		// Fetch current project settings.
 		currentSettings, settingsETag, err := fetchProjectSettings(ctx, *basePayload.UID)
 		if err != nil {
@@ -154,7 +154,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 		if settingsPayload.AnnouncementDate != nil && stringPtrToString(currentSettings.AnnouncementDate) != stringPtrToString(settingsPayload.AnnouncementDate) {
 			settingsChanged = true
 		}
-		if !userInfoPtrsEqual(settingsPayload.ExecutiveDirector, currentSettings.ExecutiveDirector) {
+		if settingsPayload.ExecutiveDirector != nil && !userInfoPtrsEqual(settingsPayload.ExecutiveDirector, currentSettings.ExecutiveDirector) {
 			settingsChanged = true
 		}
 
