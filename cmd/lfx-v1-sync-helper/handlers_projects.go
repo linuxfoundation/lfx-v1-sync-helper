@@ -395,6 +395,9 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any)
 		}
 	}
 
+	// Map executive director from v1 Salesforce contact SFID.
+	payload.ExecutiveDirector = lookupExecutiveDirector(ctx, v1Data)
+
 	// Handle parent project logic.
 	parentProjectID := ""
 	if parentID, ok := v1Data["parent_project__c"].(string); ok {
@@ -608,7 +611,7 @@ func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string,
 }
 
 // mapV1DataToProjectUpdateSettingsPayload converts v1 project data to an UpdateProjectSettingsPayload.
-func mapV1DataToProjectUpdateSettingsPayload(_ context.Context, projectUID string, v1Data map[string]any) (*projectservice.UpdateProjectSettingsPayload, error) {
+func mapV1DataToProjectUpdateSettingsPayload(ctx context.Context, projectUID string, v1Data map[string]any) (*projectservice.UpdateProjectSettingsPayload, error) {
 	payload := &projectservice.UpdateProjectSettingsPayload{
 		UID: &projectUID,
 	}
@@ -625,7 +628,41 @@ func mapV1DataToProjectUpdateSettingsPayload(_ context.Context, projectUID strin
 		}
 	}
 
+	// Map executive director from v1 Salesforce contact SFID.
+	payload.ExecutiveDirector = lookupExecutiveDirector(ctx, v1Data)
+
 	return payload, nil
+}
+
+// lookupExecutiveDirector resolves the executive_director__c Salesforce contact SFID from v1 data
+// to a UserInfo. Returns nil if the field is absent, empty, or the user lookup fails.
+func lookupExecutiveDirector(ctx context.Context, v1Data map[string]any) *projectservice.UserInfo {
+	edSFID, ok := v1Data["executive_director__c"].(string)
+	edSFID = strings.TrimSpace(edSFID)
+	if !ok || edSFID == "" {
+		return nil
+	}
+
+	user, err := lookupV1User(ctx, edSFID)
+	if err != nil {
+		logger.With(errKey, err, "ed_sfid", edSFID).WarnContext(ctx, "failed to lookup executive director user from v1, leaving field unset")
+		return nil
+	}
+
+	authSub := mapUsernameToAuthSub(user.Username)
+	info := &projectservice.UserInfo{
+		Username: &authSub,
+	}
+	if fullName := strings.TrimSpace(user.FirstName + " " + user.LastName); fullName != "" {
+		info.Name = &fullName
+	}
+	if user.Email != "" {
+		info.Email = &user.Email
+	}
+	if user.Avatar != "" {
+		info.Avatar = &user.Avatar
+	}
+	return info
 }
 
 // calculatePublicStatus determines if a project should be public based on its stage and parent's public status.
