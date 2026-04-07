@@ -395,6 +395,22 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any)
 		}
 	}
 
+	// Map executive director from v1 Salesforce contact SFID.
+	if edSFID, ok := v1Data["executive_director__c"].(string); ok && edSFID != "" {
+		user, err := lookupV1User(ctx, edSFID)
+		if err != nil {
+			logger.With(errKey, err, "ed_sfid", edSFID).WarnContext(ctx, "failed to lookup executive director user from v1, leaving field unset")
+		} else {
+			authSub := mapUsernameToAuthSub(user.Username)
+			fullName := strings.TrimSpace(user.FirstName + " " + user.LastName)
+			payload.ExecutiveDirector = &projectservice.UserInfo{
+				Username: &authSub,
+				Name:     &fullName,
+				Email:    &user.Email,
+			}
+		}
+	}
+
 	// Handle parent project logic.
 	parentProjectID := ""
 	if parentID, ok := v1Data["parent_project__c"].(string); ok {
@@ -608,7 +624,7 @@ func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string,
 }
 
 // mapV1DataToProjectUpdateSettingsPayload converts v1 project data to an UpdateProjectSettingsPayload.
-func mapV1DataToProjectUpdateSettingsPayload(_ context.Context, projectUID string, v1Data map[string]any) (*projectservice.UpdateProjectSettingsPayload, error) {
+func mapV1DataToProjectUpdateSettingsPayload(ctx context.Context, projectUID string, v1Data map[string]any) (*projectservice.UpdateProjectSettingsPayload, error) {
 	payload := &projectservice.UpdateProjectSettingsPayload{
 		UID: &projectUID,
 	}
@@ -622,6 +638,22 @@ func mapV1DataToProjectUpdateSettingsPayload(_ context.Context, projectUID strin
 	if announcementDate, ok := v1Data["expected_announcement_date__c"].(string); ok && announcementDate != "" {
 		if dateOnly := extractDateOnly(announcementDate); dateOnly != "" {
 			payload.AnnouncementDate = &dateOnly
+		}
+	}
+
+	// Map executive director from v1 Salesforce contact SFID.
+	if edSFID, ok := v1Data["executive_director__c"].(string); ok && edSFID != "" {
+		user, err := lookupV1User(ctx, edSFID)
+		if err != nil {
+			logger.With(errKey, err, "ed_sfid", edSFID).WarnContext(ctx, "failed to lookup executive director user from v1, leaving field unset")
+		} else {
+			authSub := mapUsernameToAuthSub(user.Username)
+			fullName := strings.TrimSpace(user.FirstName + " " + user.LastName)
+			payload.ExecutiveDirector = &projectservice.UserInfo{
+				Username: &authSub,
+				Name:     &fullName,
+				Email:    &user.Email,
+			}
 		}
 	}
 
