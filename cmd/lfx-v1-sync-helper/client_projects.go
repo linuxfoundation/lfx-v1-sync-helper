@@ -128,7 +128,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 	}
 
 	// Handle settings update if provided.
-	if settingsPayload != nil && (settingsPayload.MissionStatement != nil || settingsPayload.AnnouncementDate != nil) {
+	if settingsPayload != nil {
 		// Fetch current project settings.
 		currentSettings, settingsETag, err := fetchProjectSettings(ctx, *basePayload.UID)
 		if err != nil {
@@ -152,6 +152,9 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 			settingsChanged = true
 		}
 		if settingsPayload.AnnouncementDate != nil && stringPtrToString(currentSettings.AnnouncementDate) != stringPtrToString(settingsPayload.AnnouncementDate) {
+			settingsChanged = true
+		}
+		if !userInfoPtrsEqual(settingsPayload.ExecutiveDirector, currentSettings.ExecutiveDirector) {
 			settingsChanged = true
 		}
 
@@ -235,4 +238,21 @@ func stringSliceEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// userInfoPtrsEqual compares two *UserInfo values for equality, treating nil and all-empty as equivalent.
+func userInfoPtrsEqual(a, b *projectservice.UserInfo) bool {
+	getFields := func(u *projectservice.UserInfo) (name, email, username, avatar string) {
+		if u == nil {
+			return
+		}
+		name = stringPtrToString(u.Name)
+		email = stringPtrToString(u.Email)
+		username = stringPtrToString(u.Username)
+		avatar = stringPtrToString(u.Avatar)
+		return
+	}
+	an, ae, au, aa := getFields(a)
+	bn, be, bu, ba := getFields(b)
+	return an == bn && ae == be && au == bu && aa == ba
 }
