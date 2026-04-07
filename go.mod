@@ -17,7 +17,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/linuxfoundation/lfx-v2-committee-service v0.2.22
 	github.com/linuxfoundation/lfx-v2-indexer-service v0.4.16
-	github.com/linuxfoundation/lfx-v2-project-service v0.6.1-0.20260407205545-de9716158f7d
+	github.com/linuxfoundation/lfx-v2-project-service v0.6.1
 	github.com/nats-io/nats.go v1.48.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/teambition/rrule-go v1.8.2
