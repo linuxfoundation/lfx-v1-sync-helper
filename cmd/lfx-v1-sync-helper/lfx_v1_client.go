@@ -57,6 +57,7 @@ type V1User struct {
 	Email     string `json:"Email"`
 	FirstName string `json:"FirstName"`
 	LastName  string `json:"LastName"`
+	Avatar    string `json:"Avatar"`
 }
 
 // V1Organization represents an organization from the LFX v1 Organization Service
@@ -176,6 +177,11 @@ func lookupV1User(ctx context.Context, platformID string) (*V1User, error) {
 	// Map last name
 	if lastName, ok := userData["lastname"].(string); ok {
 		user.LastName = lastName
+	}
+
+	// Map avatar from photo_url__c field (LF platform profile picture).
+	if photoURL, ok := userData["photo_url__c"].(string); ok && photoURL != "" {
+		user.Avatar = photoURL
 	}
 
 	// Look up user's primary email from alternate email mappings.
