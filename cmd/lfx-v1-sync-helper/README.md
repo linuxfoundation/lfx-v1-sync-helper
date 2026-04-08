@@ -7,7 +7,7 @@ The LFX v1 Sync Helper is a Go microservice that synchronizes data between LFX v
 ### Key implementation decisions
 
 1. **KV Bucket Watcher**: Instead of consuming NATS messages directly from streaming data sources, this service watches a NATS KV bucket (`v1-objects`) where v1 data is written by replication jobs (e.g. Meltano)
-2. **Direct API Calls**: All data is routed into the LFX One platform via the appropriate API services, rather than the v1 Sync Helper writing directly to databases or platform-service queues. Records handled by external wrapper services (e.g. meetings, voting, surveys) are passed through without API calls.
+2. **Direct API Calls**: Core resources (projects, committees) are synced via LFX One API services. Records owned by external wrapper services (e.g. meetings, voting, surveys) and records consumed directly from the `v1-objects` KV bucket by other services (e.g. `salesforce_b2b-*`) are passed through without API calls.
 3. **JWT Authentication**: Reuses Heimdall's signing key to create JWT tokens for secure API authentication, supporting user impersonation while also bypassing LFX One permissions—as Heimdall tokens are not just proof of authentication, but are of *authorization*.
 4. **Mapping Storage**: Maintains v1-to-v2 ID mappings in a dedicated NATS KV bucket to track state and to avoid introducing "legacy ID" fields in LFX One data models.
 

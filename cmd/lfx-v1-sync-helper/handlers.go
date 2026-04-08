@@ -163,7 +163,7 @@ func handleKVDelete(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 	key := entry.Key()
 
 	logger.With("key", key).InfoContext(ctx, "processing hard delete from KV bucket")
-	return handleResourceDelete(ctx, key, "", nil)
+	return handleResourceDelete(ctx, key, "")
 }
 
 // handleKVSoftDelete processes a soft delete (record with _sdc_deleted_at field).
@@ -171,14 +171,12 @@ func handleKVDelete(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 func handleKVSoftDelete(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Extract v1 principal for soft deletes.
 	v1Principal := extractV1Principal(ctx, v1Data)
-	return handleResourceDelete(ctx, key, v1Principal, v1Data)
+	return handleResourceDelete(ctx, key, v1Principal)
 }
 
 // handleResourceDelete handles deletion of resources by key prefix with specified principal.
-// v1Data carries the record's field values when available (e.g. soft deletes, DynamoDB old_image);
-// nil is acceptable and handlers must fall back gracefully.
 // Returns true if the operation should be retried, false otherwise.
-func handleResourceDelete(ctx context.Context, key string, v1Principal string, v1Data map[string]any) bool {
+func handleResourceDelete(ctx context.Context, key string, v1Principal string) bool {
 	// Extract the prefix (everything before the first period) for faster lookup.
 	prefix := key
 	if dotIndex := strings.Index(key, "."); dotIndex != -1 {
