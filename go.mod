@@ -16,11 +16,9 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/linuxfoundation/lfx-v2-committee-service v0.2.22
-	github.com/linuxfoundation/lfx-v2-indexer-service v0.4.16
 	github.com/linuxfoundation/lfx-v2-project-service v0.6.1
 	github.com/nats-io/nats.go v1.48.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
-	github.com/teambition/rrule-go v1.8.2
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	goa.design/goa/v3 v3.25.3
 	golang.org/x/oauth2 v0.35.0

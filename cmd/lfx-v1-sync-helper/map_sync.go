@@ -19,12 +19,6 @@ package main
 //
 // Key naming convention: callers are responsible for constructing fully-qualified
 // lock keys (including any namespace prefix) before passing them to acquire/release.
-// For example: meetingMappingLockKeyPrefix + meetingID.
-//
-// TODO: When the handlers are migrated to the wrapper services, this locking
-// mechanism should be revisited.  The wrappers have direct access to the
-// database, so per-resource conditional updates or proper DB-level locking
-// should replace this distributed KV lock.
 
 import (
 	"context"
@@ -35,11 +29,6 @@ import (
 )
 
 const (
-	// Lock key prefix and default settings for meeting-mapping operations.
-	meetingMappingLockKeyPrefix = "v1_meeting_mapping_lock."
-	// Lock key prefix for past-meeting-mapping operations.
-	pastMeetingMappingLockKeyPrefix = "v1_past_meeting_mapping_lock."
-
 	mappingLockTimeout       = 10 * time.Second
 	mappingLockRetryInterval = 500 * time.Millisecond
 	mappingLockRetryAttempts = 5
@@ -53,9 +42,6 @@ const (
 //   - A distributed lock backed by Redis (e.g. Redlock algorithm)
 //   - A local in-process lock backed by Go sync.Mutex (useful for single-instance
 //     deployments or testing)
-//
-// The key parameter is always a fully-qualified lock key including any
-// namespace prefix (e.g. meetingMappingLockKeyPrefix + meetingID).
 type mappingLocker interface {
 	// acquire tries to acquire the lock for key.
 	// Returns (acquired, waited) — waited is true if at least one retry was made.
@@ -97,7 +83,6 @@ type kvMappingLocker struct {
 }
 
 // newKVMappingLocker creates a kvMappingLocker backed by the given KV bucket.
-// Default settings match the meeting-mapping use case; override them via opts.
 func newKVMappingLocker(kv jetstream.KeyValue, opts ...lockerOption) *kvMappingLocker {
 	cfg := lockerConfig{}
 	for _, opt := range opts {

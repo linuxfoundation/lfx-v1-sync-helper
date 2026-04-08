@@ -18,7 +18,7 @@ LFX v1 Sources → Meltano → NATS KV → v1-sync-helper → LFX One APIs
 ```
 
 ### Key Components
-- **DynamoDB (Meetings)** + **PostgreSQL (Projects/Committees)** → **Meltano** → **NATS KV Bucket (`v1-objects`)**
+- **DynamoDB** + **PostgreSQL (Projects/Committees)** → **Meltano** → **NATS KV Bucket (`v1-objects`)**
 - **NATS KV Watcher** → **v1-sync-helper** → **LFX One Project/Committee Services**
 - **JWT Authentication** via Heimdall impersonation for secure API calls
 - **ID Mappings** stored in NATS KV bucket (`v1-mappings`)
@@ -136,7 +136,7 @@ lfx-v1-sync-helper/
 - **Custom target plugin**: `load/target-nats-kv/` for NATS KV integration
 
 #### Data Sources
-- **DynamoDB**: Meetings data extraction
+- **DynamoDB**: Data extraction
 - **PostgreSQL**: Projects and committees data
 - **NATS KV**: Target for all extracted data
 
