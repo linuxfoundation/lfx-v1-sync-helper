@@ -1,0 +1,21 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+{{- if not (lookup "v1" "ConfigMap" .Release.Namespace .Values.allowlist.configMap.name) }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.allowlist.configMap.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Chart.Name }}
+    component: app-allowlist
+data:
+  # project_allowlist contains project slugs synced WITHOUT their child projects.
+  # Slugs are case-insensitive.
+  project_allowlist: |
+    - tlf
+  # project_family_allowlist contains project slugs synced TOGETHER WITH all
+  # of their descendants. Slugs are case-insensitive.
+  project_family_allowlist: ""
+{{- end }}

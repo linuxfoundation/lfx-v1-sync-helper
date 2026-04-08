@@ -58,6 +58,11 @@ spec:
               secretKeyRef:
                 name: {{ .Values.app.auth0.secret.name }}
                 key: {{ .Values.app.auth0.secret.privateKeyKey }}
+          # Allow list file paths from ConfigMap mount
+          - name: PROJECT_ALLOWLIST_FILE
+            value: {{ .Values.allowlist.configMap.mountPath }}/project_allowlist
+          - name: PROJECT_FAMILY_ALLOWLIST_FILE
+            value: {{ .Values.allowlist.configMap.mountPath }}/project_family_allowlist
           ports:
             - containerPort: 8080
               name: web
@@ -83,3 +88,11 @@ spec:
               port: web
             failureThreshold: 30
             periodSeconds: 1
+          volumeMounts:
+            - name: allowlists
+              mountPath: {{ .Values.allowlist.configMap.mountPath }}
+              readOnly: true
+      volumes:
+        - name: allowlists
+          configMap:
+            name: {{ .Values.allowlist.configMap.name }}
