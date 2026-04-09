@@ -1,3 +1,0 @@
-# False positive: V1PastMeetingParticipantRemoveSubject is a NATS subject string,
-# not a secret. Flagged by generic-api-key rule due to variable name and string entropy.
-df44b34b29f28508c086ff9bee52eca8906b9274:cmd/lfx-v1-sync-helper/handlers_meetings.go:generic-api-key:1721

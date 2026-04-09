@@ -4,7 +4,7 @@ This is a [Meltano project](https://docs.meltano.com/concepts/project/) with a s
 
 ## Overview
 
-This Meltano project extracts data from LFX v1 sources and loads it into NATS Key-Value stores for processing by the LFX v2 platform. It supports extracting from multiple data sources including DynamoDB (for meetings data) and PostgreSQL (for projects and committees data).
+This Meltano project extracts data from LFX v1 sources and loads it into NATS Key-Value stores for processing by the LFX v2 platform. It supports extracting from multiple data sources including DynamoDB and PostgreSQL (for projects and committees data).
 
 ## Important files
 
@@ -36,9 +36,9 @@ uv run meltano dragon
 
 ## Usage
 
-### Copy dev v1 Meetings data
+### Copy dev v1 DynamoDB data
 
-Extract meetings data from DynamoDB and load into NATS KV:
+Extract DynamoDB data and load into NATS KV:
 
 ```bash
 aws-vault exec itx-dev -- uv run meltano --environment=dev run tap-dynamodb target-nats-kv
@@ -68,7 +68,7 @@ Options are available that affect both the sync strategy from the source and the
 By default, this Meltano project tracks the last-synced timestamp from each table and only performs incremental syncs. For a full sync of all data, append `--full-refresh` immediately after `run`:
 
 ```bash
-# Full refresh example for meetings data
+# Full refresh example for DynamoDB data
 aws-vault exec itx-dev -- uv run meltano --environment=dev run --full-refresh tap-dynamodb target-nats-kv
 
 # Full refresh example for projects/committees data
