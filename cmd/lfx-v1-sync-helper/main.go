@@ -23,6 +23,7 @@ import (
 const (
 	errKey            = "error"
 	defaultListenPort = "8080"
+	defaultListenBind = "*"
 	natsQueue         = "lfx.v1-sync-helper.queue"
 	lookupSubject     = "lfx.lookup_v1_mapping"
 	// User SFID lookup subjects for resolving v1 platform user SFIDs by username or email.
@@ -67,7 +68,7 @@ func main() {
 	flag.Parse()
 
 	logOptions := &slog.HandlerOptions{}
-	if *debug {
+	if cfg.Debug || *debug {
 		logOptions.Level = slog.LevelDebug
 		logOptions.AddSource = true
 	}
@@ -112,10 +113,10 @@ func main() {
 		*bind = cfg.Bind
 	}
 	if *port == "" {
-		*port = "8080"
+		*port = defaultListenPort
 	}
 	if *bind == "" {
-		*bind = "*"
+		*bind = defaultListenBind
 	}
 
 	// Support GET/POST monitoring "ping".
