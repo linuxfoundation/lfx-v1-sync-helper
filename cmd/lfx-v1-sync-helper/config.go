@@ -14,6 +14,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const defaultNATSURL = "nats://nats:4222"
+
 // Config holds all configuration values for the v1-sync-helper service
 type Config struct {
 	// JWT/Heimdall configuration for LFX v2 services
@@ -60,6 +62,16 @@ type Config struct {
 	ProjectFamilyAllowlist     []string // Root slugs synced together with all descendants
 }
 
+// LoadReindexConfig returns a minimal config for --reindex-user-sfids mode.
+// Only NATS_URL is required; all other fields are left at zero values.
+func LoadReindexConfig() *Config {
+	natsURL := os.Getenv("NATS_URL")
+	if natsURL == "" {
+		natsURL = defaultNATSURL
+	}
+	return &Config{NATSURL: natsURL}
+}
+
 // LoadConfig loads configuration from environment variables
 func LoadConfig() (*Config, error) {
 	projectServiceURLStr := os.Getenv("PROJECT_SERVICE_URL")
@@ -77,12 +89,12 @@ func LoadConfig() (*Config, error) {
 		Auth0ClientID:   os.Getenv("AUTH0_CLIENT_ID"),
 		Auth0PrivateKey: os.Getenv("AUTH0_PRIVATE_KEY"),
 		// Other configuration
-		NATSURL:               os.Getenv("NATS_URL"),
-		Port:                  os.Getenv("PORT"),
-		Bind:                  os.Getenv("BIND"),
-		Debug:                 parseBooleanEnv("DEBUG"),
-		HTTPDebug:             parseBooleanEnv("HTTP_DEBUG"),
-		UseMsgpack:            parseBooleanEnv("USE_MSGPACK"),
+		NATSURL:                    os.Getenv("NATS_URL"),
+		Port:                       os.Getenv("PORT"),
+		Bind:                       os.Getenv("BIND"),
+		Debug:                      parseBooleanEnv("DEBUG"),
+		HTTPDebug:                  parseBooleanEnv("HTTP_DEBUG"),
+		UseMsgpack:                 parseBooleanEnv("USE_MSGPACK"),
 		DynamoDBIngestEnabled:      parseBooleanEnv("DYNAMODB_INGEST_ENABLED"),
 		DynamoDBStreamName:         os.Getenv("DYNAMODB_STREAM_NAME"),
 		ProjectAllowlistFile:       os.Getenv("PROJECT_ALLOWLIST_FILE"),
@@ -109,7 +121,7 @@ func LoadConfig() (*Config, error) {
 	}
 	// Set defaults
 	if cfg.NATSURL == "" {
-		cfg.NATSURL = "nats://nats:4222"
+		cfg.NATSURL = defaultNATSURL
 	}
 
 	if cfg.Port == "" {

@@ -290,6 +290,129 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 	return email, isPrimary, false, nil
 }
 
+// ResolveV1UserSFIDByUsername looks up a v1 user SFID by username using the secondary index.
+// It validates the resolved SFID by fetching the user record and confirming the username matches.
+// Returns (sfid, nil) on success, ("", nil) on miss (including stale index), or ("", error) on failure.
+func ResolveV1UserSFIDByUsername(ctx context.Context, username string) (string, error) {
+	// Normalize username for consistent lookups.
+	normalizedUsername := strings.ToLower(strings.TrimSpace(username))
+	if normalizedUsername == "" {
+		return "", nil
+	}
+
+	// Look up the secondary index.
+	indexKey := "v1-user.username." + normalizedUsername
+	entry, err := mappingsKV.Get(ctx, indexKey)
+	if err != nil {
+		if err == jetstream.ErrKeyNotFound {
+			return "", nil // Miss
+		}
+		return "", fmt.Errorf("failed to get username index: %w", err)
+	}
+
+	// Check if tombstoned.
+	if isTombstonedMapping(entry.Value()) {
+		return "", nil // Tombstoned, treat as miss
+	}
+
+	candidateSFID := string(entry.Value())
+
+	// Validate by fetching the user record.
+	user, err := lookupV1User(ctx, candidateSFID)
+	if err != nil {
+		// Per ticket: "silently treat mismatched usernames as a miss (not an error)"
+		logger.With("candidate_sfid", candidateSFID, "error", err).
+			DebugContext(ctx, "failed to lookup user for username validation, treating as miss")
+		return "", nil
+	}
+
+	// Validate that the username still matches (handles stale index data).
+	if !strings.EqualFold(user.Username, username) {
+		logger.With("candidate_sfid", candidateSFID, "expected_username", username, "actual_username", user.Username).
+			DebugContext(ctx, "username mismatch in validation, treating as miss (stale index)")
+		return "", nil
+	}
+
+	return candidateSFID, nil
+}
+
+// ResolveV1UserSFIDByEmail looks up a v1 user SFID by email using the secondary index.
+// It validates the resolved SFID by checking all alternate emails for the user.
+// Returns (sfid, nil) on success, ("", nil) on miss (including stale index), or ("", error) on failure.
+func ResolveV1UserSFIDByEmail(ctx context.Context, email string) (string, error) {
+	// Normalize email for consistent lookups.
+	normalizedEmail := emailToKVKey(strings.ToLower(strings.TrimSpace(email)))
+	if normalizedEmail == "" {
+		return "", nil
+	}
+
+	// Look up the secondary index.
+	indexKey := "v1-user.email." + normalizedEmail
+	entry, err := mappingsKV.Get(ctx, indexKey)
+	if err != nil {
+		if err == jetstream.ErrKeyNotFound {
+			return "", nil // Miss
+		}
+		return "", fmt.Errorf("failed to get email index: %w", err)
+	}
+
+	// Check if tombstoned.
+	if isTombstonedMapping(entry.Value()) {
+		return "", nil // Tombstoned, treat as miss
+	}
+
+	candidateSFID := string(entry.Value())
+
+	// Get the list of alternate email SFIDs for this user to validate.
+	// merged_user has NO email field - all emails are in alternate_email records.
+	mappingKey := fmt.Sprintf("v1-merged-user.alternate-emails.%s", candidateSFID)
+	emailListEntry, err := mappingsKV.Get(ctx, mappingKey)
+	if err != nil {
+		if err == jetstream.ErrKeyNotFound {
+			// Per ticket: "silently treat missing emails as a miss"
+			logger.With("candidate_sfid", candidateSFID).
+				DebugContext(ctx, "no alternate emails found for user, treating as miss")
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to get alternate emails mapping: %w", err)
+	}
+
+	// Parse the list of email SFIDs.
+	var emailSfids []string
+	if err := json.Unmarshal(emailListEntry.Value(), &emailSfids); err != nil {
+		return "", fmt.Errorf("failed to unmarshal email SFIDs: %w", err)
+	}
+
+	if len(emailSfids) == 0 {
+		logger.With("candidate_sfid", candidateSFID).
+			DebugContext(ctx, "empty alternate emails list for user, treating as miss")
+		return "", nil
+	}
+
+	// Check each email to see if any matches the queried email.
+	for _, emailSfid := range emailSfids {
+		emailAddr, _, isTombstoned, err := getAlternateEmailDetails(ctx, emailSfid)
+		if err != nil {
+			logger.With("email_sfid", emailSfid, "error", err).
+				DebugContext(ctx, "failed to get alternate email details, skipping")
+			continue
+		}
+		if isTombstoned {
+			continue
+		}
+
+		// Check if this email matches the queried email.
+		if strings.EqualFold(emailAddr, email) {
+			return candidateSFID, nil // Match found!
+		}
+	}
+
+	// No match found after checking all emails - stale index.
+	logger.With("candidate_sfid", candidateSFID, "email", email).
+		DebugContext(ctx, "email not found in user's alternate emails, treating as miss (stale index)")
+	return "", nil
+}
+
 // getOrganizationFromV1API fetches organization information from the LFX v1 Organization Service
 func getV1OrganizationFromOrgSvc(ctx context.Context, sfid string) (*V1Organization, error) {
 	url := fmt.Sprintf("%sorganization-service/v1/orgs/%s", cfg.LFXAPIGateway.String(), sfid)

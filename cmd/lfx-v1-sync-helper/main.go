@@ -25,6 +25,9 @@ const (
 	defaultListenPort = "8080"
 	natsQueue         = "lfx.v1-sync-helper.queue"
 	lookupSubject     = "lfx.lookup_v1_mapping"
+	// User SFID lookup subjects for resolving v1 platform user SFIDs by username or email.
+	lookupUserSFIDByUsernameSubject = "lfx.lookup_v1_user_sfid.by_username"
+	lookupUserSFIDByEmailSubject    = "lfx.lookup_v1_user_sfid.by_email"
 	// gracefulShutdownSeconds should be higher than NATS client
 	// request timeout, and lower than the pod or liveness probe's
 	// terminationGracePeriodSeconds.
@@ -52,17 +55,10 @@ var (
 
 // main parses optional flags and starts the NATS subscribers.
 func main() {
-	// Load configuration
-	var err error
-	cfg, err = LoadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
-		os.Exit(1)
-	}
-
 	var debug = flag.Bool("d", false, "enable debug logging")
-	var port = flag.String("p", cfg.Port, "health checks port")
-	var bind = flag.String("bind", cfg.Bind, "interface to bind on")
+	var port = flag.String("p", "", "health checks port")
+	var bind = flag.String("bind", "", "interface to bind on")
+	var reindexUserSFIDs = flag.Bool("reindex-user-sfids", false, "populate user SFID secondary indexes for existing data, then exit")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -71,15 +67,56 @@ func main() {
 	flag.Parse()
 
 	logOptions := &slog.HandlerOptions{}
-
-	// Optional debug logging.
-	if cfg.Debug || *debug {
+	if *debug {
 		logOptions.Level = slog.LevelDebug
 		logOptions.AddSource = true
 	}
-
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, logOptions))
 	slog.SetDefault(logger)
+
+	// --reindex-user-sfids only needs NATS KV; skip full config and API client init.
+	var err error
+	if *reindexUserSFIDs {
+		cfg = LoadReindexConfig()
+	} else {
+		cfg, err = LoadConfig()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+			os.Exit(1)
+		}
+		if cfg.Debug {
+			logOptions.Level = slog.LevelDebug
+			logOptions.AddSource = true
+			logger = slog.New(slog.NewJSONHandler(os.Stdout, logOptions))
+			slog.SetDefault(logger)
+		}
+		if err := initJWTClient(cfg); err != nil {
+			logger.With(errKey, err).Error("error initializing JWT client")
+			os.Exit(1)
+		}
+		if err := initGoaClients(cfg); err != nil {
+			logger.With(errKey, err).Error("error initializing Goa clients")
+			os.Exit(1)
+		}
+		if err := initV1Client(cfg); err != nil {
+			logger.With(errKey, err).Error("error initializing v1 client")
+			os.Exit(1)
+		}
+	}
+
+	// Apply defaults for port/bind from config if not set via flags.
+	if *port == "" {
+		*port = cfg.Port
+	}
+	if *bind == "" {
+		*bind = cfg.Bind
+	}
+	if *port == "" {
+		*port = "8080"
+	}
+	if *bind == "" {
+		*bind = "*"
+	}
 
 	// Support GET/POST monitoring "ping".
 	http.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
@@ -134,24 +171,6 @@ func main() {
 	defer cancel()
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-
-	// Initialize JWT client for v2 services
-	if err := initJWTClient(cfg); err != nil {
-		logger.With(errKey, err).Error("error initializing JWT client")
-		os.Exit(1)
-	}
-
-	// Initialize Goa SDK clients for v2 services
-	if err := initGoaClients(cfg); err != nil {
-		logger.With(errKey, err).Error("error initializing Goa clients")
-		os.Exit(1)
-	}
-
-	// Initialize v1 client for Auth0 authentication
-	if err := initV1Client(cfg); err != nil {
-		logger.With(errKey, err).Error("error initializing v1 client")
-		os.Exit(1)
-	}
 
 	// Create NATS connection.
 	gracefulCloseWG.Add(1)
@@ -208,6 +227,17 @@ func main() {
 	if err != nil {
 		logger.With(errKey, err).Error("error accessing v1-mappings KV bucket")
 		os.Exit(1)
+	}
+
+	// Handle --reindex-user-sfids flag: populate secondary indexes for existing data, then exit.
+	if *reindexUserSFIDs {
+		logger.Info("starting user SFID secondary index reindexing")
+		if err := runUserSFIDReindex(ctx); err != nil {
+			logger.With(errKey, err).Error("error during user SFID reindexing")
+			os.Exit(1)
+		}
+		logger.Info("user SFID secondary index reindexing completed successfully")
+		os.Exit(0)
 	}
 
 	// Initialize the distributed sync singleton backed by the mappings KV bucket.
@@ -318,6 +348,19 @@ func main() {
 	_, err = natsConn.QueueSubscribe(lookupSubject, natsQueue, lookupHandler)
 	if err != nil {
 		logger.With(errKey, err, "subject", lookupSubject).Error("error subscribing to NATS lookup subject")
+		os.Exit(1)
+	}
+
+	// Subscribe to user SFID lookup functions for resolving v1 platform user SFIDs.
+	// These use secondary indexes with validation to handle stale data.
+	_, err = natsConn.QueueSubscribe(lookupUserSFIDByUsernameSubject, natsQueue, userSFIDByUsernameHandler)
+	if err != nil {
+		logger.With(errKey, err, "subject", lookupUserSFIDByUsernameSubject).Error("error subscribing to user SFID by username lookup subject")
+		os.Exit(1)
+	}
+	_, err = natsConn.QueueSubscribe(lookupUserSFIDByEmailSubject, natsQueue, userSFIDByEmailHandler)
+	if err != nil {
+		logger.With(errKey, err, "subject", lookupUserSFIDByEmailSubject).Error("error subscribing to user SFID by email lookup subject")
 		os.Exit(1)
 	}
 
