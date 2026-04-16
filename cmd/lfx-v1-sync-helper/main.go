@@ -153,6 +153,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Initialize Auth0 Management API client for profile sync (v1 -> Auth0 user_metadata)
+	if err := initAuth0MgmtClient(cfg); err != nil {
+		logger.With(errKey, err).Error("error initializing Auth0 Management API client")
+		os.Exit(1)
+	}
+
 	// Create NATS connection.
 	gracefulCloseWG.Add(1)
 	natsConn, err = nats.Connect(

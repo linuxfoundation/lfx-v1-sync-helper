@@ -12,6 +12,28 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+// handleMergedUserUpdate processes merged_user record updates by syncing
+// profile fields from the v1 platform DB to Auth0 user_metadata.
+// Returns true if the operation should be retried, false otherwise.
+func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
+	// Extract username to resolve the Auth0 user ID.
+	username, _ := v1Data["username__c"].(string)
+	if username == "" {
+		logger.With("key", key).DebugContext(ctx, "merged_user has no username, skipping profile sync")
+		return false
+	}
+
+	auth0UserID := mapUsernameToAuthSub(username)
+
+	if err := syncProfileToAuth0(ctx, auth0UserID, v1Data); err != nil {
+		logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
+			ErrorContext(ctx, "failed to sync profile to Auth0")
+		return isRetryableAuth0Error(err)
+	}
+
+	return false
+}
+
 // handleAlternateEmailUpdate processes alternate email updates and maintains
 // v1-mapping records for merged users' alternate emails.
 // Returns true if the operation should be retried, false otherwise.
