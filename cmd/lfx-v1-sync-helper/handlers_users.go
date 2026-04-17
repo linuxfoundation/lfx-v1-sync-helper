@@ -66,8 +66,8 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 	username, _ := v1Data["username__c"].(string)
 
 	if isDeleted {
-		if username != "" {
-			indexKey := kvKeyUsernamePrefix + usernameToKVKey(username)
+		if encodedUsername := usernameToKVKey(username); encodedUsername != "" {
+			indexKey := kvKeyUsernamePrefix + encodedUsername
 			if err := tombstoneMapping(ctx, indexKey); err != nil {
 				logger.With("error", err, "key", key, "indexKey", indexKey).
 					ErrorContext(ctx, "failed to tombstone username index")
@@ -79,12 +79,13 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 		return false
 	}
 
-	if username == "" {
+	encodedUsername := usernameToKVKey(username)
+	if encodedUsername == "" {
 		logger.With("key", key).DebugContext(ctx, "merged_user has no username, skipping index")
 		return false
 	}
 
-	indexKey := kvKeyUsernamePrefix + usernameToKVKey(username)
+	indexKey := kvKeyUsernamePrefix + encodedUsername
 
 	// Uses simple Put() since this is a single-value overwrite, not a JSON array.
 	if _, err := mappingsKV.Put(ctx, indexKey, []byte(sfid)); err != nil {
@@ -122,8 +123,8 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 	shouldRetry := updateUserAlternateEmails(ctx, leadorcontactid, emailSfid, isDeleted)
 
 	emailAddr, _ := v1Data["alternate_email_address__c"].(string)
-	if emailAddr != "" {
-		indexKey := kvKeyEmailPrefix + emailToKVKey(emailAddr)
+	if encodedEmail := emailToKVKey(emailAddr); encodedEmail != "" {
+		indexKey := kvKeyEmailPrefix + encodedEmail
 
 		if isDeleted {
 			if err := tombstoneMapping(ctx, indexKey); err != nil {
@@ -268,11 +269,12 @@ func rebuildUserSecondaryIndexes(ctx context.Context) error {
 		username, _ := data["username__c"].(string)
 		sfid, _ := data["sfid"].(string)
 
-		if username == "" || sfid == "" {
+		encodedUsername := usernameToKVKey(username)
+		if encodedUsername == "" || sfid == "" {
 			continue
 		}
 
-		indexKey := kvKeyUsernamePrefix + usernameToKVKey(username)
+		indexKey := kvKeyUsernamePrefix + encodedUsername
 		if _, err := mappingsKV.Put(ctx, indexKey, []byte(sfid)); err != nil {
 			logger.With("error", err, "key", key, "indexKey", indexKey).Warn("failed to write username index during reindex")
 			errorCount++
@@ -314,11 +316,12 @@ func rebuildUserSecondaryIndexes(ctx context.Context) error {
 		emailAddr, _ := data["alternate_email_address__c"].(string)
 		userSfid, _ := data["leadorcontactid"].(string)
 
-		if emailAddr == "" || userSfid == "" {
+		encodedEmail := emailToKVKey(emailAddr)
+		if encodedEmail == "" || userSfid == "" {
 			continue
 		}
 
-		indexKey := kvKeyEmailPrefix + emailToKVKey(emailAddr)
+		indexKey := kvKeyEmailPrefix + encodedEmail
 		if _, err := mappingsKV.Put(ctx, indexKey, []byte(userSfid)); err != nil {
 			logger.With("error", err, "key", key, "indexKey", indexKey).Warn("failed to write email index during reindex")
 			errorCount++

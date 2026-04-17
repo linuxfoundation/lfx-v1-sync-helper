@@ -62,7 +62,7 @@ type Config struct {
 	ProjectFamilyAllowlist     []string // Root slugs synced together with all descendants
 }
 
-// LoadReindexConfig returns a minimal config for --reindex-user-sfids mode.
+// LoadReindexConfig returns a minimal config for --rebuild-user-secondary-indexes mode.
 // Only NATS_URL is required; all other fields are left at zero values.
 func LoadReindexConfig() *Config {
 	natsURL := os.Getenv("NATS_URL")

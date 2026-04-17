@@ -26,27 +26,27 @@ func TestToKVKey(t *testing.T) {
 		{
 			name:  "leading/trailing whitespace trimmed",
 			input: "  alice  ",
-			want:  toKVKey("alice"),
+			want:  "YWxpY2U", // base64("alice")
 		},
 		{
 			name:  "uppercase folded to lowercase",
 			input: "Alice",
-			want:  toKVKey("alice"),
+			want:  "YWxpY2U", // base64("alice")
 		},
 		{
 			name:  "precomposed NFC matches decomposed input",
-			input: "n\u0303on\u0303o",        // decomposed ñoño
-			want:  toKVKey("\u00f1o\u00f1o"), // precomposed ñoño
+			input: "n\u0303on\u0303o", // decomposed ñoño
+			want:  "w7Fvw7Fv",         // base64(NFC("ñoño")) — decomposed and precomposed unify
 		},
 		{
 			name:  "username with space and special chars is deterministic",
 			input: "first last!",
-			want:  toKVKey("first last!"),
+			want:  "Zmlyc3QgbGFzdCE", // base64("first last!")
 		},
 		{
 			name:  "email with plus sign",
 			input: "foo+bar@example.com",
-			want:  toKVKey("foo+bar@example.com"),
+			want:  "Zm9vK2JhckBleGFtcGxlLmNvbQ", // base64("foo+bar@example.com")
 		},
 	}
 

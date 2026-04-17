@@ -323,7 +323,8 @@ func ResolveV1UserSFIDByUsername(ctx context.Context, username string) (string, 
 	}
 
 	// Validate that the username still matches (handles stale index data).
-	if !strings.EqualFold(user.Username, username) {
+	// Compare normalized forms so whitespace/case differences in caller input don't cause false misses.
+	if !strings.EqualFold(strings.TrimSpace(user.Username), strings.TrimSpace(username)) {
 		logger.With("candidate_sfid", candidateSFID, "expected_username", username, "actual_username", user.Username).
 			DebugContext(ctx, "username mismatch in validation, treating as miss (stale index)")
 		return "", nil
@@ -395,9 +396,9 @@ func ResolveV1UserSFIDByEmail(ctx context.Context, email string) (string, error)
 			continue
 		}
 
-		// Check if this email matches the queried email.
-		if strings.EqualFold(emailAddr, email) {
-			return candidateSFID, nil // Match found!
+		// Compare normalized forms so whitespace/case in caller input don't cause false misses.
+		if strings.EqualFold(strings.TrimSpace(emailAddr), strings.TrimSpace(email)) {
+			return candidateSFID, nil
 		}
 	}
 
