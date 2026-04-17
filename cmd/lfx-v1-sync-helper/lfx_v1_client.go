@@ -148,8 +148,7 @@ func initV1Client(cfg *Config) error {
 
 // lookupV1User fetches user information from the v1-objects KV bucket (replicated by Meltano)
 func lookupV1User(ctx context.Context, platformID string) (*V1User, error) {
-	// Look up user in the salesforce-merged_user table via v1-objects KV bucket
-	userKey := fmt.Sprintf("salesforce-merged_user.%s", platformID)
+	userKey := v1MergedUserKVPrefix + platformID
 
 	userData, exists, err := getV1ObjectData(ctx, userKey)
 	if err != nil {
@@ -202,8 +201,7 @@ func lookupV1User(ctx context.Context, platformID string) (*V1User, error) {
 // getPrimaryEmailForUser retrieves the primary email address for a user by looking up
 // their alternate emails from the mappings KV bucket and the v1-objects KV bucket
 func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error) {
-	// Get the list of alternate email SFIDs for this user
-	mappingKey := fmt.Sprintf("v1-merged-user.alternate-emails.%s", userSfid)
+	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
 
 	entry, err := mappingsKV.Get(ctx, mappingKey)
 	if err != nil {
@@ -259,7 +257,7 @@ func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error
 // getAlternateEmailDetails retrieves email address and primary status from the v1-objects KV bucket
 // Returns (email, isPrimary, isTombstoned, error)
 func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email string, isPrimary bool, isTombstoned bool, err error) {
-	emailKey := fmt.Sprintf("salesforce-alternate_email__c.%s", emailSfid)
+	emailKey := v1AlternateEmailKVPrefix + emailSfid
 
 	// Parse the alternate email record.
 	emailData, exists, err := getV1ObjectData(ctx, emailKey)
@@ -294,14 +292,12 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 // It validates the resolved SFID by fetching the user record and confirming the username matches.
 // Returns (sfid, nil) on success, ("", nil) on miss (including stale index), or ("", error) on failure.
 func ResolveV1UserSFIDByUsername(ctx context.Context, username string) (string, error) {
-	// Normalize username for consistent lookups.
-	normalizedUsername := strings.ToLower(strings.TrimSpace(username))
-	if normalizedUsername == "" {
+	// Look up the secondary index.
+	encodedUsername := usernameToKVKey(username)
+	if encodedUsername == "" {
 		return "", nil
 	}
-
-	// Look up the secondary index.
-	indexKey := "v1-user.username." + normalizedUsername
+	indexKey := kvKeyUsernamePrefix + encodedUsername
 	entry, err := mappingsKV.Get(ctx, indexKey)
 	if err != nil {
 		if err == jetstream.ErrKeyNotFound {
@@ -340,14 +336,12 @@ func ResolveV1UserSFIDByUsername(ctx context.Context, username string) (string, 
 // It validates the resolved SFID by checking all alternate emails for the user.
 // Returns (sfid, nil) on success, ("", nil) on miss (including stale index), or ("", error) on failure.
 func ResolveV1UserSFIDByEmail(ctx context.Context, email string) (string, error) {
-	// Normalize email for consistent lookups.
-	normalizedEmail := emailToKVKey(strings.ToLower(strings.TrimSpace(email)))
-	if normalizedEmail == "" {
+	// Look up the secondary index.
+	encodedEmail := emailToKVKey(email)
+	if encodedEmail == "" {
 		return "", nil
 	}
-
-	// Look up the secondary index.
-	indexKey := "v1-user.email." + normalizedEmail
+	indexKey := kvKeyEmailPrefix + encodedEmail
 	entry, err := mappingsKV.Get(ctx, indexKey)
 	if err != nil {
 		if err == jetstream.ErrKeyNotFound {
@@ -365,7 +359,7 @@ func ResolveV1UserSFIDByEmail(ctx context.Context, email string) (string, error)
 
 	// Get the list of alternate email SFIDs for this user to validate.
 	// merged_user has NO email field - all emails are in alternate_email records.
-	mappingKey := fmt.Sprintf("v1-merged-user.alternate-emails.%s", candidateSFID)
+	mappingKey := kvKeyAlternateEmailsPrefix + candidateSFID
 	emailListEntry, err := mappingsKV.Get(ctx, mappingKey)
 	if err != nil {
 		if err == jetstream.ErrKeyNotFound {

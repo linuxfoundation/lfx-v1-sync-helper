@@ -117,6 +117,17 @@ Payload: <email>
 - These lookups perform validation against the actual user record to handle stale index data
 - If a username/email no longer exists on the resolved user, the lookup returns an empty string (miss)
 - The underlying secondary indexes (`v1-user.username.*`, `v1-user.email.*`) should not be queried directly via `lfx.lookup_v1_mapping`
+- Callers send raw UTF-8 usernames and emails; the service normalizes (lowercase, NFC) and base64-encodes them internally
+
+**Backfill / Reindex:**
+
+To populate secondary indexes for all existing records (e.g. after initial deployment or a schema change), run the service with the `--rebuild-user-secondary-indexes` flag:
+
+```sh
+lfx-v1-sync-helper --rebuild-user-secondary-indexes
+```
+
+This operation streams all `merged_user` and `alternate_email` records from the v1 KV bucket, writes the secondary indexes, then exits.
 
 ## Architecture Diagrams
 

@@ -59,7 +59,7 @@ func main() {
 	var debug = flag.Bool("d", false, "enable debug logging")
 	var port = flag.String("p", "", "health checks port")
 	var bind = flag.String("bind", "", "interface to bind on")
-	var reindexUserSFIDs = flag.Bool("reindex-user-sfids", false, "populate user SFID secondary indexes for existing data, then exit")
+	var doRebuildUserIndexes = flag.Bool("rebuild-user-secondary-indexes", false, "populate user secondary indexes for existing data, then exit")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -67,29 +67,19 @@ func main() {
 	}
 	flag.Parse()
 
-	logOptions := &slog.HandlerOptions{}
-	if cfg.Debug || *debug {
-		logOptions.Level = slog.LevelDebug
-		logOptions.AddSource = true
-	}
-	logger = slog.New(slog.NewJSONHandler(os.Stdout, logOptions))
+	// Initialize a default logger early so init functions can log errors.
+	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}))
 	slog.SetDefault(logger)
 
-	// --reindex-user-sfids only needs NATS KV; skip full config and API client init.
+	// --rebuild-user-secondary-indexes only needs NATS KV; skip full config and API client init.
 	var err error
-	if *reindexUserSFIDs {
+	if *doRebuildUserIndexes {
 		cfg = LoadReindexConfig()
 	} else {
 		cfg, err = LoadConfig()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
 			os.Exit(1)
-		}
-		if cfg.Debug {
-			logOptions.Level = slog.LevelDebug
-			logOptions.AddSource = true
-			logger = slog.New(slog.NewJSONHandler(os.Stdout, logOptions))
-			slog.SetDefault(logger)
 		}
 		if err := initJWTClient(cfg); err != nil {
 			logger.With(errKey, err).Error("error initializing JWT client")
@@ -103,6 +93,15 @@ func main() {
 			logger.With(errKey, err).Error("error initializing v1 client")
 			os.Exit(1)
 		}
+	}
+
+	// Reinitialize logger with debug options if requested.
+	if cfg.Debug || *debug {
+		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+			Level:     slog.LevelDebug,
+			AddSource: true,
+		}))
+		slog.SetDefault(logger)
 	}
 
 	// Apply defaults for port/bind from config if not set via flags.
@@ -230,14 +229,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Handle --reindex-user-sfids flag: populate secondary indexes for existing data, then exit.
-	if *reindexUserSFIDs {
-		logger.Info("starting user SFID secondary index reindexing")
-		if err := runUserSFIDReindex(ctx); err != nil {
-			logger.With(errKey, err).Error("error during user SFID reindexing")
+	// Handle --rebuild-user-secondary-indexes flag: populate secondary indexes for existing data, then exit.
+	if *doRebuildUserIndexes {
+		logger.Info("starting user secondary index rebuild")
+		if err := rebuildUserSecondaryIndexes(ctx); err != nil {
+			logger.With(errKey, err).Error("error during user secondary index rebuild")
 			os.Exit(1)
 		}
-		logger.Info("user SFID secondary index reindexing completed successfully")
+		logger.Info("user secondary index rebuild completed successfully")
 		os.Exit(0)
 	}
 
