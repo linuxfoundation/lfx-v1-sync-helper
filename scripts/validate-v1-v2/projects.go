@@ -51,6 +51,29 @@ func loadProjectMapping(path string) error {
 	return nil
 }
 
+// allowedMeetingIDs is the set of meeting IDs (from itx-zoom-meetings-v2) that belong to
+// an allowed project, populated by loadAllowedMeetingIDs.
+var allowedMeetingIDs map[string]bool
+
+// loadAllowedMeetingIDs scans itx-zoom-meetings-v2 and builds the set of meeting IDs
+// whose proj_id is in allowedV1ProjectIDs.
+func loadAllowedMeetingIDs(ctx context.Context, dynamo *DynamoClient) error {
+	m := map[string]bool{}
+	_, err := dynamo.ScanTable(ctx, "itx-zoom-meetings-v2", "", "", 0, func(item map[string]any) error {
+		meetingID, _ := item["meeting_id"].(string)
+		projectID, _ := item["proj_id"].(string)
+		if meetingID != "" && allowedV1ProjectIDs[projectID] {
+			m[meetingID] = true
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("loading allowed meeting IDs: %w", err)
+	}
+	allowedMeetingIDs = m
+	return nil
+}
+
 // allowedSurveyIDs is the set of survey IDs (from itx-surveys) that belong to
 // an allowed project, populated by loadAllowedSurveyIDs.
 var allowedSurveyIDs map[string]bool

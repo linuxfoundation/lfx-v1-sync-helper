@@ -139,6 +139,15 @@ func main() {
 			break
 		}
 	}
+	for _, tc := range tables {
+		if tc.MeetingIDAttribute != "" {
+			if err := loadAllowedMeetingIDs(ctx, dynamo); err != nil {
+				slog.Error("failed to load allowed meeting IDs", "error", err)
+				os.Exit(1)
+			}
+			break
+		}
+	}
 
 	report := Report{}
 
@@ -202,6 +211,12 @@ func processTable(
 			if tc.UseCommitteeProjectMapping {
 				id, _ := item[tc.V1IDAttribute].(string)
 				if !allowedSurveyIDs[id] {
+					return nil
+				}
+			}
+			if tc.MeetingIDAttribute != "" {
+				meetingID, _ := item[tc.MeetingIDAttribute].(string)
+				if !allowedMeetingIDs[meetingID] {
 					return nil
 				}
 			}

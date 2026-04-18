@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-UIDS_FILE="${1:-$SCRIPT_DIR/project-uids.txt}"
+UIDS_FILE="${1:-$SCRIPT_DIR/tmp/project-uids.txt}"
 
 if [[ ! -f "$UIDS_FILE" ]]; then
   echo "error: $UIDS_FILE not found" >&2
