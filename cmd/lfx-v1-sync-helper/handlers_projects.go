@@ -302,6 +302,11 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any)
 		payload.LegalEntityType = &category
 	}
 
+	// Map funding status.
+	if funding, ok := v1Data["funding__c"].(string); ok && funding != "" {
+		payload.Funding = &funding
+	}
+
 	// Map funding model (split semicolon-delimited values).
 	if model, ok := v1Data["model__c"].(string); ok && model != "" {
 		models := strings.Split(model, ";")
@@ -476,6 +481,11 @@ func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string,
 	// Map legal entity type from category__c.
 	if category, ok := v1Data["category__c"].(string); ok && category != "" {
 		payload.LegalEntityType = &category
+	}
+
+	// Map funding status.
+	if funding, ok := v1Data["funding__c"].(string); ok && funding != "" {
+		payload.Funding = &funding
 	}
 
 	// Map funding model (split semicolon-delimited values).

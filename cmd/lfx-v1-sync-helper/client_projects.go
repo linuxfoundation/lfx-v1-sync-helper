@@ -93,6 +93,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 		ParentUID:                  stringToStringPtr(basePayload.ParentUID),
 		Stage:                      basePayload.Stage,
 		Category:                   basePayload.Category,
+		Funding:                    basePayload.Funding,
 		FundingModel:               basePayload.FundingModel,
 		CharterURL:                 basePayload.CharterURL,
 		LegalEntityType:            basePayload.LegalEntityType,
@@ -213,6 +214,7 @@ func projectBasesEqual(a, b *projectservice.ProjectBase) bool {
 		stringPtrToString(a.ParentUID) == stringPtrToString(b.ParentUID) &&
 		stringPtrToString(a.Stage) == stringPtrToString(b.Stage) &&
 		stringPtrToString(a.Category) == stringPtrToString(b.Category) &&
+		stringPtrToString(a.Funding) == stringPtrToString(b.Funding) &&
 		stringSliceEqual(a.FundingModel, b.FundingModel) &&
 		stringPtrToString(a.CharterURL) == stringPtrToString(b.CharterURL) &&
 		stringPtrToString(a.LegalEntityType) == stringPtrToString(b.LegalEntityType) &&
