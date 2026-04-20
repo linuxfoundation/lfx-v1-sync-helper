@@ -323,8 +323,9 @@ func ResolveV1UserSFIDByUsername(ctx context.Context, username string) (string, 
 	}
 
 	// Validate that the username still matches (handles stale index data).
-	// Compare normalized forms so whitespace/case differences in caller input don't cause false misses.
-	if !strings.EqualFold(strings.TrimSpace(user.Username), strings.TrimSpace(username)) {
+	// Use the same full canonicalization as the index (NFC + lower + trim) so decomposed
+	// vs precomposed Unicode forms, case, and whitespace never cause false misses.
+	if usernameToKVKey(user.Username) != encodedUsername {
 		logger.With("candidate_sfid", candidateSFID, "expected_username", username, "actual_username", user.Username).
 			DebugContext(ctx, "username mismatch in validation, treating as miss (stale index)")
 		return "", nil
@@ -396,8 +397,9 @@ func ResolveV1UserSFIDByEmail(ctx context.Context, email string) (string, error)
 			continue
 		}
 
-		// Compare normalized forms so whitespace/case in caller input don't cause false misses.
-		if strings.EqualFold(strings.TrimSpace(emailAddr), strings.TrimSpace(email)) {
+		// Use the same full canonicalization as the index (NFC + lower + trim) so decomposed
+		// vs precomposed Unicode forms, case, and whitespace never cause false misses.
+		if emailToKVKey(emailAddr) == encodedEmail {
 			return candidateSFID, nil
 		}
 	}
