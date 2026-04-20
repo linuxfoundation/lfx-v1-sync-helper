@@ -190,16 +190,21 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 	}
 
 	// Check if the email belongs to a different Auth0 user.
+	// Ignore email| users (secondary email connection accounts we may have created).
+	if err := auth0RateLimiter.Wait(ctx); err != nil {
+		return fmt.Errorf("rate limiter: %w", err)
+	}
 	existingUsers, err := auth0Mgmt.User.ListByEmail(ctx, email)
 	if err != nil {
 		return fmt.Errorf("failed to search users by email %s: %w", email, err)
 	}
 	for _, u := range existingUsers {
-		if u.GetID() != primaryAuth0ID {
-			logger.With("auth0_user_id", primaryAuth0ID, "email", email, "other_user", u.GetID()).
-				WarnContext(ctx, "email belongs to a different Auth0 user, skipping link")
-			return nil
+		if u.GetID() == primaryAuth0ID || strings.HasPrefix(u.GetID(), "email|") {
+			continue
 		}
+		logger.With("auth0_user_id", primaryAuth0ID, "email", email, "other_user", u.GetID()).
+			WarnContext(ctx, "email belongs to a different Auth0 user, skipping link")
+		return nil
 	}
 
 	// Step 1: Create secondary user in the "email" connection with email_verified=true.
@@ -216,6 +221,9 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 		// If user already exists (409), find it and proceed to link.
 		if mgmtErr, ok := err.(management.Error); ok && mgmtErr.Status() == http.StatusConflict {
 			// Find the existing email user to get its ID for linking.
+			if waitErr := auth0RateLimiter.Wait(ctx); waitErr != nil {
+				return fmt.Errorf("rate limiter: %w", waitErr)
+			}
 			users, listErr := auth0Mgmt.User.ListByEmail(ctx, email)
 			if listErr != nil {
 				return fmt.Errorf("failed to find existing email user for %s: %w", email, listErr)

@@ -270,15 +270,17 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 		return "", false, false, true, nil
 	}
 
-	// Also check if the email is inactive (active__c is not true).
-	if isActive, ok := emailData["active__c"].(bool); !ok || !isActive {
-		return "", false, false, true, nil
-	}
-
-	// Extract email address
+	// Extract email address (do this before active check so unlink has the address).
 	if emailAddr, ok := emailData["alternate_email_address__c"].(string); ok && emailAddr != "" {
 		email = emailAddr
-	} else {
+	}
+
+	// Check if the email is inactive (active__c is not true).
+	if isActive, ok := emailData["active__c"].(bool); !ok || !isActive {
+		return email, false, false, true, nil
+	}
+
+	if email == "" {
 		return "", false, false, false, fmt.Errorf("email record %s has no email address", emailSfid)
 	}
 
