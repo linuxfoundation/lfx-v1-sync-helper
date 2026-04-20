@@ -341,6 +341,11 @@ walListener:
             - insert
             - update
             - delete
+          # salesforce_b2b.User
+          User:
+            - insert
+            - update
+            - delete
     logger:
       # level is the logging level
       level: info
