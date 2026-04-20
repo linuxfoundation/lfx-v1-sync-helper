@@ -93,6 +93,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 		ParentUID:                  stringToStringPtr(basePayload.ParentUID),
 		Stage:                      basePayload.Stage,
 		Category:                   basePayload.Category,
+		Funding:                    basePayload.Funding,
 		FundingModel:               basePayload.FundingModel,
 		CharterURL:                 basePayload.CharterURL,
 		LegalEntityType:            basePayload.LegalEntityType,
@@ -128,7 +129,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 	}
 
 	// Handle settings update if provided.
-	if settingsPayload != nil && (settingsPayload.MissionStatement != nil || settingsPayload.AnnouncementDate != nil || settingsPayload.ExecutiveDirector != nil) {
+	if settingsPayload != nil && (settingsPayload.MissionStatement != nil || settingsPayload.AnnouncementDate != nil || settingsPayload.ExecutiveDirector != nil || settingsPayload.ProgramManager != nil || settingsPayload.OpportunityOwner != nil) {
 		// Fetch current project settings.
 		currentSettings, settingsETag, err := fetchProjectSettings(ctx, *basePayload.UID)
 		if err != nil {
@@ -155,6 +156,12 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 			settingsChanged = true
 		}
 		if settingsPayload.ExecutiveDirector != nil && !userInfoPtrsEqual(settingsPayload.ExecutiveDirector, currentSettings.ExecutiveDirector) {
+			settingsChanged = true
+		}
+		if settingsPayload.ProgramManager != nil && !userInfoPtrsEqual(settingsPayload.ProgramManager, currentSettings.ProgramManager) {
+			settingsChanged = true
+		}
+		if settingsPayload.OpportunityOwner != nil && !userInfoPtrsEqual(settingsPayload.OpportunityOwner, currentSettings.OpportunityOwner) {
 			settingsChanged = true
 		}
 
@@ -213,6 +220,7 @@ func projectBasesEqual(a, b *projectservice.ProjectBase) bool {
 		stringPtrToString(a.ParentUID) == stringPtrToString(b.ParentUID) &&
 		stringPtrToString(a.Stage) == stringPtrToString(b.Stage) &&
 		stringPtrToString(a.Category) == stringPtrToString(b.Category) &&
+		stringPtrToString(a.Funding) == stringPtrToString(b.Funding) &&
 		stringSliceEqual(a.FundingModel, b.FundingModel) &&
 		stringPtrToString(a.CharterURL) == stringPtrToString(b.CharterURL) &&
 		stringPtrToString(a.LegalEntityType) == stringPtrToString(b.LegalEntityType) &&
