@@ -65,6 +65,51 @@ func initAuth0MgmtClient(cfg *Config) error {
 	return nil
 }
 
+// buildAuth0Metadata merges v1 platform DB fields into an existing Auth0
+// user_metadata map and reports whether anything changed. The orgName parameter
+// is the resolved organization name (empty to skip org mapping).
+func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, orgName string) (merged map[string]interface{}, changed bool) {
+	merged = make(map[string]interface{}, len(existing))
+	for k, v := range existing {
+		merged[k] = v
+	}
+
+	// Map each v1 field to the corresponding Auth0 user_metadata key.
+	for v1Key, auth0Key := range v1ToAuth0Fields {
+		v1Val, _ := v1Data[v1Key].(string)
+		existingVal, _ := merged[auth0Key].(string)
+
+		if v1Val != existingVal {
+			merged[auth0Key] = v1Val
+			changed = true
+		}
+	}
+
+	// Derive the full name from first + last (never read v1 "name" column).
+	firstName, _ := v1Data["firstname"].(string)
+	lastName, _ := v1Data["lastname"].(string)
+	derivedName := strings.TrimSpace(firstName + " " + lastName)
+	existingName, _ := merged["name"].(string)
+	if derivedName != existingName {
+		merged["name"] = derivedName
+		changed = true
+	}
+
+	// Organization mapping.
+	if orgName != "" {
+		existingOrg, _ := merged["organization"].(string)
+		// Don't overwrite a real org with the placeholder.
+		if orgName == v1NoAccountPlaceholder && existingOrg != "" {
+			// skip
+		} else if orgName != existingOrg {
+			merged["organization"] = orgName
+			changed = true
+		}
+	}
+
+	return merged, changed
+}
+
 // syncProfileToAuth0 maps v1 merged_user fields to Auth0 user_metadata and
 // pushes the update via the Management API. It reads the current user_metadata
 // first to avoid clobbering fields we don't own.
@@ -76,55 +121,26 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[stri
 	}
 
 	// Start from existing user_metadata (or empty map).
-	metadata := make(map[string]interface{})
+	existingMetadata := make(map[string]interface{})
 	if existing.UserMetadata != nil {
 		for k, v := range *existing.UserMetadata {
-			metadata[k] = v
+			existingMetadata[k] = v
 		}
 	}
 
-	// Track whether anything actually changed to avoid unnecessary API calls.
-	changed := false
-
-	// Map each v1 field to the corresponding Auth0 user_metadata key.
-	for v1Key, auth0Key := range v1ToAuth0Fields {
-		v1Val, _ := v1Data[v1Key].(string)
-		existingVal, _ := metadata[auth0Key].(string)
-
-		if v1Val != existingVal {
-			metadata[auth0Key] = v1Val
-			changed = true
-		}
-	}
-
-	// Derive the full name from first + last (never read v1 "name" column).
-	firstName, _ := v1Data["firstname"].(string)
-	lastName, _ := v1Data["lastname"].(string)
-	derivedName := strings.TrimSpace(firstName + " " + lastName)
-	existingName, _ := metadata["name"].(string)
-	if derivedName != existingName {
-		metadata["name"] = derivedName
-		changed = true
-	}
-
-	// Organization: resolve account name from KV.
+	// Resolve organization name from v1 accountid.
+	var orgName string
 	if accountID, ok := v1Data["accountid"].(string); ok && accountID != "" {
 		org, orgErr := lookupV1Org(ctx, accountID)
 		if orgErr != nil {
 			logger.With(errKey, orgErr, "accountid", accountID).
 				WarnContext(ctx, "failed to resolve v1 org for profile sync, skipping organization field")
 		} else if org != nil && org.Name != "" {
-			existingOrg, _ := metadata["organization"].(string)
-			// Don't overwrite a real org with the placeholder.
-			if org.Name == v1NoAccountPlaceholder && existingOrg != "" {
-				logger.With("auth0_user_id", auth0UserID).
-					DebugContext(ctx, "skipping org update: v1 has placeholder, v2 already has a value")
-			} else if org.Name != existingOrg {
-				metadata["organization"] = org.Name
-				changed = true
-			}
+			orgName = org.Name
 		}
 	}
+
+	metadata, changed := buildAuth0Metadata(existingMetadata, v1Data, orgName)
 
 	if !changed {
 		logger.With("auth0_user_id", auth0UserID).
