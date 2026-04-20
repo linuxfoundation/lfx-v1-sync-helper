@@ -50,7 +50,9 @@ var (
 	v1HTTPClient *http.Client
 )
 
-// V1User represents a user from the v1-objects KV bucket (salesforce-merged_user or salesforce_b2b-User tables)
+// V1User represents a user from the v1-objects KV bucket. Used for both salesforce-merged_user (b2c)
+// and salesforce_b2b-User (b2b) records — the fields we care about (FirstName, LastName, Email,
+// Username, Avatar) are present in both schemas, so the same struct is reused for both.
 type V1User struct {
 	ID        string `json:"ID"`
 	Username  string `json:"Username"`
@@ -200,7 +202,8 @@ func lookupMergedUser(ctx context.Context, platformID string) (*V1User, error) {
 }
 
 // lookupB2BUser fetches user information from the salesforce_b2b-User table via v1-objects KV bucket.
-// B2B users (e.g. opportunity owners) live in the Salesforce B2B org and do not have LFID usernames.
+// B2B users (e.g. opportunity owners) live in the Salesforce B2B org. V1User is reused here because
+// the fields we care about (FirstName, LastName, Email, Username, FullPhotoUrl→Avatar) exist in both schemas.
 func lookupB2BUser(ctx context.Context, b2bUserID string) (*V1User, error) {
 	userKey := fmt.Sprintf("salesforce_b2b-User.%s", b2bUserID)
 
