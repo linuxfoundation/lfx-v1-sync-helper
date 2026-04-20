@@ -12,9 +12,7 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net"
 	"strings"
 
 	"github.com/auth0/go-auth0/management"
@@ -55,8 +53,9 @@ func initAuth0MgmtClient(cfg *Config) error {
 			cfg.Auth0PrivateKey,
 			"RS256",
 		),
-		// Respect Auth0 rate limits (~50 req/s) during backfill replay.
-		management.WithRetries(3, []int{429}),
+		// No SDK-level retries: the handler runs in a fire-and-forget goroutine
+		// so we can't block on backoff. Errors are logged and the next KV update
+		// will naturally retry.
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create Auth0 Management API client: %w", err)
@@ -146,32 +145,3 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[stri
 	return nil
 }
 
-// isRetryableAuth0Error returns true for transient errors (network blips,
-// timeouts) that should trigger JetStream re-delivery. Permanent errors
-// (404, 403, validation) return false to avoid infinite retry loops.
-// Note: 429 rate-limit errors are already handled by the SDK's WithRetries.
-func isRetryableAuth0Error(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// Network-level errors are transient.
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return true
-	}
-
-	// Auth0 Management API errors expose the HTTP status code.
-	var mErr management.Error
-	if errors.As(err, &mErr) {
-		switch mErr.Status() {
-		case 408, 429, 500, 502, 503, 504:
-			return true
-		default:
-			return false
-		}
-	}
-
-	// Unknown error type — don't retry to avoid infinite loops.
-	return false
-}

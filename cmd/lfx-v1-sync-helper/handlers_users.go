@@ -8,13 +8,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+const (
+	// profileSyncDelay is the time to wait before syncing a v1 profile change
+	// to Auth0. This mitigates contention with lf-login-backend, which may
+	// update Auth0 user_metadata for the same user at roughly the same time.
+	profileSyncDelay = 5 * time.Second
+)
+
 // handleMergedUserUpdate processes merged_user record updates by syncing
 // profile fields from the v1 platform DB to Auth0 user_metadata.
-// Returns true if the operation should be retried, false otherwise.
+//
+// The Auth0 update runs in a background goroutine after a short delay to avoid
+// contention with lf-login-backend, which may write to Auth0 user_metadata at
+// the same time. The NATS message is always ACKed immediately so we don't hold
+// up the KV consumer queue. Errors are logged; the next KV update for this user
+// will naturally retry.
 func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Extract username to resolve the Auth0 user ID.
 	username, _ := v1Data["username__c"].(string)
@@ -25,11 +38,15 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 
 	auth0UserID := mapUsernameToAuthSub(username)
 
-	if err := syncProfileToAuth0(ctx, auth0UserID, v1Data); err != nil {
-		logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
-			ErrorContext(ctx, "failed to sync profile to Auth0")
-		return isRetryableAuth0Error(err)
-	}
+	// Fire-and-forget: ACK the NATS message immediately, run the Auth0 sync
+	// in a goroutine after a delay.
+	go func() {
+		time.Sleep(profileSyncDelay)
+		if err := syncProfileToAuth0(context.Background(), auth0UserID, v1Data); err != nil {
+			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
+				ErrorContext(ctx, "failed to sync profile to Auth0")
+		}
+	}()
 
 	return false
 }
