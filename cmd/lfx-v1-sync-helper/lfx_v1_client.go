@@ -226,7 +226,7 @@ func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error
 	// Single pass: look for primary email while tracking first valid fallback
 	var fallbackEmail string
 	for _, emailSfid := range emailSfids {
-		email, isPrimary, isTombstoned, err := getAlternateEmailDetails(ctx, emailSfid)
+		email, isPrimary, _, isTombstoned, err := getAlternateEmailDetails(ctx, emailSfid)
 		if err != nil {
 			logger.With("email_sfid", emailSfid, "error", err).DebugContext(ctx, "failed to get alternate email details")
 			continue
@@ -256,30 +256,30 @@ func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error
 	return "", fmt.Errorf("no valid emails found for user %s", userSfid)
 }
 
-// getAlternateEmailDetails retrieves email address and primary status from the v1-objects KV bucket
-// Returns (email, isPrimary, isTombstoned, error)
-func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email string, isPrimary bool, isTombstoned bool, err error) {
+// getAlternateEmailDetails retrieves email address, primary status, and verification status from the v1-objects KV bucket.
+// Returns (email, isPrimary, isVerified, isTombstoned, error)
+func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email string, isPrimary bool, isVerified bool, isTombstoned bool, err error) {
 	emailKey := fmt.Sprintf("salesforce-alternate_email__c.%s", emailSfid)
 
 	// Parse the alternate email record.
 	emailData, exists, err := getV1ObjectData(ctx, emailKey)
 	if err != nil {
-		return "", false, false, fmt.Errorf("failed to get email data: %w", err)
+		return "", false, false, false, fmt.Errorf("failed to get email data: %w", err)
 	}
 	if !exists {
-		return "", false, true, nil
+		return "", false, false, true, nil
 	}
 
 	// Also check if the email is inactive (active__c is not true).
 	if isActive, ok := emailData["active__c"].(bool); !ok || !isActive {
-		return "", false, true, nil
+		return "", false, false, true, nil
 	}
 
 	// Extract email address
 	if emailAddr, ok := emailData["alternate_email_address__c"].(string); ok && emailAddr != "" {
 		email = emailAddr
 	} else {
-		return "", false, false, fmt.Errorf("email record %s has no email address", emailSfid)
+		return "", false, false, false, fmt.Errorf("email record %s has no email address", emailSfid)
 	}
 
 	// Check if this is the primary email
@@ -287,7 +287,12 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 		isPrimary = primaryFlag
 	}
 
-	return email, isPrimary, false, nil
+	// Check if the email is verified
+	if verifiedFlag, ok := emailData["verified__c"].(bool); ok {
+		isVerified = verifiedFlag
+	}
+
+	return email, isPrimary, isVerified, false, nil
 }
 
 // getOrganizationFromV1API fetches organization information from the LFX v1 Organization Service

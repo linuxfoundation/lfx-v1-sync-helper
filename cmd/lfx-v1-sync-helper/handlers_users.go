@@ -53,8 +53,9 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 	return false
 }
 
-// handleAlternateEmailUpdate processes alternate email updates and maintains
-// v1-mapping records for merged users' alternate emails.
+// handleAlternateEmailUpdate processes alternate email updates, maintains
+// v1-mapping records for merged users' alternate emails, and syncs the email
+// as a linked identity to the user's Auth0 account.
 // Returns true if the operation should be retried, false otherwise.
 func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Extract the leadorcontactid which references the sfid of merged_user table.
@@ -77,8 +78,88 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 		isDeleted = deletedVal
 	}
 
-	// Process the update synchronously and return retry status.
-	return updateUserAlternateEmails(ctx, leadorcontactid, emailSfid, isDeleted)
+	// Update the SFID index in v1-mappings KV.
+	if retry := updateUserAlternateEmails(ctx, leadorcontactid, emailSfid, isDeleted); retry {
+		return true
+	}
+
+	// Sync the email identity to Auth0.
+	if retry := syncAlternateEmailToAuth0(ctx, key, leadorcontactid, emailSfid, isDeleted); retry {
+		return true
+	}
+
+	return false
+}
+
+// syncAlternateEmailToAuth0 links or unlinks an alternate email as an Auth0
+// identity on the user's primary account. Returns true if the operation should
+// be retried (transient failure).
+func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid string, isDeleted bool) bool {
+	// Look up the full email record from v1-objects KV.
+	email, isPrimary, isVerified, isTombstoned, err := getAlternateEmailDetails(ctx, emailSfid)
+	if err != nil {
+		logger.With(errKey, err, "key", key, "email_sfid", emailSfid).
+			WarnContext(ctx, "failed to get alternate email details for Auth0 sync")
+		return false
+	}
+
+	// Skip primary emails - handled by auth0-sync-userdb.
+	if isPrimary {
+		return false
+	}
+
+	// Determine action: unlink if deleted/inactive, link if verified and active.
+	shouldUnlink := isDeleted || isTombstoned
+	if !shouldUnlink {
+		// Only link verified emails.
+		if !isVerified {
+			logger.With("key", key, "email_sfid", emailSfid).
+				DebugContext(ctx, "alternate email not verified, skipping Auth0 sync")
+			return false
+		}
+		if email == "" {
+			return false
+		}
+	}
+
+	// Resolve the user's Auth0 ID via username.
+	v1User, err := lookupV1User(ctx, userSfid)
+	if err != nil {
+		logger.With(errKey, err, "key", key, "user_sfid", userSfid).
+			WarnContext(ctx, "failed to resolve v1 user for Auth0 email sync")
+		return false
+	}
+	if v1User.Username == "" {
+		logger.With("key", key, "user_sfid", userSfid).
+			WarnContext(ctx, "v1 user has no username, cannot resolve Auth0 ID")
+		return false
+	}
+	auth0UserID := mapUsernameToAuthSub(v1User.Username)
+
+	// Perform the link or unlink.
+	if shouldUnlink {
+		// For unlink we need the email address. If tombstoned, we may not have it
+		// from getAlternateEmailDetails (it returns empty for inactive records).
+		// In that case, skip - we can't unlink without knowing the email.
+		if email == "" {
+			logger.With("key", key, "email_sfid", emailSfid, "auth0_user_id", auth0UserID).
+				DebugContext(ctx, "cannot unlink email: address unavailable (record inactive/deleted)")
+			return false
+		}
+		if err := unlinkEmailIdentity(ctx, auth0UserID, email); err != nil {
+			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
+				ErrorContext(ctx, "failed to unlink email identity from Auth0")
+			return true // Retry on transient failure.
+		}
+	} else {
+		if err := linkEmailIdentity(ctx, auth0UserID, email); err != nil {
+			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
+				ErrorContext(ctx, "failed to link email identity to Auth0")
+			return true // Retry on transient failure.
+		}
+	}
+
+	return false
 }
 
 // updateUserAlternateEmails updates the v1-mapping record for a user's alternate emails
