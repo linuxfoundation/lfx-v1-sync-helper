@@ -51,8 +51,9 @@ var (
 )
 
 // V1User represents a user from the v1-objects KV bucket. Used for both salesforce-merged_user (b2c)
-// and salesforce_b2b-User (b2b) records — the fields we care about (FirstName, LastName, Email,
-// Username, Avatar) are present in both schemas, so the same struct is reused for both.
+// and salesforce_b2b-User (b2b) records — FirstName, LastName, and Email are present in both schemas.
+// For b2b users, Avatar is mapped from FullPhotoUrl; Username is not set since b2b Salesforce usernames
+// are not LFID Auth0 identities.
 type V1User struct {
 	ID        string `json:"ID"`
 	Username  string `json:"Username"`
