@@ -660,7 +660,7 @@ func lookupStaffUser(ctx context.Context, v1Data map[string]any, v1Field, sfidKe
 		return nil
 	}
 
-	user, err := lookupV1User(ctx, sfid)
+	user, err := lookupMergedUser(ctx, sfid)
 	if err != nil {
 		logger.With(errKey, err, sfidKey, sfid).WarnContext(ctx, warnMsg)
 		return nil

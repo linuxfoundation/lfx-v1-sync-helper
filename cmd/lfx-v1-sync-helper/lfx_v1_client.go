@@ -146,8 +146,8 @@ func initV1Client(cfg *Config) error {
 	return nil
 }
 
-// lookupV1User fetches user information from the v1-objects KV bucket (replicated by Meltano)
-func lookupV1User(ctx context.Context, platformID string) (*V1User, error) {
+// lookupMergedUser fetches user information from the v1-objects KV bucket (replicated by Meltano)
+func lookupMergedUser(ctx context.Context, platformID string) (*V1User, error) {
 	// Look up user in the salesforce-merged_user table via v1-objects KV bucket
 	userKey := fmt.Sprintf("salesforce-merged_user.%s", platformID)
 
