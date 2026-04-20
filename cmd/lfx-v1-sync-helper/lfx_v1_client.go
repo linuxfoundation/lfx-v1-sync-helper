@@ -151,8 +151,7 @@ func initV1Client(cfg *Config) error {
 
 // lookupMergedUser fetches user information from the v1-objects KV bucket (replicated by Meltano)
 func lookupMergedUser(ctx context.Context, platformID string) (*V1User, error) {
-	// Look up user in the salesforce-merged_user table via v1-objects KV bucket
-	userKey := fmt.Sprintf("salesforce-merged_user.%s", platformID)
+	userKey := v1MergedUserKVPrefix + platformID
 
 	userData, exists, err := getV1ObjectData(ctx, userKey)
 	if err != nil {
@@ -240,8 +239,7 @@ func lookupB2BUser(ctx context.Context, b2bUserID string) (*V1User, error) {
 // getPrimaryEmailForUser retrieves the primary email address for a user by looking up
 // their alternate emails from the mappings KV bucket and the v1-objects KV bucket
 func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error) {
-	// Get the list of alternate email SFIDs for this user
-	mappingKey := fmt.Sprintf("v1-merged-user.alternate-emails.%s", userSfid)
+	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
 
 	entry, err := mappingsKV.Get(ctx, mappingKey)
 	if err != nil {
@@ -297,7 +295,7 @@ func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error
 // getAlternateEmailDetails retrieves email address and primary status from the v1-objects KV bucket
 // Returns (email, isPrimary, isTombstoned, error)
 func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email string, isPrimary bool, isTombstoned bool, err error) {
-	emailKey := fmt.Sprintf("salesforce-alternate_email__c.%s", emailSfid)
+	emailKey := v1AlternateEmailKVPrefix + emailSfid
 
 	// Parse the alternate email record.
 	emailData, exists, err := getV1ObjectData(ctx, emailKey)
@@ -326,6 +324,128 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 	}
 
 	return email, isPrimary, false, nil
+}
+
+// ResolveV1UserSFIDByUsername looks up a v1 user SFID by username using the secondary index.
+// It validates the resolved SFID by fetching the user record and confirming the username matches.
+// Returns (sfid, nil) on success, ("", nil) on miss (including stale index), or ("", error) on failure.
+func ResolveV1UserSFIDByUsername(ctx context.Context, username string) (string, error) {
+	// Look up the secondary index.
+	encodedUsername := usernameToKVKey(username)
+	if encodedUsername == "" {
+		return "", nil
+	}
+	indexKey := kvKeyUsernamePrefix + encodedUsername
+	entry, err := mappingsKV.Get(ctx, indexKey)
+	if err != nil {
+		if err == jetstream.ErrKeyNotFound {
+			return "", nil // Miss
+		}
+		return "", fmt.Errorf("failed to get username index: %w", err)
+	}
+
+	// Check if tombstoned.
+	if isTombstonedMapping(entry.Value()) {
+		return "", nil // Tombstoned, treat as miss
+	}
+
+	candidateSFID := string(entry.Value())
+
+	// Validate by fetching the user record.
+	user, err := lookupMergedUser(ctx, candidateSFID)
+	if err != nil {
+		// Per ticket: "silently treat mismatched usernames as a miss (not an error)"
+		logger.With("candidate_sfid", candidateSFID, "error", err).
+			DebugContext(ctx, "failed to lookup user for username validation, treating as miss")
+		return "", nil
+	}
+
+	// Validate that the username still matches (handles stale index data).
+	// Use the same full canonicalization as the index (NFC + lower + trim) so decomposed
+	// vs precomposed Unicode forms, case, and whitespace never cause false misses.
+	if usernameToKVKey(user.Username) != encodedUsername {
+		logger.With("candidate_sfid", candidateSFID, "expected_username", username, "actual_username", user.Username).
+			DebugContext(ctx, "username mismatch in validation, treating as miss (stale index)")
+		return "", nil
+	}
+
+	return candidateSFID, nil
+}
+
+// ResolveV1UserSFIDByEmail looks up a v1 user SFID by email using the secondary index.
+// It validates the resolved SFID by checking all alternate emails for the user.
+// Returns (sfid, nil) on success, ("", nil) on miss (including stale index), or ("", error) on failure.
+func ResolveV1UserSFIDByEmail(ctx context.Context, email string) (string, error) {
+	// Look up the secondary index.
+	encodedEmail := emailToKVKey(email)
+	if encodedEmail == "" {
+		return "", nil
+	}
+	indexKey := kvKeyEmailPrefix + encodedEmail
+	entry, err := mappingsKV.Get(ctx, indexKey)
+	if err != nil {
+		if err == jetstream.ErrKeyNotFound {
+			return "", nil // Miss
+		}
+		return "", fmt.Errorf("failed to get email index: %w", err)
+	}
+
+	// Check if tombstoned.
+	if isTombstonedMapping(entry.Value()) {
+		return "", nil // Tombstoned, treat as miss
+	}
+
+	candidateSFID := string(entry.Value())
+
+	// Get the list of alternate email SFIDs for this user to validate.
+	// merged_user has NO email field - all emails are in alternate_email records.
+	mappingKey := kvKeyAlternateEmailsPrefix + candidateSFID
+	emailListEntry, err := mappingsKV.Get(ctx, mappingKey)
+	if err != nil {
+		if err == jetstream.ErrKeyNotFound {
+			// Per ticket: "silently treat missing emails as a miss"
+			logger.With("candidate_sfid", candidateSFID).
+				DebugContext(ctx, "no alternate emails found for user, treating as miss")
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to get alternate emails mapping: %w", err)
+	}
+
+	// Parse the list of email SFIDs.
+	var emailSfids []string
+	if err := json.Unmarshal(emailListEntry.Value(), &emailSfids); err != nil {
+		return "", fmt.Errorf("failed to unmarshal email SFIDs: %w", err)
+	}
+
+	if len(emailSfids) == 0 {
+		logger.With("candidate_sfid", candidateSFID).
+			DebugContext(ctx, "empty alternate emails list for user, treating as miss")
+		return "", nil
+	}
+
+	// Check each email to see if any matches the queried email.
+	for _, emailSfid := range emailSfids {
+		emailAddr, _, isTombstoned, err := getAlternateEmailDetails(ctx, emailSfid)
+		if err != nil {
+			logger.With("email_sfid", emailSfid, "error", err).
+				DebugContext(ctx, "failed to get alternate email details, skipping")
+			continue
+		}
+		if isTombstoned {
+			continue
+		}
+
+		// Use the same full canonicalization as the index (NFC + lower + trim) so decomposed
+		// vs precomposed Unicode forms, case, and whitespace never cause false misses.
+		if emailToKVKey(emailAddr) == encodedEmail {
+			return candidateSFID, nil
+		}
+	}
+
+	// No match found after checking all emails - stale index.
+	logger.With("candidate_sfid", candidateSFID, "email", email).
+		DebugContext(ctx, "email not found in user's alternate emails, treating as miss (stale index)")
+	return "", nil
 }
 
 // getOrganizationFromV1API fetches organization information from the LFX v1 Organization Service

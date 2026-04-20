@@ -127,10 +127,7 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 		logger.With("key", key).DebugContext(ctx, "meeting record, handled by lfx-v2-meeting-service")
 		return false
 	case "salesforce-merged_user":
-		// Merged user records are used on-demand during user lookups from v1-objects KV bucket.
-		// No special processing needed - just log for debugging.
-		logger.With("key", key).DebugContext(ctx, "salesforce-merged_user record updated")
-		return false
+		return handleMergedUserUpdate(ctx, key, v1Data)
 	case "salesforce-alternate_email__c":
 		return handleAlternateEmailUpdate(ctx, key, v1Data)
 	case "salesforce_b2b-Account",
