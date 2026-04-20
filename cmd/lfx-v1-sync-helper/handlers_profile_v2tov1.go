@@ -18,6 +18,7 @@ import (
 	"time"
 
 	nats "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // userProfileUpdatedEvent matches the event published by auth-service after a
@@ -105,24 +106,30 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 	log.With("sfid", sfid).InfoContext(ctx, "synced v2 profile to v1 user-service")
 }
 
-// resolveV1UserSFIDByUsername looks up a v1 user SFID by scanning KV entries
-// for a matching username__c. This is a simple scan approach; once PR #86
-// merges, this can be replaced with the secondary index lookup.
+// resolveV1UserSFIDByUsername looks up a v1 user SFID via the username
+// secondary index in the v1-mappings KV bucket (written by #86's
+// handleMergedUserUpdate). Returns ("", nil) if the index entry doesn't
+// exist or is tombstoned.
 func resolveV1UserSFIDByUsername(ctx context.Context, username string) (string, error) {
 	normalizedUsername := strings.ToLower(strings.TrimSpace(username))
 	if normalizedUsername == "" {
 		return "", nil
 	}
 
-	// Try the secondary index first (written by #86's handleMergedUserUpdate).
 	indexKey := "v1-user.username." + normalizedUsername
 	entry, err := mappingsKV.Get(ctx, indexKey)
-	if err == nil && !isTombstonedMapping(entry.Value()) {
-		return string(entry.Value()), nil
+	if err != nil {
+		if err == jetstream.ErrKeyNotFound || err == jetstream.ErrKeyDeleted {
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to get username index %s: %w", indexKey, err)
 	}
 
-	// Fallback: not found in index (may not be populated yet).
-	return "", nil
+	if isTombstonedMapping(entry.Value()) {
+		return "", nil
+	}
+
+	return string(entry.Value()), nil
 }
 
 // patchV1User sends a PATCH request to user-service to update a v1 user record.
