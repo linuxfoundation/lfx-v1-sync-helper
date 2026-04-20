@@ -95,13 +95,11 @@ func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, 
 		changed = true
 	}
 
-	// Organization mapping.
+	// Organization mapping: don't overwrite a real org with the placeholder.
 	if orgName != "" {
 		existingOrg, _ := merged["organization"].(string)
-		// Don't overwrite a real org with the placeholder.
-		if orgName == v1NoAccountPlaceholder && existingOrg != "" {
-			// skip
-		} else if orgName != existingOrg {
+		isPlaceholder := orgName == v1NoAccountPlaceholder && existingOrg != ""
+		if !isPlaceholder && orgName != existingOrg {
 			merged["organization"] = orgName
 			changed = true
 		}
