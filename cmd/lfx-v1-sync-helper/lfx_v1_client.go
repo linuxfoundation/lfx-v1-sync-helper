@@ -50,7 +50,7 @@ var (
 	v1HTTPClient *http.Client
 )
 
-// V1User represents a user from the v1-objects KV bucket (salesforce-merged_user table)
+// V1User represents a user from the v1-objects KV bucket (salesforce-merged_user or salesforce_b2b-User tables)
 type V1User struct {
 	ID        string `json:"ID"`
 	Username  string `json:"Username"`
