@@ -1,6 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
+// The lfx-v1-sync-helper service.
 package main
 
 // v2-to-v1 profile sync: receives lfx.user_profile.updated events from
