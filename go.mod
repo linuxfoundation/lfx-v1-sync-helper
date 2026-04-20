@@ -17,7 +17,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/linuxfoundation/lfx-v2-committee-service v0.2.22
-	github.com/linuxfoundation/lfx-v2-project-service v0.6.5-0.20260420005753-44cf81e118d6
+	github.com/linuxfoundation/lfx-v2-project-service v0.6.5
 	github.com/nats-io/nats.go v1.48.0
 	github.com/opensearch-project/opensearch-go/v4 v4.5.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
