@@ -711,6 +711,12 @@ func lookupOpportunityOwner(ctx context.Context, v1Data map[string]any) *project
 	if user.Email != "" {
 		info.Email = &user.Email
 	}
+	if user.Username != "" {
+		info.Username = &user.Username
+	}
+	if user.Avatar != "" {
+		info.Avatar = &user.Avatar
+	}
 	return info
 }
 

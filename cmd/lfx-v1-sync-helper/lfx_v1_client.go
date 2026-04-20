@@ -223,6 +223,12 @@ func lookupB2BUser(ctx context.Context, b2bUserID string) (*V1User, error) {
 	if email, ok := userData["Email"].(string); ok {
 		user.Email = email
 	}
+	if username, ok := userData["Username"].(string); ok {
+		user.Username = username
+	}
+	if photoURL, ok := userData["FullPhotoUrl"].(string); ok {
+		user.Avatar = photoURL
+	}
 
 	return user, nil
 }
