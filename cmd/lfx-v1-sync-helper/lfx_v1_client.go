@@ -199,6 +199,34 @@ func lookupV1User(ctx context.Context, platformID string) (*V1User, error) {
 	return user, nil
 }
 
+// lookupB2BUser fetches user information from the salesforce_b2b-User table via v1-objects KV bucket.
+// B2B users (e.g. opportunity owners) live in the Salesforce B2B org and do not have LFID usernames.
+func lookupB2BUser(ctx context.Context, b2bUserID string) (*V1User, error) {
+	userKey := fmt.Sprintf("salesforce_b2b-User.%s", b2bUserID)
+
+	userData, exists, err := getV1ObjectData(ctx, userKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get b2b user data: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("b2b user %s not found or is deleted in v1-objects KV bucket", b2bUserID)
+	}
+
+	user := &V1User{ID: b2bUserID}
+
+	if firstName, ok := userData["FirstName"].(string); ok {
+		user.FirstName = firstName
+	}
+	if lastName, ok := userData["LastName"].(string); ok {
+		user.LastName = lastName
+	}
+	if email, ok := userData["Email"].(string); ok {
+		user.Email = email
+	}
+
+	return user, nil
+}
+
 // getPrimaryEmailForUser retrieves the primary email address for a user by looking up
 // their alternate emails from the mappings KV bucket and the v1-objects KV bucket
 func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error) {

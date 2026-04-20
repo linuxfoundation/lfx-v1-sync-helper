@@ -691,7 +691,27 @@ func lookupProgramManager(ctx context.Context, v1Data map[string]any) *projectse
 }
 
 func lookupOpportunityOwner(ctx context.Context, v1Data map[string]any) *projectservice.UserInfo {
-	return lookupStaffUser(ctx, v1Data, "opportunity_owner__c", "oo_sfid", "failed to lookup opportunity owner user from v1, leaving field unset")
+	sfid, ok := v1Data["opportunity_owner__c"].(string)
+	sfid = strings.TrimSpace(sfid)
+	if !ok || sfid == "" {
+		return nil
+	}
+
+	// Opportunity owners are B2B Salesforce users, not B2C merged users.
+	user, err := lookupB2BUser(ctx, sfid)
+	if err != nil {
+		logger.With(errKey, err, "oo_sfid", sfid).WarnContext(ctx, "failed to lookup opportunity owner user from b2b, leaving field unset")
+		return nil
+	}
+
+	info := &projectservice.UserInfo{}
+	if fullName := strings.TrimSpace(user.FirstName + " " + user.LastName); fullName != "" {
+		info.Name = &fullName
+	}
+	if user.Email != "" {
+		info.Email = &user.Email
+	}
+	return info
 }
 
 // calculatePublicStatus determines if a project should be public based on its stage and parent's public status.
