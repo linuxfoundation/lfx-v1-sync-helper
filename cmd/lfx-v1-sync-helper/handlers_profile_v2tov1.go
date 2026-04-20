@@ -1,7 +1,6 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
-// The lfx-v1-sync-helper service.
 package main
 
 // v2-to-v1 profile sync: receives lfx.user_profile.updated events from
@@ -31,6 +30,7 @@ type userProfileUpdatedEvent struct {
 }
 
 // auth0ToV1Fields is the reverse of v1ToAuth0Fields: Auth0 user_metadata key -> v1 user-service field.
+// TODO: once the v1-to-auth0 branch merges, derive this map from v1ToAuth0Fields to prevent drift.
 var auth0ToV1Fields = map[string]string{
 	"given_name":     "FirstName",
 	"family_name":    "LastName",
@@ -153,7 +153,7 @@ func patchV1User(ctx context.Context, sfid string, fields map[string]string) err
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("user-service returned status %d for user %s: %s", resp.StatusCode, sfid, string(respBody))
