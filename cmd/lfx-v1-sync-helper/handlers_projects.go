@@ -402,6 +402,9 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any)
 
 	// Map executive director from v1 Salesforce contact SFID.
 	payload.ExecutiveDirector = lookupExecutiveDirector(ctx, v1Data)
+	// Map program manager and opportunity owner from v1 Salesforce contact SFIDs.
+	payload.ProgramManager = lookupProgramManager(ctx, v1Data)
+	payload.OpportunityOwner = lookupOpportunityOwner(ctx, v1Data)
 
 	// Handle parent project logic.
 	parentProjectID := ""
@@ -640,6 +643,9 @@ func mapV1DataToProjectUpdateSettingsPayload(ctx context.Context, projectUID str
 
 	// Map executive director from v1 Salesforce contact SFID.
 	payload.ExecutiveDirector = lookupExecutiveDirector(ctx, v1Data)
+	// Map program manager and opportunity owner from v1 Salesforce contact SFIDs.
+	payload.ProgramManager = lookupProgramManager(ctx, v1Data)
+	payload.OpportunityOwner = lookupOpportunityOwner(ctx, v1Data)
 
 	return payload, nil
 }
@@ -656,6 +662,68 @@ func lookupExecutiveDirector(ctx context.Context, v1Data map[string]any) *projec
 	user, err := lookupV1User(ctx, edSFID)
 	if err != nil {
 		logger.With(errKey, err, "ed_sfid", edSFID).WarnContext(ctx, "failed to lookup executive director user from v1, leaving field unset")
+		return nil
+	}
+
+	authSub := mapUsernameToAuthSub(user.Username)
+	info := &projectservice.UserInfo{
+		Username: &authSub,
+	}
+	if fullName := strings.TrimSpace(user.FirstName + " " + user.LastName); fullName != "" {
+		info.Name = &fullName
+	}
+	if user.Email != "" {
+		info.Email = &user.Email
+	}
+	if user.Avatar != "" {
+		info.Avatar = &user.Avatar
+	}
+	return info
+}
+
+// lookupProgramManager resolves the program_manager__c Salesforce contact SFID from v1 data
+// to a UserInfo. Returns nil if the field is absent, empty, or the user lookup fails.
+func lookupProgramManager(ctx context.Context, v1Data map[string]any) *projectservice.UserInfo {
+	sfid, ok := v1Data["program_manager__c"].(string)
+	sfid = strings.TrimSpace(sfid)
+	if !ok || sfid == "" {
+		return nil
+	}
+
+	user, err := lookupV1User(ctx, sfid)
+	if err != nil {
+		logger.With(errKey, err, "pm_sfid", sfid).WarnContext(ctx, "failed to lookup program manager user from v1, leaving field unset")
+		return nil
+	}
+
+	authSub := mapUsernameToAuthSub(user.Username)
+	info := &projectservice.UserInfo{
+		Username: &authSub,
+	}
+	if fullName := strings.TrimSpace(user.FirstName + " " + user.LastName); fullName != "" {
+		info.Name = &fullName
+	}
+	if user.Email != "" {
+		info.Email = &user.Email
+	}
+	if user.Avatar != "" {
+		info.Avatar = &user.Avatar
+	}
+	return info
+}
+
+// lookupOpportunityOwner resolves the opportunity_owner__c Salesforce contact SFID from v1 data
+// to a UserInfo. Returns nil if the field is absent, empty, or the user lookup fails.
+func lookupOpportunityOwner(ctx context.Context, v1Data map[string]any) *projectservice.UserInfo {
+	sfid, ok := v1Data["opportunity_owner__c"].(string)
+	sfid = strings.TrimSpace(sfid)
+	if !ok || sfid == "" {
+		return nil
+	}
+
+	user, err := lookupV1User(ctx, sfid)
+	if err != nil {
+		logger.With(errKey, err, "oo_sfid", sfid).WarnContext(ctx, "failed to lookup opportunity owner user from v1, leaving field unset")
 		return nil
 	}
 
