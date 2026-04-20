@@ -42,7 +42,9 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 	// in a goroutine after a delay.
 	go func() {
 		time.Sleep(profileSyncDelay)
-		if err := syncProfileToAuth0(context.Background(), auth0UserID, v1Data); err != nil {
+		syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := syncProfileToAuth0(syncCtx, auth0UserID, v1Data); err != nil {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
 				ErrorContext(ctx, "failed to sync profile to Auth0")
 		}
