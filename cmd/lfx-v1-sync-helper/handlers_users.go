@@ -46,7 +46,7 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 		defer cancel()
 		if err := syncProfileToAuth0(syncCtx, auth0UserID, v1Data); err != nil {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
-				ErrorContext(ctx, "failed to sync profile to Auth0")
+				ErrorContext(syncCtx, "failed to sync profile to Auth0")
 		}
 	}()
 
