@@ -650,97 +650,48 @@ func mapV1DataToProjectUpdateSettingsPayload(ctx context.Context, projectUID str
 	return payload, nil
 }
 
-// lookupExecutiveDirector resolves the executive_director__c Salesforce contact SFID from v1 data
-// to a UserInfo. Returns nil if the field is absent, empty, or the user lookup fails.
+// lookupStaffUser resolves a Salesforce contact SFID stored under v1Field in v1Data to a
+// UserInfo. sfidKey is used as the log field name for the SFID value. Returns nil if the
+// field is absent, empty, or the user lookup fails.
+func lookupStaffUser(ctx context.Context, v1Data map[string]any, v1Field, sfidKey, warnMsg string) *projectservice.UserInfo {
+	sfid, ok := v1Data[v1Field].(string)
+	sfid = strings.TrimSpace(sfid)
+	if !ok || sfid == "" {
+		return nil
+	}
+
+	user, err := lookupV1User(ctx, sfid)
+	if err != nil {
+		logger.With(errKey, err, sfidKey, sfid).WarnContext(ctx, warnMsg)
+		return nil
+	}
+
+	authSub := mapUsernameToAuthSub(user.Username)
+	info := &projectservice.UserInfo{
+		Username: &authSub,
+	}
+	if fullName := strings.TrimSpace(user.FirstName + " " + user.LastName); fullName != "" {
+		info.Name = &fullName
+	}
+	if user.Email != "" {
+		info.Email = &user.Email
+	}
+	if user.Avatar != "" {
+		info.Avatar = &user.Avatar
+	}
+	return info
+}
+
 func lookupExecutiveDirector(ctx context.Context, v1Data map[string]any) *projectservice.UserInfo {
-	edSFID, ok := v1Data["executive_director__c"].(string)
-	edSFID = strings.TrimSpace(edSFID)
-	if !ok || edSFID == "" {
-		return nil
-	}
-
-	user, err := lookupV1User(ctx, edSFID)
-	if err != nil {
-		logger.With(errKey, err, "ed_sfid", edSFID).WarnContext(ctx, "failed to lookup executive director user from v1, leaving field unset")
-		return nil
-	}
-
-	authSub := mapUsernameToAuthSub(user.Username)
-	info := &projectservice.UserInfo{
-		Username: &authSub,
-	}
-	if fullName := strings.TrimSpace(user.FirstName + " " + user.LastName); fullName != "" {
-		info.Name = &fullName
-	}
-	if user.Email != "" {
-		info.Email = &user.Email
-	}
-	if user.Avatar != "" {
-		info.Avatar = &user.Avatar
-	}
-	return info
+	return lookupStaffUser(ctx, v1Data, "executive_director__c", "ed_sfid", "failed to lookup executive director user from v1, leaving field unset")
 }
 
-// lookupProgramManager resolves the program_manager__c Salesforce contact SFID from v1 data
-// to a UserInfo. Returns nil if the field is absent, empty, or the user lookup fails.
 func lookupProgramManager(ctx context.Context, v1Data map[string]any) *projectservice.UserInfo {
-	sfid, ok := v1Data["program_manager__c"].(string)
-	sfid = strings.TrimSpace(sfid)
-	if !ok || sfid == "" {
-		return nil
-	}
-
-	user, err := lookupV1User(ctx, sfid)
-	if err != nil {
-		logger.With(errKey, err, "pm_sfid", sfid).WarnContext(ctx, "failed to lookup program manager user from v1, leaving field unset")
-		return nil
-	}
-
-	authSub := mapUsernameToAuthSub(user.Username)
-	info := &projectservice.UserInfo{
-		Username: &authSub,
-	}
-	if fullName := strings.TrimSpace(user.FirstName + " " + user.LastName); fullName != "" {
-		info.Name = &fullName
-	}
-	if user.Email != "" {
-		info.Email = &user.Email
-	}
-	if user.Avatar != "" {
-		info.Avatar = &user.Avatar
-	}
-	return info
+	return lookupStaffUser(ctx, v1Data, "program_manager__c", "pm_sfid", "failed to lookup program manager user from v1, leaving field unset")
 }
 
-// lookupOpportunityOwner resolves the opportunity_owner__c Salesforce contact SFID from v1 data
-// to a UserInfo. Returns nil if the field is absent, empty, or the user lookup fails.
 func lookupOpportunityOwner(ctx context.Context, v1Data map[string]any) *projectservice.UserInfo {
-	sfid, ok := v1Data["opportunity_owner__c"].(string)
-	sfid = strings.TrimSpace(sfid)
-	if !ok || sfid == "" {
-		return nil
-	}
-
-	user, err := lookupV1User(ctx, sfid)
-	if err != nil {
-		logger.With(errKey, err, "oo_sfid", sfid).WarnContext(ctx, "failed to lookup opportunity owner user from v1, leaving field unset")
-		return nil
-	}
-
-	authSub := mapUsernameToAuthSub(user.Username)
-	info := &projectservice.UserInfo{
-		Username: &authSub,
-	}
-	if fullName := strings.TrimSpace(user.FirstName + " " + user.LastName); fullName != "" {
-		info.Name = &fullName
-	}
-	if user.Email != "" {
-		info.Email = &user.Email
-	}
-	if user.Avatar != "" {
-		info.Avatar = &user.Avatar
-	}
-	return info
+	return lookupStaffUser(ctx, v1Data, "opportunity_owner__c", "oo_sfid", "failed to lookup opportunity owner user from v1, leaving field unset")
 }
 
 // calculatePublicStatus determines if a project should be public based on its stage and parent's public status.
