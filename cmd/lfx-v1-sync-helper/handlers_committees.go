@@ -659,7 +659,7 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 	// Map contact information.
 	if contactNameV1, ok := v1Data["contact_name__c"].(string); ok && contactNameV1 != "" {
 		// Look up user information from v1 API using the SFID.
-		user, err := lookupV1User(ctx, contactNameV1)
+		user, err := lookupMergedUser(ctx, contactNameV1)
 		if err != nil {
 			logger.With(errKey, err, "contact_name_sfid", contactNameV1).WarnContext(ctx, "failed to lookup user from v1 API, leaving user fields unset")
 		} else {
@@ -826,7 +826,7 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID s
 	// Map contact information.
 	if contactNameV1, ok := v1Data["contact_name__c"].(string); ok && contactNameV1 != "" {
 		// Look up user information from v1 API using the SFID.
-		user, err := lookupV1User(ctx, contactNameV1)
+		user, err := lookupMergedUser(ctx, contactNameV1)
 		if err != nil {
 			logger.With(errKey, err, "contact_name_sfid", contactNameV1).WarnContext(ctx, "failed to lookup user from v1 API, leaving user fields unset")
 		} else {

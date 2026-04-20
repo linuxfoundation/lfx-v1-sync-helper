@@ -50,7 +50,10 @@ var (
 	v1HTTPClient *http.Client
 )
 
-// V1User represents a user from the v1-objects KV bucket (salesforce-merged_user table)
+// V1User represents a user from the v1-objects KV bucket. Used for both salesforce-merged_user (b2c)
+// and salesforce_b2b-User (b2b) records — FirstName, LastName, and Email are present in both schemas.
+// For b2b users, Avatar is mapped from FullPhotoUrl; Username is not set since b2b Salesforce usernames
+// are not LFID Auth0 identities.
 type V1User struct {
 	ID        string `json:"ID"`
 	Username  string `json:"Username"`
@@ -146,8 +149,8 @@ func initV1Client(cfg *Config) error {
 	return nil
 }
 
-// lookupV1User fetches user information from the v1-objects KV bucket (replicated by Meltano)
-func lookupV1User(ctx context.Context, platformID string) (*V1User, error) {
+// lookupMergedUser fetches user information from the v1-objects KV bucket (replicated by Meltano)
+func lookupMergedUser(ctx context.Context, platformID string) (*V1User, error) {
 	userKey := v1MergedUserKVPrefix + platformID
 
 	userData, exists, err := getV1ObjectData(ctx, userKey)
@@ -193,6 +196,41 @@ func lookupV1User(ctx context.Context, platformID string) (*V1User, error) {
 	// Validate that we have at least a username (this is required for Auth0 mapping)
 	if user.Username == "" {
 		return nil, fmt.Errorf("user %s has no username in merged_user record", platformID)
+	}
+
+	return user, nil
+}
+
+// lookupB2BUser fetches user information from the salesforce_b2b-User table via v1-objects KV bucket.
+// B2B users (e.g. opportunity owners) live in the Salesforce B2B org. V1User is reused here because
+// the fields we care about (FirstName, LastName, Email, Username, FullPhotoUrl→Avatar) exist in both schemas.
+func lookupB2BUser(ctx context.Context, b2bUserID string) (*V1User, error) {
+	userKey := fmt.Sprintf("salesforce_b2b-User.%s", b2bUserID)
+
+	userData, exists, err := getV1ObjectData(ctx, userKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get b2b user data: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("b2b user %s not found or is deleted in v1-objects KV bucket", b2bUserID)
+	}
+
+	user := &V1User{ID: b2bUserID}
+
+	if firstName, ok := userData["FirstName"].(string); ok {
+		user.FirstName = firstName
+	}
+	if lastName, ok := userData["LastName"].(string); ok {
+		user.LastName = lastName
+	}
+	if email, ok := userData["Email"].(string); ok {
+		user.Email = email
+	}
+	if username, ok := userData["Username"].(string); ok {
+		user.Username = username
+	}
+	if photoURL, ok := userData["FullPhotoUrl"].(string); ok {
+		user.Avatar = photoURL
 	}
 
 	return user, nil
@@ -314,7 +352,7 @@ func ResolveV1UserSFIDByUsername(ctx context.Context, username string) (string, 
 	candidateSFID := string(entry.Value())
 
 	// Validate by fetching the user record.
-	user, err := lookupV1User(ctx, candidateSFID)
+	user, err := lookupMergedUser(ctx, candidateSFID)
 	if err != nil {
 		// Per ticket: "silently treat mismatched usernames as a miss (not an error)"
 		logger.With("candidate_sfid", candidateSFID, "error", err).
