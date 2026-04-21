@@ -252,11 +252,19 @@ async def persist_messages(
                             value = msgpack_encoder.encode(o.record)
                         else:
                             value = json_encoder.encode(o.record)
-                        await kv_client.update(
-                            key=key,
-                            value=value,
-                            last=current.revision,
-                        )
+                        try:
+                            await kv_client.update(
+                                key=key,
+                                value=value,
+                                last=current.revision,
+                            )
+                        except nats.errors.Error as e:
+                            logger.warning(
+                                "Skipping update for stream %s key %s: %s",
+                                stream,
+                                primary_key_value,
+                                e,
+                            )
                         continue
                     else:
                         logger.debug(
@@ -275,9 +283,24 @@ async def persist_messages(
                         value = msgpack_encoder.encode(o.record)
                     else:
                         value = json_encoder.encode(o.record)
-                    await kv_client.create(
-                        key=key,
-                        value=value,
+                    try:
+                        await kv_client.create(
+                            key=key,
+                            value=value,
+                        )
+                    except nats.errors.Error as e:
+                        logger.warning(
+                            "Skipping create for stream %s key %s: %s",
+                            stream,
+                            primary_key_value,
+                            e,
+                        )
+                except nats.errors.Error as e:
+                    logger.warning(
+                        "Skipping record for stream %s key %s: %s",
+                        stream,
+                        primary_key_value,
+                        e,
                     )
             else:
                 # User has requested "full" sync, so use "put" without
@@ -286,10 +309,18 @@ async def persist_messages(
                     value = msgpack_encoder.encode(o.record)
                 else:
                     value = json_encoder.encode(o.record)
-                await kv_client.put(
-                    key=key,
-                    value=value,
-                )
+                try:
+                    await kv_client.put(
+                        key=key,
+                        value=value,
+                    )
+                except nats.errors.Error as e:
+                    logger.warning(
+                        "Skipping put for stream %s key %s: %s",
+                        stream,
+                        primary_key_value,
+                        e,
+                    )
 
             state = None
         elif isinstance(o, StateMessage):

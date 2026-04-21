@@ -32,6 +32,7 @@ plugins:
         - salesforce_b2b-Alternate_Email__c.*
         - salesforce_b2b-Project__c.*
         - salesforce_b2b-Project_Role__c.*
+        - salesforce_b2b-User.*
       metadata:
         "*":
           replication-method: INCREMENTAL
@@ -53,6 +54,8 @@ plugins:
         salesforce_b2b-Project__c:
           replication-key: SystemModstamp
         salesforce_b2b-Project_Role__c:
+          replication-key: SystemModstamp
+        salesforce_b2b-User:
           replication-key: SystemModstamp
     - name: tap-dynamodb
       variant: meltanolabs
