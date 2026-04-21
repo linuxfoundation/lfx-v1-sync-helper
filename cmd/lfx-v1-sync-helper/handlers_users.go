@@ -63,7 +63,6 @@ func usernameToKVKey(name string) string { return toKVKey(name) }
 // the same time. The NATS message is always ACKed immediately so we don't hold
 // up the KV consumer queue. Errors are logged; the next KV update for this user
 // will naturally retry.
-// Returns true if the operation should be retried, false otherwise.
 func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	sfid, ok := v1Data["sfid"].(string)
 	if !ok || sfid == "" {
@@ -173,8 +172,10 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 		}
 	}
 
-	// Sync the email identity to Auth0.
-	if retry := syncAlternateEmailToAuth0(ctx, key, leadorcontactid, emailSfid, isDeleted); retry {
+	// Sync the email identity to Auth0. Pass the email address from the event
+	// as a fallback — when the record is deleted/tombstoned, the KV lookup may
+	// not return the address, but the event payload still has it.
+	if retry := syncAlternateEmailToAuth0(ctx, key, leadorcontactid, emailSfid, emailAddr, isDeleted); retry {
 		return true
 	}
 
@@ -182,15 +183,21 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 }
 
 // syncAlternateEmailToAuth0 links or unlinks an alternate email as an Auth0
-// identity on the user's primary account. Returns true if the operation should
-// be retried (transient failure).
-func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid string, isDeleted bool) bool {
+// identity on the user's primary account. eventEmail is the email address from
+// the KV event payload, used as a fallback when the KV record is deleted/tombstoned.
+// Returns true if the operation should be retried (transient failure).
+func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid, eventEmail string, isDeleted bool) bool {
 	// Look up the full email record from v1-objects KV.
 	email, isPrimary, isVerified, isTombstoned, err := getAlternateEmailDetails(ctx, emailSfid)
 	if err != nil {
 		logger.With(errKey, err, "key", key, "email_sfid", emailSfid).
 			WarnContext(ctx, "failed to get alternate email details for Auth0 sync")
 		return false
+	}
+
+	// Use the event payload email as fallback when the KV record didn't provide one.
+	if email == "" && eventEmail != "" {
+		email = eventEmail
 	}
 
 	// Skip primary emails - handled by auth0-sync-userdb.
@@ -228,9 +235,10 @@ func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid str
 
 	// Perform the link or unlink.
 	if shouldUnlink {
-		// For unlink we need the email address. If tombstoned, we may not have it
-		// from getAlternateEmailDetails (it returns empty for inactive records).
-		// In that case, skip - we can't unlink without knowing the email.
+		// For unlink we need the email address. getAlternateEmailDetails returns
+		// the address even for inactive records, and the event payload email is
+		// used as a further fallback. If still empty (e.g. record fully purged
+		// from KV), skip because we can't unlink without knowing the address.
 		if email == "" {
 			logger.With("key", key, "email_sfid", emailSfid, "auth0_user_id", auth0UserID).
 				DebugContext(ctx, "cannot unlink email: address unavailable (record inactive/deleted)")

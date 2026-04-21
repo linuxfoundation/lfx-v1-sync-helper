@@ -111,8 +111,10 @@ func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, 
 	return merged, changed
 }
 
-// auth0RateLimiter throttles Auth0 Management API calls to avoid rate limits,
-// especially important during KV consumer replay (backfill).
+// auth0RateLimiter throttles Auth0 Management API calls in the email-identity
+// link/unlink flow to avoid rate limits, especially during KV consumer replay
+// (backfill). The profile sync flow (syncProfileToAuth0) is not rate-limited
+// because it runs in a delayed goroutine with natural backpressure.
 var auth0RateLimiter = rate.NewLimiter(rate.Limit(20), 5)
 
 // syncProfileToAuth0 maps v1 merged_user fields to Auth0 user_metadata and
