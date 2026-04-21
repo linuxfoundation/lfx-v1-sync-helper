@@ -21,8 +21,24 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// auth0UserAPI defines the subset of Auth0 Management API user operations
+// used by this package. Satisfied by *management.UserManager in production
+// and by a fake in tests.
+type auth0UserAPI interface {
+	Read(ctx context.Context, id string, opts ...management.RequestOption) (*management.User, error)
+	ListByEmail(ctx context.Context, email string, opts ...management.RequestOption) ([]*management.User, error)
+	Create(ctx context.Context, u *management.User, opts ...management.RequestOption) error
+	Update(ctx context.Context, id string, u *management.User, opts ...management.RequestOption) error
+	Link(ctx context.Context, id string, il *management.UserIdentityLink, opts ...management.RequestOption) ([]management.UserIdentity, error)
+	Unlink(ctx context.Context, id, provider, userID string, opts ...management.RequestOption) ([]management.UserIdentity, error)
+}
+
 // auth0Mgmt is the Auth0 Management API client, initialized once at startup.
 var auth0Mgmt *management.Management
+
+// auth0Users is the user operations interface, set to auth0Mgmt.User at init.
+// Tests can replace this with a fake.
+var auth0Users auth0UserAPI
 
 // v1ToAuth0Fields maps v1 platform DB column names to Auth0 user_metadata keys.
 var v1ToAuth0Fields = map[string]string{
@@ -65,6 +81,7 @@ func initAuth0MgmtClient(cfg *Config) error {
 	}
 
 	auth0Mgmt = mgmt
+	auth0Users = mgmt.User
 	return nil
 }
 
@@ -122,7 +139,7 @@ var auth0RateLimiter = rate.NewLimiter(rate.Limit(20), 5)
 // first to avoid clobbering fields we don't own.
 func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[string]any) error {
 	// Read the current Auth0 user to get existing user_metadata.
-	existing, err := auth0Mgmt.User.Read(ctx, auth0UserID)
+	existing, err := auth0Users.Read(ctx, auth0UserID)
 	if err != nil {
 		return fmt.Errorf("failed to read Auth0 user %s: %w", auth0UserID, err)
 	}
@@ -156,7 +173,7 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[stri
 	}
 
 	// Push the updated user_metadata to Auth0.
-	err = auth0Mgmt.User.Update(ctx, auth0UserID, &management.User{
+	err = auth0Users.Update(ctx, auth0UserID, &management.User{
 		UserMetadata: &metadata,
 	})
 	if err != nil {
@@ -177,7 +194,7 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 	}
 
 	// Check if the email is already linked to this user.
-	primaryUser, err := auth0Mgmt.User.Read(ctx, primaryAuth0ID)
+	primaryUser, err := auth0Users.Read(ctx, primaryAuth0ID)
 	if err != nil {
 		return fmt.Errorf("failed to read primary user %s: %w", primaryAuth0ID, err)
 	}
@@ -196,7 +213,7 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 	if err := auth0RateLimiter.Wait(ctx); err != nil {
 		return fmt.Errorf("rate limiter: %w", err)
 	}
-	existingUsers, err := auth0Mgmt.User.ListByEmail(ctx, email)
+	existingUsers, err := auth0Users.ListByEmail(ctx, email)
 	if err != nil {
 		return fmt.Errorf("failed to search users by email %s: %w", email, err)
 	}
@@ -218,7 +235,7 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 		Email:         auth0.String(email),
 		EmailVerified: auth0.Bool(true),
 	}
-	err = auth0Mgmt.User.Create(ctx, secondaryUser)
+	err = auth0Users.Create(ctx, secondaryUser)
 	if err != nil {
 		// If user already exists (409), find it and proceed to link.
 		if mgmtErr, ok := err.(management.Error); ok && mgmtErr.Status() == http.StatusConflict {
@@ -226,7 +243,7 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 			if waitErr := auth0RateLimiter.Wait(ctx); waitErr != nil {
 				return fmt.Errorf("rate limiter: %w", waitErr)
 			}
-			users, listErr := auth0Mgmt.User.ListByEmail(ctx, email)
+			users, listErr := auth0Users.ListByEmail(ctx, email)
 			if listErr != nil {
 				return fmt.Errorf("failed to find existing email user for %s: %w", email, listErr)
 			}
@@ -254,7 +271,7 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 	if err := auth0RateLimiter.Wait(ctx); err != nil {
 		return fmt.Errorf("rate limiter: %w", err)
 	}
-	_, err = auth0Mgmt.User.Link(ctx, primaryAuth0ID, &management.UserIdentityLink{
+	_, err = auth0Users.Link(ctx, primaryAuth0ID, &management.UserIdentityLink{
 		Provider: auth0.String("email"),
 		UserID:   auth0.String(secondaryID),
 	})
@@ -281,7 +298,7 @@ func unlinkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) erro
 	}
 
 	// Read the primary user to find the linked email identity.
-	primaryUser, err := auth0Mgmt.User.Read(ctx, primaryAuth0ID)
+	primaryUser, err := auth0Users.Read(ctx, primaryAuth0ID)
 	if err != nil {
 		return fmt.Errorf("failed to read primary user %s: %w", primaryAuth0ID, err)
 	}
@@ -307,7 +324,7 @@ func unlinkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) erro
 	if err := auth0RateLimiter.Wait(ctx); err != nil {
 		return fmt.Errorf("rate limiter: %w", err)
 	}
-	_, err = auth0Mgmt.User.Unlink(ctx, primaryAuth0ID, "email", secondaryUserID)
+	_, err = auth0Users.Unlink(ctx, primaryAuth0ID, "email", secondaryUserID)
 	if err != nil {
 		// 404 means already unlinked (idempotent).
 		if mgmtErr, ok := err.(management.Error); ok && mgmtErr.Status() == http.StatusNotFound {
