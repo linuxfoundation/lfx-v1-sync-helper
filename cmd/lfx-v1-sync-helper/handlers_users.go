@@ -247,15 +247,15 @@ func rebuildUserSecondaryIndexes(ctx context.Context) error {
 
 	// The NATS SDK applies a 5-second default API timeout via wrapContextWithoutDeadline
 	// when the context has no deadline. This fires during ephemeral ordered-consumer
-	// creation inside ListKeysFiltered, before any keys are delivered. 45 minutes covers
+	// creation inside ListKeysFiltered, before any keys are delivered. Each phase gets its
+	// own 45-minute budget so Phase 1 cannot consume time from Phase 2. 45 minutes covers
 	// consumer creation (milliseconds) + full key iteration for up to ~2M records (~20 min
-	// worst case) with comfortable headroom. The context cancels immediately on return via
+	// worst case) with comfortable headroom. Each context cancels immediately on return via
 	// defer, so fast runs are unaffected.
-	listCtx, listCancel := context.WithTimeout(ctx, 45*time.Minute)
-	defer listCancel()
-
 	logger.Info("rebuilding username secondary indexes from merged_user records")
-	userLister, err := v1KV.ListKeysFiltered(listCtx, v1MergedUserKVPrefix+">")
+	userListCtx, userCancel := context.WithTimeout(ctx, 45*time.Minute)
+	defer userCancel()
+	userLister, err := v1KV.ListKeysFiltered(userListCtx, v1MergedUserKVPrefix+">")
 	if err != nil {
 		return fmt.Errorf("failed to list merged_user keys: %w", err)
 	}
@@ -302,7 +302,9 @@ func rebuildUserSecondaryIndexes(ctx context.Context) error {
 	logger.Info("rebuilding email secondary indexes from alternate_email records")
 	errorCount = 0
 
-	emailLister, err := v1KV.ListKeysFiltered(listCtx, v1AlternateEmailKVPrefix+">")
+	emailListCtx, emailCancel := context.WithTimeout(ctx, 45*time.Minute)
+	defer emailCancel()
+	emailLister, err := v1KV.ListKeysFiltered(emailListCtx, v1AlternateEmailKVPrefix+">")
 	if err != nil {
 		return fmt.Errorf("failed to list alternate_email keys: %w", err)
 	}
