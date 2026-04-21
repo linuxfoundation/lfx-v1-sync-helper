@@ -111,6 +111,7 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 		DebugContext(ctx, "successfully updated username index")
 
 	// Sync profile to Auth0 user_metadata in a background goroutine.
+	// The delay mitigates contention with lf-login-backend.
 	auth0UserID := mapUsernameToAuthSub(username)
 	go func() {
 		time.Sleep(profileSyncDelay)
@@ -118,7 +119,7 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 		defer cancel()
 		if err := syncProfileToAuth0(syncCtx, auth0UserID, v1Data); err != nil {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
-				ErrorContext(ctx, "failed to sync profile to Auth0")
+				ErrorContext(syncCtx, "failed to sync profile to Auth0")
 		}
 	}()
 

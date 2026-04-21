@@ -93,6 +93,10 @@ func main() {
 			logger.With(errKey, err).Error("error initializing v1 client")
 			os.Exit(1)
 		}
+		if err := initAuth0MgmtClient(cfg); err != nil {
+			logger.With(errKey, err).Error("error initializing Auth0 Management API client")
+			os.Exit(1)
+		}
 	}
 
 	// Reinitialize logger with debug options if requested.
@@ -171,12 +175,6 @@ func main() {
 	defer cancel()
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-
-	// Initialize Auth0 Management API client for profile sync (v1 -> Auth0 user_metadata)
-	if err := initAuth0MgmtClient(cfg); err != nil {
-		logger.With(errKey, err).Error("error initializing Auth0 Management API client")
-		os.Exit(1)
-	}
 
 	// Create NATS connection.
 	gracefulCloseWG.Add(1)
