@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/text/unicode/norm"
@@ -244,8 +245,17 @@ func updateEmailsList(currentEmails []string, emailSfid string, isDeleted bool) 
 func rebuildUserSecondaryIndexes(ctx context.Context) error {
 	var usernameCount, emailCount, errorCount int
 
+	// The NATS SDK applies a 5-second default API timeout via wrapContextWithoutDeadline
+	// when the context has no deadline. This fires during ephemeral ordered-consumer
+	// creation inside ListKeysFiltered, before any keys are delivered. 45 minutes covers
+	// consumer creation (milliseconds) + full key iteration for up to ~2M records (~20 min
+	// worst case) with comfortable headroom. The context cancels immediately on return via
+	// defer, so fast runs are unaffected.
+	listCtx, listCancel := context.WithTimeout(ctx, 45*time.Minute)
+	defer listCancel()
+
 	logger.Info("rebuilding username secondary indexes from merged_user records")
-	userLister, err := v1KV.ListKeysFiltered(ctx, v1MergedUserKVPrefix+">")
+	userLister, err := v1KV.ListKeysFiltered(listCtx, v1MergedUserKVPrefix+">")
 	if err != nil {
 		return fmt.Errorf("failed to list merged_user keys: %w", err)
 	}
@@ -292,7 +302,7 @@ func rebuildUserSecondaryIndexes(ctx context.Context) error {
 	logger.Info("rebuilding email secondary indexes from alternate_email records")
 	errorCount = 0
 
-	emailLister, err := v1KV.ListKeysFiltered(ctx, v1AlternateEmailKVPrefix+">")
+	emailLister, err := v1KV.ListKeysFiltered(listCtx, v1AlternateEmailKVPrefix+">")
 	if err != nil {
 		return fmt.Errorf("failed to list alternate_email keys: %w", err)
 	}
