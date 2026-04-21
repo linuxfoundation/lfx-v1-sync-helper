@@ -62,3 +62,71 @@ func lookupHandler(msg *nats.Msg) {
 		logger.With(errKey, err, "mapping_key", mappingKey).ErrorContext(ctx, "failed to respond to lookup request")
 	}
 }
+
+// userSFIDByUsernameHandler handles NATS requests for v1 user SFID lookup by username.
+// It receives a username as plain text and returns the corresponding user SFID,
+// an empty string if not found (including stale index), or an error message prefixed
+// with "error: " for other errors.
+func userSFIDByUsernameHandler(msg *nats.Msg) {
+	ctx := context.Background()
+	username := string(msg.Data)
+
+	logger.With("username", username, "subject", msg.Subject).DebugContext(ctx, "received user SFID lookup by username request")
+
+	sfid, err := ResolveV1UserSFIDByUsername(ctx, username)
+	if err != nil {
+		logger.With(errKey, err, "username", username).ErrorContext(ctx, "error resolving user SFID by username")
+		errorResponse := "error: " + err.Error()
+		if err := msg.Respond([]byte(errorResponse)); err != nil {
+			logger.With(errKey, err, "username", username).ErrorContext(ctx, "failed to respond to username lookup request")
+		}
+		return
+	}
+
+	if sfid == "" {
+		logger.With("username", username).DebugContext(ctx, "user SFID not found for username")
+		if err := msg.Respond([]byte("")); err != nil {
+			logger.With(errKey, err, "username", username).ErrorContext(ctx, "failed to respond to username lookup request")
+		}
+		return
+	}
+
+	logger.With("username", username, "sfid", sfid).DebugContext(ctx, "returning user SFID for username")
+	if err := msg.Respond([]byte(sfid)); err != nil {
+		logger.With(errKey, err, "username", username).ErrorContext(ctx, "failed to respond to username lookup request")
+	}
+}
+
+// userSFIDByEmailHandler handles NATS requests for v1 user SFID lookup by email.
+// It receives an email as plain text and returns the corresponding user SFID,
+// an empty string if not found (including stale index), or an error message prefixed
+// with "error: " for other errors.
+func userSFIDByEmailHandler(msg *nats.Msg) {
+	ctx := context.Background()
+	email := string(msg.Data)
+
+	logger.With("email", email, "subject", msg.Subject).DebugContext(ctx, "received user SFID lookup by email request")
+
+	sfid, err := ResolveV1UserSFIDByEmail(ctx, email)
+	if err != nil {
+		logger.With(errKey, err, "email", email).ErrorContext(ctx, "error resolving user SFID by email")
+		errorResponse := "error: " + err.Error()
+		if err := msg.Respond([]byte(errorResponse)); err != nil {
+			logger.With(errKey, err, "email", email).ErrorContext(ctx, "failed to respond to email lookup request")
+		}
+		return
+	}
+
+	if sfid == "" {
+		logger.With("email", email).DebugContext(ctx, "user SFID not found for email")
+		if err := msg.Respond([]byte("")); err != nil {
+			logger.With(errKey, err, "email", email).ErrorContext(ctx, "failed to respond to email lookup request")
+		}
+		return
+	}
+
+	logger.With("email", email, "sfid", sfid).DebugContext(ctx, "returning user SFID for email")
+	if err := msg.Respond([]byte(sfid)); err != nil {
+		logger.With(errKey, err, "email", email).ErrorContext(ctx, "failed to respond to email lookup request")
+	}
+}

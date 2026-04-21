@@ -330,7 +330,7 @@ func generateJWTToken(ctx context.Context, audience string, v1Principal string) 
 
 	default:
 		// User principal - attempt lookup.
-		user, err := lookupV1User(ctx, v1Principal)
+		user, err := lookupMergedUser(ctx, v1Principal)
 		if err != nil {
 			logger.With(errKey, err, "platform_id", v1Principal).WarnContext(ctx, "failed to lookup user from v1 API, falling back to service account")
 			principal = jwtClientID + "@clients"

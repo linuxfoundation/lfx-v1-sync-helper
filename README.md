@@ -87,6 +87,48 @@ The following table shows the supported mapping key patterns and their expected 
 | v1→v2 | `committee_member.sfid.{v1_sfid}` | `committee_member.sfid.123e4567-e89b-12d3-a456-426614174004` | `{committee_uuid}:{member_uuid}` | Member SFID to compound UUID |
 | v2→v1 | `committee_member.uid.{v2_member_uuid}` | `committee_member.uid.123e4567-e89b-12d3-a456-426614174002` | `{project_sfid}:{committee_sfid}:{member_sfid}` | Member UUID to compound SFID |
 
+### User SFID Lookup API
+
+The service also provides NATS request/reply functions for resolving v1 platform user SFIDs by username or email. These lookups use validated secondary indexes to handle stale data gracefully.
+
+| Subject | Description |
+|---------|-------------|
+| `lfx.lookup_v1_user_sfid.by_username` | Lookup v1 user SFID by username |
+| `lfx.lookup_v1_user_sfid.by_email` | Lookup v1 user SFID by email |
+
+**Request Format:**
+
+```
+Subject: lfx.lookup_v1_user_sfid.by_username
+Payload: <username>
+
+Subject: lfx.lookup_v1_user_sfid.by_email
+Payload: <email>
+```
+
+**Response Format:**
+
+- **Success**: The v1 user SFID as a string
+- **Not Found**: Empty string (`""`) — includes stale index detection
+- **Error**: String prefixed with `"error: "` (e.g., `"error: connection timeout"`)
+
+**Notes:**
+
+- These lookups perform validation against the actual user record to handle stale index data
+- If a username/email no longer exists on the resolved user, the lookup returns an empty string (miss)
+- The underlying secondary indexes (`v1-user.username.*`, `v1-user.email.*`) should not be queried directly via `lfx.lookup_v1_mapping`
+- Callers send raw UTF-8 usernames and emails; the service normalizes (lowercase, NFC) and base64-encodes them internally
+
+**Backfill / Reindex:**
+
+To populate secondary indexes for all existing records (e.g. after initial deployment or a schema change), run the service with the `--rebuild-user-secondary-indexes` flag:
+
+```sh
+lfx-v1-sync-helper --rebuild-user-secondary-indexes
+```
+
+This operation streams all `merged_user` and `alternate_email` records from the v1 KV bucket, writes the secondary indexes, then exits.
+
 ## Architecture Diagrams
 
 Regarding the following sequence diagrams:

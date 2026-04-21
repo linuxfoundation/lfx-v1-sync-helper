@@ -23,8 +23,12 @@ import (
 const (
 	errKey            = "error"
 	defaultListenPort = "8080"
+	defaultListenBind = "*"
 	natsQueue         = "lfx.v1-sync-helper.queue"
 	lookupSubject     = "lfx.lookup_v1_mapping"
+	// User SFID lookup subjects for resolving v1 platform user SFIDs by username or email.
+	lookupUserSFIDByUsernameSubject = "lfx.lookup_v1_user_sfid.by_username"
+	lookupUserSFIDByEmailSubject    = "lfx.lookup_v1_user_sfid.by_email"
 	// gracefulShutdownSeconds should be higher than NATS client
 	// request timeout, and lower than the pod or liveness probe's
 	// terminationGracePeriodSeconds.
@@ -52,17 +56,10 @@ var (
 
 // main parses optional flags and starts the NATS subscribers.
 func main() {
-	// Load configuration
-	var err error
-	cfg, err = LoadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
-		os.Exit(1)
-	}
-
 	var debug = flag.Bool("d", false, "enable debug logging")
-	var port = flag.String("p", cfg.Port, "health checks port")
-	var bind = flag.String("bind", cfg.Bind, "interface to bind on")
+	var port = flag.String("p", "", "health checks port")
+	var bind = flag.String("bind", "", "interface to bind on")
+	var doRebuildUserIndexes = flag.Bool("rebuild-user-secondary-indexes", false, "populate user secondary indexes for existing data, then exit")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -70,16 +67,60 @@ func main() {
 	}
 	flag.Parse()
 
-	logOptions := &slog.HandlerOptions{}
+	// Initialize a default logger early so init functions can log errors.
+	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}))
+	slog.SetDefault(logger)
 
-	// Optional debug logging.
-	if cfg.Debug || *debug {
-		logOptions.Level = slog.LevelDebug
-		logOptions.AddSource = true
+	// --rebuild-user-secondary-indexes only needs NATS KV; skip full config and API client init.
+	var err error
+	if *doRebuildUserIndexes {
+		cfg = LoadReindexConfig()
+	} else {
+		cfg, err = LoadConfig()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+			os.Exit(1)
+		}
+		if err := initJWTClient(cfg); err != nil {
+			logger.With(errKey, err).Error("error initializing JWT client")
+			os.Exit(1)
+		}
+		if err := initGoaClients(cfg); err != nil {
+			logger.With(errKey, err).Error("error initializing Goa clients")
+			os.Exit(1)
+		}
+		if err := initV1Client(cfg); err != nil {
+			logger.With(errKey, err).Error("error initializing v1 client")
+			os.Exit(1)
+		}
+		if err := initAuth0MgmtClient(cfg); err != nil {
+			logger.With(errKey, err).Error("error initializing Auth0 Management API client")
+			os.Exit(1)
+		}
 	}
 
-	logger = slog.New(slog.NewJSONHandler(os.Stdout, logOptions))
-	slog.SetDefault(logger)
+	// Reinitialize logger with debug options if requested.
+	if cfg.Debug || *debug {
+		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+			Level:     slog.LevelDebug,
+			AddSource: true,
+		}))
+		slog.SetDefault(logger)
+	}
+
+	// Apply defaults for port/bind from config if not set via flags.
+	if *port == "" {
+		*port = cfg.Port
+	}
+	if *bind == "" {
+		*bind = cfg.Bind
+	}
+	if *port == "" {
+		*port = defaultListenPort
+	}
+	if *bind == "" {
+		*bind = defaultListenBind
+	}
 
 	// Support GET/POST monitoring "ping".
 	http.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
@@ -134,30 +175,6 @@ func main() {
 	defer cancel()
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-
-	// Initialize JWT client for v2 services
-	if err := initJWTClient(cfg); err != nil {
-		logger.With(errKey, err).Error("error initializing JWT client")
-		os.Exit(1)
-	}
-
-	// Initialize Goa SDK clients for v2 services
-	if err := initGoaClients(cfg); err != nil {
-		logger.With(errKey, err).Error("error initializing Goa clients")
-		os.Exit(1)
-	}
-
-	// Initialize v1 client for Auth0 authentication
-	if err := initV1Client(cfg); err != nil {
-		logger.With(errKey, err).Error("error initializing v1 client")
-		os.Exit(1)
-	}
-
-	// Initialize Auth0 Management API client for profile sync (v1 -> Auth0 user_metadata)
-	if err := initAuth0MgmtClient(cfg); err != nil {
-		logger.With(errKey, err).Error("error initializing Auth0 Management API client")
-		os.Exit(1)
-	}
 
 	// Create NATS connection.
 	gracefulCloseWG.Add(1)
@@ -214,6 +231,17 @@ func main() {
 	if err != nil {
 		logger.With(errKey, err).Error("error accessing v1-mappings KV bucket")
 		os.Exit(1)
+	}
+
+	// Handle --rebuild-user-secondary-indexes flag: populate secondary indexes for existing data, then exit.
+	if *doRebuildUserIndexes {
+		logger.Info("starting user secondary index rebuild")
+		if err := rebuildUserSecondaryIndexes(ctx); err != nil {
+			logger.With(errKey, err).Error("error during user secondary index rebuild")
+			os.Exit(1)
+		}
+		logger.Info("user secondary index rebuild completed successfully")
+		os.Exit(0)
 	}
 
 	// Initialize the distributed sync singleton backed by the mappings KV bucket.
@@ -324,6 +352,19 @@ func main() {
 	_, err = natsConn.QueueSubscribe(lookupSubject, natsQueue, lookupHandler)
 	if err != nil {
 		logger.With(errKey, err, "subject", lookupSubject).Error("error subscribing to NATS lookup subject")
+		os.Exit(1)
+	}
+
+	// Subscribe to user SFID lookup functions for resolving v1 platform user SFIDs.
+	// These use secondary indexes with validation to handle stale data.
+	_, err = natsConn.QueueSubscribe(lookupUserSFIDByUsernameSubject, natsQueue, userSFIDByUsernameHandler)
+	if err != nil {
+		logger.With(errKey, err, "subject", lookupUserSFIDByUsernameSubject).Error("error subscribing to user SFID by username lookup subject")
+		os.Exit(1)
+	}
+	_, err = natsConn.QueueSubscribe(lookupUserSFIDByEmailSubject, natsQueue, userSFIDByEmailHandler)
+	if err != nil {
+		logger.With(errKey, err, "subject", lookupUserSFIDByEmailSubject).Error("error subscribing to user SFID by email lookup subject")
 		os.Exit(1)
 	}
 

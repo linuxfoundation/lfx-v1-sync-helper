@@ -383,6 +383,15 @@ func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID,
 		payload.OrganizationID = orgID
 	}
 
+	// Attempt to resolve the v1 user SFID by email to populate MemberID.
+	// This links the committee member to an existing v1 platform user if one exists.
+	if userSFID, err := ResolveV1UserSFIDByEmail(ctx, email); err != nil {
+		log.With(errKey, err, "email", email).WarnContext(ctx, "failed to resolve user SFID by email, proceeding without MemberID")
+	} else if userSFID != "" {
+		payload.MemberID = userSFID
+		log.With("member_id", userSFID, "email", email).DebugContext(ctx, "resolved user SFID for committee member")
+	}
+
 	result, err := createV1CommitteeMember(ctx, projectSFID, committeeSFID, payload)
 	if err != nil {
 		log.With(errKey, err).ErrorContext(ctx, "failed to create committee member in v1")
