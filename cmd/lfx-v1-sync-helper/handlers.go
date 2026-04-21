@@ -127,10 +127,7 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 		logger.With("key", key).DebugContext(ctx, "meeting record, handled by lfx-v2-meeting-service")
 		return false
 	case "salesforce-merged_user":
-		// Merged user records are used on-demand during user lookups from v1-objects KV bucket.
-		// No special processing needed - just log for debugging.
-		logger.With("key", key).DebugContext(ctx, "salesforce-merged_user record updated")
-		return false
+		return handleMergedUserUpdate(ctx, key, v1Data)
 	case "salesforce-alternate_email__c":
 		return handleAlternateEmailUpdate(ctx, key, v1Data)
 	case "salesforce_b2b-Account",
@@ -139,7 +136,8 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 		"salesforce_b2b-Contact",
 		"salesforce_b2b-Alternate_Email__c",
 		"salesforce_b2b-Project__c",
-		"salesforce_b2b-Project_Role__c":
+		"salesforce_b2b-Project_Role__c",
+		"salesforce_b2b-User":
 		// salesforce_b2b records are replicated to v1-objects KV for consumption by the member service.
 		// No additional v2 API processing needed here; the member service reads directly from KV.
 		logger.With("key", key).DebugContext(ctx, "salesforce_b2b record updated, stored in KV for member service")
@@ -243,7 +241,8 @@ func handleResourceDelete(ctx context.Context, key string, v1Principal string) b
 		"salesforce_b2b-Contact",
 		"salesforce_b2b-Alternate_Email__c",
 		"salesforce_b2b-Project__c",
-		"salesforce_b2b-Project_Role__c":
+		"salesforce_b2b-Project_Role__c",
+		"salesforce_b2b-User":
 		// salesforce_b2b records are soft-deleted in v1-objects KV by the WAL handler via _sdc_deleted_at.
 		// No additional v2 API processing needed here; the member service handles deletions reactively.
 		logger.With("key", key).DebugContext(ctx, "salesforce_b2b record deleted, member service will handle reactively")
