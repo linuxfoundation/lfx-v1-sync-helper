@@ -210,6 +210,9 @@ func handleResourceDelete(ctx context.Context, key string, v1Principal string) b
 		// Alternate email records remain in v1-objects KV bucket with _sdc_deleted_at set by WAL handler.
 		// The email mapping index also remains, but lookups will detect the soft-delete and skip the email.
 		// TODO: Should clean up (remove) soft-deleted email SFIDs from v1-merged-user.alternate-emails.{userSfid} mapping records.
+		// TODO: WAL-originated hard deletes bypass handleAlternateEmailUpdate, so the linked Auth0 email identity
+		// is not unlinked here. In practice Salesforce sets isdeleted=true before physical removal (which does
+		// route through the update handler and unlinks), so this gap only bites on true WAL hard deletes.
 		logger.With("key", key).DebugContext(ctx, "salesforce-alternate_email__c record deleted")
 		return false
 	case "itx-zoom-meetings-v2",

@@ -224,7 +224,12 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 	// Sync the email identity to Auth0. Pass the email address from the event
 	// as a fallback — when the record is deleted/tombstoned, the KV lookup may
 	// not return the address, but the event payload still has it.
-	if retry := syncAlternateEmailToAuth0(ctx, key, leadorcontactid, emailSfid, emailAddr, isDeleted); retry {
+	// Bound the call with a timeout: the KV handler uses context.Background()
+	// with no deadline, so a stuck Auth0 request would otherwise wedge the
+	// consumer indefinitely.
+	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if retry := syncAlternateEmailToAuth0(syncCtx, key, leadorcontactid, emailSfid, emailAddr, isDeleted); retry {
 		return true
 	}
 

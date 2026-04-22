@@ -119,7 +119,7 @@ func setupLinkTest(t *testing.T, fake *fakeAuth0Users) func() {
 	origUsers := auth0Users
 	origLimiter := auth0RateLimiter
 	auth0Users = fake
-	auth0RateLimiter = rate.NewLimiter(rate.Inf, 0) // no throttle in tests
+	auth0RateLimiter = rate.NewLimiter(rate.Inf, 1) // no throttle in tests
 	return func() {
 		auth0Users = origUsers
 		auth0RateLimiter = origLimiter
