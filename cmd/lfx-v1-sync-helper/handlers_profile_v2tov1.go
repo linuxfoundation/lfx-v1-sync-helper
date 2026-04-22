@@ -18,7 +18,6 @@ import (
 	"time"
 
 	nats "github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // userProfileUpdatedEvent matches the event published by auth-service after a
@@ -60,40 +59,39 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 
 	log := logger.With("user_id", event.UserID, "principal", event.Principal)
 
-	// Loop prevention: if the principal is our own client ID, this update
-	// originated from the v1-to-v2 direction and we must not echo it back.
+	// Defensive loop guard. Auth-service currently sets principal = JWT sub =
+	// user_id (the authenticated user updating their own metadata), and PR #87
+	// writes v1->Auth0 directly via the Management API without going through
+	// auth-service, so no event published today can have principal equal to
+	// our service identity. This check exists for a future flow where v1->Auth0
+	// writes are brokered through auth-service (which would publish events
+	// with principal = "{AUTH0_CLIENT_ID}@clients" for our M2M token).
 	ourServiceID := cfg.Auth0ClientID + "@clients"
 	if event.Principal == ourServiceID {
 		log.DebugContext(ctx, "skipping profile event that originated from us")
 		return
 	}
 
-	// Resolve the v1 user SFID from the Auth0 user ID.
-	// Auth0 user IDs are "auth0|{username}" for the custom DB connection.
-	username := strings.TrimPrefix(event.UserID, "auth0|")
-	if username == "" || username == event.UserID {
-		log.WarnContext(ctx, "cannot extract username from auth0 user ID, skipping")
+	auth0UserID, err := extractAuth0UserIDSuffix(event.UserID)
+	if err != nil {
+		log.With(errKey, err).WarnContext(ctx, "cannot safely derive v1 username from auth0 user ID, skipping")
 		return
 	}
 
-	sfid, err := resolveV1UserSFIDByUsername(ctx, username)
+	// ResolveV1UserSFIDByUsername uses the encoded secondary-index key
+	// (matching what handleMergedUserUpdate writes) and validates the resolved
+	// SFID by fetching the user and confirming the username still matches.
+	sfid, err := ResolveV1UserSFIDByUsername(ctx, auth0UserID)
 	if err != nil {
 		log.With(errKey, err).ErrorContext(ctx, "failed to resolve v1 user SFID")
 		return
 	}
 	if sfid == "" {
-		log.WarnContext(ctx, "no v1 user found for username, skipping")
+		log.WarnContext(ctx, "no v1 user found for auth0 user ID, skipping")
 		return
 	}
 
-	// Map Auth0 user_metadata fields to the v1 user-service PATCH payload.
-	payload := make(map[string]string)
-	for auth0Key, v1Key := range auth0ToV1Fields {
-		if val, ok := event.Metadata[auth0Key].(string); ok {
-			payload[v1Key] = val
-		}
-	}
-
+	payload := mapMetadataToV1Payload(event.Metadata)
 	if len(payload) == 0 {
 		log.DebugContext(ctx, "no mappable fields in event, skipping user-service update")
 		return
@@ -107,30 +105,58 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 	log.With("sfid", sfid).InfoContext(ctx, "synced v2 profile to v1 user-service")
 }
 
-// resolveV1UserSFIDByUsername looks up a v1 user SFID via the username
-// secondary index in the v1-mappings KV bucket (written by #86's
-// handleMergedUserUpdate). Returns ("", nil) if the index entry doesn't
-// exist or is tombstoned.
-func resolveV1UserSFIDByUsername(ctx context.Context, username string) (string, error) {
-	normalizedUsername := strings.ToLower(strings.TrimSpace(username))
-	if normalizedUsername == "" {
-		return "", nil
+// extractAuth0UserIDSuffix returns the portion of an Auth0 user_id after the
+// "auth0|" prefix when it is safe to use as a v1 username lookup key.
+//
+// The suffix of "auth0|{id}" is NOT guaranteed to be the original v1 username:
+//   - mapUsernameToAuthSub() hashes usernames that are >60 chars, contain
+//     special characters, or look like a 24+ char hex Auth0 native ID; the
+//     hash is one-way (SHA-512 + base58, ~80 chars).
+//   - Auth0 native DB connections use numeric/hex identifiers, and Auth0 is
+//     expected to begin issuing wholly-numeric user IDs.
+//
+// In both cases the only way to recover the underlying v1 username is a
+// Management API round-trip against the sub, which is out of scope here.
+// Rather than risk patching the wrong v1 user, skip events whose suffix is
+// ambiguous.
+func extractAuth0UserIDSuffix(userID string) (string, error) {
+	suffix, ok := strings.CutPrefix(userID, "auth0|")
+	if !ok || suffix == "" {
+		return "", fmt.Errorf("user_id missing auth0| prefix or has empty suffix")
 	}
+	if len(suffix) > 60 {
+		return "", fmt.Errorf("auth0 user ID suffix is longer than 60 chars (likely a hashed legacy username)")
+	}
+	if isAllDigits(suffix) {
+		return "", fmt.Errorf("auth0 user ID suffix is wholly numeric (likely a future Auth0 native ID)")
+	}
+	return suffix, nil
+}
 
-	indexKey := "v1-user.username." + normalizedUsername
-	entry, err := mappingsKV.Get(ctx, indexKey)
-	if err != nil {
-		if err == jetstream.ErrKeyNotFound || err == jetstream.ErrKeyDeleted {
-			return "", nil
+// isAllDigits reports whether s is non-empty and consists only of ASCII digits.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
 		}
-		return "", fmt.Errorf("failed to get username index %s: %w", indexKey, err)
 	}
+	return true
+}
 
-	if isTombstonedMapping(entry.Value()) {
-		return "", nil
+// mapMetadataToV1Payload builds the v1 user-service PATCH payload from an
+// Auth0 user_metadata map, applying the auth0ToV1Fields key translation.
+// Non-string values and unknown keys are ignored.
+func mapMetadataToV1Payload(metadata map[string]any) map[string]string {
+	payload := make(map[string]string, len(auth0ToV1Fields))
+	for auth0Key, v1Key := range auth0ToV1Fields {
+		if val, ok := metadata[auth0Key].(string); ok {
+			payload[v1Key] = val
+		}
 	}
-
-	return string(entry.Value()), nil
+	return payload
 }
 
 // patchV1User sends a PATCH request to user-service to update a v1 user record.
