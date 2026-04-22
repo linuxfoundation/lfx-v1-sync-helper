@@ -12,7 +12,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 
@@ -61,21 +63,31 @@ var v1ToAuth0Fields = map[string]string{
 const v1NoAccountPlaceholder = "Individual - No Account"
 
 // initAuth0MgmtClient initializes the Auth0 Management API client using private key JWT.
-func initAuth0MgmtClient(cfg *Config) error {
+//
+// The client's retry strategy depends on the profile-sync mode:
+//   - Live mode (backfill=false): SDK retries on 429/5xx so the async
+//     fire-and-forget goroutine absorbs transient failures on its own.
+//   - Backfill mode (backfill=true): no SDK retries. The sync-path handler
+//     NACKs on retryable errors so JetStream redelivery becomes the backoff,
+//     throttling Management API throughput naturally.
+func initAuth0MgmtClient(cfg *Config, backfill bool) error {
 	domain := fmt.Sprintf("%s.auth0.com", cfg.Auth0Tenant)
 
-	mgmt, err := management.New(
-		domain,
+	opts := []management.Option{
 		management.WithClientCredentialsPrivateKeyJwt(
 			context.Background(),
 			cfg.Auth0ClientID,
 			cfg.Auth0PrivateKey,
 			"RS256",
 		),
-		// No SDK-level retries: the handler runs in a fire-and-forget goroutine
-		// so we can't block on backoff. Errors are logged and the next KV update
-		// will naturally retry.
-	)
+	}
+	if backfill {
+		opts = append(opts, management.WithNoRetries())
+	} else {
+		opts = append(opts, management.WithRetries(3, []int{429, 500, 502, 503, 504}))
+	}
+
+	mgmt, err := management.New(domain, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to create Auth0 Management API client: %w", err)
 	}
@@ -83,6 +95,30 @@ func initAuth0MgmtClient(cfg *Config) error {
 	auth0Mgmt = mgmt
 	auth0Users = mgmt.User
 	return nil
+}
+
+// isRetryableAuth0Error reports whether an Auth0 Management API error is
+// transient and safe to retry via JetStream redelivery. It is only consulted
+// on the sync (backfill) path; the async path relies on SDK-level retries and
+// always ACKs.
+//
+// Retryable: HTTP 429 and any 5xx, plus network-level errors (timeouts, DNS
+// failures, connection resets) that surface as net.Error / wrapped errors
+// before a Management API response is returned.
+func isRetryableAuth0Error(err error) bool {
+	if err == nil {
+		return false
+	}
+	var mgmtErr management.Error
+	if errors.As(err, &mgmtErr) {
+		status := mgmtErr.Status()
+		return status == 429 || status >= 500
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	return false
 }
 
 // buildAuth0Metadata merges v1 platform DB fields into an existing Auth0
@@ -152,14 +188,16 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[stri
 		}
 	}
 
-	// Resolve organization name from v1 accountid.
+	// Resolve organization name from v1 accountid. A lookup failure is surfaced
+	// to the caller so backfill runs can log it explicitly; the caller treats
+	// it as non-retryable and ACKs the message so the backfill keeps moving.
 	var orgName string
 	if accountID, ok := v1Data["accountid"].(string); ok && accountID != "" {
 		org, orgErr := lookupV1Org(ctx, accountID)
 		if orgErr != nil {
-			logger.With(errKey, orgErr, "accountid", accountID).
-				WarnContext(ctx, "failed to resolve v1 org for profile sync, skipping organization field")
-		} else if org != nil && org.Name != "" {
+			return fmt.Errorf("failed to resolve v1 org %s: %w", accountID, orgErr)
+		}
+		if org != nil && org.Name != "" {
 			orgName = org.Name
 		}
 	}

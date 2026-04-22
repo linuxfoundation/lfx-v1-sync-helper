@@ -4,6 +4,9 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"net"
 	"testing"
 )
 
@@ -196,6 +199,44 @@ func TestBuildAuth0Metadata(t *testing.T) {
 				if got != want {
 					t.Errorf("merged[%q] = %q, want %q", key, got, want)
 				}
+			}
+		})
+	}
+}
+
+// fakeMgmtErr implements the management.Error interface for testing.
+type fakeMgmtErr struct {
+	status int
+	msg    string
+}
+
+func (f *fakeMgmtErr) Error() string { return fmt.Sprintf("%d: %s", f.status, f.msg) }
+func (f *fakeMgmtErr) Status() int   { return f.status }
+
+func TestIsRetryableAuth0Error(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"429", &fakeMgmtErr{status: 429, msg: "too many requests"}, true},
+		{"500", &fakeMgmtErr{status: 500, msg: "server error"}, true},
+		{"503", &fakeMgmtErr{status: 503, msg: "unavailable"}, true},
+		{"400", &fakeMgmtErr{status: 400, msg: "bad request"}, false},
+		{"401", &fakeMgmtErr{status: 401, msg: "unauthorized"}, false},
+		{"404", &fakeMgmtErr{status: 404, msg: "not found"}, false},
+		{"wrapped 429", fmt.Errorf("read Auth0: %w", &fakeMgmtErr{status: 429}), true},
+		{"wrapped 404", fmt.Errorf("read Auth0: %w", &fakeMgmtErr{status: 404}), false},
+		{"net error", &net.OpError{Op: "dial", Err: errors.New("timeout")}, true},
+		{"wrapped net error", fmt.Errorf("request: %w", &net.OpError{Op: "dial", Err: errors.New("timeout")}), true},
+		{"generic error", errors.New("something"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRetryableAuth0Error(tt.err); got != tt.want {
+				t.Errorf("isRetryableAuth0Error(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}

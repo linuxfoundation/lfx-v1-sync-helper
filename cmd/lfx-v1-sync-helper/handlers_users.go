@@ -28,12 +28,18 @@ const (
 
 	// reindexProgressInterval controls how often progress is logged during bulk reindex.
 	reindexProgressInterval = 100_000
-
-	// profileSyncDelay is the time to wait before syncing a v1 profile change
-	// to Auth0. This mitigates contention with lf-login-backend, which may
-	// update Auth0 user_metadata for the same user at roughly the same time.
-	profileSyncDelay = 5 * time.Second
 )
+
+// profileSyncDelay is the time the live path waits before pushing a v1
+// profile change to Auth0. Mitigates contention with lf-login-backend, which
+// may update Auth0 user_metadata for the same user at roughly the same time.
+// Var (not const) so tests can collapse the delay.
+var profileSyncDelay = 5 * time.Second
+
+// syncProfileToAuth0Fn is the function handleMergedUserUpdate calls to push
+// a profile to Auth0. Swappable in tests; production leaves it pointing at
+// the real Management-API implementation.
+var syncProfileToAuth0Fn = syncProfileToAuth0
 
 // toKVKey normalizes a user-provided string and encodes it as a URL-safe base64
 // key segment safe for NATS KV. Order: TrimSpace → ToLower → NFC → RawURLEncoding.
@@ -58,11 +64,22 @@ func usernameToKVKey(name string) string { return toKVKey(name) }
 // secondary index for username -> user SFID lookups, and syncs profile
 // fields from the v1 platform DB to Auth0 user_metadata.
 //
-// The Auth0 update runs in a background goroutine after a short delay to avoid
-// contention with lf-login-backend, which may write to Auth0 user_metadata at
-// the same time. The NATS message is always ACKed immediately so we don't hold
-// up the KV consumer queue. Errors are logged; the next KV update for this user
-// will naturally retry.
+// The profile sync runs in one of two modes (selected via PROFILE_SYNC_BACKFILL):
+//
+//   - Live (default): the Auth0 update runs in a background goroutine after a
+//     short delay to avoid contention with lf-login-backend, which may write to
+//     Auth0 user_metadata for the same user at roughly the same time. The NATS
+//     message is always ACKed immediately so we don't hold up the KV consumer
+//     queue. The SDK's built-in retry absorbs transient 429/5xx failures; if
+//     retries are exhausted the error is logged and the message is not
+//     redelivered (acknowledged tradeoff of async processing).
+//
+//   - Backfill: the Auth0 update runs inline. Retryable errors (429/5xx,
+//     network failures) cause the message to be NACKed so JetStream
+//     redelivery provides natural backoff. The SDK is configured with no
+//     retries in this mode to avoid holding the consumer queue. This mode is
+//     intended for bounded replay runs where fanning out thousands of async
+//     writes would guarantee cascading Auth0 rate limits.
 func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	sfid, ok := v1Data["sfid"].(string)
 	if !ok || sfid == "" {
@@ -109,14 +126,46 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 	logger.With("key", key, "indexKey", indexKey, "sfid", sfid).
 		DebugContext(ctx, "successfully updated username index")
 
-	// Sync profile to Auth0 user_metadata in a background goroutine.
-	// The delay mitigates contention with lf-login-backend.
 	auth0UserID := mapUsernameToAuthSub(username)
+	return dispatchProfileSync(ctx, key, auth0UserID, v1Data)
+}
+
+// dispatchProfileSync runs the v1→Auth0 profile sync in the configured mode
+// and reports whether the caller should NACK the JetStream message. Split out
+// from handleMergedUserUpdate so the mode branching can be unit-tested without
+// a live NATS KV bucket.
+func dispatchProfileSync(ctx context.Context, key, auth0UserID string, v1Data map[string]any) bool {
+	if cfg.ProfileSyncBackfill {
+		// Backfill: process inline, NACK on retryable Auth0 errors so
+		// JetStream redelivery throttles throughput. Other errors (org
+		// lookup failures, unmappable data) are logged and ACKed so the
+		// backfill keeps moving. No 5s delay — backfill runs separately
+		// from live user activity, so the lf-login-backend race is moot.
+		// Bound the call with a timeout: kvHandler uses context.Background()
+		// with no deadline, so a stuck Auth0 request would otherwise wedge
+		// the consumer indefinitely.
+		syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := syncProfileToAuth0Fn(syncCtx, auth0UserID, v1Data); err != nil {
+			if isRetryableAuth0Error(err) {
+				logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
+					WarnContext(syncCtx, "retryable Auth0 error during backfill, NACKing for redelivery")
+				return true
+			}
+			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
+				ErrorContext(syncCtx, "profile sync failed during backfill, dropping")
+		}
+		return false
+	}
+
+	// Live: fire-and-forget goroutine with a short delay to mitigate
+	// contention with lf-login-backend. The SDK retry inside the Management
+	// client handles transient 429/5xx failures on its own.
 	go func() {
 		time.Sleep(profileSyncDelay)
 		syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := syncProfileToAuth0(syncCtx, auth0UserID, v1Data); err != nil {
+		if err := syncProfileToAuth0Fn(syncCtx, auth0UserID, v1Data); err != nil {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
 				ErrorContext(syncCtx, "failed to sync profile to Auth0")
 		}
@@ -356,8 +405,17 @@ func updateEmailsList(currentEmails []string, emailSfid string, isDeleted bool) 
 func rebuildUserSecondaryIndexes(ctx context.Context) error {
 	var usernameCount, emailCount, errorCount int
 
+	// The NATS SDK applies a 5-second default API timeout via wrapContextWithoutDeadline
+	// when the context has no deadline. This fires during ephemeral ordered-consumer
+	// creation inside ListKeysFiltered, before any keys are delivered. Each phase gets its
+	// own 45-minute budget so Phase 1 cannot consume time from Phase 2. 45 minutes covers
+	// consumer creation (milliseconds) + full key iteration for up to ~2M records (~20 min
+	// worst case) with comfortable headroom. Each context cancels immediately on return via
+	// defer, so fast runs are unaffected.
 	logger.Info("rebuilding username secondary indexes from merged_user records")
-	userLister, err := v1KV.ListKeysFiltered(ctx, v1MergedUserKVPrefix+">")
+	userListCtx, userCancel := context.WithTimeout(ctx, 45*time.Minute)
+	defer userCancel()
+	userLister, err := v1KV.ListKeysFiltered(userListCtx, v1MergedUserKVPrefix+">")
 	if err != nil {
 		return fmt.Errorf("failed to list merged_user keys: %w", err)
 	}
@@ -404,7 +462,9 @@ func rebuildUserSecondaryIndexes(ctx context.Context) error {
 	logger.Info("rebuilding email secondary indexes from alternate_email records")
 	errorCount = 0
 
-	emailLister, err := v1KV.ListKeysFiltered(ctx, v1AlternateEmailKVPrefix+">")
+	emailListCtx, emailCancel := context.WithTimeout(ctx, 45*time.Minute)
+	defer emailCancel()
+	emailLister, err := v1KV.ListKeysFiltered(emailListCtx, v1AlternateEmailKVPrefix+">")
 	if err != nil {
 		return fmt.Errorf("failed to list alternate_email keys: %w", err)
 	}
