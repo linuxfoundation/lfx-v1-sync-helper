@@ -229,3 +229,206 @@ func TestDispatchProfileSync(t *testing.T) {
 		})
 	}
 }
+
+// altEmailLookup captures the return shape of getAlternateEmailDetails so tests
+// can drive every branch of the decision logic in syncAlternateEmailToAuth0.
+type altEmailLookup struct {
+	email        string
+	isPrimary    bool
+	isVerified   bool
+	isTombstoned bool
+	err          error
+}
+
+// TestSyncAlternateEmailToAuth0 covers the link/unlink decision logic in
+// syncAlternateEmailToAuth0: primary skip, verified gate, tombstone/delete
+// routing, event-email fallback, and retry propagation from the Auth0
+// primitives. The Auth0 link/unlink primitives themselves are tested
+// separately in auth0_identity_test.go.
+func TestSyncAlternateEmailToAuth0(t *testing.T) {
+	origLogger := logger
+	origGetDetails := getAlternateEmailDetailsFn
+	origLookup := lookupMergedUserFn
+	origLink := linkEmailIdentityFn
+	origUnlink := unlinkEmailIdentityFn
+	t.Cleanup(func() {
+		logger = origLogger
+		getAlternateEmailDetailsFn = origGetDetails
+		lookupMergedUserFn = origLookup
+		linkEmailIdentityFn = origLink
+		unlinkEmailIdentityFn = origUnlink
+	})
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	const (
+		userSfid  = "003ABC"
+		emailSfid = "a0BXYZ"
+		username  = "alice"
+		kvEmail   = "alt@example.com"
+	)
+	expectedAuth0ID := mapUsernameToAuthSub(username)
+	transientErr := errors.New("auth0 transient")
+
+	tests := []struct {
+		name       string
+		lookup     altEmailLookup
+		eventEmail string
+		isDeleted  bool
+		userResult *V1User
+		userErr    error
+		linkErr    error
+		unlinkErr  error
+
+		wantRetry      bool
+		wantLinkEmail  string // empty string = expect no call
+		wantUnlinkEmail string
+	}{
+		{
+			name:          "verified active → link with KV email",
+			lookup:        altEmailLookup{email: kvEmail, isVerified: true},
+			userResult:    &V1User{Username: username},
+			wantLinkEmail: kvEmail,
+		},
+		{
+			name:       "primary active → skip",
+			lookup:     altEmailLookup{email: kvEmail, isPrimary: true, isVerified: true},
+			userResult: &V1User{Username: username},
+		},
+		{
+			name:       "primary inactive/tombstoned → skip (no unlink attempt)",
+			lookup:     altEmailLookup{email: kvEmail, isPrimary: true, isTombstoned: true},
+			userResult: &V1User{Username: username},
+		},
+		{
+			name:       "unverified alternate → skip",
+			lookup:     altEmailLookup{email: kvEmail, isVerified: false},
+			userResult: &V1User{Username: username},
+		},
+		{
+			name:       "verified but KV email empty → skip",
+			lookup:     altEmailLookup{email: "", isVerified: true},
+			userResult: &V1User{Username: username},
+		},
+		{
+			name:            "isDeleted=true → unlink with KV email",
+			lookup:          altEmailLookup{email: kvEmail, isVerified: true},
+			isDeleted:       true,
+			userResult:      &V1User{Username: username},
+			wantUnlinkEmail: kvEmail,
+		},
+		{
+			name:            "tombstoned → unlink with KV email",
+			lookup:          altEmailLookup{email: kvEmail, isTombstoned: true},
+			userResult:      &V1User{Username: username},
+			wantUnlinkEmail: kvEmail,
+		},
+		{
+			name:            "tombstoned with empty KV email → unlink uses event-payload fallback",
+			lookup:          altEmailLookup{email: "", isTombstoned: true},
+			eventEmail:      kvEmail,
+			userResult:      &V1User{Username: username},
+			wantUnlinkEmail: kvEmail,
+		},
+		{
+			name:       "tombstoned with both empty → skip (no address to unlink)",
+			lookup:     altEmailLookup{email: "", isTombstoned: true},
+			eventEmail: "",
+			userResult: &V1User{Username: username},
+		},
+		{
+			name:   "getAlternateEmailDetails error → drop (no retry)",
+			lookup: altEmailLookup{err: errors.New("KV read failed")},
+		},
+		{
+			name:       "lookupMergedUser error → drop (no retry)",
+			lookup:     altEmailLookup{email: kvEmail, isVerified: true},
+			userErr:    errors.New("user lookup failed"),
+		},
+		{
+			name:       "empty username → drop (no retry)",
+			lookup:     altEmailLookup{email: kvEmail, isVerified: true},
+			userResult: &V1User{Username: ""},
+		},
+		{
+			name:          "link transient error → retry",
+			lookup:        altEmailLookup{email: kvEmail, isVerified: true},
+			userResult:    &V1User{Username: username},
+			linkErr:       transientErr,
+			wantRetry:     true,
+			wantLinkEmail: kvEmail,
+		},
+		{
+			name:            "unlink transient error → retry",
+			lookup:          altEmailLookup{email: kvEmail, isTombstoned: true},
+			userResult:      &V1User{Username: username},
+			unlinkErr:       transientErr,
+			wantRetry:       true,
+			wantUnlinkEmail: kvEmail,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			getAlternateEmailDetailsFn = func(_ context.Context, gotEmailSfid string) (string, bool, bool, bool, error) {
+				if gotEmailSfid != emailSfid {
+					t.Errorf("getAlternateEmailDetails called with sfid %q, want %q", gotEmailSfid, emailSfid)
+				}
+				l := tt.lookup
+				return l.email, l.isPrimary, l.isVerified, l.isTombstoned, l.err
+			}
+			lookupMergedUserFn = func(_ context.Context, gotUserSfid string) (*V1User, error) {
+				if gotUserSfid != userSfid {
+					t.Errorf("lookupMergedUser called with sfid %q, want %q", gotUserSfid, userSfid)
+				}
+				return tt.userResult, tt.userErr
+			}
+
+			var (
+				linkCalls   []string
+				unlinkCalls []string
+			)
+			linkEmailIdentityFn = func(_ context.Context, gotAuth0ID, gotEmail string) error {
+				if gotAuth0ID != expectedAuth0ID {
+					t.Errorf("linkEmailIdentity called with auth0 id %q, want %q", gotAuth0ID, expectedAuth0ID)
+				}
+				linkCalls = append(linkCalls, gotEmail)
+				return tt.linkErr
+			}
+			unlinkEmailIdentityFn = func(_ context.Context, gotAuth0ID, gotEmail string) error {
+				if gotAuth0ID != expectedAuth0ID {
+					t.Errorf("unlinkEmailIdentity called with auth0 id %q, want %q", gotAuth0ID, expectedAuth0ID)
+				}
+				unlinkCalls = append(unlinkCalls, gotEmail)
+				return tt.unlinkErr
+			}
+
+			gotRetry := syncAlternateEmailToAuth0(context.Background(), "test-key", userSfid, emailSfid, tt.eventEmail, tt.isDeleted)
+
+			if gotRetry != tt.wantRetry {
+				t.Errorf("retry = %v, want %v", gotRetry, tt.wantRetry)
+			}
+
+			if tt.wantLinkEmail != "" {
+				if len(linkCalls) != 1 {
+					t.Fatalf("expected 1 link call, got %d (%v)", len(linkCalls), linkCalls)
+				}
+				if linkCalls[0] != tt.wantLinkEmail {
+					t.Errorf("link called with email %q, want %q", linkCalls[0], tt.wantLinkEmail)
+				}
+			} else if len(linkCalls) != 0 {
+				t.Errorf("expected no link calls, got %v", linkCalls)
+			}
+
+			if tt.wantUnlinkEmail != "" {
+				if len(unlinkCalls) != 1 {
+					t.Fatalf("expected 1 unlink call, got %d (%v)", len(unlinkCalls), unlinkCalls)
+				}
+				if unlinkCalls[0] != tt.wantUnlinkEmail {
+					t.Errorf("unlink called with email %q, want %q", unlinkCalls[0], tt.wantUnlinkEmail)
+				}
+			} else if len(unlinkCalls) != 0 {
+				t.Errorf("expected no unlink calls, got %v", unlinkCalls)
+			}
+		})
+	}
+}

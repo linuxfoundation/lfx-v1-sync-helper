@@ -41,6 +41,16 @@ var profileSyncDelay = 5 * time.Second
 // the real Management-API implementation.
 var syncProfileToAuth0Fn = syncProfileToAuth0
 
+// syncAlternateEmailToAuth0 dependencies, split out so tests can inject fakes
+// for the KV reads and Auth0 identity operations without needing a live
+// v1-objects bucket or Management API.
+var (
+	getAlternateEmailDetailsFn = getAlternateEmailDetails
+	lookupMergedUserFn         = lookupMergedUser
+	linkEmailIdentityFn        = linkEmailIdentity
+	unlinkEmailIdentityFn      = unlinkEmailIdentity
+)
+
 // toKVKey normalizes a user-provided string and encodes it as a URL-safe base64
 // key segment safe for NATS KV. Order: TrimSpace → ToLower → NFC → RawURLEncoding.
 // NFC unifies decomposed/precomposed Unicode (e.g. n\u0303 ≡ ñ) without semantic
@@ -242,7 +252,7 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 // Returns true if the operation should be retried (transient failure).
 func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid, eventEmail string, isDeleted bool) bool {
 	// Look up the full email record from v1-objects KV.
-	email, isPrimary, isVerified, isTombstoned, err := getAlternateEmailDetails(ctx, emailSfid)
+	email, isPrimary, isVerified, isTombstoned, err := getAlternateEmailDetailsFn(ctx, emailSfid)
 	if err != nil {
 		logger.With(errKey, err, "key", key, "email_sfid", emailSfid).
 			WarnContext(ctx, "failed to get alternate email details for Auth0 sync")
@@ -274,7 +284,7 @@ func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid, ev
 	}
 
 	// Resolve the user's Auth0 ID via username.
-	v1User, err := lookupMergedUser(ctx, userSfid)
+	v1User, err := lookupMergedUserFn(ctx, userSfid)
 	if err != nil {
 		logger.With(errKey, err, "key", key, "user_sfid", userSfid).
 			WarnContext(ctx, "failed to resolve v1 user for Auth0 email sync")
@@ -298,13 +308,13 @@ func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid, ev
 				DebugContext(ctx, "cannot unlink email: address unavailable (record inactive/deleted)")
 			return false
 		}
-		if err := unlinkEmailIdentity(ctx, auth0UserID, email); err != nil {
+		if err := unlinkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
 				ErrorContext(ctx, "failed to unlink email identity from Auth0")
 			return true // Retry on transient failure.
 		}
 	} else {
-		if err := linkEmailIdentity(ctx, auth0UserID, email); err != nil {
+		if err := linkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
 				ErrorContext(ctx, "failed to link email identity to Auth0")
 			return true // Retry on transient failure.
