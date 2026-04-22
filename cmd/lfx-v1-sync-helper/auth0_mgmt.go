@@ -162,14 +162,16 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[stri
 		}
 	}
 
-	// Resolve organization name from v1 accountid.
+	// Resolve organization name from v1 accountid. A lookup failure is surfaced
+	// to the caller so backfill runs can log it explicitly; the caller treats
+	// it as non-retryable and ACKs the message so the backfill keeps moving.
 	var orgName string
 	if accountID, ok := v1Data["accountid"].(string); ok && accountID != "" {
 		org, orgErr := lookupV1Org(ctx, accountID)
 		if orgErr != nil {
-			logger.With(errKey, orgErr, "accountid", accountID).
-				WarnContext(ctx, "failed to resolve v1 org for profile sync, skipping organization field")
-		} else if org != nil && org.Name != "" {
+			return fmt.Errorf("failed to resolve v1 org %s: %w", accountID, orgErr)
+		}
+		if org != nil && org.Name != "" {
 			orgName = org.Name
 		}
 	}

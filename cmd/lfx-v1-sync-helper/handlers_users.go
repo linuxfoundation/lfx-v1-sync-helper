@@ -28,12 +28,18 @@ const (
 
 	// reindexProgressInterval controls how often progress is logged during bulk reindex.
 	reindexProgressInterval = 100_000
-
-	// profileSyncDelay is the time to wait before syncing a v1 profile change
-	// to Auth0. This mitigates contention with lf-login-backend, which may
-	// update Auth0 user_metadata for the same user at roughly the same time.
-	profileSyncDelay = 5 * time.Second
 )
+
+// profileSyncDelay is the time the live path waits before pushing a v1
+// profile change to Auth0. Mitigates contention with lf-login-backend, which
+// may update Auth0 user_metadata for the same user at roughly the same time.
+// Var (not const) so tests can collapse the delay.
+var profileSyncDelay = 5 * time.Second
+
+// syncProfileToAuth0Fn is the function handleMergedUserUpdate calls to push
+// a profile to Auth0. Swappable in tests; production leaves it pointing at
+// the real Management-API implementation.
+var syncProfileToAuth0Fn = syncProfileToAuth0
 
 // toKVKey normalizes a user-provided string and encodes it as a URL-safe base64
 // key segment safe for NATS KV. Order: TrimSpace → ToLower → NFC → RawURLEncoding.
@@ -120,32 +126,40 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 		DebugContext(ctx, "successfully updated username index")
 
 	auth0UserID := mapUsernameToAuthSub(username)
+	return dispatchProfileSync(ctx, key, auth0UserID, v1Data)
+}
 
+// dispatchProfileSync runs the v1→Auth0 profile sync in the configured mode
+// and reports whether the caller should NACK the JetStream message. Split out
+// from handleMergedUserUpdate so the mode branching can be unit-tested without
+// a live NATS KV bucket.
+func dispatchProfileSync(ctx context.Context, key, auth0UserID string, v1Data map[string]any) bool {
 	if cfg.ProfileSyncBackfill {
-		// Backfill: process inline, NACK on retryable errors so JetStream
-		// redelivery throttles throughput. No 5s delay — backfill runs
-		// separately from live user activity, so the lf-login-backend race
-		// is not relevant.
-		if err := syncProfileToAuth0(ctx, auth0UserID, v1Data); err != nil {
+		// Backfill: process inline, NACK on retryable Auth0 errors so
+		// JetStream redelivery throttles throughput. Other errors (org
+		// lookup failures, unmappable data) are logged and ACKed so the
+		// backfill keeps moving. No 5s delay — backfill runs separately
+		// from live user activity, so the lf-login-backend race is moot.
+		if err := syncProfileToAuth0Fn(ctx, auth0UserID, v1Data); err != nil {
 			if isRetryableAuth0Error(err) {
 				logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
 					WarnContext(ctx, "retryable Auth0 error during backfill, NACKing for redelivery")
 				return true
 			}
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
-				ErrorContext(ctx, "non-retryable Auth0 error during backfill, dropping")
+				ErrorContext(ctx, "profile sync failed during backfill, dropping")
 		}
 		return false
 	}
 
-	// Live: fire-and-forget goroutine with a 5s delay to mitigate contention
-	// with lf-login-backend. The SDK retry inside the Management client
-	// handles transient 429/5xx failures on its own.
+	// Live: fire-and-forget goroutine with a short delay to mitigate
+	// contention with lf-login-backend. The SDK retry inside the Management
+	// client handles transient 429/5xx failures on its own.
 	go func() {
 		time.Sleep(profileSyncDelay)
 		syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := syncProfileToAuth0(syncCtx, auth0UserID, v1Data); err != nil {
+		if err := syncProfileToAuth0Fn(syncCtx, auth0UserID, v1Data); err != nil {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
 				ErrorContext(syncCtx, "failed to sync profile to Auth0")
 		}
