@@ -371,6 +371,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Subscribe to auth-service profile update events for v2-to-v1 sync.
+	_, err = natsConn.QueueSubscribe("lfx.user_profile.updated", natsQueue, handleUserProfileUpdated)
+	if err != nil {
+		logger.With(errKey, err, "subject", "lfx.user_profile.updated").Error("error subscribing to user profile updated subject")
+		os.Exit(1)
+	}
+
 	// Subscribe to indexer domain events for bidirectional committee sync.
 	// The indexer publishes lfx.{object_type}.{action} after every successful OpenSearch write.
 	indexerEventSubscriptions := map[string]func(*nats.Msg){
