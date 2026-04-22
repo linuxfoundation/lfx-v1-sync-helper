@@ -179,15 +179,17 @@ func TestDispatchProfileSync(t *testing.T) {
 			cfg = &Config{ProfileSyncBackfill: tt.backfill}
 
 			var (
-				mu       sync.Mutex
-				called   bool
-				gotUID   string
-				callDone = make(chan struct{}, 1)
+				mu          sync.Mutex
+				called      bool
+				gotUID      string
+				gotHasDead  bool
+				callDone    = make(chan struct{}, 1)
 			)
-			syncProfileToAuth0Fn = func(_ context.Context, auth0UserID string, _ map[string]any) error {
+			syncProfileToAuth0Fn = func(syncCtx context.Context, auth0UserID string, _ map[string]any) error {
 				mu.Lock()
 				called = true
 				gotUID = auth0UserID
+				_, gotHasDead = syncCtx.Deadline()
 				mu.Unlock()
 				select {
 				case callDone <- struct{}{}:
@@ -218,6 +220,11 @@ func TestDispatchProfileSync(t *testing.T) {
 			}
 			if tt.wantCalled && gotUID != "auth0|alice" {
 				t.Errorf("sync called with auth0UserID = %q, want %q", gotUID, "auth0|alice")
+			}
+			// Both paths must bound the sync call with a deadline so a
+			// hung Auth0 request can't wedge the consumer or leak a goroutine.
+			if tt.wantCalled && !gotHasDead {
+				t.Errorf("sync ctx had no deadline; both paths must wrap the call in a timeout")
 			}
 		})
 	}

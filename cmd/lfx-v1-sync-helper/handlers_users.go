@@ -140,14 +140,19 @@ func dispatchProfileSync(ctx context.Context, key, auth0UserID string, v1Data ma
 		// lookup failures, unmappable data) are logged and ACKed so the
 		// backfill keeps moving. No 5s delay — backfill runs separately
 		// from live user activity, so the lf-login-backend race is moot.
-		if err := syncProfileToAuth0Fn(ctx, auth0UserID, v1Data); err != nil {
+		// Bound the call with a timeout: kvHandler uses context.Background()
+		// with no deadline, so a stuck Auth0 request would otherwise wedge
+		// the consumer indefinitely.
+		syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := syncProfileToAuth0Fn(syncCtx, auth0UserID, v1Data); err != nil {
 			if isRetryableAuth0Error(err) {
 				logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
-					WarnContext(ctx, "retryable Auth0 error during backfill, NACKing for redelivery")
+					WarnContext(syncCtx, "retryable Auth0 error during backfill, NACKing for redelivery")
 				return true
 			}
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
-				ErrorContext(ctx, "profile sync failed during backfill, dropping")
+				ErrorContext(syncCtx, "profile sync failed during backfill, dropping")
 		}
 		return false
 	}
