@@ -63,10 +63,9 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 	key := entry.Key()
 
 	// Empty-value PUTs occasionally appear in v1-objects (origin still under
-	// investigation); they carry no replica data, so skip without processing
-	// rather than logging an error.
+	// investigation); they carry no replica data, so skip without processing.
 	if len(entry.Value()) == 0 {
-		logger.With("key", key).DebugContext(ctx, "skipping KV put with empty value")
+		logger.With("key", key).WarnContext(ctx, "skipping KV put with empty value")
 		return false
 	}
 
