@@ -24,19 +24,21 @@ import (
 var auth0Mgmt *management.Management
 
 // v1ToAuth0Fields maps v1 platform DB column names to Auth0 user_metadata keys.
+// Address fields use the Salesforce MailingAddress columns (mailingstreet, etc.);
+// merged_user has no bare street/city/state/country/postalcode columns.
 var v1ToAuth0Fields = map[string]string{
-	"firstname":      "given_name",
-	"lastname":       "family_name",
-	"title":          "job_title",
-	"street":         "address",
-	"city":           "city",
-	"state":          "state_province",
-	"country":        "country",
-	"postalcode":     "postal_code",
-	"phone":          "phone_number",
-	"tshirt_size__c": "t_shirt_size",
-	"photo_url__c":   "picture",
-	"timezone__c":    "zoneinfo",
+	"firstname":         "given_name",
+	"lastname":          "family_name",
+	"title":             "job_title",
+	"mailingstreet":     "address",
+	"mailingcity":       "city",
+	"mailingstate":      "state_province",
+	"mailingcountry":    "country",
+	"mailingpostalcode": "postal_code",
+	"phone":             "phone_number",
+	"tshirt_size__c":    "t_shirt_size",
+	"photo_url__c":      "picture",
+	"timezone__c":       "zoneinfo",
 }
 
 // v1NoAccountPlaceholder is the v1 placeholder org name that should not overwrite
