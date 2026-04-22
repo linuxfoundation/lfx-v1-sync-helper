@@ -57,11 +57,22 @@ func usernameToKVKey(name string) string { return toKVKey(name) }
 // handleMergedUserUpdate processes merged user updates: maintains the
 // secondary username index and syncs profile fields to Auth0 user_metadata.
 //
-// The Auth0 update runs in a background goroutine after a short delay to avoid
-// contention with lf-login-backend, which may write to Auth0 user_metadata at
-// the same time. The NATS message is always ACKed immediately so we don't hold
-// up the KV consumer queue. Errors are logged; the next KV update for this user
-// will naturally retry.
+// The profile sync runs in one of two modes (selected via PROFILE_SYNC_BACKFILL):
+//
+//   - Live (default): the Auth0 update runs in a background goroutine after a
+//     short delay to avoid contention with lf-login-backend, which may write to
+//     Auth0 user_metadata for the same user at roughly the same time. The NATS
+//     message is always ACKed immediately so we don't hold up the KV consumer
+//     queue. The SDK's built-in retry absorbs transient 429/5xx failures; if
+//     retries are exhausted the error is logged and the message is not
+//     redelivered (acknowledged tradeoff of async processing).
+//
+//   - Backfill: the Auth0 update runs inline. Retryable errors (429/5xx,
+//     network failures) cause the message to be NACKed so JetStream
+//     redelivery provides natural backoff. The SDK is configured with no
+//     retries in this mode to avoid holding the consumer queue. This mode is
+//     intended for bounded replay runs where fanning out thousands of async
+//     writes would guarantee cascading Auth0 rate limits.
 func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	sfid, ok := v1Data["sfid"].(string)
 	if !ok || sfid == "" {
@@ -108,9 +119,28 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 	logger.With("key", key, "indexKey", indexKey, "sfid", sfid).
 		DebugContext(ctx, "successfully updated username index")
 
-	// Sync profile fields to Auth0 user_metadata in a background goroutine.
-	// The delay mitigates contention with lf-login-backend.
 	auth0UserID := mapUsernameToAuthSub(username)
+
+	if cfg.ProfileSyncBackfill {
+		// Backfill: process inline, NACK on retryable errors so JetStream
+		// redelivery throttles throughput. No 5s delay — backfill runs
+		// separately from live user activity, so the lf-login-backend race
+		// is not relevant.
+		if err := syncProfileToAuth0(ctx, auth0UserID, v1Data); err != nil {
+			if isRetryableAuth0Error(err) {
+				logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
+					WarnContext(ctx, "retryable Auth0 error during backfill, NACKing for redelivery")
+				return true
+			}
+			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
+				ErrorContext(ctx, "non-retryable Auth0 error during backfill, dropping")
+		}
+		return false
+	}
+
+	// Live: fire-and-forget goroutine with a 5s delay to mitigate contention
+	// with lf-login-backend. The SDK retry inside the Management client
+	// handles transient 429/5xx failures on its own.
 	go func() {
 		time.Sleep(profileSyncDelay)
 		syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
