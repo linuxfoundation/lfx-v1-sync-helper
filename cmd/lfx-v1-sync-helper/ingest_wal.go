@@ -184,24 +184,33 @@ func handleWALUpsert(ctx context.Context, walEvent *WALEvent) bool {
 		// Key exists, check if we should update.
 		lastRevision = existing.Revision()
 
-		// Parse existing data.
+		// Parse existing data. If the payload is empty or unparseable, treat
+		// the entry as having no usable existing state and overwrite it with
+		// the incoming WAL data (keeping lastRevision so we use Update, not
+		// Create). This unwedges entries where a stray empty PUT has left the
+		// key in an un-readable state and would otherwise block every future
+		// update.
 		var existingData map[string]interface{}
-		if unmarshalErr := json.Unmarshal(existing.Value(), &existingData); unmarshalErr != nil {
-			// Try msgpack if JSON fails.
+		if len(existing.Value()) == 0 {
+			logger.With("key", key, "revision", lastRevision).WarnContext(ctx, "existing KV entry is empty, overwriting from WAL")
+			shouldUpdate = true
+		} else if unmarshalErr := json.Unmarshal(existing.Value(), &existingData); unmarshalErr != nil {
 			if msgpackErr := msgpack.Unmarshal(existing.Value(), &existingData); msgpackErr != nil {
-				logger.With(errKey, unmarshalErr, "msgpack_error", msgpackErr, "key", key).ErrorContext(ctx, "failed to unmarshal existing KV entry data")
-				return false
+				logger.With(errKey, unmarshalErr, "msgpack_error", msgpackErr, "key", key, "revision", lastRevision).WarnContext(ctx, "existing KV entry is unparseable, overwriting from WAL")
+				shouldUpdate = true
 			}
 		}
 
-		// Check if the record was marked as deleted in the target.
-		if deletedAt, exists := existingData["_sdc_deleted_at"]; exists && deletedAt != nil {
-			logger.With("key", key).WarnContext(ctx, "skipping WAL upsert for deleted record")
-			return false
-		}
+		if existingData != nil {
+			// Check if the record was marked as deleted in the target.
+			if deletedAt, exists := existingData["_sdc_deleted_at"]; exists && deletedAt != nil {
+				logger.With("key", key).WarnContext(ctx, "skipping WAL upsert for deleted record")
+				return false
+			}
 
-		// Compare timestamps to determine if we should update.
-		shouldUpdate = shouldUpdateBasedOnTimestamps(ctx, walEvent.Data, existingData, key)
+			// Compare timestamps to determine if we should update.
+			shouldUpdate = shouldUpdateBasedOnTimestamps(ctx, walEvent.Data, existingData, key)
+		}
 	}
 
 	if shouldUpdate {
