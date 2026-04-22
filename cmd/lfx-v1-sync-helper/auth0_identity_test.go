@@ -313,6 +313,47 @@ func TestLinkEmailIdentity(t *testing.T) {
 		}
 	})
 
+	t.Run("link wrapped 409 is still idempotent (errors.As unwraps)", func(t *testing.T) {
+		fake := &fakeAuth0Users{
+			users: map[string]*management.User{
+				"auth0|primary": {ID: auth0.String("auth0|primary")},
+			},
+			usersByEmail: map[string][]*management.User{},
+			linkErr:      fmt.Errorf("auth0 sdk wrap: %w", &mgmtError{status: http.StatusConflict, message: "already linked"}),
+		}
+		cleanup := setupLinkTest(t, fake)
+		defer cleanup()
+
+		err := linkEmailIdentity(context.Background(), "auth0|primary", "alt@example.com")
+		if err != nil {
+			t.Fatalf("wrapped 409 should unwrap and be treated as success, got: %v", err)
+		}
+	})
+
+	t.Run("create wrapped 409 unwraps and resolves existing user", func(t *testing.T) {
+		fake := &fakeAuth0Users{
+			users: map[string]*management.User{
+				"auth0|primary": {ID: auth0.String("auth0|primary")},
+			},
+			usersByEmail: map[string][]*management.User{
+				"alt@example.com": {
+					{ID: auth0.String("email|wrapped789")},
+				},
+			},
+			createErr: fmt.Errorf("sdk wrap: %w", &mgmtError{status: http.StatusConflict, message: "user exists"}),
+		}
+		cleanup := setupLinkTest(t, fake)
+		defer cleanup()
+
+		err := linkEmailIdentity(context.Background(), "auth0|primary", "alt@example.com")
+		if err != nil {
+			t.Fatalf("wrapped create 409 should unwrap and proceed to link, got: %v", err)
+		}
+		if len(fake.linked) != 1 {
+			t.Fatalf("expected 1 link call, got %d", len(fake.linked))
+		}
+	})
+
 	t.Run("link non-409 error propagates", func(t *testing.T) {
 		fake := &fakeAuth0Users{
 			users: map[string]*management.User{
@@ -394,6 +435,27 @@ func TestUnlinkEmailIdentity(t *testing.T) {
 		err := unlinkEmailIdentity(context.Background(), "auth0|primary", "alt@example.com")
 		if err != nil {
 			t.Fatalf("unlink 404 should be treated as success, got: %v", err)
+		}
+	})
+
+	t.Run("unlink wrapped 404 is still idempotent (errors.As unwraps)", func(t *testing.T) {
+		fake := &fakeAuth0Users{
+			users: map[string]*management.User{
+				"auth0|primary": {
+					ID: auth0.String("auth0|primary"),
+					Identities: []*management.UserIdentity{
+						ptr(newEmailIdentity("secondary123", "alt@example.com")),
+					},
+				},
+			},
+			unlinkErr: fmt.Errorf("sdk wrap: %w", &mgmtError{status: http.StatusNotFound, message: "not found"}),
+		}
+		cleanup := setupLinkTest(t, fake)
+		defer cleanup()
+
+		err := unlinkEmailIdentity(context.Background(), "auth0|primary", "alt@example.com")
+		if err != nil {
+			t.Fatalf("wrapped 404 should unwrap and be treated as success, got: %v", err)
 		}
 	})
 

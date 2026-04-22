@@ -276,7 +276,8 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 	err = auth0Users.Create(ctx, secondaryUser)
 	if err != nil {
 		// If user already exists (409), find it and proceed to link.
-		if mgmtErr, ok := err.(management.Error); ok && mgmtErr.Status() == http.StatusConflict {
+		var mgmtErr management.Error
+		if errors.As(err, &mgmtErr) && mgmtErr.Status() == http.StatusConflict {
 			// Find the existing email user to get its ID for linking.
 			if waitErr := auth0RateLimiter.Wait(ctx); waitErr != nil {
 				return fmt.Errorf("rate limiter: %w", waitErr)
@@ -315,7 +316,8 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 	})
 	if err != nil {
 		// 409 means already linked (idempotent).
-		if mgmtErr, ok := err.(management.Error); ok && mgmtErr.Status() == http.StatusConflict {
+		var mgmtErr management.Error
+		if errors.As(err, &mgmtErr) && mgmtErr.Status() == http.StatusConflict {
 			logger.With("auth0_user_id", primaryAuth0ID, "email", email).
 				DebugContext(ctx, "email identity already linked (conflict on link call)")
 			return nil
@@ -365,7 +367,8 @@ func unlinkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) erro
 	_, err = auth0Users.Unlink(ctx, primaryAuth0ID, "email", secondaryUserID)
 	if err != nil {
 		// 404 means already unlinked (idempotent).
-		if mgmtErr, ok := err.(management.Error); ok && mgmtErr.Status() == http.StatusNotFound {
+		var mgmtErr management.Error
+		if errors.As(err, &mgmtErr) && mgmtErr.Status() == http.StatusNotFound {
 			return nil
 		}
 		return fmt.Errorf("failed to unlink email %s from user %s: %w", email, primaryAuth0ID, err)

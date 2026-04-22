@@ -36,6 +36,12 @@ const (
 // Var (not const) so tests can collapse the delay.
 var profileSyncDelay = 5 * time.Second
 
+// auth0CallTimeout bounds Auth0 Management API work on handler-blocking paths.
+// Chosen comfortably under the JetStream AckWait (30s, see main.go) so the
+// handler always ACKs/NACKs before server-side redelivery. The 10s slack
+// covers rate-limiter waits, logging, and the ACK/NACK roundtrip.
+const auth0CallTimeout = 20 * time.Second
+
 // syncProfileToAuth0Fn is the function handleMergedUserUpdate calls to push
 // a profile to Auth0. Swappable in tests; production leaves it pointing at
 // the real Management-API implementation.
@@ -151,10 +157,9 @@ func dispatchProfileSync(ctx context.Context, key, auth0UserID string, v1Data ma
 		// lookup failures, unmappable data) are logged and ACKed so the
 		// backfill keeps moving. No 5s delay — backfill runs separately
 		// from live user activity, so the lf-login-backend race is moot.
-		// Bound the call with a timeout: kvHandler uses context.Background()
-		// with no deadline, so a stuck Auth0 request would otherwise wedge
-		// the consumer indefinitely.
-		syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		// Bound the call with auth0CallTimeout (< AckWait) so a stuck Auth0
+		// request can't stall the handler past JetStream's redelivery window.
+		syncCtx, cancel := context.WithTimeout(ctx, auth0CallTimeout)
 		defer cancel()
 		if err := syncProfileToAuth0Fn(syncCtx, auth0UserID, v1Data); err != nil {
 			if isRetryableAuth0Error(err) {
@@ -169,8 +174,10 @@ func dispatchProfileSync(ctx context.Context, key, auth0UserID string, v1Data ma
 	}
 
 	// Live: fire-and-forget goroutine with a short delay to mitigate
-	// contention with lf-login-backend. The SDK retry inside the Management
-	// client handles transient 429/5xx failures on its own.
+	// contention with lf-login-backend. The goroutine runs detached from the
+	// JetStream message (which is ACKed immediately), so its timeout is
+	// independent of AckWait — kept at 30s to give Auth0 room without
+	// leaking long-lived goroutines.
 	go func() {
 		time.Sleep(profileSyncDelay)
 		syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -233,11 +240,10 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 
 	// Sync the email identity to Auth0. Pass the email address from the event
 	// as a fallback — when the record is deleted/tombstoned, the KV lookup may
-	// not return the address, but the event payload still has it.
-	// Bound the call with a timeout: the KV handler uses context.Background()
-	// with no deadline, so a stuck Auth0 request would otherwise wedge the
-	// consumer indefinitely.
-	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// not return the address, but the event payload still has it. Bound the
+	// call with auth0CallTimeout (< AckWait) so a stuck Auth0 request can't
+	// stall the handler past JetStream's redelivery window.
+	syncCtx, cancel := context.WithTimeout(ctx, auth0CallTimeout)
 	defer cancel()
 	if retry := syncAlternateEmailToAuth0(syncCtx, key, leadorcontactid, emailSfid, emailAddr, isDeleted); retry {
 		return true
@@ -309,15 +315,25 @@ func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid, ev
 			return false
 		}
 		if err := unlinkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
+			if isRetryableAuth0Error(err) {
+				logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
+					WarnContext(ctx, "retryable Auth0 error during unlink, NACKing for redelivery")
+				return true
+			}
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
-				ErrorContext(ctx, "failed to unlink email identity from Auth0")
-			return true // Retry on transient failure.
+				ErrorContext(ctx, "failed to unlink email identity from Auth0, dropping non-retryable error")
+			return false
 		}
 	} else {
 		if err := linkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
+			if isRetryableAuth0Error(err) {
+				logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
+					WarnContext(ctx, "retryable Auth0 error during link, NACKing for redelivery")
+				return true
+			}
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
-				ErrorContext(ctx, "failed to link email identity to Auth0")
-			return true // Retry on transient failure.
+				ErrorContext(ctx, "failed to link email identity to Auth0, dropping non-retryable error")
+			return false
 		}
 	}
 

@@ -267,7 +267,9 @@ func TestSyncAlternateEmailToAuth0(t *testing.T) {
 		kvEmail   = "alt@example.com"
 	)
 	expectedAuth0ID := mapUsernameToAuthSub(username)
-	transientErr := errors.New("auth0 transient")
+	retryable429 := &fakeMgmtErr{status: 429, msg: "rate limited"}
+	retryable503 := &fakeMgmtErr{status: 503, msg: "unavailable"}
+	permanent400 := &fakeMgmtErr{status: 400, msg: "bad request"}
 
 	tests := []struct {
 		name       string
@@ -350,19 +352,51 @@ func TestSyncAlternateEmailToAuth0(t *testing.T) {
 			userResult: &V1User{Username: ""},
 		},
 		{
-			name:          "link transient error → retry",
+			name:          "link 429 (retryable) → retry",
 			lookup:        altEmailLookup{email: kvEmail, isVerified: true},
 			userResult:    &V1User{Username: username},
-			linkErr:       transientErr,
+			linkErr:       retryable429,
 			wantRetry:     true,
 			wantLinkEmail: kvEmail,
 		},
 		{
-			name:            "unlink transient error → retry",
+			name:          "link wrapped 503 (retryable) → retry",
+			lookup:        altEmailLookup{email: kvEmail, isVerified: true},
+			userResult:    &V1User{Username: username},
+			linkErr:       fmt.Errorf("wrapped: %w", retryable503),
+			wantRetry:     true,
+			wantLinkEmail: kvEmail,
+		},
+		{
+			name:          "link 400 (non-retryable) → drop",
+			lookup:        altEmailLookup{email: kvEmail, isVerified: true},
+			userResult:    &V1User{Username: username},
+			linkErr:       permanent400,
+			wantRetry:     false,
+			wantLinkEmail: kvEmail,
+		},
+		{
+			name:          "link plain error (not management.Error, non-retryable) → drop",
+			lookup:        altEmailLookup{email: kvEmail, isVerified: true},
+			userResult:    &V1User{Username: username},
+			linkErr:       errors.New("bare error"),
+			wantRetry:     false,
+			wantLinkEmail: kvEmail,
+		},
+		{
+			name:            "unlink 429 (retryable) → retry",
 			lookup:          altEmailLookup{email: kvEmail, isTombstoned: true},
 			userResult:      &V1User{Username: username},
-			unlinkErr:       transientErr,
+			unlinkErr:       retryable429,
 			wantRetry:       true,
+			wantUnlinkEmail: kvEmail,
+		},
+		{
+			name:            "unlink 400 (non-retryable) → drop",
+			lookup:          altEmailLookup{email: kvEmail, isTombstoned: true},
+			userResult:      &V1User{Username: username},
+			unlinkErr:       permanent400,
+			wantRetry:       false,
 			wantUnlinkEmail: kvEmail,
 		},
 	}
