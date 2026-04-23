@@ -29,22 +29,31 @@ type userProfileUpdatedEvent struct {
 	Timestamp time.Time      `json:"timestamp"`
 }
 
-// auth0ToV1Fields is the reverse of v1ToAuth0Fields: Auth0 user_metadata key -> v1 user-service field.
-// TODO: once the v1-to-auth0 branch merges, derive this map from v1ToAuth0Fields to prevent drift.
+// auth0ToV1Fields maps Auth0 user_metadata keys to top-level fields on the
+// user-service PATCH body (schema: update-partial-user).
 var auth0ToV1Fields = map[string]string{
-	"given_name":     "FirstName",
-	"family_name":    "LastName",
-	"job_title":      "Title",
+	"given_name":   "FirstName",
+	"family_name":  "LastName",
+	"job_title":    "Title",
+	"phone_number": "Phone",
+	"t_shirt_size": "TShirtSize",
+	"picture":      "LogoURL",
+}
+
+// auth0ToV1AddressFields maps Auth0 user_metadata keys to fields on the nested
+// Address object of the user-service PATCH body (schema: address-partial-update).
+// user-service does not accept Street/City/State/Country/PostalCode at the top
+// level — they must be under "Address".
+var auth0ToV1AddressFields = map[string]string{
 	"address":        "Street",
 	"city":           "City",
 	"state_province": "State",
 	"country":        "Country",
 	"postal_code":    "PostalCode",
-	"phone_number":   "Phone",
-	"t_shirt_size":   "TShirtSize",
-	"picture":        "PhotoURL",
-	"zoneinfo":       "Timezone",
 }
+
+// Note: Auth0's `zoneinfo` has no equivalent in user-service's update-partial-user
+// schema, so timezone edits in v2 cannot propagate to v1 today.
 
 // handleUserProfileUpdated processes lfx.user_profile.updated events from
 // auth-service and syncs the profile to v1 via user-service.
@@ -147,20 +156,33 @@ func isAllDigits(s string) bool {
 }
 
 // mapMetadataToV1Payload builds the v1 user-service PATCH payload from an
-// Auth0 user_metadata map, applying the auth0ToV1Fields key translation.
-// Non-string values and unknown keys are ignored.
-func mapMetadataToV1Payload(metadata map[string]any) map[string]string {
-	payload := make(map[string]string, len(auth0ToV1Fields))
+// Auth0 user_metadata map. Top-level fields are translated via
+// auth0ToV1Fields; address fields are translated via auth0ToV1AddressFields
+// and nested under "Address". Non-string values and unknown keys are ignored.
+// Returns an empty map when nothing mapped so the caller can skip the HTTP call.
+func mapMetadataToV1Payload(metadata map[string]any) map[string]any {
+	payload := make(map[string]any, len(auth0ToV1Fields)+1)
 	for auth0Key, v1Key := range auth0ToV1Fields {
 		if val, ok := metadata[auth0Key].(string); ok {
 			payload[v1Key] = val
 		}
 	}
+
+	address := make(map[string]string, len(auth0ToV1AddressFields))
+	for auth0Key, v1Key := range auth0ToV1AddressFields {
+		if val, ok := metadata[auth0Key].(string); ok {
+			address[v1Key] = val
+		}
+	}
+	if len(address) > 0 {
+		payload["Address"] = address
+	}
+
 	return payload
 }
 
 // patchV1User sends a PATCH request to user-service to update a v1 user record.
-func patchV1User(ctx context.Context, sfid string, fields map[string]string) error {
+func patchV1User(ctx context.Context, sfid string, fields map[string]any) error {
 	apiURL := fmt.Sprintf("%suser-service/v1/users/%s", cfg.LFXAPIGateway.String(), sfid)
 
 	body, err := json.Marshal(fields)

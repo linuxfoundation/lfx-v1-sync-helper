@@ -114,7 +114,7 @@ func TestIsAllDigits(t *testing.T) {
 }
 
 func TestMapMetadataToV1Payload(t *testing.T) {
-	t.Run("all known fields mapped", func(t *testing.T) {
+	t.Run("all known fields mapped with nested Address", func(t *testing.T) {
 		metadata := map[string]any{
 			"given_name":     "Alice",
 			"family_name":    "Smith",
@@ -127,31 +127,43 @@ func TestMapMetadataToV1Payload(t *testing.T) {
 			"phone_number":   "+15551234567",
 			"t_shirt_size":   "M",
 			"picture":        "https://example.com/a.png",
-			"zoneinfo":       "America/Los_Angeles",
+			"zoneinfo":       "America/Los_Angeles", // unsupported upstream, must be dropped
 		}
 		got := mapMetadataToV1Payload(metadata)
 
-		want := map[string]string{
+		wantTop := map[string]string{
 			"FirstName":  "Alice",
 			"LastName":   "Smith",
 			"Title":      "Engineer",
+			"Phone":      "+15551234567",
+			"TShirtSize": "M",
+			"LogoURL":    "https://example.com/a.png",
+		}
+		for k, v := range wantTop {
+			if got[k] != v {
+				t.Errorf("payload[%q] = %v, want %q", k, got[k], v)
+			}
+		}
+
+		address, ok := got["Address"].(map[string]string)
+		if !ok {
+			t.Fatalf("payload[\"Address\"] = %v (type %T), want map[string]string", got["Address"], got["Address"])
+		}
+		wantAddress := map[string]string{
 			"Street":     "1 Main St",
 			"City":       "Anytown",
 			"State":      "CA",
 			"Country":    "US",
 			"PostalCode": "94000",
-			"Phone":      "+15551234567",
-			"TShirtSize": "M",
-			"PhotoURL":   "https://example.com/a.png",
-			"Timezone":   "America/Los_Angeles",
 		}
-		if len(got) != len(want) {
-			t.Fatalf("payload size = %d, want %d (got=%v)", len(got), len(want), got)
-		}
-		for k, v := range want {
-			if got[k] != v {
-				t.Errorf("payload[%q] = %q, want %q", k, got[k], v)
+		for k, v := range wantAddress {
+			if address[k] != v {
+				t.Errorf("payload.Address[%q] = %q, want %q", k, address[k], v)
 			}
+		}
+
+		if _, exists := got["Timezone"]; exists {
+			t.Errorf("Timezone must not appear in payload (no user-service field)")
 		}
 	})
 
@@ -159,13 +171,28 @@ func TestMapMetadataToV1Payload(t *testing.T) {
 		metadata := map[string]any{
 			"given_name":  "",
 			"family_name": "Smith",
+			"country":     "",
 		}
 		got := mapMetadataToV1Payload(metadata)
 		if v, ok := got["FirstName"]; !ok || v != "" {
-			t.Errorf("FirstName = %q, ok=%v; want \"\", true (empty string must be forwarded so v1 sees the cleared field)", v, ok)
+			t.Errorf("FirstName = %v, ok=%v; want \"\", true", v, ok)
 		}
 		if got["LastName"] != "Smith" {
-			t.Errorf("LastName = %q, want %q", got["LastName"], "Smith")
+			t.Errorf("LastName = %v, want %q", got["LastName"], "Smith")
+		}
+		addr, ok := got["Address"].(map[string]string)
+		if !ok {
+			t.Fatalf("Address missing for empty country (expected nested clear)")
+		}
+		if v, ok := addr["Country"]; !ok || v != "" {
+			t.Errorf("Address.Country = %q, ok=%v; want \"\", true", v, ok)
+		}
+	})
+
+	t.Run("top-level-only metadata does not add Address key", func(t *testing.T) {
+		got := mapMetadataToV1Payload(map[string]any{"given_name": "Alice"})
+		if _, exists := got["Address"]; exists {
+			t.Errorf("Address must be omitted when no address fields are set")
 		}
 	})
 
@@ -173,7 +200,7 @@ func TestMapMetadataToV1Payload(t *testing.T) {
 		metadata := map[string]any{
 			"given_name":  "Alice",
 			"unknown_key": "ignored",
-			"email":       "alice@example.com", // not in auth0ToV1Fields
+			"email":       "alice@example.com",
 		}
 		got := mapMetadataToV1Payload(metadata)
 		if len(got) != 1 || got["FirstName"] != "Alice" {
@@ -184,18 +211,19 @@ func TestMapMetadataToV1Payload(t *testing.T) {
 	t.Run("non-string values are ignored", func(t *testing.T) {
 		metadata := map[string]any{
 			"given_name":  "Alice",
-			"family_name": 42,              // wrong type
-			"job_title":   []string{"eng"}, // wrong type
+			"family_name": 42,
+			"job_title":   []string{"eng"},
+			"country":     123, // non-string address field
 		}
 		got := mapMetadataToV1Payload(metadata)
 		if got["FirstName"] != "Alice" {
-			t.Errorf("FirstName missing or wrong: %q", got["FirstName"])
+			t.Errorf("FirstName missing or wrong: %v", got["FirstName"])
 		}
 		if _, ok := got["LastName"]; ok {
 			t.Errorf("LastName should have been skipped due to non-string value")
 		}
-		if _, ok := got["Title"]; ok {
-			t.Errorf("Title should have been skipped due to non-string value")
+		if _, ok := got["Address"]; ok {
+			t.Errorf("Address must be omitted when the only address field had a non-string value")
 		}
 	})
 
