@@ -165,6 +165,15 @@ func TestMapMetadataToV1Payload(t *testing.T) {
 		if _, exists := got["Timezone"]; exists {
 			t.Errorf("Timezone must not appear in payload (no user-service field)")
 		}
+
+		// Regression guard for the original bug: address fields at the top
+		// level were silently dropped by user-service. They must only appear
+		// inside the nested Address object.
+		for _, k := range []string{"Street", "City", "State", "Country", "PostalCode"} {
+			if _, exists := got[k]; exists {
+				t.Errorf("%q must not appear at the top level of the PATCH payload (belongs under Address)", k)
+			}
+		}
 	})
 
 	t.Run("empty string values are preserved (user clearing a field)", func(t *testing.T) {
