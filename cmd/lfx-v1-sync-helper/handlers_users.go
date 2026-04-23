@@ -51,10 +51,12 @@ var syncProfileToAuth0Fn = syncProfileToAuth0
 // for the KV reads and Auth0 identity operations without needing a live
 // v1-objects bucket or Management API.
 var (
-	getAlternateEmailDetailsFn = getAlternateEmailDetails
-	lookupMergedUserFn         = lookupMergedUser
-	linkEmailIdentityFn        = linkEmailIdentity
-	unlinkEmailIdentityFn      = unlinkEmailIdentity
+	getAlternateEmailDetailsFn  = getAlternateEmailDetails
+	lookupMergedUserFn          = lookupMergedUser
+	linkEmailIdentityFn         = linkEmailIdentity
+	unlinkEmailIdentityFn       = unlinkEmailIdentity
+	updateUserAlternateEmailsFn = updateUserAlternateEmails
+	tombstoneMappingFn          = tombstoneMapping
 )
 
 // toKVKey normalizes a user-provided string and encodes it as a URL-safe base64
@@ -191,9 +193,14 @@ func dispatchProfileSync(ctx context.Context, key, auth0UserID string, v1Data ma
 	return false
 }
 
-// handleAlternateEmailUpdate processes alternate email updates, maintains
-// v1-mapping records for merged users' alternate emails and email -> user SFID index,
-// and syncs the email as a linked identity to the user's Auth0 account.
+// handleAlternateEmailUpdate processes additive alternate email updates:
+// maintains v1-mapping records for merged users' alternate emails and the
+// email -> user SFID index, and links the email as an identity on the user's
+// Auth0 account. Auth0 unlinks are NOT handled here — soft deletes flow
+// through handleAlternateEmailDelete via handleKVPut's _sdc_deleted_at branch.
+// The isDeleted (Salesforce isdeleted__c) defense-in-depth path only updates
+// the v1-mapping cleanup; LFX in practice doesn't set isdeleted=true, so the
+// Auth0 sync is gated to non-deleted records.
 // Returns true if the operation should be retried, false otherwise.
 func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	leadorcontactid, ok := v1Data["leadorcontactid"].(string)
@@ -238,26 +245,102 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 		}
 	}
 
-	// Sync the email identity to Auth0. Pass the email address from the event
-	// as a fallback — when the record is deleted/tombstoned, the KV lookup may
-	// not return the address, but the event payload still has it. Bound the
-	// call with auth0CallTimeout (< AckWait) so a stuck Auth0 request can't
-	// stall the handler past JetStream's redelivery window.
-	syncCtx, cancel := context.WithTimeout(ctx, auth0CallTimeout)
-	defer cancel()
-	if retry := syncAlternateEmailToAuth0(syncCtx, key, leadorcontactid, emailSfid, emailAddr, isDeleted); retry {
-		return true
+	// Auth0 link only runs for non-deleted records. Bound with auth0CallTimeout
+	// (< AckWait) so a stuck Auth0 request can't stall the handler past
+	// JetStream's redelivery window.
+	if !isDeleted {
+		syncCtx, cancel := context.WithTimeout(ctx, auth0CallTimeout)
+		defer cancel()
+		if retry := syncAlternateEmailToAuth0(syncCtx, key, leadorcontactid, emailSfid, emailAddr); retry {
+			return true
+		}
 	}
 
 	return shouldRetry
 }
 
-// syncAlternateEmailToAuth0 links or unlinks an alternate email as an Auth0
-// identity on the user's primary account. eventEmail is the email address from
-// the KV event payload, used as a fallback when the KV record is deleted/tombstoned.
+// handleAlternateEmailDelete processes a WAL-driven soft delete of an alternate
+// email record: cleans up the v1-mapping secondary indexes and unlinks the
+// corresponding linked identity from the user's Auth0 account. This is the
+// only path that drives Auth0 unlinks — the update handler doesn't fire on
+// soft deletes (handleKVPut routes _sdc_deleted_at records here).
+// Returns true if the operation should be retried, false otherwise.
+func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Data map[string]any) bool {
+	if v1Data == nil {
+		// True hard delete from the KV bucket — the payload is gone, so we
+		// can't resolve the user or email. WAL never produces this for
+		// alternate emails (it sets _sdc_deleted_at instead), so this path
+		// is unexpected enough to warrant a warning.
+		logger.With("key", key, "email_sfid", emailSfid).
+			WarnContext(ctx, "alternate email hard-deleted with no payload; cannot clean up indexes or unlink Auth0 identity")
+		return false
+	}
+
+	userSfid, _ := v1Data["leadorcontactid"].(string)
+	emailAddr, _ := v1Data["alternate_email_address__c"].(string)
+
+	if userSfid == "" {
+		logger.With("key", key, "email_sfid", emailSfid).
+			WarnContext(ctx, "alternate email delete missing leadorcontactid, skipping")
+		return false
+	}
+
+	// Mirror the v1-mapping cleanup that handleAlternateEmailUpdate would have
+	// performed if isdeleted=true had come through (it usually doesn't on LFX).
+	shouldRetry := updateUserAlternateEmailsFn(ctx, userSfid, emailSfid, true)
+
+	if encodedEmail := emailToKVKey(emailAddr); encodedEmail != "" {
+		indexKey := kvKeyEmailPrefix + encodedEmail
+		if err := tombstoneMappingFn(ctx, indexKey); err != nil {
+			logger.With("error", err, "key", key, "indexKey", indexKey).
+				ErrorContext(ctx, "failed to tombstone email index on delete")
+		}
+	}
+
+	// Skip primary emails — managed by auth0-sync-userdb, not this flow.
+	if isPrimary, _ := v1Data["primary_email__c"].(bool); isPrimary {
+		return shouldRetry
+	}
+
+	if emailAddr == "" {
+		logger.With("key", key, "email_sfid", emailSfid).
+			WarnContext(ctx, "alternate email delete missing address, cannot unlink Auth0 identity")
+		return shouldRetry
+	}
+
+	v1User, err := lookupMergedUserFn(ctx, userSfid)
+	if err != nil {
+		logger.With(errKey, err, "key", key, "user_sfid", userSfid).
+			WarnContext(ctx, "failed to resolve v1 user for Auth0 email unlink")
+		return shouldRetry
+	}
+	if v1User.Username == "" {
+		logger.With("key", key, "user_sfid", userSfid).
+			WarnContext(ctx, "v1 user has no username, cannot resolve Auth0 ID for unlink")
+		return shouldRetry
+	}
+	auth0UserID := mapUsernameToAuthSub(v1User.Username)
+
+	syncCtx, cancel := context.WithTimeout(ctx, auth0CallTimeout)
+	defer cancel()
+	if err := unlinkEmailIdentityFn(syncCtx, auth0UserID, emailAddr); err != nil {
+		if isRetryableAuth0Error(err) {
+			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", emailAddr).
+				WarnContext(syncCtx, "retryable Auth0 error during unlink, NACKing for redelivery")
+			return true
+		}
+		logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", emailAddr).
+			ErrorContext(syncCtx, "failed to unlink email identity from Auth0, dropping non-retryable error")
+	}
+	return shouldRetry
+}
+
+// syncAlternateEmailToAuth0 links a verified alternate email as an Auth0
+// identity on the user's primary account. eventEmail is the email address
+// from the KV event payload, used as a fallback when getAlternateEmailDetails
+// can't return one. Unlinks live in handleAlternateEmailDelete.
 // Returns true if the operation should be retried (transient failure).
-func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid, eventEmail string, isDeleted bool) bool {
-	// Look up the full email record from v1-objects KV.
+func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid, eventEmail string) bool {
 	email, isPrimary, isVerified, isTombstoned, err := getAlternateEmailDetailsFn(ctx, emailSfid)
 	if err != nil {
 		logger.With(errKey, err, "key", key, "email_sfid", emailSfid).
@@ -265,7 +348,6 @@ func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid, ev
 		return false
 	}
 
-	// Use the event payload email as fallback when the KV record didn't provide one.
 	if email == "" && eventEmail != "" {
 		email = eventEmail
 	}
@@ -274,22 +356,19 @@ func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid, ev
 	if isPrimary {
 		return false
 	}
-
-	// Determine action: unlink if deleted/inactive, link if verified and active.
-	shouldUnlink := isDeleted || isTombstoned
-	if !shouldUnlink {
-		// Only link verified emails.
-		if !isVerified {
-			logger.With("key", key, "email_sfid", emailSfid).
-				DebugContext(ctx, "alternate email not verified, skipping Auth0 sync")
-			return false
-		}
-		if email == "" {
-			return false
-		}
+	// Tombstoned/inactive: a delete event will (or did) handle the unlink.
+	if isTombstoned {
+		return false
+	}
+	if !isVerified {
+		logger.With("key", key, "email_sfid", emailSfid).
+			DebugContext(ctx, "alternate email not verified, skipping Auth0 sync")
+		return false
+	}
+	if email == "" {
+		return false
 	}
 
-	// Resolve the user's Auth0 ID via username.
 	v1User, err := lookupMergedUserFn(ctx, userSfid)
 	if err != nil {
 		logger.With(errKey, err, "key", key, "user_sfid", userSfid).
@@ -303,40 +382,15 @@ func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid, ev
 	}
 	auth0UserID := mapUsernameToAuthSub(v1User.Username)
 
-	// Perform the link or unlink.
-	if shouldUnlink {
-		// For unlink we need the email address. getAlternateEmailDetails returns
-		// the address even for inactive records, and the event payload email is
-		// used as a further fallback. If still empty (e.g. record fully purged
-		// from KV), skip because we can't unlink without knowing the address.
-		if email == "" {
-			logger.With("key", key, "email_sfid", emailSfid, "auth0_user_id", auth0UserID).
-				DebugContext(ctx, "cannot unlink email: address unavailable (record inactive/deleted)")
-			return false
-		}
-		if err := unlinkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
-			if isRetryableAuth0Error(err) {
-				logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
-					WarnContext(ctx, "retryable Auth0 error during unlink, NACKing for redelivery")
-				return true
-			}
+	if err := linkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
+		if isRetryableAuth0Error(err) {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
-				ErrorContext(ctx, "failed to unlink email identity from Auth0, dropping non-retryable error")
-			return false
+				WarnContext(ctx, "retryable Auth0 error during link, NACKing for redelivery")
+			return true
 		}
-	} else {
-		if err := linkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
-			if isRetryableAuth0Error(err) {
-				logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
-					WarnContext(ctx, "retryable Auth0 error during link, NACKing for redelivery")
-				return true
-			}
-			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
-				ErrorContext(ctx, "failed to link email identity to Auth0, dropping non-retryable error")
-			return false
-		}
+		logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
+			ErrorContext(ctx, "failed to link email identity to Auth0, dropping non-retryable error")
 	}
-
 	return false
 }
 

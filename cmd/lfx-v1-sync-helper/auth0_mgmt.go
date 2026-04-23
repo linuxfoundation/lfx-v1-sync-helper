@@ -29,6 +29,7 @@ import (
 type auth0UserAPI interface {
 	Read(ctx context.Context, id string, opts ...management.RequestOption) (*management.User, error)
 	ListByEmail(ctx context.Context, email string, opts ...management.RequestOption) ([]*management.User, error)
+	Search(ctx context.Context, opts ...management.RequestOption) (*management.UserList, error)
 	Create(ctx context.Context, u *management.User, opts ...management.RequestOption) error
 	Update(ctx context.Context, id string, u *management.User, opts ...management.RequestOption) error
 	Link(ctx context.Context, id string, il *management.UserIdentityLink, opts ...management.RequestOption) ([]management.UserIdentity, error)
@@ -170,6 +171,14 @@ func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, 
 // because it runs in a delayed goroutine with natural backpressure.
 var auth0RateLimiter = rate.NewLimiter(rate.Limit(20), 5)
 
+// luceneQuoteEscape escapes the two characters that have meaning inside an
+// Auth0 v3 search-engine quoted phrase: backslash and double-quote.
+func luceneQuoteEscape(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return s
+}
+
 // syncProfileToAuth0 maps v1 merged_user fields to Auth0 user_metadata and
 // pushes the update via the Management API. It reads the current user_metadata
 // first to avoid clobbering fields we don't own.
@@ -246,22 +255,40 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 		}
 	}
 
-	// Check if the email belongs to a different Auth0 user.
-	// Ignore email| users (secondary email connection accounts we may have created).
+	// Check if the email is already linked as a secondary identity on any
+	// Auth0 user. ListByEmail can't see this — it only matches users whose
+	// *primary* account email is the queried address. Use the v3 user search
+	// against nested-identity profile data instead, which surfaces the
+	// primary user that owns the linked identity (and never returns the
+	// detached email|... account, since its own primary identity has no
+	// profileData).
 	if err := auth0RateLimiter.Wait(ctx); err != nil {
 		return fmt.Errorf("rate limiter: %w", err)
 	}
-	existingUsers, err := auth0Users.ListByEmail(ctx, email)
+	query := fmt.Sprintf(`identities.profileData.email:"%s" AND identities.provider:"email"`, luceneQuoteEscape(email))
+	searchResult, err := auth0Users.Search(ctx, management.Query(query))
 	if err != nil {
-		return fmt.Errorf("failed to search users by email %s: %w", email, err)
+		return fmt.Errorf("failed to search Auth0 users by linked email %s: %w", email, err)
 	}
-	for _, u := range existingUsers {
-		if u.GetID() == primaryAuth0ID || strings.HasPrefix(u.GetID(), "email|") {
-			continue
+	for _, u := range searchResult.Users {
+		// The Lucene query is loose (matches any identity with this email OR
+		// any identity with provider=email). Walk identities to confirm both
+		// match on the same identity entry before treating it as a conflict.
+		for _, identity := range u.Identities {
+			if identity.GetProvider() != "email" {
+				continue
+			}
+			profileEmail, _ := identity.GetProfileData()["email"].(string)
+			if !strings.EqualFold(profileEmail, email) {
+				continue
+			}
+			// Email is already linked somewhere. Even if it happens to be
+			// to our primary user (rare race after the Read above), abort:
+			// idempotency is satisfied either way.
+			logger.With("auth0_user_id", primaryAuth0ID, "email", email, "other_user", u.GetID()).
+				WarnContext(ctx, "email already linked as a secondary identity, aborting link")
+			return nil
 		}
-		logger.With("auth0_user_id", primaryAuth0ID, "email", email, "other_user", u.GetID()).
-			WarnContext(ctx, "email belongs to a different Auth0 user, skipping link")
-		return nil
 	}
 
 	// Step 1: Create secondary user in the "email" connection with email_verified=true.
@@ -315,11 +342,13 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 		UserID:   auth0.String(secondaryID),
 	})
 	if err != nil {
-		// 409 means already linked (idempotent).
+		// 409 means already linked (idempotent). After the upstream Lucene
+		// pre-check this should be rare — log it as a warning so we have
+		// visibility into races between the pre-check and the link call.
 		var mgmtErr management.Error
 		if errors.As(err, &mgmtErr) && mgmtErr.Status() == http.StatusConflict {
 			logger.With("auth0_user_id", primaryAuth0ID, "email", email).
-				DebugContext(ctx, "email identity already linked (conflict on link call)")
+				WarnContext(ctx, "email identity already linked (conflict on link call)")
 			return nil
 		}
 		return fmt.Errorf("failed to link email %s to user %s: %w", email, primaryAuth0ID, err)
@@ -355,8 +384,11 @@ func unlinkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) erro
 	}
 
 	if secondaryUserID == "" {
+		// Backfill seeds an Auth0 linked identity for every active v1 alt
+		// email, so an unlink request that finds nothing is unexpected and
+		// worth surfacing. Still idempotent — return nil.
 		logger.With("auth0_user_id", primaryAuth0ID, "email", email).
-			DebugContext(ctx, "email not linked to user, nothing to unlink")
+			WarnContext(ctx, "email not linked to user, nothing to unlink")
 		return nil
 	}
 
@@ -378,4 +410,3 @@ func unlinkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) erro
 		InfoContext(ctx, "unlinked email identity from Auth0 user")
 	return nil
 }
-

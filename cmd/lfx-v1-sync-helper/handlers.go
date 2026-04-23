@@ -78,7 +78,7 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 	// Check if this is a soft delete (record has _sdc_deleted_at field).
 	if deletedAt, exists := v1Data["_sdc_deleted_at"]; exists && deletedAt != nil && deletedAt != "" {
 		logger.With("key", key, "_sdc_deleted_at", deletedAt).InfoContext(ctx, "processing soft delete from WAL")
-		return handleKVSoftDelete(ctx, key, v1Data)
+		return handleResourceDelete(ctx, key, v1Data)
 	}
 
 	// Check if we should skip this sync operation.
@@ -161,20 +161,15 @@ func handleKVDelete(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 	key := entry.Key()
 
 	logger.With("key", key).InfoContext(ctx, "processing hard delete from KV bucket")
-	return handleResourceDelete(ctx, key, "")
+	return handleResourceDelete(ctx, key, nil)
 }
 
-// handleKVSoftDelete processes a soft delete (record with _sdc_deleted_at field).
+// handleResourceDelete handles deletion of resources by key prefix.
+// v1Data is nil for true KV-bucket hard deletes (handleKVDelete) and the full
+// payload for WAL-driven soft deletes routed here from handleKVPut. Per-resource
+// handlers extract what they need from v1Data (principal, email address, etc.).
 // Returns true if the operation should be retried, false otherwise.
-func handleKVSoftDelete(ctx context.Context, key string, v1Data map[string]any) bool {
-	// Extract v1 principal for soft deletes.
-	v1Principal := extractV1Principal(ctx, v1Data)
-	return handleResourceDelete(ctx, key, v1Principal)
-}
-
-// handleResourceDelete handles deletion of resources by key prefix with specified principal.
-// Returns true if the operation should be retried, false otherwise.
-func handleResourceDelete(ctx context.Context, key string, v1Principal string) bool {
+func handleResourceDelete(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Extract the prefix (everything before the first period) for faster lookup.
 	prefix := key
 	if dotIndex := strings.Index(key, "."); dotIndex != -1 {
@@ -192,6 +187,12 @@ func handleResourceDelete(ctx context.Context, key string, v1Principal string) b
 		return false
 	}
 
+	// v1Principal is only meaningful when we have a payload (soft deletes).
+	var v1Principal string
+	if v1Data != nil {
+		v1Principal = extractV1Principal(ctx, v1Data)
+	}
+
 	// Determine the object type based on the key prefix and handle deletion.
 	switch prefix {
 	case "salesforce-project__c":
@@ -207,14 +208,7 @@ func handleResourceDelete(ctx context.Context, key string, v1Principal string) b
 		logger.With("key", key).DebugContext(ctx, "salesforce-merged_user record deleted")
 		return false
 	case "salesforce-alternate_email__c":
-		// Alternate email records remain in v1-objects KV bucket with _sdc_deleted_at set by WAL handler.
-		// The email mapping index also remains, but lookups will detect the soft-delete and skip the email.
-		// TODO: Should clean up (remove) soft-deleted email SFIDs from v1-merged-user.alternate-emails.{userSfid} mapping records.
-		// TODO: WAL-originated hard deletes bypass handleAlternateEmailUpdate, so the linked Auth0 email identity
-		// is not unlinked here. In practice Salesforce sets isdeleted=true before physical removal (which does
-		// route through the update handler and unlinks), so this gap only bites on true WAL hard deletes.
-		logger.With("key", key).DebugContext(ctx, "salesforce-alternate_email__c record deleted")
-		return false
+		return handleAlternateEmailDelete(ctx, key, sfid, v1Data)
 	case "itx-zoom-meetings-v2",
 		"itx-zoom-meetings-registrants-v2",
 		"itx-zoom-past-meetings-attendees",

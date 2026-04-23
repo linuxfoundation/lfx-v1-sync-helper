@@ -28,8 +28,8 @@ type mgmtError struct {
 	message string
 }
 
-func (e *mgmtError) Error() string  { return e.message }
-func (e *mgmtError) Status() int    { return e.status }
+func (e *mgmtError) Error() string   { return e.message }
+func (e *mgmtError) Status() int     { return e.status }
 func (e *mgmtError) Message() string { return e.message }
 
 // fakeAuth0Users is a test double for auth0UserAPI.
@@ -38,6 +38,11 @@ type fakeAuth0Users struct {
 	users map[string]*management.User
 	// usersByEmail stores users by email for ListByEmail calls.
 	usersByEmail map[string][]*management.User
+	// searchUsers is the result returned by Search calls (Lucene v3
+	// identities.profileData.email lookup). Order doesn't matter.
+	searchUsers []*management.User
+	// searchErr, when non-nil, is returned by Search.
+	searchErr error
 
 	// createErr is returned by Create. If nil and the user already exists
 	// (based on email), a 409 is returned.
@@ -69,6 +74,13 @@ func (f *fakeAuth0Users) Read(_ context.Context, id string, _ ...management.Requ
 
 func (f *fakeAuth0Users) ListByEmail(_ context.Context, email string, _ ...management.RequestOption) ([]*management.User, error) {
 	return f.usersByEmail[email], nil
+}
+
+func (f *fakeAuth0Users) Search(_ context.Context, _ ...management.RequestOption) (*management.UserList, error) {
+	if f.searchErr != nil {
+		return nil, f.searchErr
+	}
+	return &management.UserList{Users: f.searchUsers}, nil
 }
 
 func (f *fakeAuth0Users) Create(_ context.Context, u *management.User, _ ...management.RequestOption) error {
@@ -107,9 +119,9 @@ func (f *fakeAuth0Users) Unlink(_ context.Context, id, provider, userID string, 
 func newEmailIdentity(userID, email string) management.UserIdentity {
 	profileData := map[string]interface{}{"email": email}
 	return management.UserIdentity{
-		Provider:   auth0.String("email"),
-		Connection: auth0.String("email"),
-		UserID:     auth0.String(userID),
+		Provider:    auth0.String("email"),
+		Connection:  auth0.String("email"),
+		UserID:      auth0.String(userID),
 		ProfileData: &profileData,
 	}
 }
@@ -201,14 +213,19 @@ func TestLinkEmailIdentity(t *testing.T) {
 		}
 	})
 
-	t.Run("email belongs to different non-email user: skip", func(t *testing.T) {
+	t.Run("email already linked to a different user (Lucene): skip", func(t *testing.T) {
+		// Lucene returns the OTHER primary that has this email linked as a
+		// secondary email identity. We must abort, never re-link.
 		fake := &fakeAuth0Users{
 			users: map[string]*management.User{
 				"auth0|primary": {ID: auth0.String("auth0|primary")},
 			},
-			usersByEmail: map[string][]*management.User{
-				"alt@example.com": {
-					{ID: auth0.String("auth0|other-user")},
+			searchUsers: []*management.User{
+				{
+					ID: auth0.String("auth0|other-user"),
+					Identities: []*management.UserIdentity{
+						ptr(newEmailIdentity("secondary999", "alt@example.com")),
+					},
 				},
 			},
 		}
@@ -220,21 +237,32 @@ func TestLinkEmailIdentity(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if len(fake.created) != 0 {
-			t.Errorf("should not create when email belongs to another user")
+			t.Errorf("should not create when email is linked to another user")
 		}
 		if len(fake.linked) != 0 {
-			t.Errorf("should not link when email belongs to another user")
+			t.Errorf("should not link when email is linked to another user")
 		}
 	})
 
-	t.Run("existing email| user is not treated as conflict", func(t *testing.T) {
+	t.Run("Lucene match without an email-provider identity: proceed", func(t *testing.T) {
+		// Lucene's AND query is loose; if a returned user has the email on a
+		// non-email identity (e.g. a LinkedIn social with the same address),
+		// we must NOT treat that as a conflict and should proceed to create.
 		fake := &fakeAuth0Users{
 			users: map[string]*management.User{
 				"auth0|primary": {ID: auth0.String("auth0|primary")},
 			},
-			usersByEmail: map[string][]*management.User{
-				"alt@example.com": {
-					{ID: auth0.String("email|existing456")},
+			searchUsers: []*management.User{
+				{
+					ID: auth0.String("auth0|social-user"),
+					Identities: []*management.UserIdentity{
+						{
+							Provider:    auth0.String("linkedin"),
+							Connection:  auth0.String("linkedin"),
+							UserID:      auth0.String("xyz"),
+							ProfileData: ptr(map[string]interface{}{"email": "alt@example.com"}),
+						},
+					},
 				},
 			},
 		}
@@ -246,7 +274,49 @@ func TestLinkEmailIdentity(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if len(fake.created) != 1 {
-			t.Errorf("should proceed to create, got %d creates", len(fake.created))
+			t.Errorf("should proceed to create when only non-email identities match, got %d creates", len(fake.created))
+		}
+	})
+
+	t.Run("Lucene match with case-insensitive email: skip", func(t *testing.T) {
+		fake := &fakeAuth0Users{
+			users: map[string]*management.User{
+				"auth0|primary": {ID: auth0.String("auth0|primary")},
+			},
+			searchUsers: []*management.User{
+				{
+					ID: auth0.String("auth0|other-user"),
+					Identities: []*management.UserIdentity{
+						ptr(newEmailIdentity("secondary999", "Alt@Example.COM")),
+					},
+				},
+			},
+		}
+		cleanup := setupLinkTest(t, fake)
+		defer cleanup()
+
+		err := linkEmailIdentity(context.Background(), "auth0|primary", "alt@example.com")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(fake.created) != 0 {
+			t.Errorf("case-insensitive collision should still abort the link")
+		}
+	})
+
+	t.Run("Lucene error propagates", func(t *testing.T) {
+		fake := &fakeAuth0Users{
+			users: map[string]*management.User{
+				"auth0|primary": {ID: auth0.String("auth0|primary")},
+			},
+			searchErr: fmt.Errorf("network error"),
+		}
+		cleanup := setupLinkTest(t, fake)
+		defer cleanup()
+
+		err := linkEmailIdentity(context.Background(), "auth0|primary", "alt@example.com")
+		if err == nil {
+			t.Fatal("expected Lucene search error to propagate")
 		}
 	})
 
