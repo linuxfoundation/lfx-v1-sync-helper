@@ -10,7 +10,6 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/aws/aws-sdk-go-v2/config v1.32.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.9
-	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.20.37
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.57.1
 	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.32.14
 	github.com/aws/aws-sdk-go-v2/service/sts v1.41.6
@@ -19,12 +18,12 @@ require (
 	github.com/linuxfoundation/lfx-v2-committee-service v0.2.22
 	github.com/linuxfoundation/lfx-v2-project-service v0.6.5
 	github.com/nats-io/nats.go v1.48.0
-	github.com/opensearch-project/opensearch-go/v4 v4.5.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	goa.design/goa/v3 v3.25.3
 	golang.org/x/oauth2 v0.35.0
 	golang.org/x/text v0.36.0
+	golang.org/x/time v0.15.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

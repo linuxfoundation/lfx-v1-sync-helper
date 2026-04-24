@@ -262,7 +262,7 @@ func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error
 	// Single pass: look for primary email while tracking first valid fallback
 	var fallbackEmail string
 	for _, emailSfid := range emailSfids {
-		email, isPrimary, isTombstoned, err := getAlternateEmailDetails(ctx, emailSfid)
+		email, isPrimary, _, isTombstoned, err := getAlternateEmailDetails(ctx, emailSfid)
 		if err != nil {
 			logger.With("email_sfid", emailSfid, "error", err).DebugContext(ctx, "failed to get alternate email details")
 			continue
@@ -292,38 +292,46 @@ func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error
 	return "", fmt.Errorf("no valid emails found for user %s", userSfid)
 }
 
-// getAlternateEmailDetails retrieves email address and primary status from the v1-objects KV bucket
-// Returns (email, isPrimary, isTombstoned, error)
-func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email string, isPrimary bool, isTombstoned bool, err error) {
+// getAlternateEmailDetails retrieves email address, primary status, and verification status from the v1-objects KV bucket.
+// Returns (email, isPrimary, isVerified, isTombstoned, error)
+func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email string, isPrimary bool, isVerified bool, isTombstoned bool, err error) {
 	emailKey := v1AlternateEmailKVPrefix + emailSfid
 
 	// Parse the alternate email record.
 	emailData, exists, err := getV1ObjectData(ctx, emailKey)
 	if err != nil {
-		return "", false, false, fmt.Errorf("failed to get email data: %w", err)
+		return "", false, false, false, fmt.Errorf("failed to get email data: %w", err)
 	}
 	if !exists {
-		return "", false, true, nil
+		return "", false, false, true, nil
 	}
 
-	// Also check if the email is inactive (active__c is not true).
-	if isActive, ok := emailData["active__c"].(bool); !ok || !isActive {
-		return "", false, true, nil
-	}
-
-	// Extract email address
+	// Extract email address and primary flag before the active check: downstream
+	// callers use isPrimary to short-circuit (primary emails are managed by
+	// auth0-sync-userdb, not this flow), and they need the address to unlink
+	// tombstoned/inactive records.
 	if emailAddr, ok := emailData["alternate_email_address__c"].(string); ok && emailAddr != "" {
 		email = emailAddr
-	} else {
-		return "", false, false, fmt.Errorf("email record %s has no email address", emailSfid)
 	}
-
-	// Check if this is the primary email
 	if primaryFlag, ok := emailData["primary_email__c"].(bool); ok {
 		isPrimary = primaryFlag
 	}
 
-	return email, isPrimary, false, nil
+	// Check if the email is inactive (active__c is not true).
+	if isActive, ok := emailData["active__c"].(bool); !ok || !isActive {
+		return email, isPrimary, false, true, nil
+	}
+
+	if email == "" {
+		return "", false, false, false, fmt.Errorf("email record %s has no email address", emailSfid)
+	}
+
+	// Check if the email is verified
+	if verifiedFlag, ok := emailData["verified__c"].(bool); ok {
+		isVerified = verifiedFlag
+	}
+
+	return email, isPrimary, isVerified, false, nil
 }
 
 // ResolveV1UserSFIDByUsername looks up a v1 user SFID by username using the secondary index.
@@ -425,7 +433,7 @@ func ResolveV1UserSFIDByEmail(ctx context.Context, email string) (string, error)
 
 	// Check each email to see if any matches the queried email.
 	for _, emailSfid := range emailSfids {
-		emailAddr, _, isTombstoned, err := getAlternateEmailDetails(ctx, emailSfid)
+		emailAddr, _, _, isTombstoned, err := getAlternateEmailDetails(ctx, emailSfid)
 		if err != nil {
 			logger.With("email_sfid", emailSfid, "error", err).
 				DebugContext(ctx, "failed to get alternate email details, skipping")
