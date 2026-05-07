@@ -1,0 +1,147 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+#
+# One-shot Job to rebuild user secondary indexes (username + email → SFID) in the
+# v1-mappings KV bucket from existing merged_user records in v1-objects.
+#
+# One-shot: this manifest is applied manually via kubectl apply — it is NOT managed
+# by argocd and runs on demand only (e.g. after a migration that requires reindexing).
+#
+# Credentials: every valueFrom.secretKeyRef below references a Kubernetes Secret
+# already provisioned in the v1-sync-helper namespace (e.g. v1-sync-helper-secrets,
+# heimdall-signer-cert-ad-hoc). Only secret names are committed here — the kubelet
+# resolves the actual values at pod start. Safe to commit.
+#
+# Tuning: the REINDEX_* env vars below control timeouts and pacing. Edit and
+# re-apply this file to adjust — no rebuild required. See README "Backfill / Reindex"
+# for guidance on sizing these values for prod record counts.
+#
+# Deploy with:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/rebuild-user-secondary-indexes-job.yaml
+#
+# Monitor:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper logs -f --timestamps=true job/rebuild-user-secondary-indexes
+#
+# Abort (if any app replica shows Unhealthy readiness events during the run):
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job rebuild-user-secondary-indexes
+#
+# Clean up (auto-cleans after 1h via ttlSecondsAfterFinished):
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job rebuild-user-secondary-indexes
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rebuild-user-secondary-indexes
+  namespace: v1-sync-helper
+  labels:
+    app.kubernetes.io/name: lfx-v1-sync-helper
+    app.kubernetes.io/component: reindex
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lfx-v1-sync-helper
+        app.kubernetes.io/component: reindex
+    spec:
+      restartPolicy: Never
+      serviceAccountName: v1-sync-helper-sa
+      volumes:
+        - name: allowlists
+          configMap:
+            defaultMode: 420
+            name: lfx-v1-sync-helper-allowlists
+      containers:
+        - name: rebuild
+          image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:218875928d362c4c411707c10214c0ba85e027ae
+          imagePullPolicy: IfNotPresent
+          args: ["--rebuild-user-secondary-indexes"]
+          env:
+            - name: NATS_URL
+              value: "nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
+            - name: AUTH0_TENANT
+              value: "linuxfoundation"
+            - name: BIND
+              value: "*"
+            - name: COMMITTEE_SERVICE_URL
+              value: "http://lfx-v2-committee-service.committee-service.svc.cluster.local:8080"
+            - name: DYNAMODB_INGEST_ENABLED
+              value: "true"
+            - name: DYNAMODB_STREAM_NAME
+              value: "dynamodb_streams"
+            - name: HEIMDALL_JWKS_URL
+              value: "http://lfx-platform-heimdall.lfx.svc.cluster.local:4457/.well-known/jwks"
+            - name: HEIMDALL_KEY_ID
+              value: "prod-rsa-2025-12-12-001"
+            - name: LFX_API_GW
+              value: "https://api-gw.platform.linuxfoundation.org/"
+            - name: PORT
+              value: "8080"
+            - name: PROJECT_SERVICE_URL
+              value: "http://lfx-v2-project-service.project-service.svc.cluster.local:8080"
+            - name: USE_MSGPACK
+              value: "1"
+            # --- Reindex tuning knobs (v0.8.9+) -----------------------------------
+            # All values are Go durations ("45m", "30s", "1ms"). Edit and re-apply
+            # this manifest to adjust — no image rebuild required.
+            # See README "Backfill / Reindex" for full sizing guidance.
+            #
+            # Wall-clock budget per phase (username, then email). Covers the
+            # ListKeysFiltered consumer plus every per-key Get/Put in that phase.
+            # Raise to "60m"/"90m" for >3M records or if REINDEX_OP_DELAY > 1ms.
+            # Must be >= REINDEX_NATS_OP_TIMEOUT.
+            - name: REINDEX_PHASE_TIMEOUT
+              value: "45m"
+            # Per-op cap on each NATS KV Get/Put. Without this the NATS SDK injects
+            # a 5s default (wrapContextWithoutDeadline) that fires under prod load
+            # and causes slow-consumer overflow — this is the v0.8.9 root-cause fix.
+            # 30s per platform recommendation (Alan); raise if logs show slow-op warnings.
+            - name: REINDEX_NATS_OP_TIMEOUT
+              value: "30s"
+            # Per-iteration sleep to cap op-rate on the shared NATS broker. An
+            # unthrottled run saturated the broker on 2026-04-23 and tripped app
+            # readiness/liveness probes. 1ms ≈ 1k ops/s ceiling with negligible
+            # runtime impact. Raise to "2ms"+ if the abort guard fires on Unhealthy
+            # events; set "0s" to disable pacing in dev/staging.
+            - name: REINDEX_OP_DELAY
+              value: "1ms"
+            # ----------------------------------------------------------------------
+            # Before applying: replace this value with the actual client ID from the
+            # v1-sync-helper-secrets Kubernetes Secret:
+            #   kubectl --context lfx-v2-prod -n v1-sync-helper get secret v1-sync-helper-secrets \
+            #     -o jsonpath='{.data.heimdall_client_id}' | base64 -d
+            - name: HEIMDALL_CLIENT_ID
+              value: ""
+            - name: HEIMDALL_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: key.pem
+                  name: heimdall-signer-cert-ad-hoc
+            - name: AUTH0_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  key: client_id
+                  name: v1-sync-helper-secrets
+            - name: AUTH0_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: client_private_key
+                  name: v1-sync-helper-secrets
+            - name: PROJECT_ALLOWLIST_FILE
+              value: "/etc/lfx/allowlists/project_allowlist"
+            - name: PROJECT_FAMILY_ALLOWLIST_FILE
+              value: "/etc/lfx/allowlists/project_family_allowlist"
+          volumeMounts:
+            - mountPath: /etc/lfx/allowlists
+              name: allowlists
+              readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "10m"
+            limits:
+              memory: "2Gi"
+              cpu: "500m"
+          securityContext:
+            allowPrivilegeEscalation: false

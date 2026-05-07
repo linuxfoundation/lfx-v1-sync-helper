@@ -6,10 +6,12 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -58,6 +60,30 @@ type Config struct {
 	// redelivery provides the backoff needed to avoid cascading 429s.
 	ProfileSyncBackfill bool
 
+	// ReindexPhaseTimeout caps the wall-clock time for each reindex phase
+	// (username, then email). Both the ListKeysFiltered consumer and every
+	// per-key Get/Put inside that phase share this deadline. Sized to cover
+	// up to ~2 M records per phase under normal NATS load. Set via
+	// REINDEX_PHASE_TIMEOUT (Go duration: "45m", "1h"). Default: 45m.
+	ReindexPhaseTimeout time.Duration
+
+	// ReindexNATSOpTimeout caps each individual NATS KV Get/Put inside the
+	// reindex loop. Without this, the NATS SDK's wrapContextWithoutDeadline
+	// injects a 5 s default per call, which fires under prod load. 30 s
+	// gives ~6× headroom while still failing fast if a single op truly hangs.
+	// Set via REINDEX_NATS_OP_TIMEOUT (Go duration: "30s", "1m").
+	// Must be <= ReindexPhaseTimeout. Default: 30s.
+	ReindexNATSOpTimeout time.Duration
+
+	// ReindexOpDelay is an optional per-iteration sleep that caps the loop's
+	// op-rate against the shared NATS broker. The reindex pod and the main
+	// app share NATS; an unthrottled run saturated the broker on 2026-04-23
+	// and caused readiness/liveness failures on app pods. A small delay
+	// (~1ms) drops op-rate by orders of magnitude with negligible runtime
+	// impact. Zero disables pacing (default; suitable for dev/staging).
+	// Set via REINDEX_OP_DELAY (Go duration: "1ms", "5ms"). Default: 0.
+	ReindexOpDelay time.Duration
+
 	// Project allowlists — file paths (PROJECT_ALLOWLIST_FILE /
 	// PROJECT_FAMILY_ALLOWLIST_FILE) take precedence over comma-separated env
 	// vars (PROJECT_ALLOWLIST / PROJECT_FAMILY_ALLOWLIST), which fall back to
@@ -68,14 +94,44 @@ type Config struct {
 	ProjectFamilyAllowlist     []string // Root slugs synced together with all descendants
 }
 
-// LoadReindexConfig returns a minimal config for --rebuild-user-secondary-indexes mode.
-// Only NATS_URL is required; all other fields are left at zero values.
+const (
+	defaultReindexPhaseTimeout  = 45 * time.Minute
+	defaultReindexNATSOpTimeout = 30 * time.Second
+	defaultReindexOpDelay       = 0
+)
+
+// LoadReindexConfig returns a config for --rebuild-user-secondary-indexes mode.
+// Only NATS_URL and the REINDEX_* tuning vars are read; all other fields are
+// left at zero values. Tuning defaults: REINDEX_PHASE_TIMEOUT=45m,
+// REINDEX_NATS_OP_TIMEOUT=30s, REINDEX_OP_DELAY=0 (no pacing).
 func LoadReindexConfig() *Config {
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
 		natsURL = defaultNATSURL
 	}
-	return &Config{NATSURL: natsURL}
+	return &Config{
+		NATSURL:              natsURL,
+		ReindexPhaseTimeout:  parseDurationEnv("REINDEX_PHASE_TIMEOUT", defaultReindexPhaseTimeout),
+		ReindexNATSOpTimeout: parseDurationEnv("REINDEX_NATS_OP_TIMEOUT", defaultReindexNATSOpTimeout),
+		ReindexOpDelay:       parseDurationEnv("REINDEX_OP_DELAY", defaultReindexOpDelay),
+	}
+}
+
+// parseDurationEnv reads a Go duration string from the named env var.
+// Falls back to def on empty or invalid input, logging a warning on invalid.
+// Also enforces: if both phase and op-timeout are being set, callers should
+// verify op <= phase themselves after construction.
+func parseDurationEnv(name string, def time.Duration) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		slog.Warn("invalid duration env var, using default", "env", name, "value", v, "default", def)
+		return def
+	}
+	return d
 }
 
 // LoadConfig loads configuration from environment variables
