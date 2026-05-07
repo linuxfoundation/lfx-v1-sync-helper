@@ -121,13 +121,30 @@ Payload: <email>
 
 **Backfill / Reindex:**
 
-To populate secondary indexes for all existing records (e.g. after initial deployment or a schema change), run the service with the `--rebuild-user-secondary-indexes` flag:
+To populate secondary indexes for all existing records (e.g. after initial deployment or a schema change), apply the one-shot Job manifest to the cluster:
 
 ```sh
-lfx-v1-sync-helper --rebuild-user-secondary-indexes
+kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/rebuild-user-secondary-indexes-job.yaml
 ```
 
-This operation streams all `merged_user` and `alternate_email` records from the v1 KV bucket, writes the secondary indexes, then exits.
+This job streams all `merged_user` and `alternate_email` records from the v1 KV bucket, writes the secondary indexes, then exits. The manifest is applied manually — it is not managed by argocd.
+
+**Tuning knobs** (edit `manifests/rebuild-user-secondary-indexes-job.yaml` and re-apply; no rebuild required):
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `REINDEX_PHASE_TIMEOUT` | `45m` | Wall-clock budget per phase (username, then email). Raise to `60m`/`90m` for >3M records. |
+| `REINDEX_NATS_OP_TIMEOUT` | `30s` | Per-op cap on each NATS KV Get/Put. Without this the SDK injects a 5 s default that fires under prod load. |
+| `REINDEX_OP_DELAY` | `1ms` (prod) / `0` (dev) | Per-iteration sleep to cap op-rate on the shared broker. Prevents the reindex pod from saturating NATS and impacting app pod health. |
+
+**Operational guidance:**
+
+- Run in a low-traffic window.
+- Monitor in a second terminal: `kubectl --context lfx-v2-prod -n v1-sync-helper get events -w | grep -E "Unhealthy|app-"`
+- **Stop the job** (`kubectl ... delete job rebuild-user-secondary-indexes`) if any app replica shows `Unhealthy` readiness events during the run.
+- If per-op timeouts appear in logs, raise `REINDEX_NATS_OP_TIMEOUT` in the manifest and re-apply.
+- If broker saturation reappears, raise `REINDEX_OP_DELAY` to `2ms` (and `REINDEX_PHASE_TIMEOUT` to `90m`) and re-apply.
+- Writes are idempotent — re-running the job is safe.
 
 ## Architecture Diagrams
 

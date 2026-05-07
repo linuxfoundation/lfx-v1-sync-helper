@@ -487,18 +487,23 @@ func updateEmailsList(currentEmails []string, emailSfid string, isDeleted bool) 
 // This is a one-time operation triggered by the --rebuild-user-secondary-indexes CLI flag.
 // Note: ListKeysFiltered creates an ephemeral JetStream consumer for each call, which is separate from
 // the durable v1-sync-helper-kv-consumer used for streaming KV changes — both run independently.
+//
+// Deadline strategy (two-tier, all env-configurable — see LoadReindexConfig):
+//   - Phase budget (REINDEX_PHASE_TIMEOUT, default 45m): covers the ListKeysFiltered consumer
+//     creation plus every per-key Get/Put inside that phase. Each phase has its own context so
+//     Phase 1 cannot consume time from Phase 2.
+//   - Per-op cap (REINDEX_NATS_OP_TIMEOUT, default 30s): derived from the phase context for each
+//     individual Get/Put. Without this the NATS SDK's wrapContextWithoutDeadline injects a 5 s
+//     default per call, which fires under prod load and causes slow-consumer overflow on _INBOX.*.
+//   - Op pacer (REINDEX_OP_DELAY, default 0): optional sleep between iterations to cap the
+//     op-rate against the shared broker. The reindex pod and the main app share NATS; an
+//     unthrottled run saturated the broker and tripped app readiness/liveness probes (2026-04-23).
+//     Set to "1ms" in prod; leave at "0" in dev/staging.
 func rebuildUserSecondaryIndexes(ctx context.Context) error {
 	var usernameCount, emailCount, errorCount int
 
-	// The NATS SDK applies a 5-second default API timeout via wrapContextWithoutDeadline
-	// when the context has no deadline. This fires during ephemeral ordered-consumer
-	// creation inside ListKeysFiltered, before any keys are delivered. Each phase gets its
-	// own 45-minute budget so Phase 1 cannot consume time from Phase 2. 45 minutes covers
-	// consumer creation (milliseconds) + full key iteration for up to ~2M records (~20 min
-	// worst case) with comfortable headroom. Each context cancels immediately on return via
-	// defer, so fast runs are unaffected.
 	logger.Info("rebuilding username secondary indexes from merged_user records")
-	userListCtx, userCancel := context.WithTimeout(ctx, 45*time.Minute)
+	userListCtx, userCancel := context.WithTimeout(ctx, cfg.ReindexPhaseTimeout)
 	defer userCancel()
 	userLister, err := v1KV.ListKeysFiltered(userListCtx, v1MergedUserKVPrefix+">")
 	if err != nil {
@@ -507,7 +512,13 @@ func rebuildUserSecondaryIndexes(ctx context.Context) error {
 	defer userLister.Stop()
 
 	for key := range userLister.Keys() {
-		data, exists, err := getV1ObjectData(ctx, key)
+		if cfg.ReindexOpDelay > 0 {
+			time.Sleep(cfg.ReindexOpDelay)
+		}
+
+		getCtx, cancelGet := context.WithTimeout(userListCtx, cfg.ReindexNATSOpTimeout)
+		data, exists, err := getV1ObjectData(getCtx, key)
+		cancelGet()
 		if err != nil {
 			logger.With("error", err, "key", key).Warn("failed to get merged_user data during reindex")
 			errorCount++
@@ -530,7 +541,10 @@ func rebuildUserSecondaryIndexes(ctx context.Context) error {
 		}
 
 		indexKey := kvKeyUsernamePrefix + encodedUsername
-		if _, err := mappingsKV.Put(ctx, indexKey, []byte(sfid)); err != nil {
+		putCtx, cancelPut := context.WithTimeout(userListCtx, cfg.ReindexNATSOpTimeout)
+		_, err = mappingsKV.Put(putCtx, indexKey, []byte(sfid))
+		cancelPut()
+		if err != nil {
 			logger.With("error", err, "key", key, "indexKey", indexKey).Warn("failed to write username index during reindex")
 			errorCount++
 			continue
@@ -547,7 +561,7 @@ func rebuildUserSecondaryIndexes(ctx context.Context) error {
 	logger.Info("rebuilding email secondary indexes from alternate_email records")
 	errorCount = 0
 
-	emailListCtx, emailCancel := context.WithTimeout(ctx, 45*time.Minute)
+	emailListCtx, emailCancel := context.WithTimeout(ctx, cfg.ReindexPhaseTimeout)
 	defer emailCancel()
 	emailLister, err := v1KV.ListKeysFiltered(emailListCtx, v1AlternateEmailKVPrefix+">")
 	if err != nil {
@@ -556,7 +570,13 @@ func rebuildUserSecondaryIndexes(ctx context.Context) error {
 	defer emailLister.Stop()
 
 	for key := range emailLister.Keys() {
-		data, exists, err := getV1ObjectData(ctx, key)
+		if cfg.ReindexOpDelay > 0 {
+			time.Sleep(cfg.ReindexOpDelay)
+		}
+
+		getCtx, cancelGet := context.WithTimeout(emailListCtx, cfg.ReindexNATSOpTimeout)
+		data, exists, err := getV1ObjectData(getCtx, key)
+		cancelGet()
 		if err != nil {
 			logger.With("error", err, "key", key).Warn("failed to get alternate_email data during reindex")
 			errorCount++
@@ -579,7 +599,10 @@ func rebuildUserSecondaryIndexes(ctx context.Context) error {
 		}
 
 		indexKey := kvKeyEmailPrefix + encodedEmail
-		if _, err := mappingsKV.Put(ctx, indexKey, []byte(userSfid)); err != nil {
+		putCtx, cancelPut := context.WithTimeout(emailListCtx, cfg.ReindexNATSOpTimeout)
+		_, err = mappingsKV.Put(putCtx, indexKey, []byte(userSfid))
+		cancelPut()
+		if err != nil {
 			logger.With("error", err, "key", key, "indexKey", indexKey).Warn("failed to write email index during reindex")
 			errorCount++
 			continue

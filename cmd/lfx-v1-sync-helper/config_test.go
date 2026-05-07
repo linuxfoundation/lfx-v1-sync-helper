@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 )
 
 func TestParseStringListEnv(t *testing.T) {
@@ -305,6 +306,68 @@ func TestLoadConfigAllowlistPrecedence_WhitespaceFilePathFallsBack(t *testing.T)
 	}
 	if !slices.Equal(cfg.ProjectFamilyAllowlist, []string{"env-family-slug"}) {
 		t.Errorf("ProjectFamilyAllowlist = %v, want [env-family-slug]", cfg.ProjectFamilyAllowlist)
+	}
+}
+
+func TestLoadReindexConfigDefaults(t *testing.T) {
+	t.Setenv("NATS_URL", "")
+	t.Setenv("REINDEX_PHASE_TIMEOUT", "")
+	t.Setenv("REINDEX_NATS_OP_TIMEOUT", "")
+	t.Setenv("REINDEX_OP_DELAY", "")
+
+	cfg := LoadReindexConfig()
+
+	if cfg.NATSURL != defaultNATSURL {
+		t.Errorf("NATSURL = %q, want %q", cfg.NATSURL, defaultNATSURL)
+	}
+	if cfg.ReindexPhaseTimeout != defaultReindexPhaseTimeout {
+		t.Errorf("ReindexPhaseTimeout = %v, want %v", cfg.ReindexPhaseTimeout, defaultReindexPhaseTimeout)
+	}
+	if cfg.ReindexNATSOpTimeout != defaultReindexNATSOpTimeout {
+		t.Errorf("ReindexNATSOpTimeout = %v, want %v", cfg.ReindexNATSOpTimeout, defaultReindexNATSOpTimeout)
+	}
+	if cfg.ReindexOpDelay != defaultReindexOpDelay {
+		t.Errorf("ReindexOpDelay = %v, want %v", cfg.ReindexOpDelay, defaultReindexOpDelay)
+	}
+}
+
+func TestLoadReindexConfigEnvOverrides(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://custom:4222")
+	t.Setenv("REINDEX_PHASE_TIMEOUT", "60m")
+	t.Setenv("REINDEX_NATS_OP_TIMEOUT", "45s")
+	t.Setenv("REINDEX_OP_DELAY", "2ms")
+
+	cfg := LoadReindexConfig()
+
+	if cfg.NATSURL != "nats://custom:4222" {
+		t.Errorf("NATSURL = %q, want %q", cfg.NATSURL, "nats://custom:4222")
+	}
+	if cfg.ReindexPhaseTimeout != 60*time.Minute {
+		t.Errorf("ReindexPhaseTimeout = %v, want 60m", cfg.ReindexPhaseTimeout)
+	}
+	if cfg.ReindexNATSOpTimeout != 45*time.Second {
+		t.Errorf("ReindexNATSOpTimeout = %v, want 45s", cfg.ReindexNATSOpTimeout)
+	}
+	if cfg.ReindexOpDelay != 2*time.Millisecond {
+		t.Errorf("ReindexOpDelay = %v, want 2ms", cfg.ReindexOpDelay)
+	}
+}
+
+func TestLoadReindexConfigInvalidDurationFallsBack(t *testing.T) {
+	t.Setenv("REINDEX_PHASE_TIMEOUT", "not-a-duration")
+	t.Setenv("REINDEX_NATS_OP_TIMEOUT", "???")
+	t.Setenv("REINDEX_OP_DELAY", "bad")
+
+	cfg := LoadReindexConfig()
+
+	if cfg.ReindexPhaseTimeout != defaultReindexPhaseTimeout {
+		t.Errorf("ReindexPhaseTimeout = %v, want default %v on invalid input", cfg.ReindexPhaseTimeout, defaultReindexPhaseTimeout)
+	}
+	if cfg.ReindexNATSOpTimeout != defaultReindexNATSOpTimeout {
+		t.Errorf("ReindexNATSOpTimeout = %v, want default %v on invalid input", cfg.ReindexNATSOpTimeout, defaultReindexNATSOpTimeout)
+	}
+	if cfg.ReindexOpDelay != defaultReindexOpDelay {
+		t.Errorf("ReindexOpDelay = %v, want default %v on invalid input", cfg.ReindexOpDelay, defaultReindexOpDelay)
 	}
 }
 
