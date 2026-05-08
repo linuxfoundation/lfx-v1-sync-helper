@@ -83,8 +83,8 @@ spec:
             - name: USE_MSGPACK
               value: "1"
             # --- Reindex tuning knobs (v0.8.9+) -----------------------------------
-            # All values are Go durations ("45m", "30s", "1ms"). Edit and re-apply
-            # this manifest to adjust — no image rebuild required.
+            # All values are Go durations ("45m", "30s", "1ms"). Edit this manifest,
+            # delete the existing Job (if running), then re-apply — no image rebuild required.
             # See README "Backfill / Reindex" for full sizing guidance.
             #
             # Wall-clock budget per phase (username, then email). Covers the

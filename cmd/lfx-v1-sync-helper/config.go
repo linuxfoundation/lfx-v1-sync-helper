@@ -122,7 +122,7 @@ func LoadReindexConfig() *Config {
 // Also enforces: if both phase and op-timeout are being set, callers should
 // verify op <= phase themselves after construction.
 func parseDurationEnv(name string, def time.Duration) time.Duration {
-	v := os.Getenv(name)
+	v := strings.TrimSpace(os.Getenv(name))
 	if v == "" {
 		return def
 	}

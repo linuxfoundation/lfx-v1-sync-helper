@@ -129,7 +129,7 @@ kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/rebuild-user-
 
 This job streams all `merged_user` and `alternate_email` records from the v1 KV bucket, writes the secondary indexes, then exits. The manifest is applied manually — it is not managed by argocd.
 
-**Tuning knobs** (edit `manifests/rebuild-user-secondary-indexes-job.yaml` and re-apply; no rebuild required):
+**Tuning knobs** (edit `manifests/rebuild-user-secondary-indexes-job.yaml`, delete the existing Job if running, then re-apply; no rebuild required):
 
 | Env var | Default | Purpose |
 |---|---|---|
@@ -142,8 +142,8 @@ This job streams all `merged_user` and `alternate_email` records from the v1 KV 
 - Run in a low-traffic window.
 - Monitor in a second terminal: `kubectl --context lfx-v2-prod -n v1-sync-helper get events -w | grep -E "Unhealthy|app-"`
 - **Stop the job** (`kubectl ... delete job rebuild-user-secondary-indexes`) if any app replica shows `Unhealthy` readiness events during the run.
-- If per-op timeouts appear in logs, raise `REINDEX_NATS_OP_TIMEOUT` in the manifest and re-apply.
-- If broker saturation reappears, raise `REINDEX_OP_DELAY` to `2ms` (and `REINDEX_PHASE_TIMEOUT` to `90m`) and re-apply.
+- If per-op timeouts appear in logs, raise `REINDEX_NATS_OP_TIMEOUT` in the manifest, delete the existing Job, and re-apply.
+- If broker saturation reappears, raise `REINDEX_OP_DELAY` to `2ms` (and `REINDEX_PHASE_TIMEOUT` to `90m`), delete the existing Job, and re-apply.
 - Writes are idempotent — re-running the job is safe.
 
 ## Architecture Diagrams
