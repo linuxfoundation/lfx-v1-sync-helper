@@ -1,0 +1,127 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+#
+# One-shot Job to backfill ACS user grants into v2 project settings
+# (Writers, Auditors, MeetingCoordinators). Reads all SFID→UID mappings from the
+# v1-mappings KV bucket, fetches ACS grantusers per project, and merges them
+# additively into v2. Existing v2 entries are never removed.
+#
+# One-shot: this manifest is applied manually via kubectl apply — it is NOT managed
+# by argocd and runs on demand only (e.g. after initial deployment).
+#
+# Dry run: to preview changes without writing, add "--dry-run" to args below before
+# applying. Remove it for the live run.
+#
+# Credentials: every valueFrom.secretKeyRef below references a Kubernetes Secret
+# already provisioned in the v1-sync-helper namespace (e.g. v1-sync-helper-secrets,
+# heimdall-signer-cert-ad-hoc). Only secret names are committed here — the kubelet
+# resolves the actual values at pod start. Safe to commit.
+#
+# Deploy with:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-acs-job.yaml
+#
+# Monitor:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper logs -f --timestamps=true job/backfill-acs
+#
+# Abort:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-acs
+#
+# Clean up (auto-cleans after 1h via ttlSecondsAfterFinished):
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-acs
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: backfill-acs
+  namespace: v1-sync-helper
+  labels:
+    app.kubernetes.io/name: lfx-v1-sync-helper
+    app.kubernetes.io/component: backfill
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lfx-v1-sync-helper
+        app.kubernetes.io/component: backfill
+    spec:
+      restartPolicy: Never
+      serviceAccountName: v1-sync-helper-sa
+      volumes:
+        - name: allowlists
+          configMap:
+            defaultMode: 420
+            name: lfx-v1-sync-helper-allowlists
+      containers:
+        - name: backfill
+          # XXX: Replace with the image SHA for the release you want to run against.
+          # Find the current prod image with:
+          #   kubectl --context lfx-v2-prod -n v1-sync-helper get deployment \
+          #     -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'
+          image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:latest
+          imagePullPolicy: IfNotPresent
+          args: ["--backfill-acs"]
+          env:
+            - name: NATS_URL
+              value: "nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
+            - name: AUTH0_TENANT
+              value: "linuxfoundation"
+            - name: BIND
+              value: "*"
+            - name: COMMITTEE_SERVICE_URL
+              value: "http://lfx-v2-committee-service.committee-service.svc.cluster.local:8080"
+            - name: DYNAMODB_INGEST_ENABLED
+              value: "true"
+            - name: DYNAMODB_STREAM_NAME
+              value: "dynamodb_streams"
+            - name: HEIMDALL_JWKS_URL
+              value: "http://lfx-platform-heimdall.lfx.svc.cluster.local:4457/.well-known/jwks"
+            - name: HEIMDALL_KEY_ID
+              value: "prod-rsa-2025-12-12-001"
+            - name: LFX_API_GW
+              value: "https://api-gw.platform.linuxfoundation.org/"
+            - name: PORT
+              value: "8080"
+            - name: PROJECT_SERVICE_URL
+              value: "http://lfx-v2-project-service.project-service.svc.cluster.local:8080"
+            - name: USE_MSGPACK
+              value: "1"
+            # Before applying: replace this value with the actual client ID from the
+            # v1-sync-helper-secrets Kubernetes Secret:
+            #   kubectl --context lfx-v2-prod -n v1-sync-helper get secret v1-sync-helper-secrets \
+            #     -o jsonpath='{.data.heimdall_client_id}' | base64 -d
+            - name: HEIMDALL_CLIENT_ID
+              value: ""
+            - name: HEIMDALL_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: key.pem
+                  name: heimdall-signer-cert-ad-hoc
+            - name: AUTH0_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  key: client_id
+                  name: v1-sync-helper-secrets
+            - name: AUTH0_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: client_private_key
+                  name: v1-sync-helper-secrets
+            - name: PROJECT_ALLOWLIST_FILE
+              value: "/etc/lfx/allowlists/project_allowlist"
+            - name: PROJECT_FAMILY_ALLOWLIST_FILE
+              value: "/etc/lfx/allowlists/project_family_allowlist"
+          volumeMounts:
+            - mountPath: /etc/lfx/allowlists
+              name: allowlists
+              readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "10m"
+            limits:
+              memory: "2Gi"
+              cpu: "500m"
+          securityContext:
+            allowPrivilegeEscalation: false

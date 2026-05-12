@@ -174,6 +174,26 @@ make run
 
 See the Helm chart in `./charts/lfx-v1-sync-helper` for deployment configuration.
 
+### One-shot administrative commands
+
+The binary supports one-shot commands that exit after completing their task.
+
+**`--rebuild-user-secondary-indexes`** — populates username/email secondary indexes from existing `merged_user` and `alternate_email` records. Only `NATS_URL` is required. See the root README for production deployment guidance.
+
+**`--backfill-acs`** — merges ACS user grants into v2 project settings (`Writers`, `Auditors`, `MeetingCoordinators`) additively. Supports `--dry-run` to preview without writing. Requires full service credentials. Writes are idempotent.
+
+In production, apply the Job manifest manually (not ArgoCD-managed). A dry-run pass is recommended first:
+
+```sh
+kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-acs-job.yaml
+```
+
+Locally:
+
+```sh
+lfx-v1-sync-helper --backfill-acs [--dry-run]
+```
+
 ### Required NATS KV Buckets
 
 The service requires two NATS KV buckets:

@@ -119,7 +119,9 @@ Payload: <email>
 - The underlying secondary indexes (`v1-user.username.*`, `v1-user.email.*`) should not be queried directly via `lfx.lookup_v1_mapping`
 - Callers send raw UTF-8 usernames and emails; the service normalizes (lowercase, NFC) and base64-encodes them internally
 
-**Backfill / Reindex:**
+## Backfill / Reindex
+
+**User secondary index rebuild (`--rebuild-user-secondary-indexes`):**
 
 To populate secondary indexes for all existing records (e.g. after initial deployment or a schema change), run the service with the `--rebuild-user-secondary-indexes` flag:
 
@@ -128,6 +130,22 @@ lfx-v1-sync-helper --rebuild-user-secondary-indexes
 ```
 
 This operation streams all `merged_user` and `alternate_email` records from the v1 KV bucket, writes the secondary indexes, then exits.
+
+**ACS grant backfill (`--backfill-acs`):**
+
+Merges ACS user grants into v2 project settings (`Writers`, `Auditors`, `MeetingCoordinators`) additively — existing v2 entries are never removed. Requires full service credentials (Auth0, Heimdall, `PROJECT_SERVICE_URL`). Supports `--dry-run` to preview without writing. Writes are idempotent.
+
+In production, apply the Job manifest manually (not ArgoCD-managed). A dry-run pass is recommended first — add `--dry-run` to the manifest args, apply, inspect logs, then re-apply without it:
+
+```sh
+kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-acs-job.yaml
+```
+
+Locally:
+
+```sh
+lfx-v1-sync-helper --backfill-acs [--dry-run]
+```
 
 ## Architecture Diagrams
 
