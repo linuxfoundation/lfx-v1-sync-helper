@@ -148,7 +148,10 @@ func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) 
 		}
 		sfid := key[len(prefix):]
 
-		// The value is the v2 project UID as a plain string.
+		// The value is the v2 project UID as a plain string. Skip tombstoned entries.
+		if isTombstonedMapping(entry.Value()) {
+			continue
+		}
 		v2UID := string(entry.Value())
 		if v2UID == "" {
 			continue
@@ -390,9 +393,21 @@ func mergeUserInfoWithACS(
 		// Secondary lookup: email. If matched, correct the v2 entry's username
 		// in place so it reflects the normalized Auth0 sub going forward.
 		if u.Email != "" {
-			if existing, byEmail := existingByEmail[u.Email]; byEmail {
-				existing.Username = &authSub
-				existingByUsername[authSub] = existing
+			if byEmailEntry, byEmail := existingByEmail[u.Email]; byEmail {
+				authSubCopy := authSub
+				// Shallow-copy the entry before mutating so currentSettings is not
+				// affected — otherwise userInfoSlicesEqual would see no change and
+				// skip the PUT.
+				corrected := *byEmailEntry
+				corrected.Username = &authSubCopy
+				// Replace the pointer in merged so the corrected copy is what gets written.
+				for i, m := range merged {
+					if m == byEmailEntry {
+						merged[i] = &corrected
+						break
+					}
+				}
+				existingByUsername[authSub] = &corrected
 				continue
 			}
 		}
@@ -408,9 +423,10 @@ func mergeUserInfoWithACS(
 			name += lastName
 		}
 		avatar := u.LogoURL
+		authSubCopy := authSub
 
 		entry := &projectservice.UserInfo{
-			Username: &authSub,
+			Username: &authSubCopy,
 			Email:    &email,
 			Name:     &name,
 			Avatar:   &avatar,
