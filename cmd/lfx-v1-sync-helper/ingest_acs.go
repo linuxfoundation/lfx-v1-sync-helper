@@ -441,10 +441,11 @@ func mergeUserInfoWithACS(
 	return merged
 }
 
-// userInfoSlicesEqual compares two []*UserInfo slices for equality by username.
-// Entries with nil or empty usernames are included in the length comparison but
-// are otherwise ignored for matching, so two slices that differ only in such
-// entries are still considered unequal.
+// userInfoSlicesEqual reports whether two []*UserInfo slices contain the same
+// multiset of usernames. Only usernames are compared; Email, Name, and Avatar
+// fields are ignored. Nil pointers and entries with nil or empty Username fields
+// all map to the empty string, so they are counted together as a group — two
+// slices with different counts of such entries are considered unequal.
 func userInfoSlicesEqual(a, b []*projectservice.UserInfo) bool {
 	if len(a) != len(b) {
 		return false
