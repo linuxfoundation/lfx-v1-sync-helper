@@ -28,10 +28,10 @@ const (
 	// grantusers endpoint.
 	acsAPIPathGrantUsers = "acs/v1/api/grantusers"
 
-	// ACS role IDs that map to v2 project settings fields.
-	acsRoleAdmin               = "admin"
-	acsRoleViewer              = "viewer"
-	acsRoleMeetingsCoordinator = "meetings-coordinator"
+	// ACS role names (role_name field) that map to v2 project settings fields.
+	acsRoleNameAdmin               = "admin"
+	acsRoleNameViewer              = "viewer"
+	acsRoleNameMeetingsCoordinator = "meetings-coordinator"
 
 	// acsGrantUsersPageSize is the number of results to request per page.
 	acsGrantUsersPageSize = 100
@@ -248,7 +248,7 @@ func backfillProjectACSGrants(ctx context.Context, sfid, projectUID string, dryR
 // fetchACSGrantsByRole calls the ACS /grantusers endpoint for a project (all pages)
 // and groups the returned users by the three roles we care about.
 func fetchACSGrantsByRole(ctx context.Context, projectSFID string) (*acsGrantsByRole, error) {
-	rolenames := acsRoleAdmin + "," + acsRoleViewer + "," + acsRoleMeetingsCoordinator
+	rolenames := acsRoleNameAdmin + "," + acsRoleNameViewer + "," + acsRoleNameMeetingsCoordinator
 
 	var (
 		offset   int64
@@ -307,11 +307,11 @@ func fetchACSGrantsByRole(ctx context.Context, projectSFID string) (*acsGrantsBy
 	for _, u := range allUsers {
 		for _, role := range u.Roles {
 			switch role.RoleName {
-			case acsRoleAdmin:
+			case acsRoleNameAdmin:
 				grants.Admins = append(grants.Admins, u)
-			case acsRoleViewer:
+			case acsRoleNameViewer:
 				grants.Viewers = append(grants.Viewers, u)
-			case acsRoleMeetingsCoordinator:
+			case acsRoleNameMeetingsCoordinator:
 				grants.MeetingsCoordinators = append(grants.MeetingsCoordinators, u)
 			}
 		}
@@ -323,26 +323,38 @@ func fetchACSGrantsByRole(ctx context.Context, projectSFID string) (*acsGrantsBy
 // mergeUserInfoWithACS builds a merged []*UserInfo by unioning the existing v2 list with
 // the ACS user list. The merge is additive-only — no existing entries are removed.
 // Users already present in v2 but not in ACS are logged as "extra" values.
+//
+// ACS usernames are normalized via mapUsernameToAuthSub before comparison, since v2
+// stores usernames in Auth0 "sub" format (e.g. "auth0|jdoe"). When an ACS user is not
+// found by normalized username, a secondary lookup by email is attempted; if matched,
+// the existing v2 entry's Username is updated to the normalized value.
 func mergeUserInfoWithACS(
 	ctx context.Context,
 	existing []*projectservice.UserInfo,
 	acsUsers []acsGrantUser,
 	field, sfid, projectUID string,
 ) []*projectservice.UserInfo {
-	// Build an index of existing v2 users by username for deduplication and
-	// "extra values" detection.
+	// Build indexes of existing v2 users by normalized username and by email.
 	existingByUsername := make(map[string]*projectservice.UserInfo, len(existing))
+	existingByEmail := make(map[string]*projectservice.UserInfo, len(existing))
 	for _, u := range existing {
-		if u != nil && u.Username != nil && *u.Username != "" {
+		if u == nil {
+			continue
+		}
+		if u.Username != nil && *u.Username != "" {
 			existingByUsername[*u.Username] = u
+		} else if u.Email != nil && *u.Email != "" {
+			// Only index by email when there is no username; if a username is
+			// present the primary lookup will find it first.
+			existingByEmail[*u.Email] = u
 		}
 	}
 
-	// Build the ACS username set for "extra values" detection.
+	// Build the ACS normalized-username set for "extra values" detection.
 	acsUsernames := make(map[string]struct{}, len(acsUsers))
 	for _, u := range acsUsers {
 		if u.Username != "" {
-			acsUsernames[u.Username] = struct{}{}
+			acsUsernames[mapUsernameToAuthSub(u.Username)] = struct{}{}
 		}
 	}
 
@@ -367,11 +379,24 @@ func mergeUserInfoWithACS(
 		if u.Username == "" {
 			continue
 		}
-		if _, alreadyPresent := existingByUsername[u.Username]; alreadyPresent {
+
+		authSub := mapUsernameToAuthSub(u.Username)
+
+		// Primary lookup: normalized username.
+		if _, alreadyPresent := existingByUsername[authSub]; alreadyPresent {
 			continue
 		}
 
-		username := u.Username
+		// Secondary lookup: email. If matched, correct the v2 entry's username
+		// in place so it reflects the normalized Auth0 sub going forward.
+		if u.Email != "" {
+			if existing, byEmail := existingByEmail[u.Email]; byEmail {
+				existing.Username = &authSub
+				existingByUsername[authSub] = existing
+				continue
+			}
+		}
+
 		email := u.Email
 		firstName := u.FirstName
 		lastName := u.LastName
@@ -384,16 +409,17 @@ func mergeUserInfoWithACS(
 		}
 		avatar := u.LogoURL
 
-		merged = append(merged, &projectservice.UserInfo{
-			Username: &username,
+		entry := &projectservice.UserInfo{
+			Username: &authSub,
 			Email:    &email,
 			Name:     &name,
 			Avatar:   &avatar,
-		})
+		}
+		merged = append(merged, entry)
 
 		// Track newly added user so subsequent ACS entries with the same username
 		// are not added twice.
-		existingByUsername[u.Username] = merged[len(merged)-1]
+		existingByUsername[authSub] = entry
 	}
 
 	return merged
