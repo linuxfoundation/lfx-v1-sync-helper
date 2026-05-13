@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -39,11 +40,7 @@ const (
 
 // acsGrantUser represents a single user returned by the ACS /grantusers endpoint.
 type acsGrantUser struct {
-	Username  string `json:"username"`
-	Email     string `json:"email"`
-	FirstName string `json:"first_name"`
-	LastName  string `json:"last_name"`
-	LogoURL   string `json:"logo_url"`
+	Username string `json:"username"`
 
 	// Roles is the list of role grants associated with this user for the queried object.
 	Roles []acsGrantObjectRole `json:"roles"`
@@ -51,8 +48,8 @@ type acsGrantUser struct {
 
 // acsGrantObjectRole represents a single role grant on an ACS object.
 type acsGrantObjectRole struct {
-	RoleName string `json:"role_name"`
-	RoleID   string `json:"role_id"`
+	RoleName string `json:"name"`
+	RoleID   string `json:"id"`
 }
 
 // acsGrantUsersResponse is the top-level response returned by GET /grantusers.
@@ -327,46 +324,41 @@ func fetchACSGrantsByRole(ctx context.Context, projectSFID string) (*acsGrantsBy
 // the ACS user list. The merge is additive-only — no existing entries are removed.
 // Users already present in v2 but not in ACS are logged as "extra" values.
 //
-// ACS usernames are normalized via mapUsernameToAuthSub before comparison, since v2
-// stores usernames in Auth0 "sub" format (e.g. "auth0|jdoe"). When an ACS user is not
-// found by normalized username, a secondary lookup by email is attempted; if matched,
-// the existing v2 entry's Username is updated to the normalized value.
+// Usernames are converted to v2 format via mapUsernameToAuthSub before comparison
+// (e.g. "example" → "auth0|example"). For new entries, the username is resolved to a
+// v1 SFID via ResolveV1UserSFIDByUsername and enriched with email/name/avatar from
+// lookupMergedUser.
 func mergeUserInfoWithACS(
 	ctx context.Context,
 	existing []*projectservice.UserInfo,
 	acsUsers []acsGrantUser,
 	field, sfid, projectUID string,
 ) []*projectservice.UserInfo {
-	// Build indexes of existing v2 users by normalized username and by email.
+	// Build index of existing v2 users by v2-format username.
 	existingByUsername := make(map[string]*projectservice.UserInfo, len(existing))
-	existingByEmail := make(map[string]*projectservice.UserInfo, len(existing))
 	for _, u := range existing {
 		if u == nil {
 			continue
 		}
 		if u.Username != nil && *u.Username != "" {
 			existingByUsername[*u.Username] = u
-		} else if u.Email != nil && *u.Email != "" {
-			// Only index by email when there is no username; if a username is
-			// present the primary lookup will find it first.
-			existingByEmail[*u.Email] = u
 		}
 	}
 
-	// Build the ACS normalized-username set for "extra values" detection.
-	acsUsernames := make(map[string]struct{}, len(acsUsers))
+	// Build the v2-format username set from ACS for "extra values" detection.
+	acsAuthSubs := make(map[string]struct{}, len(acsUsers))
 	for _, u := range acsUsers {
 		if u.Username != "" {
-			acsUsernames[mapUsernameToAuthSub(u.Username)] = struct{}{}
+			acsAuthSubs[mapUsernameToAuthSub(u.Username)] = struct{}{}
 		}
 	}
 
 	// Log any v2 users that are not in ACS ("extra" values for investigation).
-	for username := range existingByUsername {
-		if _, inACS := acsUsernames[username]; !inACS {
+	for authSub := range existingByUsername {
+		if _, inACS := acsAuthSubs[authSub]; !inACS {
 			logger.With(
 				"field", field,
-				"username", username,
+				"username", authSub,
 				"sfid", sfid,
 				"project_uid", projectUID,
 			).InfoContext(ctx, "v2 project settings has user not present in ACS — may need investigation")
@@ -377,7 +369,7 @@ func mergeUserInfoWithACS(
 	merged := make([]*projectservice.UserInfo, len(existing))
 	copy(merged, existing)
 
-	// Append ACS users that are not already present in v2.
+	// Append users that are not already present in v2.
 	for _, u := range acsUsers {
 		if u.Username == "" {
 			continue
@@ -385,60 +377,54 @@ func mergeUserInfoWithACS(
 
 		authSub := mapUsernameToAuthSub(u.Username)
 
-		// Primary lookup: normalized username.
 		if _, alreadyPresent := existingByUsername[authSub]; alreadyPresent {
 			continue
 		}
 
-		// Secondary lookup: email. If matched, correct the v2 entry's username
-		// in place so it reflects the normalized Auth0 sub going forward.
-		if u.Email != "" {
-			if byEmailEntry, byEmail := existingByEmail[u.Email]; byEmail {
-				authSubCopy := authSub
-				// Shallow-copy the entry before mutating so currentSettings is not
-				// affected — otherwise userInfoSlicesEqual would see no change and
-				// skip the PUT.
-				corrected := *byEmailEntry
-				corrected.Username = &authSubCopy
-				// Replace the pointer in merged so the corrected copy is what gets written.
-				for i, m := range merged {
-					if m == byEmailEntry {
-						merged[i] = &corrected
-						break
-					}
-				}
-				existingByUsername[authSub] = &corrected
-				continue
-			}
-		}
-
-		email := u.Email
-		firstName := u.FirstName
-		lastName := u.LastName
-		name := firstName
-		if lastName != "" {
-			if name != "" {
-				name += " "
-			}
-			name += lastName
-		}
-		avatar := u.LogoURL
-		authSubCopy := authSub
-
-		entry := &projectservice.UserInfo{
-			Username: &authSubCopy,
-			Email:    &email,
-			Name:     &name,
-			Avatar:   &avatar,
-		}
+		entry := buildProjectUserFromUsername(ctx, u.Username)
 		merged = append(merged, entry)
 
-		// Track newly added user so subsequent ACS entries with the same username
+		// Track newly added user so subsequent entries with the same username
 		// are not added twice.
 		existingByUsername[authSub] = entry
 	}
 
 	return merged
+}
+
+// buildProjectUserFromUsername looks up a username in v1 and returns a project service
+// UserInfo populated with the Auth0 sub, email, name, and avatar. If the v1 lookup
+// fails the entry falls back to the Auth0 sub only.
+func buildProjectUserFromUsername(ctx context.Context, username string) *projectservice.UserInfo {
+	authSub := mapUsernameToAuthSub(username)
+	info := &projectservice.UserInfo{Username: &authSub}
+
+	sfid, err := ResolveV1UserSFIDByUsername(ctx, username)
+	if err != nil || sfid == "" {
+		if err != nil {
+			logger.With(errKey, err, "username", username).
+				WarnContext(ctx, "failed to resolve username to v1 SFID, using username-only entry")
+		}
+		return info
+	}
+
+	user, err := lookupMergedUser(ctx, sfid)
+	if err != nil {
+		logger.With(errKey, err, "username", username, "sfid", sfid).
+			WarnContext(ctx, "failed to lookup merged user, using username-only entry")
+		return info
+	}
+
+	if fullName := strings.TrimSpace(user.FirstName + " " + user.LastName); fullName != "" {
+		info.Name = &fullName
+	}
+	if user.Email != "" {
+		info.Email = &user.Email
+	}
+	if user.Avatar != "" {
+		info.Avatar = &user.Avatar
+	}
+	return info
 }
 
 // userInfoSlicesEqual reports whether two []*UserInfo slices contain the same
