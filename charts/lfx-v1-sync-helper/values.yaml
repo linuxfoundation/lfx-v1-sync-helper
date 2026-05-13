@@ -566,17 +566,30 @@ meltano:
       # Format: Go duration string (e.g., "720h" for 30 days, "168h" for 7 days)
       # This will be converted to a timestamp using Helm's date functions
       duration: "720h"
-      # tablesWithModifiedAt is the list of tables that support modified_at filtering
-      # Only these tables will have FilterExpression applied for incremental loads
-      tablesWithModifiedAt:
-        - "itx-zoom-meetings-invite-responses-v2"
-        - "itx-zoom-meetings-registrants-v2"
-        - "itx-zoom-meetings-v2"
-        - "itx-zoom-past-meetings"
-        - "itx-zoom-past-meetings-attendees"
-        - "itx-zoom-past-meetings-invitees"
-        - "itx-zoom-past-meetings-recordings"
-        - "itx-zoom-past-meetings-summaries"
+      # tablesWithFilteredAt is the list of tables that support timestamp-based FilterExpression.
+      # Each entry declares the table name and its timestamp attribute, since different tables
+      # use different field names (modified_at vs last_modified_at).
+      tablesWithFilteredAt:
+        - name: "itx-zoom-meetings-invite-responses-v2"
+          attribute: "modified_at"
+        - name: "itx-zoom-meetings-registrants-v2"
+          attribute: "modified_at"
+        - name: "itx-zoom-meetings-v2"
+          attribute: "modified_at"
+        - name: "itx-zoom-past-meetings"
+          attribute: "modified_at"
+        - name: "itx-zoom-past-meetings-attendees"
+          attribute: "modified_at"
+        - name: "itx-zoom-past-meetings-invitees"
+          attribute: "modified_at"
+        - name: "itx-zoom-past-meetings-recordings"
+          attribute: "modified_at"
+        - name: "itx-zoom-past-meetings-summaries"
+          attribute: "modified_at"
+        - name: "itx-groupsio-v2-artifact"
+          attribute: "last_modified_at"
+        - name: "itx-groupsio-v2-member"
+          attribute: "last_modified_at"
     # nats configuration for target NATS KV
     # Environment variables built: TARGET_NATS_KV_URL, TARGET_NATS_KV_BUCKET,
     # TARGET_NATS_KV_REFRESH_MODE, TARGET_NATS_KV_VALIDATE_RECORDS, TARGET_NATS_KV_MSGPACK
