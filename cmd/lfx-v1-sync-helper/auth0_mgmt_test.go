@@ -130,10 +130,10 @@ func TestBuildAuth0Metadata(t *testing.T) {
 			},
 		},
 		{
-			name:     "org name is set when provided",
-			existing: map[string]interface{}{},
-			v1Data:   map[string]any{},
-			orgName:  "Linux Foundation",
+			name:        "org name is set when provided",
+			existing:    map[string]interface{}{},
+			v1Data:      map[string]any{},
+			orgName:     "Linux Foundation",
 			wantChanged: true,
 			wantFieldChecks: map[string]string{
 				"organization": "Linux Foundation",
@@ -152,10 +152,10 @@ func TestBuildAuth0Metadata(t *testing.T) {
 			},
 		},
 		{
-			name:     "placeholder org is set when no existing org",
-			existing: map[string]interface{}{},
-			v1Data:   map[string]any{},
-			orgName:  "Individual - No Account",
+			name:        "placeholder org is set when no existing org",
+			existing:    map[string]interface{}{},
+			v1Data:      map[string]any{},
+			orgName:     "Individual - No Account",
 			wantChanged: true,
 			wantFieldChecks: map[string]string{
 				"organization": "Individual - No Account",
