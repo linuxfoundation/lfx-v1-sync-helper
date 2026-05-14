@@ -562,9 +562,10 @@ meltano:
     # filtering configuration for DynamoDB table scans
     # Environment variables built: TAP_DYNAMODB_TABLE_SCAN_KWARGS
     filtering:
-      # duration is the time period to look back for modified_at filtering
+      # duration is the lookback window applied to each table's timestamp attribute.
       # Format: Go duration string (e.g., "720h" for 30 days, "168h" for 7 days)
-      # This will be converted to a timestamp using Helm's date functions
+      # This will be converted to a timestamp using Helm's date functions and injected
+      # as the FilterExpression startTime for every table in tablesWithFilteredAt.
       duration: "720h"
       # tablesWithFilteredAt is the list of tables that support timestamp-based FilterExpression.
       # Each entry declares the table name and its timestamp attribute, since different tables
