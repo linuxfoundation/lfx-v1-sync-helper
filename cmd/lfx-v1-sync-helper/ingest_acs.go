@@ -168,10 +168,18 @@ func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) 
 		FilterSubject: projectSFIDSubject,
 		// MemoryStorage avoids disk I/O for this short-lived ephemeral consumer.
 		MemoryStorage: true,
+		// InactiveThreshold ensures the server cleans up the ephemeral consumer
+		// automatically if the client exits before the deferred delete runs.
+		InactiveThreshold: 5 * time.Minute,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pull consumer for project SFID mappings: %w", err)
 	}
+	defer func() {
+		if err := jsContext.DeleteConsumer(ctx, kvMappingsStream, cons.CachedInfo().Name); err != nil {
+			logger.With("error", err).WarnContext(ctx, "Failed to delete ephemeral SFID mappings consumer.")
+		}
+	}()
 
 	mappings := make(map[string]string)
 
@@ -185,6 +193,9 @@ func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) 
 		for msg := range batch.Messages() {
 			empty = false
 
+			if !strings.HasPrefix(msg.Subject(), projectSFIDSubjectPrefix) {
+				continue
+			}
 			sfid := msg.Subject()[len(projectSFIDSubjectPrefix):]
 			val := string(msg.Data())
 
@@ -381,7 +392,7 @@ func fetchACSGrantsByRole(ctx context.Context, projectSFID string) (*acsGrantsBy
 
 // mergeUserInfoWithACS builds a merged []*UserInfo by unioning the existing v2
 // list with the ACS user list. The merge is additive-only — no existing
-// entries are removed.  Users already present in v2 but not in ACS are logged
+// entries are removed. Users already present in v2 but not in ACS are logged
 // as "extra" values.
 //
 // Usernames are converted to v2 format via mapUsernameToAuthSub before
