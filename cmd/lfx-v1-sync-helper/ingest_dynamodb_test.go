@@ -113,6 +113,25 @@ func TestShouldDynamoDBUpdate(t *testing.T) {
 			existingData: map[string]interface{}{"last_modified_at": "2024-06-02T10:00:00Z"},
 			expected:     false,
 		},
+		// last_modified_time cases (itx-poll, itx-poll-vote)
+		{
+			name:         "new last_modified_time is newer – should update",
+			newData:      map[string]interface{}{"last_modified_time": "2024-06-02T10:00:00Z"},
+			existingData: map[string]interface{}{"last_modified_time": "2024-06-01T10:00:00Z"},
+			expected:     true,
+		},
+		{
+			name:         "new last_modified_time is older – should not update",
+			newData:      map[string]interface{}{"last_modified_time": "2024-06-01T10:00:00Z"},
+			existingData: map[string]interface{}{"last_modified_time": "2024-06-02T10:00:00Z"},
+			expected:     false,
+		},
+		{
+			name:         "same last_modified_time – should not update",
+			newData:      map[string]interface{}{"last_modified_time": "2024-06-01T10:00:00Z"},
+			existingData: map[string]interface{}{"last_modified_time": "2024-06-01T10:00:00Z"},
+			expected:     false,
+		},
 		// date_modified cases (surveymonkey-surveys)
 		{
 			name:         "new date_modified is newer – should update",

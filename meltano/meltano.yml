@@ -91,11 +91,9 @@ plugins:
             # INCREMENTAL or LOG_BASED replication methods.
             replication-key: modified_at
           itx-poll:
-            # No timestamp field for this table.
-            replication-key: ""
+            replication-key: last_modified_time
           itx-poll-vote:
-            # No timestamp field for this table.
-            replication-key: ""
+            replication-key: last_modified_time
           itx-surveys:
             replication-key: last_modified_at
           itx-survey-responses:
