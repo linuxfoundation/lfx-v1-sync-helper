@@ -4,7 +4,8 @@
 // The lfx-v1-sync-helper service.
 package main
 
-// Backfill ACS user grants (admin/viewer/meetings-coordinator) to v2 project settings.
+// Backfill ACS user grants (admin/viewer/meetings-coordinator) to v2 project
+// settings.
 //
 // The backfill is additive-only: it unions ACS users with the existing v2
 // Writers/Auditors/MeetingCoordinators lists and never removes any existing
@@ -18,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -42,7 +44,8 @@ const (
 type acsGrantUser struct {
 	Username string `json:"username"`
 
-	// Roles is the list of role grants associated with this user for the queried object.
+	// Roles is the list of role grants associated with this user for the queried
+	// object.
 	Roles []acsGrantObjectRole `json:"roles"`
 }
 
@@ -64,19 +67,20 @@ type acsListMetadata struct {
 	Offset    int64 `json:"Offset"`
 }
 
-// acsGrantsByRole is a helper that groups ACS usernames by their role for a single project.
+// acsGrantsByRole is a helper that groups ACS usernames by their role for a
+// single project.
 type acsGrantsByRole struct {
 	Admins               []acsGrantUser
 	Viewers              []acsGrantUser
 	MeetingsCoordinators []acsGrantUser
 }
 
-// backfillACSGrants iterates all known project SFID → v2 UID mappings and, for each
-// project, fetches ACS grant data then additively merges writers, auditors, and meeting
-// coordinators into the v2 project settings.
+// backfillACSGrants iterates all known project SFID → v2 UID mappings and, for
+// each project, fetches ACS grant data then additively merges writers,
+// auditors, and meeting coordinators into the v2 project settings.
 //
-// When dryRun is true the function logs every change it would make but does not call
-// UpdateProjectSettings.
+// When dryRun is true the function logs every change it would make but does
+// not call UpdateProjectSettings.
 func backfillACSGrants(ctx context.Context, dryRun bool) error {
 	if dryRun {
 		logger.InfoContext(ctx, "running ACS backfill in dry-run mode — no changes will be written")
@@ -119,42 +123,108 @@ func backfillACSGrants(ctx context.Context, dryRun bool) error {
 	return nil
 }
 
-// collectProjectSFIDMappings reads all project.sfid.* keys from mappingsKV and returns
-// a map of v1 SFID → v2 project UID.
+// collectProjectSFIDMappings reads all project.sfid.* keys from the
+// KV_v1-mappings JetStream stream and returns a map of v1 SFID → v2 project
+// UID.
+//
+// This uses a direct JetStream pull consumer with DeliverAllPolicy rather than
+// the KV Watch API (which uses DeliverLastPerSubjectPolicy).
+// DeliverLastPerSubjectPolicy requires the server to scan all message blocks
+// to find the latest sequence per subject at consumer creation time — an O(N)
+// operation that exceeds the 5 second SDK API timeout on large buckets.
+// DeliverAllPolicy starts at seq 1 with no server-side scan (O(1) creation),
+// and we apply last-write-wins deduplication client-side as we stream through
+// all revisions.
+//
+// FetchMaxWait is kept ≤ 10 seconds to prevent the SDK from auto-enabling idle
+// heartbeats, which fail over high-latency connections (e.g. kubectl
+// port-forward). The loop retries until NumPending reaches zero.
 func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) {
-	const prefix = "project.sfid."
+	const (
+		// kvMappingsStream is the JetStream stream backing the v1-mappings KV
+		// bucket.
+		kvMappingsStream = "KV_v1-mappings"
 
-	watcher, err := mappingsKV.Watch(ctx, prefix+"*", jetstream.IgnoreDeletes())
+		// projectSFIDSubject is the NATS subject filter for project SFID mapping
+		// entries.
+		projectSFIDSubject = "$KV.v1-mappings.project.sfid.*"
+
+		// projectSFIDSubjectPrefix is stripped from the subject to extract the
+		// SFID.
+		projectSFIDSubjectPrefix = "$KV.v1-mappings.project.sfid."
+
+		// fetchBatchSize is the number of messages to request per Fetch call.
+		fetchBatchSize = 512
+
+		// fetchMaxWait is the per-Fetch timeout. Must be ≤ 10 seconds to prevent
+		// the SDK from auto-enabling idle heartbeats (which require a low-latency
+		// connection).
+		fetchMaxWait = 5 * time.Second
+	)
+
+	cons, err := jsContext.CreateConsumer(ctx, kvMappingsStream, jetstream.ConsumerConfig{
+		DeliverPolicy: jetstream.DeliverAllPolicy,
+		AckPolicy:     jetstream.AckNonePolicy,
+		FilterSubject: projectSFIDSubject,
+		// MemoryStorage avoids disk I/O for this short-lived ephemeral consumer.
+		MemoryStorage: true,
+		// InactiveThreshold ensures the server cleans up the ephemeral consumer
+		// automatically if the client exits before the deferred delete runs.
+		InactiveThreshold: 5 * time.Minute,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create KV watcher for project SFID mappings: %w", err)
+		return nil, fmt.Errorf("failed to create pull consumer for project SFID mappings: %w", err)
 	}
-	defer watcher.Stop() //nolint:errcheck
+	defer func() {
+		if err := jsContext.DeleteConsumer(ctx, kvMappingsStream, cons.CachedInfo().Name); err != nil {
+			logger.With("error", err).WarnContext(ctx, "Failed to delete ephemeral SFID mappings consumer.")
+		}
+	}()
 
 	mappings := make(map[string]string)
 
-	for entry := range watcher.Updates() {
-		if entry == nil {
-			// A nil entry signals the end of the initial values.
+	for {
+		batch, err := cons.Fetch(fetchBatchSize, jetstream.FetchMaxWait(fetchMaxWait))
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch project SFID mappings: %w", err)
+		}
+
+		empty := true
+		for msg := range batch.Messages() {
+			empty = false
+
+			if !strings.HasPrefix(msg.Subject(), projectSFIDSubjectPrefix) {
+				continue
+			}
+			sfid := msg.Subject()[len(projectSFIDSubjectPrefix):]
+			val := string(msg.Data())
+
+			// Last-write-wins: later revisions overwrite earlier ones. Tombstoned
+			// or empty values remove the entry so deleted mappings are excluded.
+			if isTombstonedMapping(msg.Data()) || val == "" {
+				delete(mappings, sfid)
+			} else {
+				mappings[sfid] = val
+			}
+		}
+
+		if err := batch.Error(); err != nil {
+			return nil, fmt.Errorf("batch error reading project SFID mappings: %w", err)
+		}
+
+		if empty {
 			break
 		}
 
-		// Extract the SFID from the key (strip the "project.sfid." prefix).
-		key := entry.Key()
-		if len(key) <= len(prefix) {
-			continue
+		// Re-check NumPending to detect end-of-stream without relying on an empty
+		// batch alone (the last batch may still be partial).
+		info, err := cons.Info(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get consumer info: %w", err)
 		}
-		sfid := key[len(prefix):]
-
-		// The value is the v2 project UID as a plain string. Skip tombstoned entries.
-		if isTombstonedMapping(entry.Value()) {
-			continue
+		if info.NumPending == 0 {
+			break
 		}
-		v2UID := string(entry.Value())
-		if v2UID == "" {
-			continue
-		}
-
-		mappings[sfid] = v2UID
 	}
 
 	return mappings, nil
@@ -320,15 +390,16 @@ func fetchACSGrantsByRole(ctx context.Context, projectSFID string) (*acsGrantsBy
 	return grants, nil
 }
 
-// mergeUserInfoWithACS builds a merged []*UserInfo by unioning the existing v2 list with
-// the ACS user list. The merge is additive-only — no existing entries are removed.
-// Users already present in v2 but not in ACS are logged as "extra" values.
+// mergeUserInfoWithACS builds a merged []*UserInfo by unioning the existing v2
+// list with the ACS user list. The merge is additive-only — no existing
+// entries are removed. Users already present in v2 but not in ACS are logged
+// as "extra" values.
 //
-// Usernames are converted to v2 format via mapUsernameToAuthSub before comparison
-// (e.g. "example" → "auth0|example"). For new entries, the username is resolved to a
-// v1 SFID via lookupUserByUsername and enriched with email/name/avatar. When no
-// username match is found, a secondary lookup by email is attempted against existing
-// email-only entries.
+// Usernames are converted to v2 format via mapUsernameToAuthSub before
+// comparison (e.g. "example" → "auth0|example"). For new entries, the username
+// is resolved to a v1 SFID via lookupUserByUsername and enriched with
+// email/name/avatar. When no username match is found, a secondary lookup by
+// email is attempted against existing email-only entries.
 func mergeUserInfoWithACS(
 	ctx context.Context,
 	existing []*projectservice.UserInfo,
