@@ -571,6 +571,10 @@ func streamUserSecondaryIndex(
 	}()
 
 	for {
+		if err := phaseCtx.Err(); err != nil {
+			return written, errors, fmt.Errorf("%s reindex phase timed out after %d writes: %w", phaseName, written, err)
+		}
+
 		batch, fetchErr := cons.Fetch(reindexFetchBatchSize, jetstream.FetchMaxWait(reindexFetchMaxWait))
 		if fetchErr != nil {
 			return written, errors, fmt.Errorf("fetch error during %s reindex: %w", phaseName, fetchErr)
@@ -639,7 +643,10 @@ func streamUserSecondaryIndex(
 		// empty batch alone (the last batch may still be partial).
 		// Use outer ctx (not phaseCtx) so a deadline expiry on the last batch
 		// does not produce a false error — mirrors collectProjectSFIDMappings.
-		info, infoErr := cons.Info(ctx)
+		// Apply per-op timeout so a transient slowdown can't stall the phase indefinitely.
+		infoCtx, cancelInfo := context.WithTimeout(ctx, cfg.ReindexNATSOpTimeout)
+		info, infoErr := cons.Info(infoCtx)
+		cancelInfo()
 		if infoErr != nil {
 			return written, errors, fmt.Errorf("failed to get consumer info during %s reindex: %w", phaseName, infoErr)
 		}
