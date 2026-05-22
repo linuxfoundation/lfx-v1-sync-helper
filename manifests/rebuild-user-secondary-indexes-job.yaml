@@ -87,13 +87,13 @@ spec:
             # delete the existing Job (if running), then re-apply — no image rebuild required.
             # See README "Backfill / Reindex" for full sizing guidance.
             #
-            # Wall-clock budget per phase (username, then email). Covers the
-            # ListKeysFiltered consumer plus every per-key Get/Put in that phase.
-            # Raise to "60m"/"90m" for >3M records or if REINDEX_OP_DELAY > 1ms.
+            # Safety cap per phase (username, then email). Consumer creation is O(1)
+            # with DeliverAllPolicy so this is a soft bound, not a hard requirement.
+            # Raise to "60m"/"90m" only for >3M records with REINDEX_OP_DELAY > 1ms.
             # Must be >= REINDEX_NATS_OP_TIMEOUT.
             - name: REINDEX_PHASE_TIMEOUT
               value: "45m"
-            # Per-op cap on each NATS KV Get/Put. Without this the NATS SDK injects
+            # Per-op cap on each NATS KV Put. Without this the NATS SDK injects
             # a 5s default (wrapContextWithoutDeadline) that fires under prod load
             # and causes slow-consumer overflow — this is the v0.8.9 root-cause fix.
             # 30s per platform recommendation (Alan); raise if logs show slow-op warnings.

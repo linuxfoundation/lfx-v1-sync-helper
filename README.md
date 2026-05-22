@@ -135,8 +135,8 @@ This job streams all `merged_user` and `alternate_email` records from the v1 KV 
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `REINDEX_PHASE_TIMEOUT` | `45m` | Wall-clock budget per phase (username, then email). Raise to `60m`/`90m` for >3M records. |
-| `REINDEX_NATS_OP_TIMEOUT` | `30s` | Per-op cap on each NATS KV Get/Put. Without this the SDK injects a 5 s default that fires under prod load. |
+| `REINDEX_PHASE_TIMEOUT` | `45m` | Safety cap per phase (username, then email). Consumer creation is now O(1) so this is a soft bound; raise to `60m`/`90m` only if >3M records with `REINDEX_OP_DELAY` > 1ms. |
+| `REINDEX_NATS_OP_TIMEOUT` | `30s` | Per-op cap on each NATS KV Put. Without this the SDK injects a 5 s default that fires under prod load. |
 | `REINDEX_OP_DELAY` | `1ms` (prod) / `0` (dev) | Per-iteration sleep to cap op-rate on the shared broker. Prevents the reindex pod from saturating NATS and impacting app pod health. |
 
 **Operational guidance:**
