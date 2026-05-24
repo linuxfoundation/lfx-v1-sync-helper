@@ -488,6 +488,10 @@ const (
 	// kvObjectsStream is the JetStream stream backing the v1-objects KV bucket.
 	kvObjectsStream = "KV_v1-objects"
 
+	// kvObjectsSubjectPrefix is the NATS subject prefix the server prepends to
+	// every KV key stored in the v1-objects bucket. Strip it to recover the key.
+	kvObjectsSubjectPrefix = "$KV.v1-objects."
+
 	// reindexFetchBatchSize and reindexFetchMaxWait mirror the values in
 	// collectProjectSFIDMappings (ingest_acs.go). FetchMaxWait ≤ 10s prevents
 	// the SDK from auto-enabling idle heartbeats over high-latency connections.
@@ -523,27 +527,44 @@ func extractEmailIndex(data map[string]any) (indexKey, value string) {
 	return kvKeyEmailPrefix + enc, userSfid
 }
 
-// streamUserSecondaryIndex creates an ephemeral pull consumer on KV_v1-objects
-// filtered to subjectFilter, streams all messages, decodes each (JSON then
-// msgpack — mirrors getV1ObjectData), and writes the derived index entry via
-// extractIndex. Returns the number of entries written and the error count.
+// streamUserSecondaryIndex rebuilds one class of secondary index (username or
+// email) using a two-pass strategy that is correct regardless of the
+// v1-objects bucket's History setting.
 //
-// Safe because KV_v1-objects uses History=1 (one message per subject by
-// default); if History is ever raised this function will issue redundant Puts
-// but remain correct via last-write-wins.
+// # Why two passes
 //
-// DeliverAllPolicy is NOT a point-in-time snapshot: messages written during
-// the run are also delivered, so runtime scales with concurrent write rate to
-// the bucket.
+// With DeliverAllPolicy and History>1 a single-pass consumer receives every
+// retained revision per subject. Processing in order would cause earlier
+// revisions (e.g. an old username) to write stale index entries that the later
+// revision's different indexKey never cleans up. Dev is already at History=2;
+// prod must not be assumed to stay at 1.
 //
-// Deadline strategy (env-configurable — see LoadReindexConfig):
-//   - Phase budget (REINDEX_PHASE_TIMEOUT, default 45m): phaseCtx wraps ctx.
-//     Each phase has its own context so Phase 1 cannot consume Phase 2's budget.
-//   - Per-op cap (REINDEX_NATS_OP_TIMEOUT, default 30s): applied to each Put.
-//     Without this, the NATS SDK's wrapContextWithoutDeadline injects a 5s
-//     default per call, which fires under prod load (2026-04-23 incident).
-//   - Op pacer (REINDEX_OP_DELAY, default 0): optional sleep between iterations
-//     to cap op-rate against the shared broker.
+// # Pass 1 — enumerate live subjects (HeadersOnly)
+//
+// An ephemeral pull consumer with HeadersOnly:true streams only message headers,
+// not bodies. This cuts per-message wire cost to ~100 B and avoids decoding work
+// for the N×history messages in the stream. The result is a map[subject]bool
+// that reflects only the latest observed state per subject:
+//
+//   - Normal header message  → subject marked live (true)
+//   - KV-Operation: DEL/PURGE header → subject marked deleted (false)
+//
+// Messages arrive in stream-seq order so the last write for a subject wins.
+//
+// # Pass 2 — fetch latest value per subject and write index
+//
+// For each live subject, v1KV.Get returns the latest revision by definition
+// (NATS direct-get uses last_by_subj). Decode, apply existing skip logic
+// (isdeleted, _sdc_deleted_at), extract the index entry, and Put into mappings.
+//
+// # Deadline strategy (env-configurable via REINDEX_* env vars)
+//
+//   - REINDEX_PHASE_TIMEOUT (default 45m): total budget for pass 1 + pass 2
+//     combined. Pass 2 dominates runtime (~unique-keys × REINDEX_OP_DELAY + RTT).
+//   - REINDEX_NATS_OP_TIMEOUT (default 30s): per-op cap on each KV.Get and Put.
+//     Without this the SDK injects a 5s default (2026-04-23 incident).
+//   - REINDEX_OP_DELAY (default 1ms): inter-iteration sleep to cap op-rate on
+//     the shared broker. Primary throughput knob for prod runs.
 func streamUserSecondaryIndex(
 	ctx context.Context,
 	phaseName string,
@@ -553,105 +574,140 @@ func streamUserSecondaryIndex(
 	phaseCtx, phaseCancel := context.WithTimeout(ctx, cfg.ReindexPhaseTimeout)
 	defer phaseCancel()
 
+	// ---- Pass 1: enumerate live subjects via HeadersOnly consumer ----
+
 	cons, err := jsContext.CreateConsumer(phaseCtx, kvObjectsStream, jetstream.ConsumerConfig{
-		DeliverPolicy:     jetstream.DeliverAllPolicy,
+		DeliverPolicy:     jetstream.DeliverAllPolicy, // O(1) creation — no server-side seq scan
 		AckPolicy:         jetstream.AckNonePolicy,
 		FilterSubject:     subjectFilter,
+		HeadersOnly:       true, // server sends headers only; bodies not transmitted
 		MemoryStorage:     true,
 		InactiveThreshold: reindexEphemeralInactiveTimeout,
 	})
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to create pull consumer for %s reindex: %w", phaseName, err)
+		return 0, 0, fmt.Errorf("failed to create enumeration consumer for %s reindex: %w", phaseName, err)
 	}
-	// Use outer ctx for delete so cleanup runs even after phaseCtx is cancelled.
 	defer func() {
 		if delErr := jsContext.DeleteConsumer(ctx, kvObjectsStream, cons.CachedInfo().Name); delErr != nil {
 			logger.With("error", delErr, "phase", phaseName).Warn("failed to delete ephemeral reindex consumer")
 		}
 	}()
 
+	// liveSubjects tracks latest observed state per subject (true = live).
+	// Messages arrive in stream-seq order, so the last write per subject wins.
+	liveSubjects := make(map[string]bool)
+
 	for {
 		if err := phaseCtx.Err(); err != nil {
-			return written, errors, fmt.Errorf("%s reindex phase timed out after %d writes: %w", phaseName, written, err)
+			return 0, 0, fmt.Errorf("%s reindex enumeration timed out after %d subjects: %w", phaseName, len(liveSubjects), err)
 		}
 
 		batch, fetchErr := cons.Fetch(reindexFetchBatchSize, jetstream.FetchMaxWait(reindexFetchMaxWait))
 		if fetchErr != nil {
-			return written, errors, fmt.Errorf("fetch error during %s reindex: %w", phaseName, fetchErr)
+			return 0, 0, fmt.Errorf("fetch error during %s reindex enumeration: %w", phaseName, fetchErr)
 		}
 
 		empty := true
 		for msg := range batch.Messages() {
 			empty = false
-
-			if isTombstonedMapping(msg.Data()) {
-				continue
-			}
-
-			// Decode JSON, fall back to msgpack — mirrors getV1ObjectData in lfx_v1_client.go.
-			var data map[string]any
-			if jsonErr := json.Unmarshal(msg.Data(), &data); jsonErr != nil {
-				if mpErr := msgpack.Unmarshal(msg.Data(), &data); mpErr != nil {
-					logger.With("subject", msg.Subject(), "phase", phaseName).Warn("failed to decode reindex message; skipping")
-					errors++
-					continue
-				}
-			}
-
-			if isDeleted, ok := data["isdeleted"].(bool); ok && isDeleted {
-				continue
-			}
-			// Mirror getV1ObjectData: skip WAL-based soft deletes (_sdc_deleted_at).
-			if deletedAt, ok := data["_sdc_deleted_at"]; ok {
-				if s, okStr := deletedAt.(string); (okStr && strings.TrimSpace(s) != "") || (!okStr && deletedAt != nil) {
-					continue
-				}
-			}
-
-			indexKey, value := extractIndex(data)
-			if indexKey == "" {
-				continue
-			}
-
-			if cfg.ReindexOpDelay > 0 {
-				time.Sleep(cfg.ReindexOpDelay)
-			}
-
-			putCtx, cancelPut := context.WithTimeout(phaseCtx, cfg.ReindexNATSOpTimeout)
-			_, putErr := mappingsKV.Put(putCtx, indexKey, []byte(value))
-			cancelPut()
-			if putErr != nil {
-				logger.With("error", putErr, "subject", msg.Subject(), "indexKey", indexKey, "phase", phaseName).Warn("failed to write index during reindex")
-				errors++
-				continue
-			}
-			written++
-			if written%reindexProgressInterval == 0 {
-				logger.With("count", written, "phase", phaseName).Info("reindex progress")
+			kvOp := msg.Headers().Get("KV-Operation")
+			if kvOp == "DEL" || kvOp == "PURGE" {
+				liveSubjects[msg.Subject()] = false
+			} else {
+				liveSubjects[msg.Subject()] = true
 			}
 		}
 
 		if batchErr := batch.Error(); batchErr != nil {
-			return written, errors, fmt.Errorf("batch error during %s reindex: %w", phaseName, batchErr)
+			return 0, 0, fmt.Errorf("batch error during %s reindex enumeration: %w", phaseName, batchErr)
 		}
 
 		if empty {
 			break
 		}
 
-		// Re-check NumPending to detect end-of-stream without relying on an
-		// empty batch alone (the last batch may still be partial).
-		// Use outer ctx (not phaseCtx) so a deadline expiry on the last batch
-		// does not produce a false error — mirrors collectProjectSFIDMappings.
-		// Apply per-op timeout so a transient slowdown can't stall the phase indefinitely.
 		infoCtx, cancelInfo := context.WithTimeout(ctx, cfg.ReindexNATSOpTimeout)
 		info, infoErr := cons.Info(infoCtx)
 		cancelInfo()
 		if infoErr != nil {
-			return written, errors, fmt.Errorf("failed to get consumer info during %s reindex: %w", phaseName, infoErr)
+			return 0, 0, fmt.Errorf("failed to get consumer info during %s reindex enumeration: %w", phaseName, infoErr)
 		}
 		if info.NumPending == 0 {
 			break
+		}
+	}
+
+	logger.With("subjects", len(liveSubjects), "phase", phaseName).Info("reindex enumeration complete; starting index writes")
+
+	// ---- Pass 2: fetch latest value per live subject and write index ----
+
+	for subject, live := range liveSubjects {
+		if !live {
+			continue
+		}
+
+		if err := phaseCtx.Err(); err != nil {
+			return written, errors, fmt.Errorf("%s reindex phase timed out after %d writes: %w", phaseName, written, err)
+		}
+
+		kvKey := strings.TrimPrefix(subject, kvObjectsSubjectPrefix)
+
+		getCtx, cancelGet := context.WithTimeout(ctx, cfg.ReindexNATSOpTimeout)
+		entry, getErr := v1KV.Get(getCtx, kvKey)
+		cancelGet()
+		if getErr != nil {
+			if getErr == jetstream.ErrKeyNotFound || getErr == jetstream.ErrKeyDeleted {
+				continue
+			}
+			logger.With("error", getErr, "subject", subject, "phase", phaseName).Warn("failed to get latest value during reindex; skipping")
+			errors++
+			continue
+		}
+
+		if isTombstonedMapping(entry.Value()) {
+			continue
+		}
+
+		// Decode JSON, fall back to msgpack — mirrors getV1ObjectData in lfx_v1_client.go.
+		var data map[string]any
+		if jsonErr := json.Unmarshal(entry.Value(), &data); jsonErr != nil {
+			if mpErr := msgpack.Unmarshal(entry.Value(), &data); mpErr != nil {
+				logger.With("subject", subject, "phase", phaseName).Warn("failed to decode reindex value; skipping")
+				errors++
+				continue
+			}
+		}
+
+		if isDeleted, ok := data["isdeleted"].(bool); ok && isDeleted {
+			continue
+		}
+		// Mirror getV1ObjectData: skip WAL-based soft deletes (_sdc_deleted_at).
+		if deletedAt, ok := data["_sdc_deleted_at"]; ok {
+			if s, okStr := deletedAt.(string); (okStr && strings.TrimSpace(s) != "") || (!okStr && deletedAt != nil) {
+				continue
+			}
+		}
+
+		indexKey, value := extractIndex(data)
+		if indexKey == "" {
+			continue
+		}
+
+		if cfg.ReindexOpDelay > 0 {
+			time.Sleep(cfg.ReindexOpDelay)
+		}
+
+		putCtx, cancelPut := context.WithTimeout(ctx, cfg.ReindexNATSOpTimeout)
+		_, putErr := mappingsKV.Put(putCtx, indexKey, []byte(value))
+		cancelPut()
+		if putErr != nil {
+			logger.With("error", putErr, "subject", subject, "indexKey", indexKey, "phase", phaseName).Warn("failed to write index during reindex")
+			errors++
+			continue
+		}
+		written++
+		if written%reindexProgressInterval == 0 {
+			logger.With("count", written, "phase", phaseName).Info("reindex progress")
 		}
 	}
 
