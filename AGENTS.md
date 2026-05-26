@@ -255,6 +255,20 @@ ORDER BY schemaname, tablename;
 
 Note: The replication slot is named `lfx_v2` (not `wal-listener`). The publication and slot names differ.
 
+## One-shot Backfill Commands
+
+### `--backfill-acs` org pass (`ingest_acs_org.go`)
+
+The `--backfill-acs` flag runs two sequential passes. The second pass (`backfillACSOrgGrants`) backfills ACS legacy org grants into v2 b2b_org settings:
+
+- **SFID source**: scans `$KV.v1-objects.salesforce_b2b-Account.*` keys from the `KV_v1-objects` JetStream stream using `DeliverAllPolicy` (last-write-wins, same trick as project SFID collection). Skips records where `IsDeleted=true` or `IsMember__c!=true`.
+- **UID resolution**: `sfuuid.ToUUID(sfid)` — a deterministic pure function from `lfx-v2-member-service/pkg/sfuuid`. No network call; the same algorithm member-service uses internally.
+- **ACS query**: `GET /acs/v1/api/grantusers?object_type=organization&object_id={sfid}&rolename=company-admin,viewer` (paginated). `company-admin` → `writer`; `viewer` → `auditor`.
+- **Settings API**: raw HTTP `GET`/`PUT /b2b_orgs/{uid}/settings` via `client_members.go`. Requires `MEMBER_SERVICE_URL` env var.
+- **Merge**: additive-only; existing v2-only entries are logged as "extra" but never removed.
+- **Dry-run**: add `--dry-run` to preview without writing.
+- **Summary log fields**: `orgs_total`, `orgs_changed`, `writers_added`, `auditors_added`, `orgs_skipped`, `errors`.
+
 ### 4. `cmd/lfx-v1-sync-helper/handlers.go` — suppress unknown-object warnings (optional)
 
 If the new table's records should only be stored in KV for downstream consumption (no v2 API side-effects), add the key prefix (e.g. `"myschema-mytable"`) as an explicit `case` in both `handleKVPut` and `handleResourceDelete` with a debug-level log statement. This prevents spurious "unknown object type" warnings in the logs.

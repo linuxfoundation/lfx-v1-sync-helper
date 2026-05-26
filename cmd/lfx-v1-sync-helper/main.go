@@ -252,12 +252,19 @@ func main() {
 
 	// Handle --backfill-acs flag: populate v2 project settings from ACS grants, then exit.
 	if *doBackfillACS {
-		logger.With("dry_run", *dryRun).Info("starting ACS grants backfill")
+		logger.With("dry_run", *dryRun).Info("starting ACS project grants backfill")
 		if err := backfillACSGrants(ctx, *dryRun); err != nil {
-			logger.With(errKey, err).Error("error during ACS grants backfill")
+			logger.With(errKey, err).Error("error during ACS project grants backfill — continuing to org pass")
+		} else {
+			logger.Info("ACS project grants backfill completed successfully")
+		}
+
+		logger.With("dry_run", *dryRun).Info("starting ACS org grants backfill")
+		if err := backfillACSOrgGrants(ctx, *dryRun); err != nil {
+			logger.With(errKey, err).Error("error during ACS org grants backfill")
 			os.Exit(1)
 		}
-		logger.Info("ACS grants backfill completed successfully")
+		logger.Info("ACS org grants backfill completed successfully")
 		os.Exit(0)
 	}
 

@@ -39,6 +39,7 @@ const (
 	// Service audiences for JWT tokens.
 	projectServiceAudience   = "lfx-v2-project-service"
 	committeeServiceAudience = "lfx-v2-committee-service"
+	memberServiceAudience    = "lfx-v2-member-service"
 )
 
 // debugTransport wraps an http.RoundTripper to log requests and responses.

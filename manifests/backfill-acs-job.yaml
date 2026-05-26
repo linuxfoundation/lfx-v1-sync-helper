@@ -83,6 +83,8 @@ spec:
               value: "https://api-gw.platform.linuxfoundation.org/"
             - name: PORT
               value: "8080"
+            - name: MEMBER_SERVICE_URL
+              value: "http://lfx-v2-member-service.member-service.svc.cluster.local:8080"
             - name: PROJECT_SERVICE_URL
               value: "http://lfx-v2-project-service.project-service.svc.cluster.local:8080"
             - name: USE_MSGPACK
