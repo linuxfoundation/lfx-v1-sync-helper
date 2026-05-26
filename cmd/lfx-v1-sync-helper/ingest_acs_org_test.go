@@ -82,14 +82,23 @@ func TestMergeOrgUsersWithACS(t *testing.T) {
 	})
 
 	t.Run("nil slice treated same as empty slice (no-op path)", func(t *testing.T) {
-		authSub := mapUsernameToAuthSub("alice")
-		existing := []*b2bOrgUser{{Username: &authSub, Email: "alice@example.com", InvitedAs: "writer"}}
+		// nil and [] existing slices must behave identically (both have no prior entries).
 		_, addedFromNil := mergeOrgUsersWithACS(ctx, normaliseOrgUserSlice(nil), []acsGrantUser{{Username: "alice"}}, "writers", "sfid1", "uid1")
 		_, addedFromEmpty := mergeOrgUsersWithACS(ctx, normaliseOrgUserSlice([]*b2bOrgUser{}), []acsGrantUser{{Username: "alice"}}, "writers", "sfid1", "uid1")
 		if addedFromNil != addedFromEmpty {
 			t.Fatalf("nil and [] produced different added counts: %d vs %d", addedFromNil, addedFromEmpty)
 		}
-		_ = existing
+
+		// A non-nil existing slice that already contains alice must not duplicate her.
+		authSub := mapUsernameToAuthSub("alice")
+		existing := []*b2bOrgUser{{Username: &authSub, Email: "alice@example.com", InvitedAs: "writer"}}
+		merged, added := mergeOrgUsersWithACS(ctx, existing, []acsGrantUser{{Username: "alice"}}, "writers", "sfid1", "uid1")
+		if added != 0 {
+			t.Fatalf("alice already exists: expected 0 added, got %d", added)
+		}
+		if len(merged) != 1 {
+			t.Fatalf("expected 1 entry in merged result, got %d", len(merged))
+		}
 	})
 }
 

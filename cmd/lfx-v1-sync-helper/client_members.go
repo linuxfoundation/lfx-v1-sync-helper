@@ -43,9 +43,10 @@ type b2bOrgSettingsBody struct {
 	Auditors []*b2bOrgUser `json:"auditors,omitempty"`
 }
 
-// b2bOrgSettingsGetResponse wraps the outer envelope from the GET endpoint.
+// b2bOrgSettingsGetResponse is a fallback envelope shape {"settings":{...}}.
+// The member-service currently returns the flat body {"writers":[...]} directly;
+// this type is kept as a future-proofing fallback only.
 type b2bOrgSettingsGetResponse struct {
-	// The service wraps the settings object under a "settings" key.
 	Settings *b2bOrgSettingsBody `json:"settings"`
 }
 
@@ -86,12 +87,19 @@ func getB2BOrgSettings(ctx context.Context, uid string) (*b2bOrgSettingsBody, st
 		return nil, "", fmt.Errorf("GET /b2b_orgs/%s/settings returned status %d: %s", uid, resp.StatusCode, body)
 	}
 
+	// Empty body means no settings record exists yet. Return empty struct with no
+	// ETag so putB2BOrgSettings omits If-Match and the first write succeeds.
+	if len(bytes.TrimSpace(body)) == 0 {
+		return &b2bOrgSettingsBody{}, "", nil
+	}
+
 	// The GET response body is the settings object directly (not wrapped under a
 	// "settings" key). Try direct unmarshal first; fall back to the envelope
 	// shape {"settings":{...}} in case the API adds a wrapper in future.
+	// Any valid JSON response (including "{}") means a record exists — keep ETag.
 	var settings b2bOrgSettingsBody
 	hasRecord := false
-	if err := json.Unmarshal(body, &settings); err == nil && (settings.Writers != nil || settings.Auditors != nil) {
+	if err := json.Unmarshal(body, &settings); err == nil {
 		hasRecord = true
 	} else {
 		var envelope b2bOrgSettingsGetResponse
@@ -161,15 +169,19 @@ func putB2BOrgSettings(ctx context.Context, uid string, payload *b2bOrgSettingsB
 		return nil, "", fmt.Errorf("PUT /b2b_orgs/%s/settings returned status %d: %s", uid, resp.StatusCode, respBody)
 	}
 
-	var envelope b2bOrgSettingsGetResponse
-	if err := json.Unmarshal(respBody, &envelope); err != nil {
-		return nil, "", fmt.Errorf("failed to unmarshal PUT settings response: %w", err)
+	// Apply the same flat-first, envelope-fallback decoding as getB2BOrgSettings.
+	var updated b2bOrgSettingsBody
+	if len(bytes.TrimSpace(respBody)) > 0 {
+		if err := json.Unmarshal(respBody, &updated); err != nil {
+			var envelope b2bOrgSettingsGetResponse
+			if err2 := json.Unmarshal(respBody, &envelope); err2 != nil {
+				return nil, "", fmt.Errorf("failed to unmarshal PUT settings response: %w", err)
+			}
+			if envelope.Settings != nil {
+				updated = *envelope.Settings
+			}
+		}
 	}
 
-	newETag := resp.Header.Get("ETag")
-	updated := envelope.Settings
-	if updated == nil {
-		updated = &b2bOrgSettingsBody{}
-	}
-	return updated, newETag, nil
+	return &updated, resp.Header.Get("ETag"), nil
 }

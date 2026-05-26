@@ -250,7 +250,8 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Handle --backfill-acs flag: populate v2 project settings from ACS grants, then exit.
+	// Handle --backfill-acs flag: run two sequential passes — populate v2 project settings
+	// from ACS grants, then populate v2 b2b_org settings from ACS org grants. Exits when done.
 	if *doBackfillACS {
 		logger.With("dry_run", *dryRun).Info("starting ACS project grants backfill")
 		if err := backfillACSGrants(ctx, *dryRun); err != nil {
