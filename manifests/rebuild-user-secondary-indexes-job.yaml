@@ -82,28 +82,32 @@ spec:
               value: "http://lfx-v2-project-service.project-service.svc.cluster.local:8080"
             - name: USE_MSGPACK
               value: "1"
-            # --- Reindex tuning knobs (v0.8.9+) -----------------------------------
+            # --- Reindex tuning knobs -------------------------------------------
             # All values are Go durations ("45m", "30s", "1ms"). Edit this manifest,
             # delete the existing Job (if running), then re-apply — no image rebuild required.
             # See README "Backfill / Reindex" for full sizing guidance.
             #
-            # Wall-clock budget per phase (username, then email). Covers the
-            # ListKeysFiltered consumer plus every per-key Get/Put in that phase.
-            # Raise to "60m"/"90m" for >3M records or if REINDEX_OP_DELAY > 1ms.
+            # The reindex runs in two passes per phase (username, then email):
+            #   Pass 1: HeadersOnly pull consumer enumerates live subjects (no bodies).
+            #   Pass 2: KV.Get per live subject fetches the latest revision and writes
+            #           the derived index entry. Pass 2 dominates wall-clock time.
+            #
+            # Total budget per phase (pass 1 + pass 2). Pass 2 runtime ≈
+            # unique-records × (REINDEX_OP_DELAY + RTT). At 1ms delay + ~1ms RTT
+            # and 1.7M records this is ~57 min; raise to "90m" if needed.
             # Must be >= REINDEX_NATS_OP_TIMEOUT.
             - name: REINDEX_PHASE_TIMEOUT
               value: "45m"
-            # Per-op cap on each NATS KV Get/Put. Without this the NATS SDK injects
-            # a 5s default (wrapContextWithoutDeadline) that fires under prod load
-            # and causes slow-consumer overflow — this is the v0.8.9 root-cause fix.
-            # 30s per platform recommendation (Alan); raise if logs show slow-op warnings.
+            # Per-op cap on each KV.Get and KV.Put. Without this the NATS SDK
+            # injects a 5s default (wrapContextWithoutDeadline) that fires under
+            # prod load — this is the v0.8.9 root-cause fix (2026-04-23 incident).
+            # Raise if logs show slow-op warnings.
             - name: REINDEX_NATS_OP_TIMEOUT
               value: "30s"
-            # Per-iteration sleep to cap op-rate on the shared NATS broker. An
-            # unthrottled run saturated the broker on 2026-04-23 and tripped app
-            # readiness/liveness probes. 1ms ≈ 1k ops/s ceiling with negligible
-            # runtime impact. Raise to "2ms"+ if the abort guard fires on Unhealthy
-            # events; set "0s" to disable pacing in dev/staging.
+            # Per-iteration sleep between pass-2 writes to cap op-rate on the shared
+            # NATS broker. 1ms ≈ 1k ops/s ceiling. An unthrottled run saturated the
+            # broker on 2026-04-23 and tripped app readiness probes. Raise to "2ms"+
+            # if the abort guard fires on Unhealthy events; set "0s" in dev/staging.
             - name: REINDEX_OP_DELAY
               value: "1ms"
             # ----------------------------------------------------------------------
