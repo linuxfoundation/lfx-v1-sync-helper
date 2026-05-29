@@ -268,7 +268,7 @@ func dynamodbKVKey(tableName string, keys map[string]interface{}) string {
 // knownTimestampFields is the ordered list of timestamp field names checked when
 // comparing records. Add new field names here when onboarding tables that use a
 // different timestamp field.
-var knownTimestampFields = []string{"modified_at", "last_modified_at", "date_modified"}
+var knownTimestampFields = []string{"modified_at", "last_modified_at", "last_modified_time", "date_modified"}
 
 // shouldDynamoDBUpdate returns true when the new image should overwrite the
 // existing KV entry. If either record has no recognisable timestamp the write

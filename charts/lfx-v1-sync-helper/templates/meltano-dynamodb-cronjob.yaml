@@ -77,17 +77,17 @@ spec:
                 - name: TAP_DYNAMODB_TABLE_SCAN_KWARGS
                   value: |
                     {
-                      {{- $tables_with_modified_at := .Values.meltano.dynamodbEtl.filtering.tablesWithModifiedAt }}
+                      {{- $tables_with_filtered_at := .Values.meltano.dynamodbEtl.filtering.tablesWithFilteredAt }}
                       {{- $duration := .Values.meltano.dynamodbEtl.filtering.duration }}
                       {{- $startTime := now | dateModify (printf "-%s" $duration) | date "2006-01-02T15:04:05Z" }}
-                      {{- range $index, $table := $tables_with_modified_at }}
-                        {{ $table | quote }}: {
-                          "FilterExpression": "modified_at > :startTime",
+                      {{- range $index, $table := $tables_with_filtered_at }}
+                        {{ $table.name | quote }}: {
+                          "FilterExpression": "{{ $table.attribute }} > :startTime",
                           "ExpressionAttributeValues": {
                             ":startTime": {{ $startTime | quote }}
                           },
                           "ConsistentRead": false
-                        }{{ if lt $index (sub (len $tables_with_modified_at) 1) }},{{ end }}
+                        }{{ if lt $index (sub (len $tables_with_filtered_at) 1) }},{{ end }}
                       {{- end }}
                     }
                 # Target NATS KV configuration

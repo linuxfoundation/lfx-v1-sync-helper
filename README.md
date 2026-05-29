@@ -119,15 +119,56 @@ Payload: <email>
 - The underlying secondary indexes (`v1-user.username.*`, `v1-user.email.*`) should not be queried directly via `lfx.lookup_v1_mapping`
 - Callers send raw UTF-8 usernames and emails; the service normalizes (lowercase, NFC) and base64-encodes them internally
 
-**Backfill / Reindex:**
+## Backfill / Reindex
 
-To populate secondary indexes for all existing records (e.g. after initial deployment or a schema change), run the service with the `--rebuild-user-secondary-indexes` flag:
+**User secondary index rebuild (`--rebuild-user-secondary-indexes`):**
+
+To populate secondary indexes for all existing records (e.g. after initial deployment or a schema change), apply the one-shot Job manifest to the cluster:
 
 ```sh
-lfx-v1-sync-helper --rebuild-user-secondary-indexes
+kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/rebuild-user-secondary-indexes-job.yaml
 ```
 
-This operation streams all `merged_user` and `alternate_email` records from the v1 KV bucket, writes the secondary indexes, then exits.
+The job runs in two passes per phase (username, then email), then exits. The manifest is applied manually — it is not managed by argocd.
+
+**How it works (history-insensitive two-pass design):**
+
+Pass 1 streams only message *headers* (no bodies) from the `v1-objects` KV bucket using a `HeadersOnly` pull consumer with `DeliverAllPolicy`. This enumerates the set of live subjects without transmitting any record bodies — O(1) consumer creation cost, regardless of how many records are in the stream. Messages with `KV-Operation: DEL` or `PURGE` headers are excluded so deleted records never produce index entries.
+
+Pass 2 iterates the live subject set: for each subject it calls `v1KV.Get` (NATS direct-get, returns latest revision by definition), decodes the record, and writes the derived index entry to `v1-mappings`. This ensures exactly one index entry per record reflecting the current state, regardless of the bucket's `History` setting.
+
+**Tuning knobs** (edit `manifests/rebuild-user-secondary-indexes-job.yaml`, delete the existing Job if running, then re-apply; no rebuild required):
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `REINDEX_PHASE_TIMEOUT` | `45m` | Total budget per phase (pass 1 + pass 2 combined). Pass 2 dominates: `~unique-records × (REINDEX_OP_DELAY + RTT)`. Raise to `90m` only for >3M records with `REINDEX_OP_DELAY` > 1ms. |
+| `REINDEX_NATS_OP_TIMEOUT` | `30s` | Per-op cap on each `KV.Get` and `KV.Put`. Without this the SDK injects a 5s default that fires under prod load (2026-04-23 incident). |
+| `REINDEX_OP_DELAY` | `1ms` (prod) / `0` (dev) | Per-iteration sleep between pass-2 writes to cap op-rate on the shared broker. Primary throughput knob: 1ms ≈ 1k ops/s ceiling. |
+
+**Operational guidance:**
+
+- Run in a low-traffic window.
+- Monitor in a second terminal: `kubectl --context lfx-v2-prod -n v1-sync-helper get events -w | grep -E "Unhealthy|app-"`
+- **Stop the job** (`kubectl ... delete job rebuild-user-secondary-indexes`) if any app replica shows `Unhealthy` readiness events during the run.
+- If per-op timeouts appear in logs, raise `REINDEX_NATS_OP_TIMEOUT` in the manifest, delete the existing Job, and re-apply.
+- If broker saturation reappears, raise `REINDEX_OP_DELAY` to `2ms` (and `REINDEX_PHASE_TIMEOUT` to `90m`), delete the existing Job, and re-apply.
+- Writes are idempotent — re-running the job is safe.
+
+**ACS grant backfill (`--backfill-acs`):**
+
+Merges ACS user grants into v2 project settings (`Writers`, `Auditors`, `MeetingCoordinators`) additively — existing v2 entries are never removed. Requires full service credentials (Auth0, Heimdall, `PROJECT_SERVICE_URL`). Supports `--dry-run` to preview without writing. Writes are idempotent.
+
+In production, apply the Job manifest manually (not ArgoCD-managed). A dry-run pass is recommended first — add `--dry-run` to the manifest args, apply, inspect logs, then re-apply without it:
+
+```sh
+kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-acs-job.yaml
+```
+
+Locally:
+
+```sh
+lfx-v1-sync-helper --backfill-acs [--dry-run]
+```
 
 ## Architecture Diagrams
 

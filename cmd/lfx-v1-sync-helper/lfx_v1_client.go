@@ -380,6 +380,46 @@ func ResolveV1UserSFIDByUsername(ctx context.Context, username string) (string, 
 	return candidateSFID, nil
 }
 
+// lookupUserByUsername looks up a username in the v1 secondary index and returns
+// the resolved V1User and SFID in a single operation, avoiding the double KV lookup
+// that would result from calling ResolveV1UserSFIDByUsername followed by lookupMergedUser.
+// Returns (nil, "") on any miss or error.
+func lookupUserByUsername(ctx context.Context, username string) (*V1User, string) {
+	encodedUsername := usernameToKVKey(username)
+	if encodedUsername == "" {
+		return nil, ""
+	}
+	indexKey := kvKeyUsernamePrefix + encodedUsername
+	entry, err := mappingsKV.Get(ctx, indexKey)
+	if err != nil {
+		if err != jetstream.ErrKeyNotFound {
+			logger.With(errKey, err, "username", username).
+				WarnContext(ctx, "failed to get username index for user enrichment")
+		}
+		return nil, ""
+	}
+	if isTombstonedMapping(entry.Value()) {
+		return nil, ""
+	}
+
+	sfid := string(entry.Value())
+	user, err := lookupMergedUser(ctx, sfid)
+	if err != nil {
+		logger.With(errKey, err, "username", username, "sfid", sfid).
+			WarnContext(ctx, "failed to lookup merged user for enrichment")
+		return nil, ""
+	}
+
+	// Validate that the index is still current (handles stale index data).
+	if usernameToKVKey(user.Username) != encodedUsername {
+		logger.With("sfid", sfid, "expected_username", username, "actual_username", user.Username).
+			DebugContext(ctx, "username mismatch in validation, treating as miss (stale index)")
+		return nil, ""
+	}
+
+	return user, sfid
+}
+
 // ResolveV1UserSFIDByEmail looks up a v1 user SFID by email using the secondary index.
 // It validates the resolved SFID by checking all alternate emails for the user.
 // Returns (sfid, nil) on success, ("", nil) on miss (including stale index), or ("", error) on failure.

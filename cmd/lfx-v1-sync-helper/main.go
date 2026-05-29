@@ -60,6 +60,8 @@ func main() {
 	var port = flag.String("p", "", "health checks port")
 	var bind = flag.String("bind", "", "interface to bind on")
 	var doRebuildUserIndexes = flag.Bool("rebuild-user-secondary-indexes", false, "populate user secondary indexes for existing data, then exit")
+	var doBackfillACS = flag.Bool("backfill-acs", false, "backfill ACS user grants to v2 project settings, then exit")
+	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (only applicable with --backfill-acs)")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -72,6 +74,7 @@ func main() {
 	slog.SetDefault(logger)
 
 	// --rebuild-user-secondary-indexes only needs NATS KV; skip full config and API client init.
+	// --backfill-acs requires full config and API client init.
 	var err error
 	if *doRebuildUserIndexes {
 		cfg = LoadReindexConfig()
@@ -244,6 +247,17 @@ func main() {
 			os.Exit(1)
 		}
 		logger.Info("user secondary index rebuild completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --backfill-acs flag: populate v2 project settings from ACS grants, then exit.
+	if *doBackfillACS {
+		logger.With("dry_run", *dryRun).Info("starting ACS grants backfill")
+		if err := backfillACSGrants(ctx, *dryRun); err != nil {
+			logger.With(errKey, err).Error("error during ACS grants backfill")
+			os.Exit(1)
+		}
+		logger.Info("ACS grants backfill completed successfully")
 		os.Exit(0)
 	}
 

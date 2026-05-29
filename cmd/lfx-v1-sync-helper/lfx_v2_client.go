@@ -184,6 +184,16 @@ func initGoaClients(cfg *Config) error {
 		projectHTTPClient.DeleteProject(),
 		projectHTTPClient.Readyz(),
 		projectHTTPClient.Livez(),
+		projectHTTPClient.CreateProjectLink(),
+		projectHTTPClient.GetProjectLink(),
+		projectHTTPClient.DeleteProjectLink(),
+		projectHTTPClient.CreateProjectFolder(),
+		projectHTTPClient.GetProjectFolder(),
+		projectHTTPClient.DeleteProjectFolder(),
+		projectHTTPClient.UploadProjectDocument(nil),
+		projectHTTPClient.GetProjectDocument(),
+		projectHTTPClient.DownloadProjectDocument(),
+		projectHTTPClient.DeleteProjectDocument(),
 	)
 
 	// Initialize committee service client if configured.
@@ -226,6 +236,18 @@ func initGoaClients(cfg *Config) error {
 			committeeHTTPClient.RejectApplication(),
 			committeeHTTPClient.JoinCommittee(),
 			committeeHTTPClient.LeaveCommittee(),
+			committeeHTTPClient.GetCommitteeLink(),
+			committeeHTTPClient.ListCommitteeLinks(),
+			committeeHTTPClient.CreateCommitteeLink(),
+			committeeHTTPClient.DeleteCommitteeLink(),
+			committeeHTTPClient.GetCommitteeLinkFolder(),
+			committeeHTTPClient.ListCommitteeLinkFolders(),
+			committeeHTTPClient.CreateCommitteeLinkFolder(),
+			committeeHTTPClient.DeleteCommitteeLinkFolder(),
+			committeeHTTPClient.UploadCommitteeDocument(nil),
+			committeeHTTPClient.GetCommitteeDocument(),
+			committeeHTTPClient.DownloadCommitteeDocument(),
+			committeeHTTPClient.DeleteCommitteeDocument(),
 		)
 	}
 

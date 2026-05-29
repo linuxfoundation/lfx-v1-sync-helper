@@ -76,87 +76,106 @@ func TestShouldDynamoDBUpdate(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name        string
-		newData     map[string]interface{}
+		name         string
+		newData      map[string]interface{}
 		existingData map[string]interface{}
-		expected    bool
+		expected     bool
 	}{
 		// modified_at cases
 		{
-			name:        "new modified_at is newer – should update",
-			newData:     map[string]interface{}{"modified_at": "2024-06-02T10:00:00Z"},
+			name:         "new modified_at is newer – should update",
+			newData:      map[string]interface{}{"modified_at": "2024-06-02T10:00:00Z"},
 			existingData: map[string]interface{}{"modified_at": "2024-06-01T10:00:00Z"},
-			expected:    true,
+			expected:     true,
 		},
 		{
-			name:        "new modified_at is older – should not update",
-			newData:     map[string]interface{}{"modified_at": "2024-06-01T10:00:00Z"},
+			name:         "new modified_at is older – should not update",
+			newData:      map[string]interface{}{"modified_at": "2024-06-01T10:00:00Z"},
 			existingData: map[string]interface{}{"modified_at": "2024-06-02T10:00:00Z"},
-			expected:    false,
+			expected:     false,
 		},
 		{
-			name:        "same modified_at – should not update",
-			newData:     map[string]interface{}{"modified_at": "2024-06-01T10:00:00Z"},
+			name:         "same modified_at – should not update",
+			newData:      map[string]interface{}{"modified_at": "2024-06-01T10:00:00Z"},
 			existingData: map[string]interface{}{"modified_at": "2024-06-01T10:00:00Z"},
-			expected:    false,
+			expected:     false,
 		},
 		// last_modified_at cases (Groups.io tables)
 		{
-			name:        "new last_modified_at is newer – should update",
-			newData:     map[string]interface{}{"last_modified_at": "2024-06-02T10:00:00Z"},
+			name:         "new last_modified_at is newer – should update",
+			newData:      map[string]interface{}{"last_modified_at": "2024-06-02T10:00:00Z"},
 			existingData: map[string]interface{}{"last_modified_at": "2024-06-01T10:00:00Z"},
-			expected:    true,
+			expected:     true,
 		},
 		{
-			name:        "new last_modified_at is older – should not update",
-			newData:     map[string]interface{}{"last_modified_at": "2024-06-01T10:00:00Z"},
+			name:         "new last_modified_at is older – should not update",
+			newData:      map[string]interface{}{"last_modified_at": "2024-06-01T10:00:00Z"},
 			existingData: map[string]interface{}{"last_modified_at": "2024-06-02T10:00:00Z"},
-			expected:    false,
+			expected:     false,
+		},
+		// last_modified_time cases (itx-poll, itx-poll-vote)
+		{
+			name:         "new last_modified_time is newer – should update",
+			newData:      map[string]interface{}{"last_modified_time": "2024-06-02T10:00:00Z"},
+			existingData: map[string]interface{}{"last_modified_time": "2024-06-01T10:00:00Z"},
+			expected:     true,
+		},
+		{
+			name:         "new last_modified_time is older – should not update",
+			newData:      map[string]interface{}{"last_modified_time": "2024-06-01T10:00:00Z"},
+			existingData: map[string]interface{}{"last_modified_time": "2024-06-02T10:00:00Z"},
+			expected:     false,
+		},
+		{
+			name:         "same last_modified_time – should not update",
+			newData:      map[string]interface{}{"last_modified_time": "2024-06-01T10:00:00Z"},
+			existingData: map[string]interface{}{"last_modified_time": "2024-06-01T10:00:00Z"},
+			expected:     false,
 		},
 		// date_modified cases (surveymonkey-surveys)
 		{
-			name:        "new date_modified is newer – should update",
-			newData:     map[string]interface{}{"date_modified": "2024-06-02T10:00:00Z"},
+			name:         "new date_modified is newer – should update",
+			newData:      map[string]interface{}{"date_modified": "2024-06-02T10:00:00Z"},
 			existingData: map[string]interface{}{"date_modified": "2024-06-01T10:00:00Z"},
-			expected:    true,
+			expected:     true,
 		},
 		{
-			name:        "new date_modified is older – should not update",
-			newData:     map[string]interface{}{"date_modified": "2024-06-01T10:00:00Z"},
+			name:         "new date_modified is older – should not update",
+			newData:      map[string]interface{}{"date_modified": "2024-06-01T10:00:00Z"},
 			existingData: map[string]interface{}{"date_modified": "2024-06-02T10:00:00Z"},
-			expected:    false,
+			expected:     false,
 		},
 		{
-			name:        "same date_modified – should not update",
-			newData:     map[string]interface{}{"date_modified": "2024-06-01T10:00:00Z"},
+			name:         "same date_modified – should not update",
+			newData:      map[string]interface{}{"date_modified": "2024-06-01T10:00:00Z"},
 			existingData: map[string]interface{}{"date_modified": "2024-06-01T10:00:00Z"},
-			expected:    false,
+			expected:     false,
 		},
 		// missing timestamp cases
 		{
-			name:        "no timestamp in either – should update",
-			newData:     map[string]interface{}{"title": "survey"},
+			name:         "no timestamp in either – should update",
+			newData:      map[string]interface{}{"title": "survey"},
 			existingData: map[string]interface{}{"title": "old survey"},
-			expected:    true,
+			expected:     true,
 		},
 		{
-			name:        "no timestamp in new data – should update",
-			newData:     map[string]interface{}{"title": "survey"},
+			name:         "no timestamp in new data – should update",
+			newData:      map[string]interface{}{"title": "survey"},
 			existingData: map[string]interface{}{"date_modified": "2024-06-01T10:00:00Z"},
-			expected:    true,
+			expected:     true,
 		},
 		{
-			name:        "no timestamp in existing data – should update",
-			newData:     map[string]interface{}{"date_modified": "2024-06-01T10:00:00Z"},
+			name:         "no timestamp in existing data – should update",
+			newData:      map[string]interface{}{"date_modified": "2024-06-01T10:00:00Z"},
 			existingData: map[string]interface{}{"title": "old survey"},
-			expected:    true,
+			expected:     true,
 		},
 		// unparseable timestamp cases
 		{
-			name:        "unparseable date_modified – should update",
-			newData:     map[string]interface{}{"date_modified": "not-a-date"},
+			name:         "unparseable date_modified – should update",
+			newData:      map[string]interface{}{"date_modified": "not-a-date"},
 			existingData: map[string]interface{}{"date_modified": "also-not-a-date"},
-			expected:    true,
+			expected:     true,
 		},
 	}
 
