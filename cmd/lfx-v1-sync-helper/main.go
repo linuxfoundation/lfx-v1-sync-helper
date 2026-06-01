@@ -60,8 +60,9 @@ func main() {
 	var port = flag.String("p", "", "health checks port")
 	var bind = flag.String("bind", "", "interface to bind on")
 	var doRebuildUserIndexes = flag.Bool("rebuild-user-secondary-indexes", false, "populate user secondary indexes for existing data, then exit")
-	var doBackfillACS = flag.Bool("backfill-acs", false, "backfill ACS user grants to v2 project settings, then exit")
-	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (only applicable with --backfill-acs)")
+	var doBackfillACS = flag.Bool("backfill-acs", false, "backfill ACS user grants to v2 project and org settings (two passes), then exit")
+	var doBackfillACSOrgOnly = flag.Bool("backfill-acs-org", false, "backfill ACS org grants to v2 b2b_org settings only, then exit")
+	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (only applicable with --backfill-acs or --backfill-acs-org)")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -74,7 +75,7 @@ func main() {
 	slog.SetDefault(logger)
 
 	// --rebuild-user-secondary-indexes only needs NATS KV; skip full config and API client init.
-	// --backfill-acs requires full config and API client init.
+	// --backfill-acs and --backfill-acs-org require full config and API client init.
 	var err error
 	if *doRebuildUserIndexes {
 		cfg = LoadReindexConfig()
@@ -260,6 +261,17 @@ func main() {
 			logger.Info("ACS project grants backfill completed successfully")
 		}
 
+		logger.With("dry_run", *dryRun).Info("starting ACS org grants backfill")
+		if err := backfillACSOrgGrants(ctx, *dryRun); err != nil {
+			logger.With(errKey, err).Error("error during ACS org grants backfill")
+			os.Exit(1)
+		}
+		logger.Info("ACS org grants backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --backfill-acs-org flag: run the org grants pass only, then exit.
+	if *doBackfillACSOrgOnly {
 		logger.With("dry_run", *dryRun).Info("starting ACS org grants backfill")
 		if err := backfillACSOrgGrants(ctx, *dryRun); err != nil {
 			logger.With(errKey, err).Error("error during ACS org grants backfill")

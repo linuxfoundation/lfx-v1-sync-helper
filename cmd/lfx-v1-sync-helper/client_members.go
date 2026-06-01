@@ -51,8 +51,9 @@ type b2bOrgSettingsGetResponse struct {
 }
 
 // getB2BOrgSettings fetches the current settings for a b2b_org and returns
-// the settings body and its ETag.  When no settings record exists the service
-// returns 200 with an empty body — this is returned as a non-nil empty struct.
+// the settings body and its ETag. The service always returns 200 — an empty
+// writers/auditors body with an ETag means no settings record exists yet.
+// putB2BOrgSettings handles the first-write case via a 412 retry.
 func getB2BOrgSettings(ctx context.Context, uid string) (*b2bOrgSettingsBody, string, error) {
 	if cfg.MemberServiceURL == nil {
 		return nil, "", fmt.Errorf("MEMBER_SERVICE_URL is not configured")
@@ -87,8 +88,7 @@ func getB2BOrgSettings(ctx context.Context, uid string) (*b2bOrgSettingsBody, st
 		return nil, "", fmt.Errorf("GET /b2b_orgs/%s/settings returned status %d: %s", uid, resp.StatusCode, body)
 	}
 
-	// Empty body means no settings record exists yet. Return empty struct with no
-	// ETag so putB2BOrgSettings omits If-Match and the first write succeeds.
+	// Defensive: treat a truly empty body as no-record (shouldn't occur in practice).
 	if len(bytes.TrimSpace(body)) == 0 {
 		return &b2bOrgSettingsBody{}, "", nil
 	}
@@ -96,35 +96,24 @@ func getB2BOrgSettings(ctx context.Context, uid string) (*b2bOrgSettingsBody, st
 	// The GET response body is the settings object directly (not wrapped under a
 	// "settings" key). Try direct unmarshal first; fall back to the envelope
 	// shape {"settings":{...}} in case the API adds a wrapper in future.
-	// Any valid JSON response (including "{}") means a record exists — keep ETag.
 	var settings b2bOrgSettingsBody
-	hasRecord := false
-	if err := json.Unmarshal(body, &settings); err == nil {
-		hasRecord = true
-	} else {
+	if err := json.Unmarshal(body, &settings); err != nil {
 		var envelope b2bOrgSettingsGetResponse
 		if err := json.Unmarshal(body, &envelope); err != nil {
 			return nil, "", fmt.Errorf("failed to unmarshal settings response: %w", err)
 		}
 		if envelope.Settings != nil {
 			settings = *envelope.Settings
-			hasRecord = true
 		}
 	}
 
-	// When no settings record exists yet the server returns an empty body
-	// with an ETag for the "empty state", but rejects If-Match on the first
-	// PUT ("no settings record exists to match against"). Clear the ETag so
-	// putB2BOrgSettings omits the If-Match header and the first write succeeds.
-	etag := ""
-	if hasRecord {
-		etag = resp.Header.Get("ETag")
-	}
-	return &settings, etag, nil
+	return &settings, resp.Header.Get("ETag"), nil
 }
 
 // putB2BOrgSettings replaces the settings for a b2b_org. ifMatch is the ETag
-// from a preceding GET; pass "" to skip optimistic-locking (not recommended).
+// from a preceding GET; pass "" to skip optimistic-locking. On 412 the server
+// has no settings record yet — the function retries once without If-Match so
+// the PUT acts as a first write (kv.Create on the server side).
 // Returns the updated settings and the new ETag.
 func putB2BOrgSettings(ctx context.Context, uid string, payload *b2bOrgSettingsBody, ifMatch string) (*b2bOrgSettingsBody, string, error) {
 	if cfg.MemberServiceURL == nil {
@@ -163,6 +152,12 @@ func putB2BOrgSettings(ctx context.Context, uid string, payload *b2bOrgSettingsB
 	}
 	if readErr != nil {
 		return nil, "", fmt.Errorf("failed to read PUT settings response: %w", readErr)
+	}
+
+	// 412 with an If-Match header means the server has no settings record yet
+	// ("omit If-Match for first write"). Retry once without it.
+	if resp.StatusCode == http.StatusPreconditionFailed && ifMatch != "" {
+		return putB2BOrgSettings(ctx, uid, payload, "")
 	}
 
 	if resp.StatusCode != http.StatusOK {
