@@ -36,9 +36,6 @@ const (
 	acsOrgRoleNameAdmin  = "company-admin"
 	acsOrgRoleNameViewer = "viewer"
 
-	// kvObjectsStream is the JetStream stream backing the v1-objects KV bucket.
-	kvObjectsStream = "KV_v1-objects"
-
 	// b2bAccountSubject is the NATS subject filter for Salesforce Account entries.
 	b2bAccountSubject = "$KV.v1-objects.salesforce_b2b-Account.*"
 
