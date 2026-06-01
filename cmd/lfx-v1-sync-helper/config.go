@@ -35,6 +35,7 @@ type Config struct {
 	// Service URLs
 	ProjectServiceURL   *url.URL
 	CommitteeServiceURL *url.URL
+	MemberServiceURL    *url.URL // Optional; required only for --backfill-acs org pass
 
 	// NATS configuration
 	NATSURL string
@@ -138,6 +139,7 @@ func parseDurationEnv(name string, def time.Duration) time.Duration {
 func LoadConfig() (*Config, error) {
 	projectServiceURLStr := os.Getenv("PROJECT_SERVICE_URL")
 	committeeServiceURLStr := os.Getenv("COMMITTEE_SERVICE_URL")
+	memberServiceURLStr := os.Getenv("MEMBER_SERVICE_URL")
 	lfxAPIGatewayStr := os.Getenv("LFX_API_GW")
 
 	cfg := &Config{
@@ -255,6 +257,14 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("failed to parse COMMITTEE_SERVICE_URL: %w", err)
 	}
 	cfg.CommitteeServiceURL = committeeServiceURL
+
+	if memberServiceURLStr != "" {
+		memberServiceURL, err := url.Parse(memberServiceURLStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse MEMBER_SERVICE_URL: %w", err)
+		}
+		cfg.MemberServiceURL = memberServiceURL
+	}
 
 	return cfg, nil
 }
