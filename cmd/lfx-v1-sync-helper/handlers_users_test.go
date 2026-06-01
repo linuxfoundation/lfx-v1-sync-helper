@@ -405,6 +405,104 @@ func TestSyncAlternateEmailToAuth0(t *testing.T) {
 	}
 }
 
+// TestExtractUsernameIndex covers the field extraction for the merged_user reindex phase.
+func TestExtractUsernameIndex(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      map[string]any
+		wantKey   string
+		wantValue string
+	}{
+		{
+			name:      "valid username and sfid → index key and sfid",
+			data:      map[string]any{"username__c": "alice", "sfid": "003ABC"},
+			wantKey:   kvKeyUsernamePrefix + usernameToKVKey("alice"),
+			wantValue: "003ABC",
+		},
+		{
+			name:      "username normalization: uppercase folded",
+			data:      map[string]any{"username__c": "Alice", "sfid": "003ABC"},
+			wantKey:   kvKeyUsernamePrefix + usernameToKVKey("alice"),
+			wantValue: "003ABC",
+		},
+		{
+			name: "empty username → skip",
+			data: map[string]any{"username__c": "", "sfid": "003ABC"},
+		},
+		{
+			name: "whitespace-only username → skip",
+			data: map[string]any{"username__c": "   ", "sfid": "003ABC"},
+		},
+		{
+			name: "missing username field → skip",
+			data: map[string]any{"sfid": "003ABC"},
+		},
+		{
+			name: "empty sfid → skip",
+			data: map[string]any{"username__c": "alice", "sfid": ""},
+		},
+		{
+			name: "missing sfid field → skip",
+			data: map[string]any{"username__c": "alice"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotKey, gotVal := extractUsernameIndex(tc.data)
+			if gotKey != tc.wantKey || gotVal != tc.wantValue {
+				t.Errorf("extractUsernameIndex() = (%q, %q), want (%q, %q)", gotKey, gotVal, tc.wantKey, tc.wantValue)
+			}
+		})
+	}
+}
+
+// TestExtractEmailIndex covers the field extraction for the alternate_email reindex phase.
+func TestExtractEmailIndex(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      map[string]any
+		wantKey   string
+		wantValue string
+	}{
+		{
+			name:      "valid email and leadorcontactid → index key and sfid",
+			data:      map[string]any{"alternate_email_address__c": "user@example.com", "leadorcontactid": "003DEF"},
+			wantKey:   kvKeyEmailPrefix + emailToKVKey("user@example.com"),
+			wantValue: "003DEF",
+		},
+		{
+			name:      "email normalization: uppercase folded",
+			data:      map[string]any{"alternate_email_address__c": "User@Example.COM", "leadorcontactid": "003DEF"},
+			wantKey:   kvKeyEmailPrefix + emailToKVKey("user@example.com"),
+			wantValue: "003DEF",
+		},
+		{
+			name: "empty email → skip",
+			data: map[string]any{"alternate_email_address__c": "", "leadorcontactid": "003DEF"},
+		},
+		{
+			name: "missing email field → skip",
+			data: map[string]any{"leadorcontactid": "003DEF"},
+		},
+		{
+			name: "empty leadorcontactid → skip",
+			data: map[string]any{"alternate_email_address__c": "user@example.com", "leadorcontactid": ""},
+		},
+		{
+			name: "missing leadorcontactid field → skip",
+			data: map[string]any{"alternate_email_address__c": "user@example.com"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotKey, gotVal := extractEmailIndex(tc.data)
+			if gotKey != tc.wantKey || gotVal != tc.wantValue {
+				t.Errorf("extractEmailIndex() = (%q, %q), want (%q, %q)", gotKey, gotVal, tc.wantKey, tc.wantValue)
+			}
+		})
+	}
+}
+
 // TestHandleAlternateEmailDelete exercises the soft-delete handler:
 // v1-mapping cleanup, primary-email skip, address fallback behavior, and the
 // retry / drop classifications around the Auth0 unlink call.

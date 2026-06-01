@@ -129,15 +129,21 @@ To populate secondary indexes for all existing records (e.g. after initial deplo
 kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/rebuild-user-secondary-indexes-job.yaml
 ```
 
-This job streams all `merged_user` and `alternate_email` records from the v1 KV bucket, writes the secondary indexes, then exits. The manifest is applied manually — it is not managed by argocd.
+The job runs in two passes per phase (username, then email), then exits. The manifest is applied manually — it is not managed by argocd.
+
+**How it works (history-insensitive two-pass design):**
+
+Pass 1 streams only message *headers* (no bodies) from the `v1-objects` KV bucket using a `HeadersOnly` pull consumer with `DeliverAllPolicy`. This enumerates the set of live subjects without transmitting any record bodies — O(1) consumer creation cost, regardless of how many records are in the stream. Messages with `KV-Operation: DEL` or `PURGE` headers are excluded so deleted records never produce index entries.
+
+Pass 2 iterates the live subject set: for each subject it calls `v1KV.Get` (NATS direct-get, returns latest revision by definition), decodes the record, and writes the derived index entry to `v1-mappings`. This ensures exactly one index entry per record reflecting the current state, regardless of the bucket's `History` setting.
 
 **Tuning knobs** (edit `manifests/rebuild-user-secondary-indexes-job.yaml`, delete the existing Job if running, then re-apply; no rebuild required):
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `REINDEX_PHASE_TIMEOUT` | `45m` | Wall-clock budget per phase (username, then email). Raise to `60m`/`90m` for >3M records. |
-| `REINDEX_NATS_OP_TIMEOUT` | `30s` | Per-op cap on each NATS KV Get/Put. Without this the SDK injects a 5 s default that fires under prod load. |
-| `REINDEX_OP_DELAY` | `1ms` (prod) / `0` (dev) | Per-iteration sleep to cap op-rate on the shared broker. Prevents the reindex pod from saturating NATS and impacting app pod health. |
+| `REINDEX_PHASE_TIMEOUT` | `45m` | Total budget per phase (pass 1 + pass 2 combined). Pass 2 dominates: `~unique-records × (REINDEX_OP_DELAY + RTT)`. Raise to `90m` only for >3M records with `REINDEX_OP_DELAY` > 1ms. |
+| `REINDEX_NATS_OP_TIMEOUT` | `30s` | Per-op cap on each `KV.Get` and `KV.Put`. Without this the SDK injects a 5s default that fires under prod load (2026-04-23 incident). |
+| `REINDEX_OP_DELAY` | `1ms` (prod) / `0` (dev) | Per-iteration sleep between pass-2 writes to cap op-rate on the shared broker. Primary throughput knob: 1ms ≈ 1k ops/s ceiling. |
 
 **Operational guidance:**
 

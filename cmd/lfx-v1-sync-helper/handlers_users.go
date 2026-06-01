@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/vmihailenco/msgpack/v5"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -483,139 +484,262 @@ func updateEmailsList(currentEmails []string, emailSfid string, isDeleted bool) 
 	return currentEmails
 }
 
-// rebuildUserSecondaryIndexes populates secondary indexes for all existing merged_user and alternate_email records.
-// This is a one-time operation triggered by the --rebuild-user-secondary-indexes CLI flag.
-// Note: ListKeysFiltered creates an ephemeral JetStream consumer for each call, which is separate from
-// the durable v1-sync-helper-kv-consumer used for streaming KV changes — both run independently.
-//
-// Deadline strategy (two-tier, all env-configurable — see LoadReindexConfig):
-//   - Phase budget (REINDEX_PHASE_TIMEOUT, default 45m): covers the ListKeysFiltered consumer
-//     creation plus every per-key Get/Put inside that phase. Each phase has its own context so
-//     Phase 1 cannot consume time from Phase 2.
-//   - Per-op cap (REINDEX_NATS_OP_TIMEOUT, default 30s): derived from the phase context for each
-//     individual Get/Put. Without this the NATS SDK's wrapContextWithoutDeadline injects a 5 s
-//     default per call, which fires under prod load and causes slow-consumer overflow on _INBOX.*.
-//   - Op pacer (REINDEX_OP_DELAY, default 0): optional sleep between iterations to cap the
-//     op-rate against the shared broker. The reindex pod and the main app share NATS; an
-//     unthrottled run saturated the broker and tripped app readiness/liveness probes (2026-04-23).
-//     Set to "1ms" in prod; leave at "0" in dev/staging.
-func rebuildUserSecondaryIndexes(ctx context.Context) error {
-	var usernameCount, emailCount, errorCount int
+const (
+	// kvObjectsStream is the JetStream stream backing the v1-objects KV bucket.
+	kvObjectsStream = "KV_v1-objects"
 
-	logger.Info("rebuilding username secondary indexes from merged_user records")
-	userListCtx, userCancel := context.WithTimeout(ctx, cfg.ReindexPhaseTimeout)
-	defer userCancel()
-	userLister, err := v1KV.ListKeysFiltered(userListCtx, v1MergedUserKVPrefix+">")
-	if err != nil {
-		return fmt.Errorf("failed to list merged_user keys: %w", err)
+	// kvObjectsSubjectPrefix is the NATS subject prefix the server prepends to
+	// every KV key stored in the v1-objects bucket. Strip it to recover the key.
+	kvObjectsSubjectPrefix = "$KV.v1-objects."
+
+	// reindexFetchBatchSize and reindexFetchMaxWait mirror the values in
+	// collectProjectSFIDMappings (ingest_acs.go). FetchMaxWait ≤ 10s prevents
+	// the SDK from auto-enabling idle heartbeats over high-latency connections.
+	reindexFetchBatchSize = 512
+	reindexFetchMaxWait   = 5 * time.Second
+
+	// reindexEphemeralInactiveTimeout is the server-side cleanup window for the
+	// ephemeral pull consumer if the client exits before the deferred delete runs.
+	reindexEphemeralInactiveTimeout = 5 * time.Minute
+)
+
+// extractUsernameIndex extracts the secondary index key and value for a
+// merged_user record. Returns ("", "") to signal that the record should be skipped.
+func extractUsernameIndex(data map[string]any) (indexKey, value string) {
+	username, _ := data["username__c"].(string)
+	sfid, _ := data["sfid"].(string)
+	enc := usernameToKVKey(username)
+	if enc == "" || sfid == "" {
+		return "", ""
 	}
-	defer userLister.Stop()
+	return kvKeyUsernamePrefix + enc, sfid
+}
 
-	for key := range userLister.Keys() {
-		if cfg.ReindexOpDelay > 0 {
-			time.Sleep(cfg.ReindexOpDelay)
+// extractEmailIndex extracts the secondary index key and value for an
+// alternate_email__c record. Returns ("", "") to signal that the record should be skipped.
+func extractEmailIndex(data map[string]any) (indexKey, value string) {
+	email, _ := data["alternate_email_address__c"].(string)
+	userSfid, _ := data["leadorcontactid"].(string)
+	enc := emailToKVKey(email)
+	if enc == "" || userSfid == "" {
+		return "", ""
+	}
+	return kvKeyEmailPrefix + enc, userSfid
+}
+
+// streamUserSecondaryIndex rebuilds one class of secondary index (username or
+// email) using a two-pass strategy that is correct regardless of the
+// v1-objects bucket's History setting.
+//
+// # Why two passes
+//
+// With DeliverAllPolicy and History>1 a single-pass consumer receives every
+// retained revision per subject. Processing in order would cause earlier
+// revisions (e.g. an old username) to write stale index entries that the later
+// revision's different indexKey never cleans up. Dev is already at History=2;
+// prod must not be assumed to stay at 1.
+//
+// # Pass 1 — enumerate live subjects (HeadersOnly)
+//
+// An ephemeral pull consumer with HeadersOnly:true streams only message headers,
+// not bodies. This cuts per-message wire cost to ~100 B and avoids decoding work
+// for the N×history messages in the stream. The result is a map[subject]bool
+// that reflects only the latest observed state per subject:
+//
+//   - Normal header message  → subject marked live (true)
+//   - KV-Operation: DEL/PURGE header → subject marked deleted (false)
+//
+// Messages arrive in stream-seq order so the last write for a subject wins.
+//
+// # Pass 2 — fetch latest value per subject and write index
+//
+// For each live subject, v1KV.Get returns the latest revision by definition
+// (NATS direct-get uses last_by_subj). Decode, apply existing skip logic
+// (isdeleted, _sdc_deleted_at), extract the index entry, and Put into mappings.
+//
+// # Deadline strategy (env-configurable via REINDEX_* env vars)
+//
+//   - REINDEX_PHASE_TIMEOUT (default 45m): total budget for pass 1 + pass 2
+//     combined. Pass 2 dominates runtime (~unique-keys × REINDEX_OP_DELAY + RTT).
+//   - REINDEX_NATS_OP_TIMEOUT (default 30s): per-op cap on each KV.Get and Put.
+//     Without this the SDK injects a 5s default (2026-04-23 incident).
+//   - REINDEX_OP_DELAY (default 1ms): inter-iteration sleep to cap op-rate on
+//     the shared broker. Primary throughput knob for prod runs.
+func streamUserSecondaryIndex(
+	ctx context.Context,
+	phaseName string,
+	subjectFilter string,
+	extractIndex func(data map[string]any) (string, string),
+) (written, errors int, err error) {
+	phaseCtx, phaseCancel := context.WithTimeout(ctx, cfg.ReindexPhaseTimeout)
+	defer phaseCancel()
+
+	// ---- Pass 1: enumerate live subjects via HeadersOnly consumer ----
+
+	cons, err := jsContext.CreateConsumer(phaseCtx, kvObjectsStream, jetstream.ConsumerConfig{
+		DeliverPolicy:     jetstream.DeliverAllPolicy, // O(1) creation — no server-side seq scan
+		AckPolicy:         jetstream.AckNonePolicy,
+		FilterSubject:     subjectFilter,
+		HeadersOnly:       true, // server sends headers only; bodies not transmitted
+		MemoryStorage:     true,
+		InactiveThreshold: reindexEphemeralInactiveTimeout,
+	})
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to create enumeration consumer for %s reindex: %w", phaseName, err)
+	}
+	defer func() {
+		if delErr := jsContext.DeleteConsumer(ctx, kvObjectsStream, cons.CachedInfo().Name); delErr != nil {
+			logger.With("error", delErr, "phase", phaseName).Warn("failed to delete ephemeral reindex consumer")
+		}
+	}()
+
+	// liveSubjects tracks latest observed state per subject (true = live).
+	// Messages arrive in stream-seq order, so the last write per subject wins.
+	liveSubjects := make(map[string]bool)
+
+	for {
+		if err := phaseCtx.Err(); err != nil {
+			return 0, 0, fmt.Errorf("%s reindex enumeration timed out after %d subjects: %w", phaseName, len(liveSubjects), err)
 		}
 
-		getCtx, cancelGet := context.WithTimeout(userListCtx, cfg.ReindexNATSOpTimeout)
-		data, exists, err := getV1ObjectData(getCtx, key)
+		batch, fetchErr := cons.Fetch(reindexFetchBatchSize, jetstream.FetchMaxWait(reindexFetchMaxWait))
+		if fetchErr != nil {
+			return 0, 0, fmt.Errorf("fetch error during %s reindex enumeration: %w", phaseName, fetchErr)
+		}
+
+		empty := true
+		for msg := range batch.Messages() {
+			empty = false
+			kvOp := msg.Headers().Get("KV-Operation")
+			if kvOp == "DEL" || kvOp == "PURGE" {
+				liveSubjects[msg.Subject()] = false
+			} else {
+				liveSubjects[msg.Subject()] = true
+			}
+		}
+
+		if batchErr := batch.Error(); batchErr != nil {
+			return 0, 0, fmt.Errorf("batch error during %s reindex enumeration: %w", phaseName, batchErr)
+		}
+
+		if empty {
+			break
+		}
+
+		infoCtx, cancelInfo := context.WithTimeout(ctx, cfg.ReindexNATSOpTimeout)
+		info, infoErr := cons.Info(infoCtx)
+		cancelInfo()
+		if infoErr != nil {
+			return 0, 0, fmt.Errorf("failed to get consumer info during %s reindex enumeration: %w", phaseName, infoErr)
+		}
+		if info.NumPending == 0 {
+			break
+		}
+	}
+
+	logger.With("subjects", len(liveSubjects), "phase", phaseName).Info("reindex enumeration complete; starting index writes")
+
+	// ---- Pass 2: fetch latest value per live subject and write index ----
+
+	for subject, live := range liveSubjects {
+		if !live {
+			continue
+		}
+
+		if err := phaseCtx.Err(); err != nil {
+			return written, errors, fmt.Errorf("%s reindex phase timed out after %d writes: %w", phaseName, written, err)
+		}
+
+		kvKey := strings.TrimPrefix(subject, kvObjectsSubjectPrefix)
+
+		getCtx, cancelGet := context.WithTimeout(ctx, cfg.ReindexNATSOpTimeout)
+		entry, getErr := v1KV.Get(getCtx, kvKey)
 		cancelGet()
-		if err != nil {
-			logger.With("error", err, "key", key).Warn("failed to get merged_user data during reindex")
-			errorCount++
+		if getErr != nil {
+			if getErr == jetstream.ErrKeyNotFound || getErr == jetstream.ErrKeyDeleted {
+				continue
+			}
+			logger.With("error", getErr, "subject", subject, "phase", phaseName).Warn("failed to get latest value during reindex; skipping")
+			errors++
 			continue
 		}
-		if !exists {
+
+		if isTombstonedMapping(entry.Value()) {
 			continue
+		}
+
+		// Decode JSON, fall back to msgpack — mirrors getV1ObjectData in lfx_v1_client.go.
+		var data map[string]any
+		if jsonErr := json.Unmarshal(entry.Value(), &data); jsonErr != nil {
+			if mpErr := msgpack.Unmarshal(entry.Value(), &data); mpErr != nil {
+				logger.With("subject", subject, "phase", phaseName).Warn("failed to decode reindex value; skipping")
+				errors++
+				continue
+			}
 		}
 
 		if isDeleted, ok := data["isdeleted"].(bool); ok && isDeleted {
 			continue
 		}
+		// Mirror getV1ObjectData: skip WAL-based soft deletes (_sdc_deleted_at).
+		if deletedAt, ok := data["_sdc_deleted_at"]; ok {
+			if s, okStr := deletedAt.(string); (okStr && strings.TrimSpace(s) != "") || (!okStr && deletedAt != nil) {
+				continue
+			}
+		}
 
-		username, _ := data["username__c"].(string)
-		sfid, _ := data["sfid"].(string)
-
-		encodedUsername := usernameToKVKey(username)
-		if encodedUsername == "" || sfid == "" {
+		indexKey, value := extractIndex(data)
+		if indexKey == "" {
 			continue
 		}
 
-		indexKey := kvKeyUsernamePrefix + encodedUsername
-		putCtx, cancelPut := context.WithTimeout(userListCtx, cfg.ReindexNATSOpTimeout)
-		_, err = mappingsKV.Put(putCtx, indexKey, []byte(sfid))
+		if cfg.ReindexOpDelay > 0 {
+			time.Sleep(cfg.ReindexOpDelay)
+		}
+
+		putCtx, cancelPut := context.WithTimeout(ctx, cfg.ReindexNATSOpTimeout)
+		_, putErr := mappingsKV.Put(putCtx, indexKey, []byte(value))
 		cancelPut()
-		if err != nil {
-			logger.With("error", err, "key", key, "indexKey", indexKey).Warn("failed to write username index during reindex")
-			errorCount++
+		if putErr != nil {
+			logger.With("error", putErr, "subject", subject, "indexKey", indexKey, "phase", phaseName).Warn("failed to write index during reindex")
+			errors++
 			continue
 		}
-		usernameCount++
-
-		if usernameCount%reindexProgressInterval == 0 {
-			logger.With("count", usernameCount).Info("username reindex progress")
+		written++
+		if written%reindexProgressInterval == 0 {
+			logger.With("count", written, "phase", phaseName).Info("reindex progress")
 		}
 	}
 
-	logger.With("count", usernameCount, "errors", errorCount).Info("completed username secondary index rebuild")
+	return written, errors, nil
+}
+
+// rebuildUserSecondaryIndexes populates secondary indexes for all existing
+// merged_user and alternate_email records. One-time operation triggered by the
+// --rebuild-user-secondary-indexes CLI flag.
+func rebuildUserSecondaryIndexes(ctx context.Context) error {
+	logger.Info("rebuilding username secondary indexes from merged_user records")
+	usernameCount, usernameErrors, err := streamUserSecondaryIndex(
+		ctx, "username",
+		"$KV.v1-objects."+v1MergedUserKVPrefix+">",
+		extractUsernameIndex,
+	)
+	if err != nil {
+		return fmt.Errorf("username phase: %w", err)
+	}
+	logger.With("count", usernameCount, "errors", usernameErrors).Info("completed username secondary index rebuild")
 
 	logger.Info("rebuilding email secondary indexes from alternate_email records")
-	errorCount = 0
-
-	emailListCtx, emailCancel := context.WithTimeout(ctx, cfg.ReindexPhaseTimeout)
-	defer emailCancel()
-	emailLister, err := v1KV.ListKeysFiltered(emailListCtx, v1AlternateEmailKVPrefix+">")
+	emailCount, emailErrors, err := streamUserSecondaryIndex(
+		ctx, "email",
+		"$KV.v1-objects."+v1AlternateEmailKVPrefix+">",
+		extractEmailIndex,
+	)
 	if err != nil {
-		return fmt.Errorf("failed to list alternate_email keys: %w", err)
+		return fmt.Errorf("email phase: %w", err)
 	}
-	defer emailLister.Stop()
+	logger.With("count", emailCount, "errors", emailErrors).Info("completed email secondary index rebuild")
 
-	for key := range emailLister.Keys() {
-		if cfg.ReindexOpDelay > 0 {
-			time.Sleep(cfg.ReindexOpDelay)
-		}
-
-		getCtx, cancelGet := context.WithTimeout(emailListCtx, cfg.ReindexNATSOpTimeout)
-		data, exists, err := getV1ObjectData(getCtx, key)
-		cancelGet()
-		if err != nil {
-			logger.With("error", err, "key", key).Warn("failed to get alternate_email data during reindex")
-			errorCount++
-			continue
-		}
-		if !exists {
-			continue
-		}
-
-		if isDeleted, ok := data["isdeleted"].(bool); ok && isDeleted {
-			continue
-		}
-
-		emailAddr, _ := data["alternate_email_address__c"].(string)
-		userSfid, _ := data["leadorcontactid"].(string)
-
-		encodedEmail := emailToKVKey(emailAddr)
-		if encodedEmail == "" || userSfid == "" {
-			continue
-		}
-
-		indexKey := kvKeyEmailPrefix + encodedEmail
-		putCtx, cancelPut := context.WithTimeout(emailListCtx, cfg.ReindexNATSOpTimeout)
-		_, err = mappingsKV.Put(putCtx, indexKey, []byte(userSfid))
-		cancelPut()
-		if err != nil {
-			logger.With("error", err, "key", key, "indexKey", indexKey).Warn("failed to write email index during reindex")
-			errorCount++
-			continue
-		}
-		emailCount++
-
-		if emailCount%reindexProgressInterval == 0 {
-			logger.With("count", emailCount).Info("email reindex progress")
-		}
-	}
-
-	logger.With("count", emailCount, "errors", errorCount).Info("completed email secondary index rebuild")
 	logger.With("usernameIndexes", usernameCount, "emailIndexes", emailCount).Info("user secondary index rebuild summary")
-
 	return nil
 }
