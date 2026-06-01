@@ -51,9 +51,10 @@ type b2bOrgSettingsGetResponse struct {
 }
 
 // getB2BOrgSettings fetches the current settings for a b2b_org and returns
-// the settings body and its ETag. The service always returns 200 — an empty
-// writers/auditors body with an ETag means no settings record exists yet.
-// putB2BOrgSettings handles the first-write case via a 412 retry.
+// the settings body and its ETag. The service returns 200 even when no
+// settings record exists yet — in that case the body has empty writers/auditors
+// and a non-empty ETag. putB2BOrgSettings handles the first-write case via a
+// 412 retry.
 func getB2BOrgSettings(ctx context.Context, uid string) (*b2bOrgSettingsBody, string, error) {
 	if cfg.MemberServiceURL == nil {
 		return nil, "", fmt.Errorf("MEMBER_SERVICE_URL is not configured")
@@ -154,9 +155,13 @@ func putB2BOrgSettings(ctx context.Context, uid string, payload *b2bOrgSettingsB
 		return nil, "", fmt.Errorf("failed to read PUT settings response: %w", readErr)
 	}
 
-	// 412 with an If-Match header means the server has no settings record yet
-	// ("omit If-Match for first write"). Retry once without it.
-	if resp.StatusCode == http.StatusPreconditionFailed && ifMatch != "" {
+	// 412 with an If-Match header can mean two things:
+	//   (a) no settings record exists yet → server says "omit If-Match for first write"
+	//   (b) genuine ETag mismatch → a concurrent writer already changed the record
+	// Only retry for case (a): check the response body for the specific message.
+	// Retrying for case (b) would silently overwrite the concurrent update.
+	if resp.StatusCode == http.StatusPreconditionFailed && ifMatch != "" &&
+		bytes.Contains(respBody, []byte("no settings record exists")) {
 		return putB2BOrgSettings(ctx, uid, payload, "")
 	}
 

@@ -70,6 +70,11 @@ func main() {
 	}
 	flag.Parse()
 
+	if *doBackfillACS && *doBackfillACSOrgOnly {
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs and --backfill-acs-org are mutually exclusive")
+		os.Exit(1)
+	}
+
 	// Initialize a default logger early so init functions can log errors.
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}))
 	slog.SetDefault(logger)
