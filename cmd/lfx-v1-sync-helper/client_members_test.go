@@ -66,7 +66,7 @@ func TestPutB2BOrgSettings_412Retry(t *testing.T) {
 			name:    "412 with sentinel message retries and succeeds",
 			ifMatch: `"v1"`,
 			handler: func(calls *int) http.HandlerFunc {
-				return func(w http.ResponseWriter, r *http.Request) {
+				return func(w http.ResponseWriter, _ *http.Request) {
 					*calls++
 					if *calls == 1 {
 						w.WriteHeader(http.StatusPreconditionFailed)
@@ -85,7 +85,7 @@ func TestPutB2BOrgSettings_412Retry(t *testing.T) {
 			name:    "412 with different message returns error without retrying",
 			ifMatch: `"v1"`,
 			handler: func(calls *int) http.HandlerFunc {
-				return func(w http.ResponseWriter, r *http.Request) {
+				return func(w http.ResponseWriter, _ *http.Request) {
 					*calls++
 					w.WriteHeader(http.StatusPreconditionFailed)
 					fmt.Fprint(w, `{"message":"etag mismatch"}`)
@@ -100,7 +100,7 @@ func TestPutB2BOrgSettings_412Retry(t *testing.T) {
 			name:    "412 with empty ifMatch does not retry (no infinite loop)",
 			ifMatch: "",
 			handler: func(calls *int) http.HandlerFunc {
-				return func(w http.ResponseWriter, r *http.Request) {
+				return func(w http.ResponseWriter, _ *http.Request) {
 					*calls++
 					w.WriteHeader(http.StatusPreconditionFailed)
 					fmt.Fprintf(w, `{"message":"%s"}`, sentinel)
