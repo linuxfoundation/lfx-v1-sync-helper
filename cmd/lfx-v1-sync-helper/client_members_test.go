@@ -19,7 +19,7 @@ import (
 
 // setupMembersTestGlobals initialises the package-level globals that
 // putB2BOrgSettings depends on (cfg, httpClient, jwtTokenCache with a fake
-// token) and returns a cleanup function that restores the originals.
+// token) and registers a t.Cleanup that restores the originals.
 func setupMembersTestGlobals(t *testing.T) {
 	t.Helper()
 

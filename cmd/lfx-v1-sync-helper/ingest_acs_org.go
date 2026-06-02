@@ -13,8 +13,8 @@ package main
 // are logged for visibility.
 //
 // SFID→UID: as of member-service LFXV2-2049 the b2b_org uid IS the 18-char
-// Salesforce ID. normalizeSFID18 (sfid.go) converts any 15- or 18-char SFID
-// to canonical 18-char form without any network round-trip.
+// Salesforce ID. sfutil.Normalize18 (internal/sfid) converts any 15- or
+// 18-char SFID to canonical 18-char form without any network round-trip.
 
 import (
 	"context"
