@@ -12,9 +12,9 @@ package main
 // lists and never removes existing entries.  "Extra" v2 users not found in ACS
 // are logged for visibility.
 //
-// SFID→UID conversion uses sfuuid.ToUUID — a deterministic pure function that
-// encodes the Salesforce ID into a UUID v8 without any network round-trip.
-// This is the same algorithm member-service uses internally.
+// SFID→UID: as of member-service LFXV2-2049 the b2b_org uid IS the 18-char
+// Salesforce ID. normalizeSFID18 (sfid.go) converts any 15- or 18-char SFID
+// to canonical 18-char form without any network round-trip.
 
 import (
 	"context"
@@ -28,7 +28,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/linuxfoundation/lfx-v2-member-service/pkg/sfuuid"
+	sfutil "github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
 )
 
 const (
@@ -91,9 +91,9 @@ func backfillACSOrgGrants(ctx context.Context, dryRun bool) error {
 	for sfid := range sfids {
 		orgsTotal++
 
-		uid, err := sfuuid.ToUUID(sfid)
+		uid, err := sfutil.Normalize18(sfid)
 		if err != nil {
-			logger.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to compute b2b_org UID from SFID, skipping")
+			logger.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to normalize b2b_org SFID, skipping")
 			errors++
 			continue
 		}
