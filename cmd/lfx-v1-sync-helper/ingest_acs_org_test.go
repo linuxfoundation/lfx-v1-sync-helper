@@ -8,7 +8,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/linuxfoundation/lfx-v2-member-service/pkg/sfuuid"
+	sfutil "github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
 )
 
 // TestNormaliseOrgUserSlice confirms nil and [] are treated as equivalent.
@@ -102,27 +102,39 @@ func TestMergeOrgUsersWithACS(t *testing.T) {
 	})
 }
 
-// TestSfuuidRoundTrip confirms sfuuid.ToUUID produces a stable, non-empty UID
-// for a known Salesforce Account SFID — guards against vendor drift.
-func TestSfuuidRoundTrip(t *testing.T) {
-	// 15-char Salesforce Account SFID (standard base-62 format).
-	const knownSFID = "0014100000Te0OK"
+// TestNormalizeSFID18 confirms sfutil.Normalize18 produces the canonical 18-char
+// SFID, is idempotent, and rejects invalid inputs.
+func TestNormalizeSFID18(t *testing.T) {
+	// 15-char fixture; expected 18-char computed from the checksum algorithm.
+	const id15 = "0014100000Te0OK"
+	const want18 = "0014100000Te0OKAAZ"
 
-	uid1, err := sfuuid.ToUUID(knownSFID)
+	got, err := sfutil.Normalize18(id15)
 	if err != nil {
-		t.Fatalf("sfuuid.ToUUID(%q) error: %v", knownSFID, err)
+		t.Fatalf("sfutil.Normalize18(%q) error: %v", id15, err)
 	}
-	if uid1 == "" {
-		t.Fatal("sfuuid.ToUUID returned empty UID")
+	if got != want18 {
+		t.Fatalf("sfutil.Normalize18(%q) = %q, want %q", id15, got, want18)
 	}
 
-	// Determinism check.
-	uid2, err := sfuuid.ToUUID(knownSFID)
+	// Idempotency: 18-char input returns the same 18-char output.
+	got2, err := sfutil.Normalize18(want18)
 	if err != nil {
-		t.Fatalf("sfuuid.ToUUID(%q) second call error: %v", knownSFID, err)
+		t.Fatalf("sfutil.Normalize18(%q) (idempotency) error: %v", want18, err)
 	}
-	if uid1 != uid2 {
-		t.Fatalf("sfuuid.ToUUID not deterministic: %q != %q", uid1, uid2)
+	if got2 != want18 {
+		t.Fatalf("sfutil.Normalize18 not idempotent: %q != %q", got2, want18)
+	}
+
+	// Error cases.
+	if _, err := sfutil.Normalize18(""); err == nil {
+		t.Fatal("expected error for empty input")
+	}
+	if _, err := sfutil.Normalize18("tooshort"); err == nil {
+		t.Fatal("expected error for too-short input")
+	}
+	if _, err := sfutil.Normalize18("invalid!chars!!"); err == nil {
+		t.Fatal("expected error for invalid chars")
 	}
 }
 

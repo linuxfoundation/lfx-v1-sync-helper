@@ -72,7 +72,7 @@ func main() {
 
 	if *doBackfillACS && *doBackfillACSOrgOnly {
 		fmt.Fprintln(os.Stderr, "error: --backfill-acs and --backfill-acs-org are mutually exclusive")
-		os.Exit(1)
+		os.Exit(2)
 	}
 
 	// Initialize a default logger early so init functions can log errors.
