@@ -198,38 +198,72 @@ func collectOrgAccountSFIDs(ctx context.Context) (map[string]struct{}, error) {
 
 	sfids := make(map[string]struct{}, len(latest))
 	for sfid, data := range latest {
-		if len(data) == 0 {
-			continue
-		}
-		// Decode into map[string]any. Both Meltano (tap-postgres) and the WAL
-		// ingester preserve the original Salesforce Pascal-case field names for
-		// this table ("IsDeleted", "IsMember__c") — confirmed by prod inspection.
-		var raw map[string]any
-		if jsonErr := json.Unmarshal(data, &raw); jsonErr != nil {
-			if mpErr := msgpack.Unmarshal(data, &raw); mpErr != nil {
-				logger.With("sfid", sfid, "json_error", jsonErr, "msgpack_error", mpErr).
-					WarnContext(ctx, "failed to decode org account record, skipping")
-				continue
-			}
-		}
-		// Missing IsDeleted is treated as not deleted — intentional.
-		if isDeleted, ok := raw["IsDeleted"].(bool); ok && isDeleted {
-			continue
-		}
-		isMember, ok := raw["IsMember__c"].(bool)
-		if !ok {
-			if raw["IsMember__c"] != nil {
-				logger.With("sfid", sfid).WarnContext(ctx, "IsMember__c is not bool, skipping")
+		live, err := isLiveMemberOrgAccount(data)
+		if err != nil {
+			if de, ok := err.(*orgDecodeError); ok {
+				logger.With("sfid", sfid, errKey, de.json, "msgpack_error", de.msgpack).WarnContext(ctx, "failed to decode org account record, skipping")
+			} else {
+				logger.With("sfid", sfid, errKey, err).WarnContext(ctx, "failed to classify org account record, skipping")
 			}
 			continue
 		}
-		if !isMember {
+		if !live {
 			continue
 		}
 		sfids[sfid] = struct{}{}
 	}
 
 	return sfids, nil
+}
+
+// orgDecodeError carries both JSON and msgpack decode failures so the caller
+// can log them as separate structured fields.
+type orgDecodeError struct{ json, msgpack error }
+
+func (e *orgDecodeError) Error() string {
+	return fmt.Sprintf("json: %v; msgpack: %v", e.json, e.msgpack)
+}
+
+// isLiveMemberOrgAccount reports whether data (JSON or msgpack) represents a
+// live LF-member b2b-Account org eligible for ACS backfill.
+// Returns (false, non-nil error) for decode failures or unexpected field types.
+// Returns (false, nil) for records that are deleted or not LF members.
+func isLiveMemberOrgAccount(data []byte) (bool, error) {
+	if len(data) == 0 {
+		return false, nil
+	}
+	var raw map[string]any
+	if jsonErr := json.Unmarshal(data, &raw); jsonErr != nil {
+		if mpErr := msgpack.Unmarshal(data, &raw); mpErr != nil {
+			return false, &orgDecodeError{json: jsonErr, msgpack: mpErr}
+		}
+	}
+	// Missing IsDeleted → not deleted (intentional). Non-bool → fail closed.
+	if v, exists := raw["IsDeleted"]; exists && v != nil {
+		isDeleted, ok := v.(bool)
+		if !ok {
+			return false, fmt.Errorf("IsDeleted is not bool: %T", v)
+		}
+		if isDeleted {
+			return false, nil
+		}
+	}
+	// WAL/DynamoDB soft-deletes add _sdc_deleted_at to the preserved prior
+	// image while IsDeleted stays false — mirror getV1ObjectData (lfx_v1_client.go:1202).
+	if deletedAt, ok := raw["_sdc_deleted_at"]; ok {
+		if s, isStr := deletedAt.(string); (isStr && strings.TrimSpace(s) != "") || (!isStr && deletedAt != nil) {
+			return false, nil
+		}
+	}
+	// IsMember__c must be explicitly true. Non-bool is an unexpected type.
+	isMember, ok := raw["IsMember__c"].(bool)
+	if !ok {
+		if raw["IsMember__c"] != nil {
+			return false, fmt.Errorf("IsMember__c is not bool: %T", raw["IsMember__c"])
+		}
+		return false, nil
+	}
+	return isMember, nil
 }
 
 // fetchACSOrgGrantsByRole calls the ACS /grantusers endpoint for a single org

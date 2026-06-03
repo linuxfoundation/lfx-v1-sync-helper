@@ -6,9 +6,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	sfutil "github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // TestNormaliseOrgUserSlice confirms nil and [] are treated as equivalent.
@@ -135,6 +137,99 @@ func TestNormalizeSFID18(t *testing.T) {
 	}
 	if _, err := sfutil.Normalize18("invalid!chars!!"); err == nil {
 		t.Fatal("expected error for invalid chars")
+	}
+}
+
+// TestIsLiveMemberOrgAccount covers the decode + deletion + membership filter path.
+func TestIsLiveMemberOrgAccount(t *testing.T) {
+	mustJSON := func(v any) []byte {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		return b
+	}
+	mustMsgpack := func(v any) []byte {
+		b, err := msgpack.Marshal(v)
+		if err != nil {
+			t.Fatalf("msgpack.Marshal: %v", err)
+		}
+		return b
+	}
+
+	tests := []struct {
+		name    string
+		data    []byte
+		want    bool
+		wantErr bool
+	}{
+		{name: "nil payload", data: nil, want: false},
+		{name: "empty payload", data: []byte{}, want: false},
+		{
+			name: "live member org (JSON)",
+			data: mustJSON(map[string]any{"IsDeleted": false, "IsMember__c": true}),
+			want: true,
+		},
+		{
+			name: "live member org (msgpack)",
+			data: mustMsgpack(map[string]any{"IsDeleted": false, "IsMember__c": true}),
+			want: true,
+		},
+		{
+			name: "IsDeleted=true",
+			data: mustJSON(map[string]any{"IsDeleted": true, "IsMember__c": true}),
+			want: false,
+		},
+		{
+			name: "IsMember__c=false",
+			data: mustJSON(map[string]any{"IsDeleted": false, "IsMember__c": false}),
+			want: false,
+		},
+		{
+			name: "IsMember__c missing",
+			data: mustJSON(map[string]any{"IsDeleted": false}),
+			want: false,
+		},
+		{
+			name: "_sdc_deleted_at set (WAL soft-delete)",
+			data: mustJSON(map[string]any{"IsDeleted": false, "IsMember__c": true, "_sdc_deleted_at": "2026-01-01T00:00:00Z"}),
+			want: false,
+		},
+		{
+			name: "_sdc_deleted_at empty string (not deleted)",
+			data: mustJSON(map[string]any{"IsDeleted": false, "IsMember__c": true, "_sdc_deleted_at": ""}),
+			want: true,
+		},
+		{
+			name:    "IsDeleted not bool",
+			data:    mustJSON(map[string]any{"IsDeleted": "yes", "IsMember__c": true}),
+			want:    false,
+			wantErr: true,
+		},
+		{
+			name:    "IsMember__c not bool",
+			data:    mustJSON(map[string]any{"IsDeleted": false, "IsMember__c": "yes"}),
+			want:    false,
+			wantErr: true,
+		},
+		{
+			name:    "decode failure",
+			data:    []byte("not-json-or-msgpack"),
+			want:    false,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := isLiveMemberOrgAccount(tt.data)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
