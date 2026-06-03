@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/vmihailenco/msgpack/v5"
 
 	sfutil "github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
 )
@@ -47,13 +48,6 @@ const (
 type acsOrgGrantsByRole struct {
 	Writers []acsGrantUser
 	Viewers []acsGrantUser
-}
-
-// b2bAccountRecord is the minimal set of fields parsed from each v1-objects
-// KV value to decide whether to include the org in the backfill.
-type b2bAccountRecord struct {
-	IsDeleted bool  `json:"IsDeleted"`
-	IsMember  *bool `json:"IsMember__c"`
 }
 
 // backfillACSOrgGrants iterates all known salesforce_b2b-Account SFIDs from
@@ -191,39 +185,85 @@ func collectOrgAccountSFIDs(ctx context.Context) (map[string]struct{}, error) {
 			return nil, fmt.Errorf("batch error reading org account SFIDs: %w", err)
 		}
 
+		// An empty batch means the server has no more matching messages for this
+		// consumer. cons.Info(ctx) is intentionally omitted here: on KV_v1-objects
+		// (52M+ sequences) the JetStream API call reliably times out under prod load
+		// within the 5 s SDK default, aborting the collection. The empty-batch
+		// signal is sufficient for correctness — worst case is one extra
+		// FetchMaxWait(5 s) at end-of-stream.
 		if empty {
-			break
-		}
-
-		info, err := cons.Info(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get consumer info: %w", err)
-		}
-		if info.NumPending == 0 {
 			break
 		}
 	}
 
 	sfids := make(map[string]struct{}, len(latest))
 	for sfid, data := range latest {
-		if len(data) == 0 {
+		live, err := isLiveMemberOrgAccount(data)
+		if err != nil {
+			if de, ok := err.(*orgDecodeError); ok {
+				logger.With("sfid", sfid, errKey, de.json, "msgpack_error", de.msgpack).WarnContext(ctx, "failed to decode org account record, skipping")
+			} else {
+				logger.With("sfid", sfid, errKey, err).WarnContext(ctx, "failed to classify org account record, skipping")
+			}
 			continue
 		}
-		var rec b2bAccountRecord
-		if err := json.Unmarshal(data, &rec); err != nil {
-			logger.With("sfid", sfid).WarnContext(ctx, "failed to parse b2bAccountRecord, skipping")
-			continue
-		}
-		if rec.IsDeleted {
-			continue
-		}
-		if rec.IsMember == nil || !*rec.IsMember {
+		if !live {
 			continue
 		}
 		sfids[sfid] = struct{}{}
 	}
 
 	return sfids, nil
+}
+
+// orgDecodeError carries both JSON and msgpack decode failures so the caller
+// can log them as separate structured fields.
+type orgDecodeError struct{ json, msgpack error }
+
+func (e *orgDecodeError) Error() string {
+	return fmt.Sprintf("json: %v; msgpack: %v", e.json, e.msgpack)
+}
+
+// isLiveMemberOrgAccount reports whether data (JSON or msgpack) represents a
+// live LF-member b2b-Account org eligible for ACS backfill.
+// Returns (false, non-nil error) for decode failures or unexpected field types.
+// Returns (false, nil) for records that are deleted or not LF members.
+func isLiveMemberOrgAccount(data []byte) (bool, error) {
+	if len(data) == 0 {
+		return false, nil
+	}
+	var raw map[string]any
+	if jsonErr := json.Unmarshal(data, &raw); jsonErr != nil {
+		if mpErr := msgpack.Unmarshal(data, &raw); mpErr != nil {
+			return false, &orgDecodeError{json: jsonErr, msgpack: mpErr}
+		}
+	}
+	// Missing IsDeleted → not deleted (intentional). Non-bool → fail closed.
+	if v, exists := raw["IsDeleted"]; exists && v != nil {
+		isDeleted, ok := v.(bool)
+		if !ok {
+			return false, fmt.Errorf("IsDeleted is not bool: %T", v)
+		}
+		if isDeleted {
+			return false, nil
+		}
+	}
+	// WAL/DynamoDB soft-deletes add _sdc_deleted_at to the preserved prior
+	// image while IsDeleted stays false — mirror getV1ObjectData (lfx_v1_client.go:1202).
+	if deletedAt, ok := raw["_sdc_deleted_at"]; ok {
+		if s, isStr := deletedAt.(string); (isStr && strings.TrimSpace(s) != "") || (!isStr && deletedAt != nil) {
+			return false, nil
+		}
+	}
+	// IsMember__c must be explicitly true. Non-bool is an unexpected type.
+	isMember, ok := raw["IsMember__c"].(bool)
+	if !ok {
+		if raw["IsMember__c"] != nil {
+			return false, fmt.Errorf("IsMember__c is not bool: %T", raw["IsMember__c"])
+		}
+		return false, nil
+	}
+	return isMember, nil
 }
 
 // fetchACSOrgGrantsByRole calls the ACS /grantusers endpoint for a single org
