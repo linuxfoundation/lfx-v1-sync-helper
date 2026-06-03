@@ -44,10 +44,31 @@ const (
 	b2bAccountSubjectPrefix = "$KV.v1-objects.salesforce_b2b-Account."
 )
 
-// acsOrgGrantsByRole groups ACS usernames by their role for a single org.
+// acsOrgGrantUser is the rich per-user shape returned by the ACS /grantusers
+// endpoint for the org backfill.  The shared acsGrantUser (ingest_acs.go) only
+// parses username+roles; the org path also needs email, name, and avatar so it
+// uses its own struct.  acsGrantObjectRole and acsListMetadata are reused from
+// ingest_acs.go unchanged.
+type acsOrgGrantUser struct {
+	Username  string               `json:"username"`
+	Email     string               `json:"email"`
+	FirstName string               `json:"first_name"`
+	LastName  string               `json:"last_name"`
+	LogoURL   string               `json:"logo_url"`
+	Roles     []acsGrantObjectRole `json:"roles"`
+}
+
+// acsOrgGrantUsersResponse is the envelope returned by GET /grantusers for the
+// org backfill.
+type acsOrgGrantUsersResponse struct {
+	Data     []acsOrgGrantUser `json:"data"`
+	Metadata acsListMetadata   `json:"metadata"`
+}
+
+// acsOrgGrantsByRole groups rich ACS users by their role for a single org.
 type acsOrgGrantsByRole struct {
-	Writers []acsGrantUser
-	Viewers []acsGrantUser
+	Writers []acsOrgGrantUser
+	Viewers []acsOrgGrantUser
 }
 
 // backfillACSOrgGrants iterates all known salesforce_b2b-Account SFIDs from
@@ -274,7 +295,7 @@ func fetchACSOrgGrantsByRole(ctx context.Context, orgSFID string) (*acsOrgGrants
 
 	var (
 		offset   int64
-		allUsers []acsGrantUser
+		allUsers []acsOrgGrantUser
 	)
 
 	for {
@@ -306,7 +327,7 @@ func fetchACSOrgGrantsByRole(ctx context.Context, orgSFID string) (*acsOrgGrants
 			return nil, fmt.Errorf("ACS /grantusers returned status %d for org %s: %s", resp.StatusCode, orgSFID, body)
 		}
 
-		var page acsGrantUsersResponse
+		var page acsOrgGrantUsersResponse
 		if err := json.Unmarshal(body, &page); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal ACS org /grantusers response: %w", err)
 		}
@@ -337,7 +358,7 @@ func fetchACSOrgGrantsByRole(ctx context.Context, orgSFID string) (*acsOrgGrants
 // backfillOrgSettings reads the current b2b_org settings, merges ACS grants
 // additively, and PUTs if there are any new entries.
 // Returns (writersAdded, auditorsAdded, changed, error).
-func backfillOrgSettings(ctx context.Context, sfid, uid string, acsWriters, acsViewers []acsGrantUser, dryRun bool) (int, int, bool, error) {
+func backfillOrgSettings(ctx context.Context, sfid, uid string, acsWriters, acsViewers []acsOrgGrantUser, dryRun bool) (int, int, bool, error) {
 	current, etag, err := getB2BOrgSettings(ctx, uid)
 	if err != nil {
 		return 0, 0, false, fmt.Errorf("failed to GET org settings: %w", err)
@@ -408,6 +429,15 @@ func normaliseOrgUserSlice(s []*b2bOrgUser) []*b2bOrgUser {
 	return s
 }
 
+// buildFullName joins first and last name, trimming whitespace.
+// Returns nil when both are blank so callers can use a nil-check as "not set".
+func buildFullName(first, last string) *string {
+	if name := strings.TrimSpace(first + " " + last); name != "" {
+		return &name
+	}
+	return nil
+}
+
 // mergeOrgUsersWithACS builds a merged []*b2bOrgUser by unioning the existing
 // v2 list with the ACS user list.  The merge is additive-only.  Users already
 // present in v2 but not in ACS are logged as "extra" values.
@@ -415,7 +445,7 @@ func normaliseOrgUserSlice(s []*b2bOrgUser) []*b2bOrgUser {
 func mergeOrgUsersWithACS(
 	ctx context.Context,
 	existing []*b2bOrgUser,
-	acsUsers []acsGrantUser,
+	acsUsers []acsOrgGrantUser,
 	field, sfid, uid string,
 ) ([]*b2bOrgUser, int) {
 	// Index existing v2 users by auth sub (username).
@@ -467,13 +497,20 @@ func mergeOrgUsersWithACS(
 		if len(field) > 1 {
 			invitedAs = field[:len(field)-1] // "writers" → "writer", "auditors" → "auditor"
 		}
-		entry := &b2bOrgUser{
-			Email:     u.Username + "@placeholder.invalid",
-			Username:  &authSub,
-			InvitedAs: invitedAs,
+		entry := &b2bOrgUser{Username: &authSub, InvitedAs: invitedAs}
+
+		// Primary: use fields returned directly by the ACS /grantusers endpoint.
+		if u.Email != "" {
+			entry.Email = u.Email
+		}
+		entry.Name = buildFullName(u.FirstName, u.LastName)
+		if u.LogoURL != "" {
+			logo := u.LogoURL
+			entry.Avatar = &logo
 		}
 
-		// Attempt v1 user lookup for email/name enrichment (skipped when v1 client not init'd).
+		// Fallback: v1 KV lookup re-canonicalises the auth sub and fills any
+		// fields the endpoint omitted (skipped when v1 client is not init'd).
 		if v1HTTPClient != nil {
 			if v1User, _ := lookupUserByUsername(ctx, u.Username); v1User != nil {
 				authSub = mapUsernameToAuthSub(v1User.Username)
@@ -482,13 +519,29 @@ func mergeOrgUsersWithACS(
 					continue
 				}
 				entry.Username = &authSub
-				if v1User.Email != "" {
+				if entry.Email == "" && v1User.Email != "" {
 					entry.Email = v1User.Email
 				}
-				if name := strings.TrimSpace(v1User.FirstName + " " + v1User.LastName); name != "" {
-					entry.Name = &name
+				if entry.Name == nil {
+					entry.Name = buildFullName(v1User.FirstName, v1User.LastName)
+				}
+				if entry.Avatar == nil && v1User.Avatar != "" {
+					av := v1User.Avatar
+					entry.Avatar = &av
 				}
 			}
+		}
+
+		// No email from the endpoint or the KV lookup — skip entirely.
+		// Placeholder addresses (username@placeholder.invalid) are never written.
+		if entry.Email == "" {
+			logger.With(
+				"username", u.Username,
+				"field", field,
+				"sfid", sfid,
+				"uid", uid,
+			).InfoContext(ctx, "skipping ACS org user with no resolvable email")
+			continue
 		}
 
 		merged = append(merged, entry)
