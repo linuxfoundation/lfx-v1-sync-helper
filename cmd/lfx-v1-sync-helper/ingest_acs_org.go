@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/vmihailenco/msgpack/v5"
 
 	sfutil "github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
 )
@@ -191,15 +192,13 @@ func collectOrgAccountSFIDs(ctx context.Context) (map[string]struct{}, error) {
 			return nil, fmt.Errorf("batch error reading org account SFIDs: %w", err)
 		}
 
+		// An empty batch means the server has no more matching messages for this
+		// consumer. cons.Info(ctx) is intentionally omitted here: on KV_v1-objects
+		// (52M+ sequences) the JetStream API call reliably times out under prod load
+		// within the 5 s SDK default, aborting the collection. The empty-batch
+		// signal is sufficient for correctness — worst case is one extra
+		// FetchMaxWait(5 s) at end-of-stream.
 		if empty {
-			break
-		}
-
-		info, err := cons.Info(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get consumer info: %w", err)
-		}
-		if info.NumPending == 0 {
 			break
 		}
 	}
@@ -210,9 +209,11 @@ func collectOrgAccountSFIDs(ctx context.Context) (map[string]struct{}, error) {
 			continue
 		}
 		var rec b2bAccountRecord
-		if err := json.Unmarshal(data, &rec); err != nil {
-			logger.With("sfid", sfid).WarnContext(ctx, "failed to parse b2bAccountRecord, skipping")
-			continue
+		if jsonErr := json.Unmarshal(data, &rec); jsonErr != nil {
+			if mpErr := msgpack.Unmarshal(data, &rec); mpErr != nil {
+				logger.With("sfid", sfid).WarnContext(ctx, "failed to parse b2bAccountRecord, skipping")
+				continue
+			}
 		}
 		if rec.IsDeleted {
 			continue
