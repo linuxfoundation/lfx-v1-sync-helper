@@ -50,13 +50,6 @@ type acsOrgGrantsByRole struct {
 	Viewers []acsGrantUser
 }
 
-// b2bAccountRecord is the minimal set of fields parsed from each v1-objects
-// KV value to decide whether to include the org in the backfill.
-type b2bAccountRecord struct {
-	IsDeleted bool  `json:"IsDeleted"`
-	IsMember  *bool `json:"IsMember__c"`
-}
-
 // backfillACSOrgGrants iterates all known salesforce_b2b-Account SFIDs from
 // the v1-objects KV bucket and, for each live member org, fetches ACS grant
 // data then additively merges writers and auditors into the v2 b2b_org
@@ -208,17 +201,20 @@ func collectOrgAccountSFIDs(ctx context.Context) (map[string]struct{}, error) {
 		if len(data) == 0 {
 			continue
 		}
-		var rec b2bAccountRecord
-		if jsonErr := json.Unmarshal(data, &rec); jsonErr != nil {
-			if mpErr := msgpack.Unmarshal(data, &rec); mpErr != nil {
-				logger.With("sfid", sfid).WarnContext(ctx, "failed to parse b2bAccountRecord, skipping")
+		// Decode into map[string]any to handle both JSON and msgpack-encoded
+		// records. Salesforce field names are preserved as-is by Meltano
+		// ("IsDeleted", "IsMember__c") — confirmed by prod field inspection.
+		var raw map[string]any
+		if jsonErr := json.Unmarshal(data, &raw); jsonErr != nil {
+			if mpErr := msgpack.Unmarshal(data, &raw); mpErr != nil {
+				logger.With("sfid", sfid).WarnContext(ctx, "failed to decode org account record, skipping")
 				continue
 			}
 		}
-		if rec.IsDeleted {
+		if isDeleted, ok := raw["IsDeleted"].(bool); ok && isDeleted {
 			continue
 		}
-		if rec.IsMember == nil || !*rec.IsMember {
+		if isMember, ok := raw["IsMember__c"].(bool); !ok || !isMember {
 			continue
 		}
 		sfids[sfid] = struct{}{}
