@@ -201,20 +201,29 @@ func collectOrgAccountSFIDs(ctx context.Context) (map[string]struct{}, error) {
 		if len(data) == 0 {
 			continue
 		}
-		// Decode into map[string]any to handle both JSON and msgpack-encoded
-		// records. Salesforce field names are preserved as-is by Meltano
-		// ("IsDeleted", "IsMember__c") — confirmed by prod field inspection.
+		// Decode into map[string]any. Both Meltano (tap-postgres) and the WAL
+		// ingester preserve the original Salesforce Pascal-case field names for
+		// this table ("IsDeleted", "IsMember__c") — confirmed by prod inspection.
 		var raw map[string]any
 		if jsonErr := json.Unmarshal(data, &raw); jsonErr != nil {
 			if mpErr := msgpack.Unmarshal(data, &raw); mpErr != nil {
-				logger.With("sfid", sfid).WarnContext(ctx, "failed to decode org account record, skipping")
+				logger.With("sfid", sfid, "json_error", jsonErr, "msgpack_error", mpErr).
+					WarnContext(ctx, "failed to decode org account record, skipping")
 				continue
 			}
 		}
+		// Missing IsDeleted is treated as not deleted — intentional.
 		if isDeleted, ok := raw["IsDeleted"].(bool); ok && isDeleted {
 			continue
 		}
-		if isMember, ok := raw["IsMember__c"].(bool); !ok || !isMember {
+		isMember, ok := raw["IsMember__c"].(bool)
+		if !ok {
+			if raw["IsMember__c"] != nil {
+				logger.With("sfid", sfid).WarnContext(ctx, "IsMember__c is not bool, skipping")
+			}
+			continue
+		}
+		if !isMember {
 			continue
 		}
 		sfids[sfid] = struct{}{}
