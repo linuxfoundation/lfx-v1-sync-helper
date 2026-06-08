@@ -40,8 +40,8 @@ func TestMergeOrgUsersWithACS(t *testing.T) {
 	})
 
 	t.Run("ACS user already in v2 is not duplicated", func(t *testing.T) {
-		authSub := mapUsernameToAuthSub("alice")
-		existing := []*b2bOrgUser{{Username: &authSub, Email: "alice@example.com", InvitedAs: "writer"}}
+		username := "alice"
+		existing := []*b2bOrgUser{{Username: &username, Email: "alice@example.com", InvitedAs: "writer"}}
 		merged, added := mergeOrgUsersWithACS(ctx, existing, []acsOrgGrantUser{{Username: "alice", Email: "alice@example.com"}}, "writers", "sfid1", "uid1")
 		if added != 0 {
 			t.Fatalf("want 0 added (already present), got %d", added)
@@ -127,8 +127,8 @@ func TestMergeOrgUsersWithACS(t *testing.T) {
 		}
 
 		// A non-nil existing slice that already contains alice must not duplicate her.
-		authSub := mapUsernameToAuthSub("alice")
-		existing := []*b2bOrgUser{{Username: &authSub, Email: "alice@example.com", InvitedAs: "writer"}}
+		username := "alice"
+		existing := []*b2bOrgUser{{Username: &username, Email: "alice@example.com", InvitedAs: "writer"}}
 		merged, added := mergeOrgUsersWithACS(ctx, existing, []acsOrgGrantUser{{Username: "alice", Email: "alice@example.com"}}, "writers", "sfid1", "uid1")
 		if added != 0 {
 			t.Fatalf("alice already exists: expected 0 added, got %d", added)
@@ -271,10 +271,9 @@ func TestIsLiveMemberOrgAccount(t *testing.T) {
 // helpers
 
 func makeOrgUser(username, invitedAs string) *b2bOrgUser {
-	authSub := mapUsernameToAuthSub(username)
 	return &b2bOrgUser{
 		Email:     username + "@example.com",
-		Username:  &authSub,
+		Username:  &username,
 		InvitedAs: invitedAs,
 	}
 }

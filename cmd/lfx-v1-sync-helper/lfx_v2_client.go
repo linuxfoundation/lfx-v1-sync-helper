@@ -322,13 +322,12 @@ func generateCachedJWTToken(ctx context.Context, audience string, v1Principal st
 //
 // This function implements a dual authentication strategy:
 //  1. User Impersonation: If v1Principal is provided and can be looked up, the JWT will impersonate that user
-//     with principal=auth0|{userID}, sub=auth0|{userID}, and email (if available)
+//     with principal and sub set to the LFX username, and email (if available)
 //  2. Fallback Client: If no v1Principal is provided or lookup fails, uses v1_sync_helper client credentials
 //     with principal="v1_sync_helper@clients" and sub="v1_sync_helper"
 //
 // The impersonation approach allows v1 sync operations to be attributed to the actual
 // user who made the changes in v1, rather than a generic service account.
-// Usernames are mapped to Auth0 "sub" format using mapUsernameToAuthSub().
 func generateJWTToken(ctx context.Context, audience string, v1Principal string) (string, error) {
 	now := time.Now()
 
@@ -361,8 +360,7 @@ func generateJWTToken(ctx context.Context, audience string, v1Principal string) 
 			logger.With("platform_id", v1Principal).WarnContext(ctx, "user has empty username, falling back to service account")
 			principal = jwtClientID + "@clients"
 		} else {
-			// Map username to Auth0 "sub" format for v2 compatibility.
-			principal = mapUsernameToAuthSub(user.Username)
+			principal = user.Username
 			email = user.Email
 			logger.With("username", user.Username, "principal", principal, "email", email, "audience", audience).Debug("generating JWT token with user impersonation")
 		}

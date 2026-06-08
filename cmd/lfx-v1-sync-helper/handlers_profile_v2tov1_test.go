@@ -8,6 +8,49 @@ import (
 	"testing"
 )
 
+func TestResolveV1UsernameFromV2UserID(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:  "plain LFX username",
+			input: "alice",
+			want:  "alice",
+		},
+		{
+			name:  "legacy auth0-prefixed username",
+			input: "auth0|alice",
+			want:  "alice",
+		},
+		{
+			name:    "empty input",
+			input:   "",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveV1UsernameFromV2UserID(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("resolveV1UsernameFromV2UserID(%q) = %q, nil; want error", tc.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveV1UsernameFromV2UserID(%q) unexpected error: %v", tc.input, err)
+			}
+			if got != tc.want {
+				t.Errorf("resolveV1UsernameFromV2UserID(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestExtractAuth0UserIDSuffix(t *testing.T) {
 	tests := []struct {
 		name    string

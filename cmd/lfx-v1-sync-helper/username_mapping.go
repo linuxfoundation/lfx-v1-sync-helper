@@ -4,10 +4,10 @@
 // The lfx-v1-sync-helper service.
 package main
 
-// Username mapping utility for converting usernames to Auth0 "sub" format.
+// Username mapping utility for resolving Auth0 Management API user IDs.
 //
-// This file handles the conversion of usernames to the "sub" claim format
-// expected by v2 services, which uses "auth0|{ldap exported safe ID}" format.
+// v2 services now accept LFX usernames directly. This mapping remains for
+// v1-side Auth0 profile sync (Management API calls in handlers_users.go).
 
 import (
 	"crypto/sha512"
@@ -22,9 +22,8 @@ var (
 	hexUserRE  = regexp.MustCompile(`^[0-9a-f]{24,60}$`)
 )
 
-// mapUsernameToAuthSub converts a username to the Auth0 "sub" format expected by v2 services.
-// This replaces both "username" and "principal" claims in JWT impersonation and usernames
-// sent in committee-member payloads.
+// mapUsernameToAuthSub converts an LFX username to the Auth0 user_id format used by the
+// Auth0 Management API (auth0|{userID}). Not used for v2 service writes or JWT impersonation.
 //
 // The mapping logic:
 //   - Safe usernames (matching safeNameRE and not hexUserRE): use directly as userID
