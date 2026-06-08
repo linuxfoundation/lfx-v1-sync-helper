@@ -425,7 +425,7 @@ func mergeUserInfoWithACS(
 	acsUsernames := make(map[string]struct{}, len(acsUsers))
 	for _, u := range acsUsers {
 		if u.Username != "" {
-			acsUsernames[u.Username] = struct{}{}
+			acsUsernames[usernameMergeKey(u.Username)] = struct{}{}
 		}
 	}
 

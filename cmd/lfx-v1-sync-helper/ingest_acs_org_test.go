@@ -63,6 +63,19 @@ func TestMergeOrgUsersWithACS(t *testing.T) {
 		}
 	})
 
+	t.Run("duplicate ACS auth0-prefixed and plain usernames are not both added", func(t *testing.T) {
+		merged, added := mergeOrgUsersWithACS(ctx, nil, []acsOrgGrantUser{
+			{Username: "auth0|alice", Email: "alice@example.com"},
+			{Username: "alice", Email: "alice@example.com"},
+		}, "writers", "sfid1", "uid1")
+		if added != 1 {
+			t.Fatalf("want 1 added, got %d", added)
+		}
+		if len(merged) != 1 {
+			t.Fatalf("want 1 merged, got %d", len(merged))
+		}
+	})
+
 	t.Run("existing v2-only user is preserved", func(t *testing.T) {
 		existing := []*b2bOrgUser{alice}
 		merged, added := mergeOrgUsersWithACS(ctx, existing, []acsOrgGrantUser{{Username: "bob", Email: "bob@example.com"}}, "writers", "sfid1", "uid1")

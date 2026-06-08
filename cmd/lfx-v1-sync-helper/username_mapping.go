@@ -54,8 +54,10 @@ func mapUsernameToAuthSub(username string) string {
 }
 
 // usernameMergeKey returns the username value used for ACS merge deduplication.
-// Legacy v2 entries may still store auth0|{username}; strip that prefix so they
-// match plain LFX usernames from ACS during the transition.
+// Legacy v2 entries may still store auth0|{id} values from older sync-helper
+// writes. When the suffix is a plain username, strip the prefix so it matches
+// ACS/plain LFX usernames during the transition. Hashed auth0|{id} values are
+// not safely reversible and are only normalized for dedup keying, not migration.
 func usernameMergeKey(username string) string {
 	if suffix, ok := strings.CutPrefix(username, "auth0|"); ok && suffix != "" {
 		return suffix

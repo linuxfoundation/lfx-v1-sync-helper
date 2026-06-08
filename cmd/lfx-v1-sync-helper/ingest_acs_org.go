@@ -463,7 +463,7 @@ func mergeOrgUsersWithACS(
 	acsUsernames := make(map[string]struct{}, len(acsUsers))
 	for _, u := range acsUsers {
 		if u.Username != "" {
-			acsUsernames[u.Username] = struct{}{}
+			acsUsernames[usernameMergeKey(u.Username)] = struct{}{}
 		}
 	}
 
@@ -515,7 +515,7 @@ func mergeOrgUsersWithACS(
 			if v1User, _ := lookupUserByUsername(ctx, u.Username); v1User != nil {
 				username = v1User.Username
 				// Re-check with canonical username after lookup.
-				if _, alreadyPresent := existingByUsername[username]; alreadyPresent {
+				if _, alreadyPresent := existingByUsername[usernameMergeKey(username)]; alreadyPresent {
 					continue
 				}
 				entry.Username = &username
@@ -545,7 +545,7 @@ func mergeOrgUsersWithACS(
 		}
 
 		merged = append(merged, entry)
-		existingByUsername[username] = entry
+		existingByUsername[usernameMergeKey(username)] = entry
 		added++
 	}
 

@@ -1,5 +1,12 @@
 # Ignore local Kubernetes paths.
 ^(https?|nats)://[a-zA-Z0-9.-]+\.svc\.cluster\.local
 
-# Meltano Hub docs are external and intermittently unreachable from CI.
-https://hub\.meltano\.com/.*
+# Meltano Hub links referenced by this repo; external and intermittently unreachable from CI.
+https://hub\.meltano\.com/extractors/tap-postgres--meltanolabs
+https://hub\.meltano\.com/extractors/tap-dynamodb--meltanolabs
+https://hub\.meltano\.com/loaders/target-jsonl--andyh1203
+https://hub\.meltano\.com/files/files-docker--meltano
+https://hub\.meltano\.com/assets/logos/extractors/postgres\.png
+https://hub\.meltano\.com/assets/logos/extractors/dynamodb\.png
+https://hub\.meltano\.com/assets/logos/loaders/jsonl\.png
+https://hub\.meltano\.com/assets/logos/files/docker\.png
