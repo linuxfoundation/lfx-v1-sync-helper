@@ -30,6 +30,11 @@ func TestResolveV1UsernameFromV2UserID(t *testing.T) {
 			input:   "",
 			wantErr: true,
 		},
+		{
+			name:    "non-auth0 provider user_id",
+			input:   "google-oauth2|12345",
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {

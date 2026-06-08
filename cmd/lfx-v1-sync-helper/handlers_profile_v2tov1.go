@@ -122,10 +122,13 @@ func resolveV1UsernameFromV2UserID(userID string) (string, error) {
 	if userID == "" {
 		return "", fmt.Errorf("empty user_id")
 	}
-	if !strings.HasPrefix(userID, "auth0|") {
-		return userID, nil
+	if strings.HasPrefix(userID, "auth0|") {
+		return extractAuth0UserIDSuffix(userID)
 	}
-	return extractAuth0UserIDSuffix(userID)
+	if strings.Contains(userID, "|") {
+		return "", fmt.Errorf("unsupported auth provider user_id format: %q", userID)
+	}
+	return userID, nil
 }
 
 // extractAuth0UserIDSuffix returns the portion of an Auth0 user_id after the

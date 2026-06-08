@@ -323,8 +323,8 @@ func generateCachedJWTToken(ctx context.Context, audience string, v1Principal st
 // This function implements a dual authentication strategy:
 //  1. User Impersonation: If v1Principal is provided and can be looked up, the JWT will impersonate that user
 //     with principal and sub set to the LFX username, and email (if available)
-//  2. Fallback Client: If no v1Principal is provided or lookup fails, uses v1_sync_helper client credentials
-//     with principal="v1_sync_helper@clients" and sub="v1_sync_helper"
+//  2. Fallback Client: If no v1Principal is provided or lookup fails, uses Heimdall M2M client
+//     credentials with principal and sub both set to "{HeimdallClientID}@clients"
 //
 // The impersonation approach allows v1 sync operations to be attributed to the actual
 // user who made the changes in v1, rather than a generic service account.
