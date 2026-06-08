@@ -51,6 +51,18 @@ func TestMergeOrgUsersWithACS(t *testing.T) {
 		}
 	})
 
+	t.Run("legacy auth0-prefixed v2 username matches plain ACS username", func(t *testing.T) {
+		username := "auth0|alice"
+		existing := []*b2bOrgUser{{Username: &username, Email: "alice@example.com", InvitedAs: "writer"}}
+		merged, added := mergeOrgUsersWithACS(ctx, existing, []acsOrgGrantUser{{Username: "alice", Email: "alice@example.com"}}, "writers", "sfid1", "uid1")
+		if added != 0 {
+			t.Fatalf("want 0 added (legacy auth0| entry treated as present), got %d", added)
+		}
+		if len(merged) != 1 {
+			t.Fatalf("want 1 merged (no duplicates), got %d", len(merged))
+		}
+	})
+
 	t.Run("existing v2-only user is preserved", func(t *testing.T) {
 		existing := []*b2bOrgUser{alice}
 		merged, added := mergeOrgUsersWithACS(ctx, existing, []acsOrgGrantUser{{Username: "bob", Email: "bob@example.com"}}, "writers", "sfid1", "uid1")

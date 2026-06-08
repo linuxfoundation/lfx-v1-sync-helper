@@ -455,7 +455,7 @@ func mergeOrgUsersWithACS(
 			continue
 		}
 		if u.Username != nil && *u.Username != "" {
-			existingByUsername[*u.Username] = u
+			existingByUsername[usernameMergeKey(*u.Username)] = u
 		}
 	}
 
@@ -489,7 +489,7 @@ func mergeOrgUsersWithACS(
 		}
 
 		username := u.Username
-		if _, alreadyPresent := existingByUsername[username]; alreadyPresent {
+		if _, alreadyPresent := existingByUsername[usernameMergeKey(username)]; alreadyPresent {
 			continue
 		}
 

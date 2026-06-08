@@ -413,7 +413,7 @@ func mergeUserInfoWithACS(
 			continue
 		}
 		if u.Username != nil && *u.Username != "" {
-			existingByUsername[*u.Username] = u
+			existingByUsername[usernameMergeKey(*u.Username)] = u
 		} else if u.Email != nil && *u.Email != "" {
 			// Only index by email when there is no username; if a username is
 			// present the primary lookup will find it first.
@@ -453,7 +453,7 @@ func mergeUserInfoWithACS(
 
 		username := u.Username
 
-		if _, alreadyPresent := existingByUsername[username]; alreadyPresent {
+		if _, alreadyPresent := existingByUsername[usernameMergeKey(username)]; alreadyPresent {
 			continue
 		}
 
@@ -465,7 +465,7 @@ func mergeUserInfoWithACS(
 		if v1User != nil {
 			username = v1User.Username
 			// Re-check deduplication with the canonical username.
-			if _, alreadyPresent := existingByUsername[username]; alreadyPresent {
+			if _, alreadyPresent := existingByUsername[usernameMergeKey(username)]; alreadyPresent {
 				continue
 			}
 		}
@@ -486,7 +486,7 @@ func mergeUserInfoWithACS(
 						break
 					}
 				}
-				existingByUsername[username] = &corrected
+				existingByUsername[usernameMergeKey(username)] = &corrected
 				continue
 			}
 		}
@@ -496,7 +496,7 @@ func mergeUserInfoWithACS(
 
 		// Track newly added user so subsequent entries with the same username
 		// are not added twice.
-		existingByUsername[username] = entry
+		existingByUsername[usernameMergeKey(username)] = entry
 	}
 
 	return merged

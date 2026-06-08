@@ -12,6 +12,7 @@ package main
 import (
 	"crypto/sha512"
 	"regexp"
+	"strings"
 
 	"github.com/akamensky/base58"
 )
@@ -50,4 +51,14 @@ func mapUsernameToAuthSub(username string) string {
 	}
 
 	return "auth0|" + userID
+}
+
+// usernameMergeKey returns the username value used for ACS merge deduplication.
+// Legacy v2 entries may still store auth0|{username}; strip that prefix so they
+// match plain LFX usernames from ACS during the transition.
+func usernameMergeKey(username string) string {
+	if suffix, ok := strings.CutPrefix(username, "auth0|"); ok && suffix != "" {
+		return suffix
+	}
+	return username
 }
