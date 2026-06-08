@@ -1,2 +1,5 @@
 # Ignore local Kubernetes paths.
 ^(https?|nats)://[a-zA-Z0-9.-]+\.svc\.cluster\.local
+
+# Meltano Hub docs are external and intermittently unreachable from CI.
+https://hub\.meltano\.com/.*
