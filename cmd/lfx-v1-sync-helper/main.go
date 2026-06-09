@@ -61,7 +61,7 @@ func main() {
 	var bind = flag.String("bind", "", "interface to bind on")
 	var doRebuildUserIndexes = flag.Bool("rebuild-user-secondary-indexes", false, "populate user secondary indexes for existing data, then exit")
 	var doBackfillACSProject = flag.Bool("backfill-acs-project", false, "backfill ACS user grants to v2 project settings, then exit")
-	var doBackfillACSOrgOnly = flag.Bool("backfill-acs-org", false, "backfill ACS org grants to v2 b2b_org settings only, then exit")
+	var doBackfillACSOrg = flag.Bool("backfill-acs-org", false, "backfill ACS org grants to v2 b2b_org settings, then exit")
 	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (only applicable with --backfill-acs-project or --backfill-acs-org)")
 
 	flag.Usage = func() {
@@ -70,7 +70,7 @@ func main() {
 	}
 	flag.Parse()
 
-	if *doBackfillACSProject && *doBackfillACSOrgOnly {
+	if *doBackfillACSProject && *doBackfillACSOrg {
 		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project and --backfill-acs-org are mutually exclusive")
 		os.Exit(2)
 	}
@@ -267,8 +267,8 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Handle --backfill-acs-org flag: run the org grants pass only, then exit.
-	if *doBackfillACSOrgOnly {
+	// Handle --backfill-acs-org flag: populate v2 b2b_org settings from ACS org grants, then exit.
+	if *doBackfillACSOrg {
 		logger.With("dry_run", *dryRun).Info("starting ACS org grants backfill")
 		if err := backfillACSOrgGrants(ctx, *dryRun); err != nil {
 			logger.With(errKey, err).Error("error during ACS org grants backfill")
