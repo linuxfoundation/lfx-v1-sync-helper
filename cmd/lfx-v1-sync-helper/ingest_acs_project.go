@@ -75,15 +75,15 @@ type acsGrantsByRole struct {
 	MeetingsCoordinators []acsGrantUser
 }
 
-// backfillACSGrants iterates all known project SFID → v2 UID mappings and, for
+// backfillACSProjectGrants iterates all known project SFID → v2 UID mappings and, for
 // each project, fetches ACS grant data then additively merges writers,
 // auditors, and meeting coordinators into the v2 project settings.
 //
 // When dryRun is true the function logs every change it would make but does
 // not call UpdateProjectSettings.
-func backfillACSGrants(ctx context.Context, dryRun bool) error {
+func backfillACSProjectGrants(ctx context.Context, dryRun bool) error {
 	if dryRun {
-		logger.InfoContext(ctx, "running ACS backfill in dry-run mode — no changes will be written")
+		logger.InfoContext(ctx, "running ACS project grants backfill in dry-run mode — no changes will be written")
 	}
 
 	// Collect all project.sfid.* mapping keys from mappingsKV.
@@ -115,10 +115,10 @@ func backfillACSGrants(ctx context.Context, dryRun bool) error {
 	logger.With(
 		"processed", processed,
 		"errors", errors,
-	).InfoContext(ctx, "ACS backfill complete")
+	).InfoContext(ctx, "ACS project grants backfill complete")
 
 	if errors > 0 {
-		return fmt.Errorf("ACS backfill completed with %d errors", errors)
+		return fmt.Errorf("ACS project grants backfill completed with %d errors", errors)
 	}
 	return nil
 }

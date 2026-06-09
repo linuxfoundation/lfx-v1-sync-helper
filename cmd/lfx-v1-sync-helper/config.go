@@ -35,7 +35,7 @@ type Config struct {
 	// Service URLs
 	ProjectServiceURL   *url.URL
 	CommitteeServiceURL *url.URL
-	MemberServiceURL    *url.URL // Optional; required only for --backfill-acs org pass
+	MemberServiceURL    *url.URL // Optional; required only for --backfill-acs-org pass
 
 	// NATS configuration
 	NATSURL string

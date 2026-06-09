@@ -84,7 +84,7 @@ func backfillACSOrgGrants(ctx context.Context, dryRun bool) error {
 	}
 
 	if dryRun {
-		logger.InfoContext(ctx, "running org ACS backfill in dry-run mode — no changes will be written")
+		logger.InfoContext(ctx, "running ACS org grants backfill in dry-run mode — no changes will be written")
 	}
 
 	sfids, err := collectOrgAccountSFIDs(ctx)
@@ -146,10 +146,10 @@ func backfillACSOrgGrants(ctx context.Context, dryRun bool) error {
 		"auditors_added", auditorsAdded,
 		"orgs_skipped", orgsSkipped,
 		"errors", errors,
-	).InfoContext(ctx, "org ACS backfill complete")
+	).InfoContext(ctx, "ACS org grants backfill complete")
 
 	if errors > 0 {
-		return fmt.Errorf("org ACS backfill completed with %d errors", errors)
+		return fmt.Errorf("ACS org grants backfill completed with %d errors", errors)
 	}
 	return nil
 }
