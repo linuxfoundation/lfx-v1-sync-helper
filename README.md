@@ -154,14 +154,14 @@ Pass 2 iterates the live subject set: for each subject it calls `v1KV.Get` (NATS
 - If broker saturation reappears, raise `REINDEX_OP_DELAY` to `2ms` (and `REINDEX_PHASE_TIMEOUT` to `90m`), delete the existing Job, and re-apply.
 - Writes are idempotent — re-running the job is safe.
 
-**ACS grant backfill (`--backfill-acs` / `--backfill-acs-org`):**
+**ACS grant backfill (`--backfill-acs-project` / `--backfill-acs-org`):**
 
-Two flags are available:
+Two independent flags are available:
 
-- `--backfill-acs` — runs both passes sequentially: project grants (`Writers`, `Auditors`, `MeetingCoordinators`) then org grants (`b2b_org` Writers/Auditors).
-- `--backfill-acs-org` — runs the org grants pass only, skipping the project pass. Use this when you only need to backfill `b2b_org` settings.
+- `--backfill-acs-project` — merges ACS user grants into v2 project settings (`Writers`, `Auditors`, `MeetingCoordinators`).
+- `--backfill-acs-org` — merges ACS org grants into v2 `b2b_org` settings (Writers/Auditors). Requires `MEMBER_SERVICE_URL`.
 
-Both flags are additive-only (existing v2 entries are never removed), support `--dry-run` to preview without writing, and are idempotent. Requires full service credentials (Auth0, Heimdall, `MEMBER_SERVICE_URL`, `PROJECT_SERVICE_URL`).
+Both flags are additive-only (existing v2 entries are never removed), support `--dry-run` to preview without writing, and are idempotent. The flags are mutually exclusive — run each as a separate Job invocation. Requires full service credentials (Auth0, Heimdall, `PROJECT_SERVICE_URL`; `MEMBER_SERVICE_URL` for the org pass).
 
 In production, apply the Job manifest manually (not ArgoCD-managed). A dry-run pass is recommended first — add `--dry-run` to the manifest args, apply, inspect logs, then re-apply without it:
 
@@ -172,7 +172,7 @@ kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-acs-
 Locally (with NATS and member-service port-forwarded):
 
 ```sh
-lfx-v1-sync-helper --backfill-acs [--dry-run]
+lfx-v1-sync-helper --backfill-acs-project [--dry-run]
 lfx-v1-sync-helper --backfill-acs-org [--dry-run]
 ```
 

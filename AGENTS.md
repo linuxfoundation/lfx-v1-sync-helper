@@ -257,9 +257,9 @@ Note: The replication slot is named `lfx_v2` (not `wal-listener`). The publicati
 
 ## One-shot Backfill Commands
 
-### `--backfill-acs` org pass (`ingest_acs_org.go`)
+### `--backfill-acs-org` pass (`ingest_acs_org.go`)
 
-The `--backfill-acs` flag runs two sequential passes. The second pass (`backfillACSOrgGrants`) backfills ACS legacy org grants into v2 b2b_org settings:
+The `--backfill-acs-org` flag runs the org grants pass (`backfillACSOrgGrants`), which backfills ACS legacy org grants into v2 b2b_org settings:
 
 - **SFID source**: scans `$KV.v1-objects.salesforce_b2b-Account.*` keys from the `KV_v1-objects` JetStream stream using `DeliverAllPolicy` (last-write-wins, same trick as project SFID collection). Skips records where `IsDeleted=true` or `IsMember__c!=true`.
 - **UID resolution**: `sfuuid.ToUUID(sfid)` — a deterministic pure function from `lfx-v2-member-service/pkg/sfuuid`. No network call; the same algorithm member-service uses internally.

@@ -90,7 +90,7 @@ Loop detection prevents infinite sync cycles: if a non-tombstoned reverse mappin
 | `USE_MSGPACK`               | No       | Encode KV values as MessagePack instead of JSON (default: `false`)                |
 | `DYNAMODB_INGEST_ENABLED`   | No       | Subscribe to DynamoDB stream events from `dynamodb-stream-consumer` (default: `false`). Requires the `dynamodb_streams` NATS stream to exist. |
 | `DYNAMODB_STREAM_NAME`      | No       | NATS stream name to consume DynamoDB events from (default: `dynamodb_streams`)    |
-| `MEMBER_SERVICE_URL`        | No       | Member Service API URL; required only for the `--backfill-acs` org grants pass    |
+| `MEMBER_SERVICE_URL`        | No       | Member Service API URL; required only for the `--backfill-acs-org` pass           |
 | `PORT`                      | No       | HTTP server port (default: `8080`)                                                |
 | `BIND`                      | No       | Interface to bind on (default: `*`)                                               |
 | `DEBUG`                     | No       | Enable debug logging (default: `false`)                                           |
@@ -181,12 +181,11 @@ The binary supports one-shot commands that exit after completing their task.
 
 **`--rebuild-user-secondary-indexes`** — populates username/email secondary indexes from existing `merged_user` and `alternate_email` records. Only `NATS_URL` is required. See the root README for production deployment guidance.
 
-**`--backfill-acs`** — runs two additive passes in sequence:
+**`--backfill-acs-project`** — merges ACS user grants into v2 project settings (`Writers`, `Auditors`, `MeetingCoordinators`). Reads SFID→UID mappings from the `v1-mappings` KV bucket. Additive-only (never removes existing entries) and idempotent. Supports `--dry-run` to preview without writing.
 
-1. **Project pass** — merges ACS user grants into v2 project settings (`Writers`, `Auditors`, `MeetingCoordinators`). Reads SFID→UID mappings from the `v1-mappings` KV bucket.
-2. **Org pass** — merges ACS org grants (`company-admin` → `writer`, `viewer` → `auditor`) into v2 b2b_org settings. Reads live LF member org SFIDs from the `v1-objects` KV bucket (`salesforce_b2b-Account.*` keys, filtered to `IsDeleted=false` and `IsMember__c=true`). The SFID→UID conversion is a deterministic pure function (`sfuuid.ToUUID`) — no network round-trip. Requires `MEMBER_SERVICE_URL`.
+**`--backfill-acs-org`** — merges ACS org grants (`company-admin` → `writer`, `viewer` → `auditor`) into v2 b2b_org settings. Reads live LF member org SFIDs from the `v1-objects` KV bucket (`salesforce_b2b-Account.*` keys, filtered to `IsDeleted=false` and `IsMember__c=true`). The SFID→UID conversion is a deterministic pure function (`sfuuid.ToUUID`) — no network round-trip. Requires `MEMBER_SERVICE_URL`. Additive-only and idempotent. Supports `--dry-run`. End-of-run summary includes: `orgs_total`, `orgs_changed`, `writers_added`, `auditors_added`, `orgs_skipped`, `errors`.
 
-Both passes are additive-only (never remove existing entries) and idempotent (re-runs write nothing when the merged set equals the existing set). Supports `--dry-run` to preview without writing. End-of-run summary for the org pass includes: `orgs_total`, `orgs_changed`, `writers_added`, `auditors_added`, `orgs_skipped`, `errors`.
+The two flags are independent and mutually exclusive — run each as a separate Job invocation.
 
 In production, apply the Job manifest manually (not ArgoCD-managed). A dry-run pass is recommended first:
 
@@ -197,7 +196,8 @@ kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-acs-
 Locally:
 
 ```sh
-lfx-v1-sync-helper --backfill-acs [--dry-run]
+lfx-v1-sync-helper --backfill-acs-project [--dry-run]
+lfx-v1-sync-helper --backfill-acs-org [--dry-run]
 ```
 
 ### Required NATS KV Buckets
