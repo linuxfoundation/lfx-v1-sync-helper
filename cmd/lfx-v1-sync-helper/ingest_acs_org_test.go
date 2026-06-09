@@ -74,6 +74,9 @@ func TestMergeOrgUsersWithACS(t *testing.T) {
 		if len(merged) != 1 {
 			t.Fatalf("want 1 merged, got %d", len(merged))
 		}
+		if merged[0].Username == nil || *merged[0].Username != "alice" {
+			t.Errorf("want plain username %q, got %v", "alice", merged[0].Username)
+		}
 	})
 
 	t.Run("existing v2-only user is preserved", func(t *testing.T) {

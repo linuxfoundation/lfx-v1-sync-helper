@@ -53,6 +53,18 @@ func mapUsernameToAuthSub(username string) string {
 	return "auth0|" + userID
 }
 
+// normalizeACSUsername converts legacy auth0|{username} ACS values to plain LFX
+// usernames when the suffix is a plausible v1 username. Hashed auth0|{id}
+// suffixes are left unchanged so v1 lookup is not attempted with opaque IDs.
+func normalizeACSUsername(username string) string {
+	if suffix, ok := strings.CutPrefix(username, "auth0|"); ok && suffix != "" {
+		if safeNameRE.MatchString(suffix) && !hexUserRE.MatchString(suffix) {
+			return suffix
+		}
+	}
+	return username
+}
+
 // usernameMergeKey returns the username value used for ACS merge deduplication.
 // Legacy v2 entries may still store auth0|{id} values from older sync-helper
 // writes. When the suffix is a plain username, strip the prefix so it matches

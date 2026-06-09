@@ -425,7 +425,7 @@ func mergeUserInfoWithACS(
 	acsUsernames := make(map[string]struct{}, len(acsUsers))
 	for _, u := range acsUsers {
 		if u.Username != "" {
-			acsUsernames[usernameMergeKey(u.Username)] = struct{}{}
+			acsUsernames[usernameMergeKey(normalizeACSUsername(u.Username))] = struct{}{}
 		}
 	}
 
@@ -451,14 +451,14 @@ func mergeUserInfoWithACS(
 			continue
 		}
 
-		username := u.Username
+		username := normalizeACSUsername(u.Username)
 
 		if _, alreadyPresent := existingByUsername[usernameMergeKey(username)]; alreadyPresent {
 			continue
 		}
 
 		// Resolve the username to a v1 user record for enrichment and canonical username.
-		v1User, _ := lookupUserByUsernameForACS(ctx, u.Username)
+		v1User, _ := lookupUserByUsernameForACS(ctx, username)
 
 		// If we got a v1 user, use the canonical v1 username
 		// (handles casing/whitespace differences between ACS and v1).

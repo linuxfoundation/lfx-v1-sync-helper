@@ -23,6 +23,25 @@ func TestMergeUserInfoWithACS(t *testing.T) {
 		}
 	})
 
+	t.Run("auth0-prefixed ACS username is normalized to plain LFX username", func(t *testing.T) {
+		orig := lookupUserByUsernameForACS
+		t.Cleanup(func() { lookupUserByUsernameForACS = orig })
+		lookupUserByUsernameForACS = func(_ context.Context, _ string) (*V1User, string) {
+			return nil, ""
+		}
+
+		merged := mergeUserInfoWithACS(ctx, nil, []acsGrantUser{
+			{Username: "auth0|alice"},
+			{Username: "alice"},
+		}, "writers", "sfid1", "uid1")
+		if len(merged) != 1 {
+			t.Fatalf("want 1 merged (no duplicates), got %d", len(merged))
+		}
+		if merged[0].Username == nil || *merged[0].Username != "alice" {
+			t.Errorf("want plain username %q, got %v", "alice", merged[0].Username)
+		}
+	})
+
 	t.Run("email-only v2 entry is corrected with username from ACS", func(t *testing.T) {
 		orig := lookupUserByUsernameForACS
 		t.Cleanup(func() { lookupUserByUsernameForACS = orig })

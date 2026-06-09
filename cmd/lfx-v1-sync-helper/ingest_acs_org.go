@@ -463,7 +463,7 @@ func mergeOrgUsersWithACS(
 	acsUsernames := make(map[string]struct{}, len(acsUsers))
 	for _, u := range acsUsers {
 		if u.Username != "" {
-			acsUsernames[usernameMergeKey(u.Username)] = struct{}{}
+			acsUsernames[usernameMergeKey(normalizeACSUsername(u.Username))] = struct{}{}
 		}
 	}
 
@@ -488,7 +488,7 @@ func mergeOrgUsersWithACS(
 			continue
 		}
 
-		username := u.Username
+		username := normalizeACSUsername(u.Username)
 		if _, alreadyPresent := existingByUsername[usernameMergeKey(username)]; alreadyPresent {
 			continue
 		}
@@ -512,7 +512,7 @@ func mergeOrgUsersWithACS(
 		// Fallback: v1 KV lookup re-canonicalises the username and fills any
 		// fields the endpoint omitted (skipped when v1 client is not init'd).
 		if v1HTTPClient != nil {
-			if v1User, _ := lookupUserByUsername(ctx, u.Username); v1User != nil {
+			if v1User, _ := lookupUserByUsername(ctx, username); v1User != nil {
 				username = v1User.Username
 				// Re-check with canonical username after lookup.
 				if _, alreadyPresent := existingByUsername[usernameMergeKey(username)]; alreadyPresent {
