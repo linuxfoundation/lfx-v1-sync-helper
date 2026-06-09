@@ -458,7 +458,7 @@ func mergeUserInfoWithACS(
 		}
 
 		// Resolve the username to a v1 user record for enrichment and canonical username.
-		v1User, _ := lookupUserByUsername(ctx, u.Username)
+		v1User, _ := lookupUserByUsernameForACS(ctx, u.Username)
 
 		// If we got a v1 user, use the canonical v1 username
 		// (handles casing/whitespace differences between ACS and v1).

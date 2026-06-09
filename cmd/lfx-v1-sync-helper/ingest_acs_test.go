@@ -22,4 +22,25 @@ func TestMergeUserInfoWithACS(t *testing.T) {
 			t.Fatalf("want 1 merged (no duplicates), got %d", len(merged))
 		}
 	})
+
+	t.Run("email-only v2 entry is corrected with username from ACS", func(t *testing.T) {
+		orig := lookupUserByUsernameForACS
+		t.Cleanup(func() { lookupUserByUsernameForACS = orig })
+		lookupUserByUsernameForACS = func(_ context.Context, username string) (*V1User, string) {
+			if username == "alice" {
+				return &V1User{Username: "alice", Email: "alice@example.com"}, "sfid1"
+			}
+			return nil, ""
+		}
+
+		email := "alice@example.com"
+		existing := []*projectservice.UserInfo{{Email: &email}}
+		merged := mergeUserInfoWithACS(ctx, existing, []acsGrantUser{{Username: "alice"}}, "writers", "sfid1", "uid1")
+		if len(merged) != 1 {
+			t.Fatalf("want 1 merged (no duplicate), got %d", len(merged))
+		}
+		if merged[0].Username == nil || *merged[0].Username != "alice" {
+			t.Errorf("email-only entry: want username %q, got %v", "alice", merged[0].Username)
+		}
+	})
 }

@@ -359,6 +359,9 @@ func generateJWTToken(ctx context.Context, audience string, v1Principal string) 
 		} else if user.Username == "" {
 			logger.With("platform_id", v1Principal).WarnContext(ctx, "user has empty username, falling back to service account")
 			principal = jwtClientID + "@clients"
+		} else if !safeNameRE.MatchString(user.Username) || hexUserRE.MatchString(user.Username) {
+			logger.With("username", user.Username).WarnContext(ctx, "username not in safe format, falling back to service account")
+			principal = jwtClientID + "@clients"
 		} else {
 			principal = user.Username
 			email = user.Email

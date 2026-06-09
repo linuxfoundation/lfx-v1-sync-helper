@@ -96,7 +96,7 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 		return
 	}
 	if sfid == "" {
-		log.WarnContext(ctx, "no v1 user found for auth0 user ID, skipping")
+		log.WarnContext(ctx, "no v1 user found for v2 user ID, skipping")
 		return
 	}
 
