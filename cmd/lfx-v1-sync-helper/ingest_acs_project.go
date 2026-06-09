@@ -430,11 +430,16 @@ func mergeUserInfoWithACS(
 	}
 
 	// Log any v2 users that are not in ACS ("extra" values for investigation).
-	for username := range existingByUsername {
-		if _, inACS := acsUsernames[username]; !inACS {
+	for mergeKey, u := range existingByUsername {
+		if _, inACS := acsUsernames[mergeKey]; !inACS {
+			storedUsername := ""
+			if u != nil && u.Username != nil {
+				storedUsername = *u.Username
+			}
 			logger.With(
 				"field", field,
-				"username", username,
+				"username", storedUsername,
+				"merge_key", mergeKey,
 				"sfid", sfid,
 				"project_uid", projectUID,
 			).InfoContext(ctx, "v2 project settings has user not present in ACS — may need investigation")

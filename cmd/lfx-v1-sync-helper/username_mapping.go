@@ -65,17 +65,17 @@ func normalizeACSUsername(username string) string {
 	return username
 }
 
-// usernameMergeKey returns the username value used for ACS merge deduplication.
-// Legacy v2 entries may still store auth0|{id} values from older sync-helper
-// writes. When the suffix is a plain username, strip the prefix so it matches
-// ACS/plain LFX usernames during the transition. Hashed auth0|{id} values are
-// not safely reversible and are only normalized for dedup keying, not migration.
 // stringPtr returns a pointer to a copy of s. Use when storing string pointers
 // derived from loop-scoped variables so each entry gets its own allocation.
 func stringPtr(s string) *string {
 	return &s
 }
 
+// usernameMergeKey returns the username value used for ACS merge deduplication.
+// Legacy v2 entries may still store auth0|{id} values from older sync-helper
+// writes. When the suffix is a plain username, strip the prefix so it matches
+// ACS/plain LFX usernames during the transition. Hashed auth0|{id} values are
+// not safely reversible and are only normalized for dedup keying, not migration.
 func usernameMergeKey(username string) string {
 	if suffix, ok := strings.CutPrefix(username, "auth0|"); ok && suffix != "" {
 		return suffix

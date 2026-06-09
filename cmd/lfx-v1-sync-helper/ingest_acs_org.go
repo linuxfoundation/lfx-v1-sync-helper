@@ -468,11 +468,16 @@ func mergeOrgUsersWithACS(
 	}
 
 	// Log v2 users not in ACS.
-	for username := range existingByUsername {
-		if _, inACS := acsUsernames[username]; !inACS {
+	for mergeKey, u := range existingByUsername {
+		if _, inACS := acsUsernames[mergeKey]; !inACS {
+			storedUsername := ""
+			if u != nil && u.Username != nil {
+				storedUsername = *u.Username
+			}
 			logger.With(
 				"field", field,
-				"username", username,
+				"username", storedUsername,
+				"merge_key", mergeKey,
 				"sfid", sfid,
 				"uid", uid,
 			).InfoContext(ctx, "v2 org settings has user not present in ACS — may need investigation")
