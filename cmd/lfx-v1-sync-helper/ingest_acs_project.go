@@ -478,7 +478,7 @@ func mergeUserInfoWithACS(
 				// affected — otherwise userInfoSlicesEqual would see no change and
 				// skip the PUT.
 				corrected := *byEmailEntry
-				corrected.Username = &username
+				corrected.Username = stringPtr(username)
 				// Replace the pointer in merged so the corrected copy is what gets written.
 				for i, m := range merged {
 					if m == byEmailEntry {
@@ -505,7 +505,7 @@ func mergeUserInfoWithACS(
 // buildProjectUserInfo constructs a project service UserInfo from a username and an
 // optional resolved V1User. If v1User is nil only the username is set.
 func buildProjectUserInfo(username string, v1User *V1User) *projectservice.UserInfo {
-	info := &projectservice.UserInfo{Username: &username}
+	info := &projectservice.UserInfo{Username: stringPtr(username)}
 	if v1User == nil {
 		return info
 	}

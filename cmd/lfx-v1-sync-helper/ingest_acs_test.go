@@ -62,4 +62,36 @@ func TestMergeUserInfoWithACS(t *testing.T) {
 			t.Errorf("email-only entry: want username %q, got %v", "alice", merged[0].Username)
 		}
 	})
+
+	t.Run("multiple ACS users each retain distinct usernames", func(t *testing.T) {
+		orig := lookupUserByUsernameForACS
+		t.Cleanup(func() { lookupUserByUsernameForACS = orig })
+		lookupUserByUsernameForACS = func(_ context.Context, _ string) (*V1User, string) {
+			return nil, ""
+		}
+
+		merged := mergeUserInfoWithACS(ctx, nil, []acsGrantUser{
+			{Username: "alice"},
+			{Username: "bob"},
+		}, "writers", "sfid1", "uid1")
+		if len(merged) != 2 {
+			t.Fatalf("want 2 merged, got %d", len(merged))
+		}
+		got := map[string]struct{}{}
+		for _, entry := range merged {
+			if entry.Username == nil {
+				t.Fatal("expected username pointer")
+			}
+			got[*entry.Username] = struct{}{}
+		}
+		if len(got) != 2 {
+			t.Fatalf("want 2 distinct usernames, got %v", got)
+		}
+		if _, ok := got["alice"]; !ok {
+			t.Errorf("missing alice in %v", got)
+		}
+		if _, ok := got["bob"]; !ok {
+			t.Errorf("missing bob in %v", got)
+		}
+	})
 }

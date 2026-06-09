@@ -497,7 +497,7 @@ func mergeOrgUsersWithACS(
 		if len(field) > 1 {
 			invitedAs = field[:len(field)-1] // "writers" → "writer", "auditors" → "auditor"
 		}
-		entry := &b2bOrgUser{Username: &username, InvitedAs: invitedAs}
+		entry := &b2bOrgUser{Username: stringPtr(username), InvitedAs: invitedAs}
 
 		// Primary: use fields returned directly by the ACS /grantusers endpoint.
 		if u.Email != "" {
@@ -518,7 +518,7 @@ func mergeOrgUsersWithACS(
 				if _, alreadyPresent := existingByUsername[usernameMergeKey(username)]; alreadyPresent {
 					continue
 				}
-				entry.Username = &username
+				entry.Username = stringPtr(username)
 				if entry.Email == "" && v1User.Email != "" {
 					entry.Email = v1User.Email
 				}
