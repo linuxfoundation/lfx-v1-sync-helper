@@ -183,7 +183,7 @@ The binary supports one-shot commands that exit after completing their task.
 
 **`--backfill-acs-project`** — merges ACS user grants into v2 project settings (`Writers`, `Auditors`, `MeetingCoordinators`). Reads SFID→UID mappings from the `v1-mappings` KV bucket. Additive-only (never removes existing entries) and idempotent. Supports `--dry-run` to preview without writing.
 
-**`--backfill-acs-org`** — merges ACS org grants (`company-admin` → `writer`, `viewer` → `auditor`) into v2 b2b_org settings. Reads live LF member org SFIDs from the `v1-objects` KV bucket (`salesforce_b2b-Account.*` keys, filtered to `IsDeleted=false` and `IsMember__c=true`). The SFID→UID conversion is a deterministic pure function (`sfuuid.ToUUID`) — no network round-trip. Requires `MEMBER_SERVICE_URL`. Additive-only and idempotent. Supports `--dry-run`. End-of-run summary includes: `orgs_total`, `orgs_changed`, `writers_added`, `auditors_added`, `orgs_skipped`, `errors`.
+**`--backfill-acs-org`** — merges ACS org grants (`company-admin` → `writer`, `viewer` → `auditor`) into v2 b2b_org settings. Reads live LF member org SFIDs from the `v1-objects` KV bucket (`salesforce_b2b-Account.*` keys, filtered to `IsDeleted=false` and `IsMember__c=true`). The b2b_org UID is the 18-char normalized SFID (`sfutil.Normalize18`) — no network round-trip. Requires `MEMBER_SERVICE_URL`. Additive-only and idempotent. Supports `--dry-run`. End-of-run summary includes: `orgs_total`, `orgs_changed`, `writers_added`, `auditors_added`, `orgs_skipped`, `errors`.
 
 The two flags are independent and mutually exclusive — run each as a separate Job invocation.
 

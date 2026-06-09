@@ -262,7 +262,7 @@ Note: The replication slot is named `lfx_v2` (not `wal-listener`). The publicati
 The `--backfill-acs-org` flag runs the org grants pass (`backfillACSOrgGrants`), which backfills ACS legacy org grants into v2 b2b_org settings:
 
 - **SFID source**: scans `$KV.v1-objects.salesforce_b2b-Account.*` keys from the `KV_v1-objects` JetStream stream using `DeliverAllPolicy` (last-write-wins, same trick as project SFID collection). Skips records where `IsDeleted=true` or `IsMember__c!=true`.
-- **UID resolution**: `sfuuid.ToUUID(sfid)` — a deterministic pure function from `lfx-v2-member-service/pkg/sfuuid`. No network call; the same algorithm member-service uses internally.
+- **UID resolution**: `sfutil.Normalize18(sfid)` — as of LFXV2-2049 the b2b_org UID is the 18-char normalized SFID. No network call.
 - **ACS query**: `GET /acs/v1/api/grantusers?object_type=organization&object_id={sfid}&rolename=company-admin,viewer` (paginated). `company-admin` → `writer`; `viewer` → `auditor`.
 - **Settings API**: raw HTTP `GET`/`PUT /b2b_orgs/{uid}/settings` via `client_members.go`. Requires `MEMBER_SERVICE_URL` env var.
 - **Merge**: additive-only; existing v2-only entries are logged as "extra" but never removed.
