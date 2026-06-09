@@ -1,17 +1,12 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
 #
-# One-shot Job to backfill ACS user grants into v2.
-#
-# Runs two sequential passes via --backfill-acs:
-#   1. Project grants — merges ACS grants into v2 project settings
-#      (Writers, Auditors, MeetingCoordinators).
-#   2. Org grants — merges ACS company-admin/viewer grants into v2
-#      b2b_org settings (Writers, Auditors).
+# One-shot Job to backfill ACS user grants into v2 project settings
+# (Writers, Auditors, MeetingCoordinators). Reads all SFID→UID mappings from the
+# v1-mappings KV bucket, fetches ACS grantusers per project, and merges them
+# additively into v2 project settings. Existing v2 entries are never removed.
 #
 # To run the org pass only, change args to ["--backfill-acs-org"].
-#
-# Both passes are additive-only: existing v2 entries are never removed.
 #
 # One-shot: this manifest is applied manually via kubectl apply — it is NOT managed
 # by argocd and runs on demand only (e.g. after initial deployment).
