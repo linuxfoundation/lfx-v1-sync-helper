@@ -61,6 +61,17 @@ type Config struct {
 	// redelivery provides the backoff needed to avoid cascading 429s.
 	ProfileSyncBackfill bool
 
+	// NATSFetchMaxWait is the per-Fetch timeout used when scanning large
+	// KV streams with sparse subject filters (backfill and reindex passes).
+	// Both KV_v1-mappings and KV_v1-objects have millions of sequences; a
+	// subject filter matching only a small fraction causes short timeouts to
+	// return nearly-empty batches, terminating the loop prematurely. 120s
+	// gives the server enough time to fill a 512-message batch through a
+	// ~1:800 sparse filter. The SDK auto-enables a 5s idle heartbeat for
+	// requests longer than 10s, which is fine for in-cluster use. Set via
+	// NATS_FETCH_MAX_WAIT (Go duration: "120s", "3m"). Default: 120s.
+	NATSFetchMaxWait time.Duration
+
 	// ReindexPhaseTimeout caps the wall-clock time for each reindex phase
 	// (username, then email). Both the ListKeysFiltered consumer and every
 	// per-key Get/Put inside that phase share this deadline. Sized to cover
@@ -96,6 +107,7 @@ type Config struct {
 }
 
 const (
+	defaultNATSFetchMaxWait     = 120 * time.Second
 	defaultReindexPhaseTimeout  = 45 * time.Minute
 	defaultReindexNATSOpTimeout = 30 * time.Second
 	defaultReindexOpDelay       = 0
@@ -112,6 +124,7 @@ func LoadReindexConfig() *Config {
 	}
 	return &Config{
 		NATSURL:              natsURL,
+		NATSFetchMaxWait:     parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
 		ReindexPhaseTimeout:  parseDurationEnv("REINDEX_PHASE_TIMEOUT", defaultReindexPhaseTimeout),
 		ReindexNATSOpTimeout: parseDurationEnv("REINDEX_NATS_OP_TIMEOUT", defaultReindexNATSOpTimeout),
 		ReindexOpDelay:       parseDurationEnv("REINDEX_OP_DELAY", defaultReindexOpDelay),
@@ -162,6 +175,7 @@ func LoadConfig() (*Config, error) {
 		DynamoDBIngestEnabled:      parseBooleanEnv("DYNAMODB_INGEST_ENABLED"),
 		DynamoDBStreamName:         os.Getenv("DYNAMODB_STREAM_NAME"),
 		ProfileSyncBackfill:        parseBooleanEnv("PROFILE_SYNC_BACKFILL"),
+		NATSFetchMaxWait:           parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
 		ProjectAllowlistFile:       os.Getenv("PROJECT_ALLOWLIST_FILE"),
 		ProjectFamilyAllowlistFile: os.Getenv("PROJECT_FAMILY_ALLOWLIST_FILE"),
 	}

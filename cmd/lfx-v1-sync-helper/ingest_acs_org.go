@@ -164,8 +164,16 @@ func backfillACSOrgGrants(ctx context.Context, dryRun bool) error {
 func collectOrgAccountSFIDs(ctx context.Context) (map[string]struct{}, error) {
 	const (
 		fetchBatchSize = 512
-		fetchMaxWait   = 5 * time.Second
+		// fetchMaxWaitDefault is the default per-Fetch timeout; see
+		// Config.NATSFetchMaxWait for rationale. Overridden at runtime
+		// via NATS_FETCH_MAX_WAIT.
+		fetchMaxWaitDefault = 120 * time.Second
 	)
+
+	fetchMaxWait := cfg.NATSFetchMaxWait
+	if fetchMaxWait == 0 {
+		fetchMaxWait = fetchMaxWaitDefault
+	}
 
 	cons, err := jsContext.CreateConsumer(ctx, kvObjectsStream, jetstream.ConsumerConfig{
 		DeliverPolicy:     jetstream.DeliverAllPolicy,

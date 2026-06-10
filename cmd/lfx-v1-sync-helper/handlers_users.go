@@ -492,11 +492,10 @@ const (
 	// every KV key stored in the v1-objects bucket. Strip it to recover the key.
 	kvObjectsSubjectPrefix = "$KV.v1-objects."
 
-	// reindexFetchBatchSize and reindexFetchMaxWait mirror the values in
-	// collectProjectSFIDMappings (ingest_acs.go). FetchMaxWait ≤ 10s prevents
-	// the SDK from auto-enabling idle heartbeats over high-latency connections.
+	// reindexFetchBatchSize is the number of messages to request per Fetch
+	// call during the enumeration pass. The per-Fetch timeout is
+	// cfg.NATSFetchMaxWait (NATS_FETCH_MAX_WAIT, default 120s).
 	reindexFetchBatchSize = 512
-	reindexFetchMaxWait   = 5 * time.Second
 
 	// reindexEphemeralInactiveTimeout is the server-side cleanup window for the
 	// ephemeral pull consumer if the client exits before the deferred delete runs.
@@ -602,7 +601,7 @@ func streamUserSecondaryIndex(
 			return 0, 0, fmt.Errorf("%s reindex enumeration timed out after %d subjects: %w", phaseName, len(liveSubjects), err)
 		}
 
-		batch, fetchErr := cons.Fetch(reindexFetchBatchSize, jetstream.FetchMaxWait(reindexFetchMaxWait))
+		batch, fetchErr := cons.Fetch(reindexFetchBatchSize, jetstream.FetchMaxWait(cfg.NATSFetchMaxWait))
 		if fetchErr != nil {
 			return 0, 0, fmt.Errorf("fetch error during %s reindex enumeration: %w", phaseName, fetchErr)
 		}
