@@ -138,7 +138,7 @@ func backfillACSProjectGrants(ctx context.Context, dryRun bool) error {
 //
 // FetchMaxWait is kept ≤ 10 seconds to prevent the SDK from auto-enabling idle
 // heartbeats, which fail over high-latency connections (e.g. kubectl
-// port-forward). The loop retries until NumPending reaches zero.
+// port-forward). The loop terminates on an empty batch (no more messages).
 func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) {
 	const (
 		// kvMappingsStream is the JetStream stream backing the v1-mappings KV
