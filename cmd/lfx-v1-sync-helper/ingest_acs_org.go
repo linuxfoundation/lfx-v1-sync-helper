@@ -448,31 +448,36 @@ func mergeOrgUsersWithACS(
 	acsUsers []acsOrgGrantUser,
 	field, sfid, uid string,
 ) ([]*b2bOrgUser, int) {
-	// Index existing v2 users by auth sub (username).
-	existingByAuthSub := make(map[string]*b2bOrgUser, len(existing))
+	// Index existing v2 users by username.
+	existingByUsername := make(map[string]*b2bOrgUser, len(existing))
 	for _, u := range existing {
 		if u == nil {
 			continue
 		}
 		if u.Username != nil && *u.Username != "" {
-			existingByAuthSub[*u.Username] = u
+			existingByUsername[usernameMergeKey(*u.Username)] = u
 		}
 	}
 
-	// Build the auth sub set from ACS for "extra" detection.
-	acsAuthSubs := make(map[string]struct{}, len(acsUsers))
+	// Build the username set from ACS for "extra" detection.
+	acsUsernames := make(map[string]struct{}, len(acsUsers))
 	for _, u := range acsUsers {
 		if u.Username != "" {
-			acsAuthSubs[mapUsernameToAuthSub(u.Username)] = struct{}{}
+			acsUsernames[usernameMergeKey(normalizeACSUsername(u.Username))] = struct{}{}
 		}
 	}
 
 	// Log v2 users not in ACS.
-	for authSub := range existingByAuthSub {
-		if _, inACS := acsAuthSubs[authSub]; !inACS {
+	for mergeKey, u := range existingByUsername {
+		if _, inACS := acsUsernames[mergeKey]; !inACS {
+			storedUsername := ""
+			if u != nil && u.Username != nil {
+				storedUsername = *u.Username
+			}
 			logger.With(
 				"field", field,
-				"username", authSub,
+				"username", storedUsername,
+				"merge_key", mergeKey,
 				"sfid", sfid,
 				"uid", uid,
 			).InfoContext(ctx, "v2 org settings has user not present in ACS — may need investigation")
@@ -488,8 +493,8 @@ func mergeOrgUsersWithACS(
 			continue
 		}
 
-		authSub := mapUsernameToAuthSub(u.Username)
-		if _, alreadyPresent := existingByAuthSub[authSub]; alreadyPresent {
+		username := normalizeACSUsername(u.Username)
+		if _, alreadyPresent := existingByUsername[usernameMergeKey(username)]; alreadyPresent {
 			continue
 		}
 
@@ -497,7 +502,7 @@ func mergeOrgUsersWithACS(
 		if len(field) > 1 {
 			invitedAs = field[:len(field)-1] // "writers" → "writer", "auditors" → "auditor"
 		}
-		entry := &b2bOrgUser{Username: &authSub, InvitedAs: invitedAs}
+		entry := &b2bOrgUser{Username: stringPtr(username), InvitedAs: invitedAs}
 
 		// Primary: use fields returned directly by the ACS /grantusers endpoint.
 		if u.Email != "" {
@@ -509,16 +514,16 @@ func mergeOrgUsersWithACS(
 			entry.Avatar = &logo
 		}
 
-		// Fallback: v1 KV lookup re-canonicalises the auth sub and fills any
+		// Fallback: v1 KV lookup re-canonicalises the username and fills any
 		// fields the endpoint omitted (skipped when v1 client is not init'd).
 		if v1HTTPClient != nil {
-			if v1User, _ := lookupUserByUsername(ctx, u.Username); v1User != nil {
-				authSub = mapUsernameToAuthSub(v1User.Username)
-				// Re-check with canonical sub after lookup.
-				if _, alreadyPresent := existingByAuthSub[authSub]; alreadyPresent {
+			if v1User, _ := lookupUserByUsername(ctx, username); v1User != nil {
+				username = v1User.Username
+				// Re-check with canonical username after lookup.
+				if _, alreadyPresent := existingByUsername[usernameMergeKey(username)]; alreadyPresent {
 					continue
 				}
-				entry.Username = &authSub
+				entry.Username = stringPtr(username)
 				if entry.Email == "" && v1User.Email != "" {
 					entry.Email = v1User.Email
 				}
@@ -545,7 +550,7 @@ func mergeOrgUsersWithACS(
 		}
 
 		merged = append(merged, entry)
-		existingByAuthSub[authSub] = entry
+		existingByUsername[usernameMergeKey(username)] = entry
 		added++
 	}
 

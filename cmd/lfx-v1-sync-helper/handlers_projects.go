@@ -666,9 +666,8 @@ func lookupStaffUser(ctx context.Context, v1Data map[string]any, v1Field, sfidKe
 		return nil
 	}
 
-	authSub := mapUsernameToAuthSub(user.Username)
 	info := &projectservice.UserInfo{
-		Username: &authSub,
+		Username: &user.Username,
 	}
 	if fullName := strings.TrimSpace(user.FirstName + " " + user.LastName); fullName != "" {
 		info.Name = &fullName

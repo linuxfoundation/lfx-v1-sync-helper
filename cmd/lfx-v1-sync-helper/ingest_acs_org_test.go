@@ -40,14 +40,42 @@ func TestMergeOrgUsersWithACS(t *testing.T) {
 	})
 
 	t.Run("ACS user already in v2 is not duplicated", func(t *testing.T) {
-		authSub := mapUsernameToAuthSub("alice")
-		existing := []*b2bOrgUser{{Username: &authSub, Email: "alice@example.com", InvitedAs: "writer"}}
+		username := "alice"
+		existing := []*b2bOrgUser{{Username: &username, Email: "alice@example.com", InvitedAs: "writer"}}
 		merged, added := mergeOrgUsersWithACS(ctx, existing, []acsOrgGrantUser{{Username: "alice", Email: "alice@example.com"}}, "writers", "sfid1", "uid1")
 		if added != 0 {
 			t.Fatalf("want 0 added (already present), got %d", added)
 		}
 		if len(merged) != 1 {
 			t.Fatalf("want 1 merged (no duplicates), got %d", len(merged))
+		}
+	})
+
+	t.Run("legacy auth0-prefixed v2 username matches plain ACS username", func(t *testing.T) {
+		username := "auth0|alice"
+		existing := []*b2bOrgUser{{Username: &username, Email: "alice@example.com", InvitedAs: "writer"}}
+		merged, added := mergeOrgUsersWithACS(ctx, existing, []acsOrgGrantUser{{Username: "alice", Email: "alice@example.com"}}, "writers", "sfid1", "uid1")
+		if added != 0 {
+			t.Fatalf("want 0 added (legacy auth0| entry treated as present), got %d", added)
+		}
+		if len(merged) != 1 {
+			t.Fatalf("want 1 merged (no duplicates), got %d", len(merged))
+		}
+	})
+
+	t.Run("duplicate ACS auth0-prefixed and plain usernames are not both added", func(t *testing.T) {
+		merged, added := mergeOrgUsersWithACS(ctx, nil, []acsOrgGrantUser{
+			{Username: "auth0|alice", Email: "alice@example.com"},
+			{Username: "alice", Email: "alice@example.com"},
+		}, "writers", "sfid1", "uid1")
+		if added != 1 {
+			t.Fatalf("want 1 added, got %d", added)
+		}
+		if len(merged) != 1 {
+			t.Fatalf("want 1 merged, got %d", len(merged))
+		}
+		if merged[0].Username == nil || *merged[0].Username != "alice" {
+			t.Errorf("want plain username %q, got %v", "alice", merged[0].Username)
 		}
 	})
 
@@ -59,6 +87,35 @@ func TestMergeOrgUsersWithACS(t *testing.T) {
 		}
 		if len(merged) != 2 {
 			t.Fatalf("want 2 merged (alice preserved + bob added), got %d", len(merged))
+		}
+	})
+
+	t.Run("multiple ACS users each retain distinct usernames", func(t *testing.T) {
+		merged, added := mergeOrgUsersWithACS(ctx, nil, []acsOrgGrantUser{
+			{Username: "alice", Email: "alice@example.com"},
+			{Username: "bob", Email: "bob@example.com"},
+		}, "writers", "sfid1", "uid1")
+		if added != 2 {
+			t.Fatalf("want 2 added, got %d", added)
+		}
+		if len(merged) != 2 {
+			t.Fatalf("want 2 merged, got %d", len(merged))
+		}
+		got := map[string]struct{}{}
+		for _, entry := range merged {
+			if entry.Username == nil {
+				t.Fatal("expected username pointer")
+			}
+			got[*entry.Username] = struct{}{}
+		}
+		if len(got) != 2 {
+			t.Fatalf("want 2 distinct usernames, got %v", got)
+		}
+		if _, ok := got["alice"]; !ok {
+			t.Errorf("missing alice in %v", got)
+		}
+		if _, ok := got["bob"]; !ok {
+			t.Errorf("missing bob in %v", got)
 		}
 	})
 
@@ -127,8 +184,8 @@ func TestMergeOrgUsersWithACS(t *testing.T) {
 		}
 
 		// A non-nil existing slice that already contains alice must not duplicate her.
-		authSub := mapUsernameToAuthSub("alice")
-		existing := []*b2bOrgUser{{Username: &authSub, Email: "alice@example.com", InvitedAs: "writer"}}
+		username := "alice"
+		existing := []*b2bOrgUser{{Username: &username, Email: "alice@example.com", InvitedAs: "writer"}}
 		merged, added := mergeOrgUsersWithACS(ctx, existing, []acsOrgGrantUser{{Username: "alice", Email: "alice@example.com"}}, "writers", "sfid1", "uid1")
 		if added != 0 {
 			t.Fatalf("alice already exists: expected 0 added, got %d", added)
@@ -271,10 +328,9 @@ func TestIsLiveMemberOrgAccount(t *testing.T) {
 // helpers
 
 func makeOrgUser(username, invitedAs string) *b2bOrgUser {
-	authSub := mapUsernameToAuthSub(username)
 	return &b2bOrgUser{
 		Email:     username + "@example.com",
-		Username:  &authSub,
+		Username:  &username,
 		InvitedAs: invitedAs,
 	}
 }
