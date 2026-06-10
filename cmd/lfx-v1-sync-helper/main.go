@@ -60,8 +60,9 @@ func main() {
 	var port = flag.String("p", "", "health checks port")
 	var bind = flag.String("bind", "", "interface to bind on")
 	var doRebuildUserIndexes = flag.Bool("rebuild-user-secondary-indexes", false, "populate user secondary indexes for existing data, then exit")
-	var doBackfillACS = flag.Bool("backfill-acs", false, "backfill ACS user grants to v2 project settings, then exit")
-	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (only applicable with --backfill-acs)")
+	var doBackfillACSProject = flag.Bool("backfill-acs-project", false, "backfill ACS user grants to v2 project settings, then exit")
+	var doBackfillACSOrg = flag.Bool("backfill-acs-org", false, "backfill ACS org grants to v2 b2b_org settings, then exit")
+	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (only applicable with --backfill-acs-project or --backfill-acs-org)")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -69,12 +70,17 @@ func main() {
 	}
 	flag.Parse()
 
+	if *doBackfillACSProject && *doBackfillACSOrg {
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project and --backfill-acs-org are mutually exclusive")
+		os.Exit(2)
+	}
+
 	// Initialize a default logger early so init functions can log errors.
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}))
 	slog.SetDefault(logger)
 
 	// --rebuild-user-secondary-indexes only needs NATS KV; skip full config and API client init.
-	// --backfill-acs requires full config and API client init.
+	// --backfill-acs-project and --backfill-acs-org require full config and API client init.
 	var err error
 	if *doRebuildUserIndexes {
 		cfg = LoadReindexConfig()
@@ -250,14 +256,25 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Handle --backfill-acs flag: populate v2 project settings from ACS grants, then exit.
-	if *doBackfillACS {
-		logger.With("dry_run", *dryRun).Info("starting ACS grants backfill")
-		if err := backfillACSGrants(ctx, *dryRun); err != nil {
-			logger.With(errKey, err).Error("error during ACS grants backfill")
+	// Handle --backfill-acs-project flag: populate v2 project settings from ACS grants, then exit.
+	if *doBackfillACSProject {
+		logger.With("dry_run", *dryRun).Info("starting ACS project grants backfill")
+		if err := backfillACSProjectGrants(ctx, *dryRun); err != nil {
+			logger.With(errKey, err).Error("error during ACS project grants backfill")
 			os.Exit(1)
 		}
-		logger.Info("ACS grants backfill completed successfully")
+		logger.Info("ACS project grants backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --backfill-acs-org flag: populate v2 b2b_org settings from ACS org grants, then exit.
+	if *doBackfillACSOrg {
+		logger.With("dry_run", *dryRun).Info("starting ACS org grants backfill")
+		if err := backfillACSOrgGrants(ctx, *dryRun); err != nil {
+			logger.With(errKey, err).Error("error during ACS org grants backfill")
+			os.Exit(1)
+		}
+		logger.Info("ACS org grants backfill completed successfully")
 		os.Exit(0)
 	}
 

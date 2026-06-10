@@ -4,7 +4,9 @@
 # One-shot Job to backfill ACS user grants into v2 project settings
 # (Writers, Auditors, MeetingCoordinators). Reads all SFID→UID mappings from the
 # v1-mappings KV bucket, fetches ACS grantusers per project, and merges them
-# additively into v2. Existing v2 entries are never removed.
+# additively into v2 project settings. Existing v2 entries are never removed.
+#
+# To run the org pass only, change args to ["--backfill-acs-org"].
 #
 # One-shot: this manifest is applied manually via kubectl apply — it is NOT managed
 # by argocd and runs on demand only (e.g. after initial deployment).
@@ -61,7 +63,7 @@ spec:
           #     -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'
           image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:latest
           imagePullPolicy: IfNotPresent
-          args: ["--backfill-acs"]
+          args: ["--backfill-acs-project"]
           env:
             - name: NATS_URL
               value: "nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
@@ -83,6 +85,8 @@ spec:
               value: "https://api-gw.platform.linuxfoundation.org/"
             - name: PORT
               value: "8080"
+            - name: MEMBER_SERVICE_URL
+              value: "http://lfx-v2-member-service.member-service.svc.cluster.local:8080"
             - name: PROJECT_SERVICE_URL
               value: "http://lfx-v2-project-service.project-service.svc.cluster.local:8080"
             - name: USE_MSGPACK
