@@ -212,17 +212,13 @@ func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) 
 			return nil, fmt.Errorf("batch error reading project SFID mappings: %w", err)
 		}
 
+		// An empty batch means the server has no more matching messages for this
+		// consumer. cons.Info(ctx) is intentionally omitted here: on KV_v1-mappings
+		// the JetStream API call reliably times out under prod load within the 5 s
+		// SDK default, aborting the collection. The empty-batch signal is sufficient
+		// for correctness — worst case is one extra FetchMaxWait(5 s) at
+		// end-of-stream.
 		if empty {
-			break
-		}
-
-		// Re-check NumPending to detect end-of-stream without relying on an empty
-		// batch alone (the last batch may still be partial).
-		info, err := cons.Info(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get consumer info: %w", err)
-		}
-		if info.NumPending == 0 {
 			break
 		}
 	}
