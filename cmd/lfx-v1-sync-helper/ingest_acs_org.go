@@ -120,13 +120,23 @@ func backfillACSOrgGrants(ctx context.Context, dryRun bool) error {
 			continue
 		}
 
-		if len(grants.Writers) == 0 && len(grants.Viewers) == 0 {
-			logger.With("sfid", sfid, "uid", uid).DebugContext(ctx, "no ACS org grants found, skipping")
+		invites, err := fetchACSOrgInvitesByRole(ctx, sfid)
+		if err != nil {
+			// Proceed with empty invites so accepted grants are still backfilled
+			// even when the /invites endpoint is temporarily unavailable.
+			logger.With(errKey, err, "sfid", sfid, "uid", uid).ErrorContext(ctx, "failed to fetch ACS org invites, continuing with grants only")
+			errors++
+			invites = &acsOrgInvitesByRole{}
+		}
+
+		if len(grants.Writers) == 0 && len(grants.Viewers) == 0 &&
+			len(invites.Writers) == 0 && len(invites.Auditors) == 0 {
+			logger.With("sfid", sfid, "uid", uid).DebugContext(ctx, "no ACS org grants or invites found, skipping")
 			orgsSkipped++
 			continue
 		}
 
-		wa, aa, changed, err := backfillOrgSettings(ctx, sfid, uid, grants.Writers, grants.Viewers, dryRun)
+		wa, aa, changed, err := backfillOrgSettings(ctx, sfid, uid, grants.Writers, grants.Viewers, invites.Writers, invites.Auditors, dryRun)
 		if err != nil {
 			logger.With(errKey, err, "sfid", sfid, "uid", uid).ErrorContext(ctx, "error backfilling org settings, continuing")
 			errors++
@@ -356,9 +366,15 @@ func fetchACSOrgGrantsByRole(ctx context.Context, orgSFID string) (*acsOrgGrants
 }
 
 // backfillOrgSettings reads the current b2b_org settings, merges ACS grants
-// additively, and PUTs if there are any new entries.
+// and pending invites additively, and PUTs if there are any new entries.
+//
+// The merge runs in two passes:
+//  1. Username-keyed pass (grants): mergeOrgUsersWithACS for accepted grants.
+//  2. Email-keyed pass (invites): mergeOrgInvitesWithACS for pending invites,
+//     run cross-relation so an email already present in either list is skipped.
+//
 // Returns (writersAdded, auditorsAdded, changed, error).
-func backfillOrgSettings(ctx context.Context, sfid, uid string, acsWriters, acsViewers []acsOrgGrantUser, dryRun bool) (int, int, bool, error) {
+func backfillOrgSettings(ctx context.Context, sfid, uid string, acsWriters, acsViewers []acsOrgGrantUser, inviteWriters, inviteAuditors []acsOrgInvite, dryRun bool) (int, int, bool, error) {
 	current, etag, err := getB2BOrgSettings(ctx, uid)
 	if err != nil {
 		return 0, 0, false, fmt.Errorf("failed to GET org settings: %w", err)
@@ -368,10 +384,23 @@ func backfillOrgSettings(ctx context.Context, sfid, uid string, acsWriters, acsV
 	existingWriters := normaliseOrgUserSlice(current.Writers)
 	existingAuditors := normaliseOrgUserSlice(current.Auditors)
 
+	// Pass 1: username-keyed accepted-grants merge.
 	mergedWriters, wa := mergeOrgUsersWithACS(ctx, existingWriters, acsWriters, "writers", sfid, uid)
 	mergedAuditors, aa := mergeOrgUsersWithACS(ctx, existingAuditors, acsViewers, "auditors", sfid, uid)
 
-	if wa == 0 && aa == 0 {
+	// Pass 2a: email-keyed invite merge for writers.
+	// otherSlice = mergedAuditors from Pass 1 (invite auditors added in 2b are not
+	// visible here, preventing a pair of cross-role invites from blocking each other).
+	mergedWriters, wi := mergeOrgInvitesWithACS(ctx, mergedWriters, mergedAuditors, inviteWriters, "writers", sfid, uid)
+	// Pass 2b: email-keyed invite merge for auditors.
+	// otherSlice = mergedWriters AFTER Pass 2a, so a pending auditor invite is
+	// deduplicated if a writer invite for the same email was just added.
+	mergedAuditors, ai := mergeOrgInvitesWithACS(ctx, mergedAuditors, mergedWriters, inviteAuditors, "auditors", sfid, uid)
+
+	totalWritersAdded := wa + wi
+	totalAuditorsAdded := aa + ai
+
+	if totalWritersAdded == 0 && totalAuditorsAdded == 0 {
 		logger.With("sfid", sfid, "uid", uid).DebugContext(ctx, "no changes to org settings from ACS backfill, skipping")
 		return 0, 0, false, nil
 	}
@@ -382,10 +411,10 @@ func backfillOrgSettings(ctx context.Context, sfid, uid string, acsWriters, acsV
 			"uid", uid,
 			"writers_count", len(mergedWriters),
 			"auditors_count", len(mergedAuditors),
-			"writers_to_add", wa,
-			"auditors_to_add", aa,
-		).InfoContext(ctx, "[dry-run] would update org settings with merged ACS grants")
-		return wa, aa, true, nil
+			"writers_to_add", totalWritersAdded,
+			"auditors_to_add", totalAuditorsAdded,
+		).InfoContext(ctx, "[dry-run] would update org settings with merged ACS grants and invites")
+		return totalWritersAdded, totalAuditorsAdded, true, nil
 	}
 
 	// nil means "preserve" in the PUT contract; only include a relation when
@@ -394,10 +423,10 @@ func backfillOrgSettings(ctx context.Context, sfid, uid string, acsWriters, acsV
 	// publish) for data that didn't change, and risks silently overwriting a
 	// concurrent modification when the server doesn't return an ETag.
 	var writersPayload, auditorsPayload []*b2bOrgUser
-	if wa > 0 {
+	if totalWritersAdded > 0 {
 		writersPayload = mergedWriters
 	}
-	if aa > 0 {
+	if totalAuditorsAdded > 0 {
 		auditorsPayload = mergedAuditors
 	}
 	payload := &b2bOrgSettingsBody{
@@ -413,11 +442,11 @@ func backfillOrgSettings(ctx context.Context, sfid, uid string, acsWriters, acsV
 	logger.With(
 		"sfid", sfid,
 		"uid", uid,
-		"writers_added", wa,
-		"auditors_added", aa,
-	).InfoContext(ctx, "updated org settings with merged ACS grants")
+		"writers_added", totalWritersAdded,
+		"auditors_added", totalAuditorsAdded,
+	).InfoContext(ctx, "updated org settings with merged ACS grants and invites")
 
-	return wa, aa, true, nil
+	return totalWritersAdded, totalAuditorsAdded, true, nil
 }
 
 // normaliseOrgUserSlice converts nil to an empty slice so nil and [] are
@@ -450,12 +479,19 @@ func mergeOrgUsersWithACS(
 ) ([]*b2bOrgUser, int) {
 	// Index existing v2 users by username.
 	existingByUsername := make(map[string]*b2bOrgUser, len(existing))
-	for _, u := range existing {
+	// Index existing pending (email-only, Username==nil) entries by normalized
+	// email so they can be upgraded in-place when the same user later appears in
+	// /grantusers (accepted grant).  Without this, a second run would append a
+	// duplicate accepted row alongside the stale pending row.
+	existingPendingByEmail := make(map[string]int, len(existing))
+	for i, u := range existing {
 		if u == nil {
 			continue
 		}
 		if u.Username != nil && *u.Username != "" {
 			existingByUsername[usernameMergeKey(*u.Username)] = u
+		} else if u.Email != "" {
+			existingPendingByEmail[normalizeSettingsEmail(u.Email)] = i
 		}
 	}
 
@@ -498,11 +534,7 @@ func mergeOrgUsersWithACS(
 			continue
 		}
 
-		invitedAs := ""
-		if len(field) > 1 {
-			invitedAs = field[:len(field)-1] // "writers" → "writer", "auditors" → "auditor"
-		}
-		entry := &b2bOrgUser{Username: stringPtr(username), InvitedAs: invitedAs}
+		entry := &b2bOrgUser{Username: stringPtr(username), InvitedAs: invitedAsFromField(field)}
 
 		// Primary: use fields returned directly by the ACS /grantusers endpoint.
 		if u.Email != "" {
@@ -549,7 +581,14 @@ func mergeOrgUsersWithACS(
 			continue
 		}
 
-		merged = append(merged, entry)
+		// Upgrade a stale pending-invite row in-place rather than appending a
+		// duplicate row.  This handles run 2+: alice was pending on run 1, she
+		// accepted, now her grant supersedes the email-only entry.
+		if idx, ok := existingPendingByEmail[normalizeSettingsEmail(entry.Email)]; ok {
+			merged[idx] = entry
+		} else {
+			merged = append(merged, entry)
+		}
 		existingByUsername[usernameMergeKey(username)] = entry
 		added++
 	}
