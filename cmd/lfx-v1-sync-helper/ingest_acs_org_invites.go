@@ -205,17 +205,17 @@ func mergeOrgInvitesWithACS(
 	added := 0
 
 	for _, inv := range invites {
-		if inv.Email == "" {
+		key := normalizeSettingsEmail(inv.Email)
+		if key == "" {
 			logger.With("invite_id", inv.InviteID, "sfid", sfid, "uid", uid, "field", field).
 				InfoContext(ctx, "skipping ACS invite with no email")
 			continue
 		}
-		key := normalizeSettingsEmail(inv.Email)
 		if _, present := existingEmails[key]; present {
 			continue
 		}
 		entry := &b2bOrgUser{
-			Email:     inv.Email,
+			Email:     key, // store normalized (trimmed+lowercased) form
 			Name:      buildFullName(inv.FirstName, inv.LastName),
 			InvitedAs: invitedAs,
 			// Username intentionally nil — member-service sets invite_status=pending.

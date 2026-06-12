@@ -122,9 +122,11 @@ func backfillACSOrgGrants(ctx context.Context, dryRun bool) error {
 
 		invites, err := fetchACSOrgInvitesByRole(ctx, sfid)
 		if err != nil {
-			logger.With(errKey, err, "sfid", sfid, "uid", uid).ErrorContext(ctx, "failed to fetch ACS org invites, continuing")
+			// Proceed with empty invites so accepted grants are still backfilled
+			// even when the /invites endpoint is temporarily unavailable.
+			logger.With(errKey, err, "sfid", sfid, "uid", uid).ErrorContext(ctx, "failed to fetch ACS org invites, continuing with grants only")
 			errors++
-			continue
+			invites = &acsOrgInvitesByRole{}
 		}
 
 		if len(grants.Writers) == 0 && len(grants.Viewers) == 0 &&
