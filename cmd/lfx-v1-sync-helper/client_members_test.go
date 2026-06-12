@@ -41,6 +41,45 @@ func setupMembersTestGlobals(t *testing.T) {
 	})
 }
 
+// TestNormalizePayloadUsernames confirms that auth0| prefixes are stripped from
+// writer and auditor usernames before the payload is serialised.
+func TestNormalizePayloadUsernames(t *testing.T) {
+	alice := "auth0|alice"
+	bob := "auth0|bob"
+	plain := "carol"
+
+	payload := &b2bOrgSettingsBody{
+		Writers:  []*b2bOrgUser{{Username: &alice, Email: "alice@example.com", InvitedAs: "writer"}},
+		Auditors: []*b2bOrgUser{{Username: &bob, Email: "bob@example.com", InvitedAs: "auditor"}},
+	}
+	normalizePayloadUsernames(payload)
+
+	if got := *payload.Writers[0].Username; got != "alice" {
+		t.Errorf("writers[0].username = %q, want %q", got, "alice")
+	}
+	if got := *payload.Auditors[0].Username; got != "bob" {
+		t.Errorf("auditors[0].username = %q, want %q", got, "bob")
+	}
+
+	// plain username (no prefix) must be left unchanged.
+	payload2 := &b2bOrgSettingsBody{
+		Writers: []*b2bOrgUser{{Username: &plain, Email: "carol@example.com", InvitedAs: "writer"}},
+	}
+	normalizePayloadUsernames(payload2)
+	if got := *payload2.Writers[0].Username; got != "carol" {
+		t.Errorf("plain username mutated: got %q, want %q", got, "carol")
+	}
+
+	// nil payload must not panic.
+	normalizePayloadUsernames(nil)
+
+	// entry with nil Username pointer must not panic.
+	payload3 := &b2bOrgSettingsBody{
+		Writers: []*b2bOrgUser{{Email: "nouser@example.com", InvitedAs: "writer"}},
+	}
+	normalizePayloadUsernames(payload3)
+}
+
 // TestPutB2BOrgSettings_412Retry covers the three critical scenarios for the
 // optimistic-lock retry in putB2BOrgSettings.
 func TestPutB2BOrgSettings_412Retry(t *testing.T) {

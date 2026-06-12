@@ -111,6 +111,27 @@ func getB2BOrgSettings(ctx context.Context, uid string) (*b2bOrgSettingsBody, st
 	return &settings, resp.Header.Get("ETag"), nil
 }
 
+// normalizePayloadUsernames strips legacy auth0| prefixes from every writer
+// and auditor entry in payload before it is serialised to JSON.
+// normalizeACSUsername (username_mapping.go) strips the prefix only for
+// safe-slug values (auth0|alice → alice); opaque hashed auth0|<base58> values
+// are left unchanged so they are never silently truncated to a bare hash.
+func normalizePayloadUsernames(payload *b2bOrgSettingsBody) {
+	if payload == nil {
+		return
+	}
+	for _, u := range payload.Writers {
+		if u != nil && u.Username != nil {
+			*u.Username = normalizeACSUsername(*u.Username)
+		}
+	}
+	for _, u := range payload.Auditors {
+		if u != nil && u.Username != nil {
+			*u.Username = normalizeACSUsername(*u.Username)
+		}
+	}
+}
+
 // putB2BOrgSettings replaces the settings for a b2b_org. ifMatch is the ETag
 // from a preceding GET; pass "" to skip optimistic-locking. On 412 the server
 // has no settings record yet — the function retries once without If-Match so
@@ -125,6 +146,12 @@ func putB2BOrgSettings(ctx context.Context, uid string, payload *b2bOrgSettingsB
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to generate JWT token: %w", err)
 	}
+
+	// Normalise usernames before serialising: strip the legacy auth0| prefix from
+	// safe-slug values (auth0|alice → alice) so member-service always receives a
+	// plain LFID username.  Hashed auth0|<base58> values that are not safe slugs
+	// are left unchanged by normalizeACSUsername.
+	normalizePayloadUsernames(payload)
 
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
