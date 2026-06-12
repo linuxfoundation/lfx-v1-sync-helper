@@ -116,20 +116,22 @@ func getB2BOrgSettings(ctx context.Context, uid string) (*b2bOrgSettingsBody, st
 // normalizeACSUsername (username_mapping.go) strips the prefix only for
 // safe-slug values (auth0|alice → alice); opaque hashed auth0|<base58> values
 // are left unchanged so they are never silently truncated to a bare hash.
+//
+// This function mutates payload in place. Callers must not reuse payload
+// after passing it to putB2BOrgSettings.
 func normalizePayloadUsernames(payload *b2bOrgSettingsBody) {
 	if payload == nil {
 		return
 	}
-	for _, u := range payload.Writers {
-		if u != nil && u.Username != nil {
-			*u.Username = normalizeACSUsername(*u.Username)
+	normalize := func(users []*b2bOrgUser) {
+		for _, u := range users {
+			if u != nil && u.Username != nil {
+				*u.Username = normalizeACSUsername(*u.Username)
+			}
 		}
 	}
-	for _, u := range payload.Auditors {
-		if u != nil && u.Username != nil {
-			*u.Username = normalizeACSUsername(*u.Username)
-		}
-	}
+	normalize(payload.Writers)
+	normalize(payload.Auditors)
 }
 
 // putB2BOrgSettings replaces the settings for a b2b_org. ifMatch is the ETag

@@ -88,10 +88,11 @@ func fetchACSOrgInvitesByRole(ctx context.Context, orgSFID string) (*acsOrgInvit
 	rolenames := acsOrgRoleNameAdmin + "," + acsOrgRoleNameViewer
 
 	var (
-		offset       int64
-		rawFetched   int64 // total rows returned by API (for TotalSize comparison)
-		filteredRows []acsOrgInvite
+		offset     int64
+		rawFetched int64 // total rows returned by API (for TotalSize comparison)
 	)
+
+	result := &acsOrgInvitesByRole{}
 
 	for {
 		apiURL := fmt.Sprintf("%s%s", cfg.LFXAPIGateway.String(), acsAPIPathInvites)
@@ -143,11 +144,14 @@ func fetchACSOrgInvitesByRole(ctx context.Context, orgSFID string) (*acsOrgInvit
 			if updatedAt < cutoff {
 				continue // outside 1-year window
 			}
+			if item.Status != "" && item.Status != "pending" {
+				continue // guard against API contract drift
+			}
 			switch item.RoleName {
-			case acsOrgRoleNameAdmin, acsOrgRoleNameViewer:
-				filteredRows = append(filteredRows, item)
-			default:
-				// role outside scope; skip silently
+			case acsOrgRoleNameAdmin:
+				result.Writers = append(result.Writers, item)
+			case acsOrgRoleNameViewer:
+				result.Auditors = append(result.Auditors, item)
 			}
 		}
 
@@ -157,15 +161,6 @@ func fetchACSOrgInvitesByRole(ctx context.Context, orgSFID string) (*acsOrgInvit
 		offset += acsGrantUsersPageSize
 	}
 
-	result := &acsOrgInvitesByRole{}
-	for _, item := range filteredRows {
-		switch item.RoleName {
-		case acsOrgRoleNameAdmin:
-			result.Writers = append(result.Writers, item)
-		case acsOrgRoleNameViewer:
-			result.Auditors = append(result.Auditors, item)
-		}
-	}
 	return result, nil
 }
 

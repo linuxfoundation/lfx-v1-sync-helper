@@ -479,12 +479,19 @@ func mergeOrgUsersWithACS(
 ) ([]*b2bOrgUser, int) {
 	// Index existing v2 users by username.
 	existingByUsername := make(map[string]*b2bOrgUser, len(existing))
-	for _, u := range existing {
+	// Index existing pending (email-only, Username==nil) entries by normalized
+	// email so they can be upgraded in-place when the same user later appears in
+	// /grantusers (accepted grant).  Without this, a second run would append a
+	// duplicate accepted row alongside the stale pending row.
+	existingPendingByEmail := make(map[string]int, len(existing))
+	for i, u := range existing {
 		if u == nil {
 			continue
 		}
 		if u.Username != nil && *u.Username != "" {
 			existingByUsername[usernameMergeKey(*u.Username)] = u
+		} else if u.Email != "" {
+			existingPendingByEmail[normalizeSettingsEmail(u.Email)] = i
 		}
 	}
 
@@ -574,7 +581,14 @@ func mergeOrgUsersWithACS(
 			continue
 		}
 
-		merged = append(merged, entry)
+		// Upgrade a stale pending-invite row in-place rather than appending a
+		// duplicate row.  This handles run 2+: alice was pending on run 1, she
+		// accepted, now her grant supersedes the email-only entry.
+		if idx, ok := existingPendingByEmail[normalizeSettingsEmail(entry.Email)]; ok {
+			merged[idx] = entry
+		} else {
+			merged = append(merged, entry)
+		}
 		existingByUsername[usernameMergeKey(username)] = entry
 		added++
 	}
