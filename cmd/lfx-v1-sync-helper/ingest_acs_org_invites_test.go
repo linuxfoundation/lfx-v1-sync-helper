@@ -134,8 +134,8 @@ func TestMergeOrgInvitesWithACS(t *testing.T) {
 // 1-year window are included and that role filtering works.
 func TestFetchACSOrgInvitesByRole_TimeFilter(t *testing.T) {
 	cutoff := time.Now().AddDate(-1, 0, 0).Unix()
-	justInside := cutoff + 1      // 1 second inside window — must be included
-	justOutside := cutoff - 1     // 1 second outside window — must be skipped
+	justInside := cutoff + 10     // 10 seconds inside window — must be included
+	justOutside := cutoff - 10    // 10 seconds outside window — must be skipped
 	unparseable := "not-a-number" // must log + skip
 
 	tests := []struct {
@@ -164,7 +164,20 @@ func TestFetchACSOrgInvitesByRole_TimeFilter(t *testing.T) {
 				"metadata":{"TotalSize":1,"Offset":0,"PageSize":1}
 			}`, tc.roleName, tc.updatedAt)
 
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				q := r.URL.Query()
+				if got := q.Get("scopeid"); got != "sfid1" {
+					t.Errorf("expected scopeid=sfid1, got %q", got)
+				}
+				if got := q.Get("rolenames"); got != acsOrgRoleNameAdmin+","+acsOrgRoleNameViewer {
+					t.Errorf("expected rolenames=%q, got %q", acsOrgRoleNameAdmin+","+acsOrgRoleNameViewer, got)
+				}
+				if got := q.Get("status"); got != "pending" {
+					t.Errorf("expected status=pending, got %q", got)
+				}
+				if got := q.Get("showuniqueusers"); got != "true" {
+					t.Errorf("expected showuniqueusers=true, got %q", got)
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				fmt.Fprint(w, body)
@@ -195,7 +208,20 @@ func TestFetchACSOrgInvitesByRole_Pagination(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		offset := r.URL.Query().Get("offset")
+		q := r.URL.Query()
+		if got := q.Get("scopeid"); got != "sfid1" {
+			t.Errorf("expected scopeid=sfid1, got %q", got)
+		}
+		if got := q.Get("rolenames"); got != acsOrgRoleNameAdmin+","+acsOrgRoleNameViewer {
+			t.Errorf("expected rolenames=%q, got %q", acsOrgRoleNameAdmin+","+acsOrgRoleNameViewer, got)
+		}
+		if got := q.Get("status"); got != "pending" {
+			t.Errorf("expected status=pending, got %q", got)
+		}
+		if got := q.Get("showuniqueusers"); got != "true" {
+			t.Errorf("expected showuniqueusers=true, got %q", got)
+		}
+		offset := q.Get("offset")
 		var body string
 		switch offset {
 		case "0":
