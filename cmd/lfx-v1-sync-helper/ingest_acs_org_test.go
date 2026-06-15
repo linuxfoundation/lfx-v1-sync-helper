@@ -194,6 +194,29 @@ func TestMergeOrgUsersWithACS(t *testing.T) {
 			t.Fatalf("expected 1 entry in merged result, got %d", len(merged))
 		}
 	})
+
+	t.Run("stale pending-invite row upgraded in-place when grant appears (run-2 scenario)", func(t *testing.T) {
+		// Run 1 wrote alice as a pending invite (email-only, no username).
+		// On Run 2 alice has accepted, so /grantusers returns her with a username.
+		// mergeOrgUsersWithACS must replace the pending row rather than appending
+		// a duplicate — otherwise alice would appear twice in settings.
+		existing := []*b2bOrgUser{{Email: "alice@example.com", InvitedAs: "writer"}} // Username == nil
+		grant := acsOrgGrantUser{Username: "alice", Email: "alice@example.com"}
+		merged, added := mergeOrgUsersWithACS(ctx, existing, []acsOrgGrantUser{grant}, "writers", "sfid1", "uid1")
+		if len(merged) != 1 {
+			t.Fatalf("want 1 entry (pending replaced, no duplicate), got %d", len(merged))
+		}
+		if added != 1 {
+			t.Fatalf("want added=1 (upgrade counts as change), got %d", added)
+		}
+		entry := merged[0]
+		if entry.Username == nil || *entry.Username != "alice" {
+			t.Errorf("upgraded entry must have username=alice, got %v", entry.Username)
+		}
+		if entry.Email != "alice@example.com" {
+			t.Errorf("email = %q, want alice@example.com", entry.Email)
+		}
+	})
 }
 
 // TestNormalizeSFID18 confirms sfutil.Normalize18 produces the canonical 18-char
