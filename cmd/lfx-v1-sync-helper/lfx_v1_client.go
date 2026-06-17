@@ -420,6 +420,10 @@ func lookupUserByUsername(ctx context.Context, username string) (*V1User, string
 	return user, sfid
 }
 
+// lookupUserByUsernameForACS is the v1 username resolver used during ACS project
+// settings merge. Tests may replace it to stub v1 lookups.
+var lookupUserByUsernameForACS = lookupUserByUsername
+
 // ResolveV1UserSFIDByEmail looks up a v1 user SFID by email using the secondary index.
 // It validates the resolved SFID by checking all alternate emails for the user.
 // Returns (sfid, nil) on success, ("", nil) on miss (including stale index), or ("", error) on failure.

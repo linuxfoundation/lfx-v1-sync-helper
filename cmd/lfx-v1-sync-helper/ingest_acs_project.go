@@ -138,7 +138,7 @@ func backfillACSProjectGrants(ctx context.Context, dryRun bool) error {
 //
 // FetchMaxWait is kept ≤ 10 seconds to prevent the SDK from auto-enabling idle
 // heartbeats, which fail over high-latency connections (e.g. kubectl
-// port-forward). The loop retries until NumPending reaches zero.
+// port-forward). The loop terminates on an empty batch (no more messages).
 func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) {
 	const (
 		// kvMappingsStream is the JetStream stream backing the v1-mappings KV
@@ -212,17 +212,13 @@ func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) 
 			return nil, fmt.Errorf("batch error reading project SFID mappings: %w", err)
 		}
 
+		// An empty batch means the server has no more matching messages for this
+		// consumer. cons.Info(ctx) is intentionally omitted here: on KV_v1-mappings
+		// the JetStream API call reliably times out under prod load within the 5 s
+		// SDK default, aborting the collection. The empty-batch signal is sufficient
+		// for correctness — worst case is one extra FetchMaxWait(5 s) at
+		// end-of-stream.
 		if empty {
-			break
-		}
-
-		// Re-check NumPending to detect end-of-stream without relying on an empty
-		// batch alone (the last batch may still be partial).
-		info, err := cons.Info(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get consumer info: %w", err)
-		}
-		if info.NumPending == 0 {
 			break
 		}
 	}
@@ -395,9 +391,8 @@ func fetchACSGrantsByRole(ctx context.Context, projectSFID string) (*acsGrantsBy
 // entries are removed. Users already present in v2 but not in ACS are logged
 // as "extra" values.
 //
-// Usernames are converted to v2 format via mapUsernameToAuthSub before
-// comparison (e.g. "example" → "auth0|example"). For new entries, the username
-// is resolved to a v1 SFID via lookupUserByUsername and enriched with
+// Usernames are compared and written as LFX usernames. For new entries, the
+// username is resolved to a v1 SFID via lookupUserByUsername and enriched with
 // email/name/avatar. When no username match is found, a secondary lookup by
 // email is attempted against existing email-only entries.
 func mergeUserInfoWithACS(
@@ -406,15 +401,15 @@ func mergeUserInfoWithACS(
 	acsUsers []acsGrantUser,
 	field, sfid, projectUID string,
 ) []*projectservice.UserInfo {
-	// Build indexes of existing v2 users by auth sub and by email.
-	existingByAuthSub := make(map[string]*projectservice.UserInfo, len(existing))
+	// Build indexes of existing v2 users by username and by email.
+	existingByUsername := make(map[string]*projectservice.UserInfo, len(existing))
 	existingByEmail := make(map[string]*projectservice.UserInfo, len(existing))
 	for _, u := range existing {
 		if u == nil {
 			continue
 		}
 		if u.Username != nil && *u.Username != "" {
-			existingByAuthSub[*u.Username] = u
+			existingByUsername[usernameMergeKey(*u.Username)] = u
 		} else if u.Email != nil && *u.Email != "" {
 			// Only index by email when there is no username; if a username is
 			// present the primary lookup will find it first.
@@ -422,20 +417,25 @@ func mergeUserInfoWithACS(
 		}
 	}
 
-	// Build the auth sub set from ACS for "extra values" detection.
-	acsAuthSubs := make(map[string]struct{}, len(acsUsers))
+	// Build the username set from ACS for "extra values" detection.
+	acsUsernames := make(map[string]struct{}, len(acsUsers))
 	for _, u := range acsUsers {
 		if u.Username != "" {
-			acsAuthSubs[mapUsernameToAuthSub(u.Username)] = struct{}{}
+			acsUsernames[usernameMergeKey(normalizeACSUsername(u.Username))] = struct{}{}
 		}
 	}
 
 	// Log any v2 users that are not in ACS ("extra" values for investigation).
-	for authSub := range existingByAuthSub {
-		if _, inACS := acsAuthSubs[authSub]; !inACS {
+	for mergeKey, u := range existingByUsername {
+		if _, inACS := acsUsernames[mergeKey]; !inACS {
+			storedUsername := ""
+			if u != nil && u.Username != nil {
+				storedUsername = *u.Username
+			}
 			logger.With(
 				"field", field,
-				"username", authSub,
+				"username", storedUsername,
+				"merge_key", mergeKey,
 				"sfid", sfid,
 				"project_uid", projectUID,
 			).InfoContext(ctx, "v2 project settings has user not present in ACS — may need investigation")
@@ -452,21 +452,21 @@ func mergeUserInfoWithACS(
 			continue
 		}
 
-		authSub := mapUsernameToAuthSub(u.Username)
+		username := normalizeACSUsername(u.Username)
 
-		if _, alreadyPresent := existingByAuthSub[authSub]; alreadyPresent {
+		if _, alreadyPresent := existingByUsername[usernameMergeKey(username)]; alreadyPresent {
 			continue
 		}
 
-		// Resolve the username to a v1 user record for enrichment and canonical auth sub.
-		v1User, _ := lookupUserByUsername(ctx, u.Username)
+		// Resolve the username to a v1 user record for enrichment and canonical username.
+		v1User, _ := lookupUserByUsernameForACS(ctx, username)
 
-		// If we got a v1 user, recompute the auth sub from the canonical v1 username
+		// If we got a v1 user, use the canonical v1 username
 		// (handles casing/whitespace differences between ACS and v1).
 		if v1User != nil {
-			authSub = mapUsernameToAuthSub(v1User.Username)
-			// Re-check deduplication with the canonical auth sub.
-			if _, alreadyPresent := existingByAuthSub[authSub]; alreadyPresent {
+			username = v1User.Username
+			// Re-check deduplication with the canonical username.
+			if _, alreadyPresent := existingByUsername[usernameMergeKey(username)]; alreadyPresent {
 				continue
 			}
 		}
@@ -479,7 +479,7 @@ func mergeUserInfoWithACS(
 				// affected — otherwise userInfoSlicesEqual would see no change and
 				// skip the PUT.
 				corrected := *byEmailEntry
-				corrected.Username = &authSub
+				corrected.Username = stringPtr(username)
 				// Replace the pointer in merged so the corrected copy is what gets written.
 				for i, m := range merged {
 					if m == byEmailEntry {
@@ -487,26 +487,26 @@ func mergeUserInfoWithACS(
 						break
 					}
 				}
-				existingByAuthSub[authSub] = &corrected
+				existingByUsername[usernameMergeKey(username)] = &corrected
 				continue
 			}
 		}
 
-		entry := buildProjectUserInfo(authSub, v1User)
+		entry := buildProjectUserInfo(username, v1User)
 		merged = append(merged, entry)
 
 		// Track newly added user so subsequent entries with the same username
 		// are not added twice.
-		existingByAuthSub[authSub] = entry
+		existingByUsername[usernameMergeKey(username)] = entry
 	}
 
 	return merged
 }
 
-// buildProjectUserInfo constructs a project service UserInfo from an auth sub and an
-// optional resolved V1User. If v1User is nil only the auth sub is set.
-func buildProjectUserInfo(authSub string, v1User *V1User) *projectservice.UserInfo {
-	info := &projectservice.UserInfo{Username: &authSub}
+// buildProjectUserInfo constructs a project service UserInfo from a username and an
+// optional resolved V1User. If v1User is nil only the username is set.
+func buildProjectUserInfo(username string, v1User *V1User) *projectservice.UserInfo {
+	info := &projectservice.UserInfo{Username: stringPtr(username)}
 	if v1User == nil {
 		return info
 	}

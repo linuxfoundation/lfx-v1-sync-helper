@@ -4,14 +4,15 @@
 // The lfx-v1-sync-helper service.
 package main
 
-// Username mapping utility for converting usernames to Auth0 "sub" format.
+// Username mapping utility for resolving Auth0 Management API user IDs.
 //
-// This file handles the conversion of usernames to the "sub" claim format
-// expected by v2 services, which uses "auth0|{ldap exported safe ID}" format.
+// v2 services now accept LFX usernames directly. This mapping remains for
+// v1-side Auth0 profile sync (Management API calls in handlers_users.go).
 
 import (
 	"crypto/sha512"
 	"regexp"
+	"strings"
 
 	"github.com/akamensky/base58"
 )
@@ -22,9 +23,8 @@ var (
 	hexUserRE  = regexp.MustCompile(`^[0-9a-f]{24,60}$`)
 )
 
-// mapUsernameToAuthSub converts a username to the Auth0 "sub" format expected by v2 services.
-// This replaces both "username" and "principal" claims in JWT impersonation and usernames
-// sent in committee-member payloads.
+// mapUsernameToAuthSub converts an LFX username to the Auth0 user_id format used by the
+// Auth0 Management API (auth0|{userID}). Not used for v2 service writes or JWT impersonation.
 //
 // The mapping logic:
 //   - Safe usernames (matching safeNameRE and not hexUserRE): use directly as userID
@@ -51,4 +51,34 @@ func mapUsernameToAuthSub(username string) string {
 	}
 
 	return "auth0|" + userID
+}
+
+// normalizeACSUsername converts legacy auth0|{username} ACS values to plain LFX
+// usernames when the suffix is a plausible v1 username. Hashed auth0|{id}
+// suffixes are left unchanged so v1 lookup is not attempted with opaque IDs.
+func normalizeACSUsername(username string) string {
+	if suffix, ok := strings.CutPrefix(username, "auth0|"); ok && suffix != "" {
+		if safeNameRE.MatchString(suffix) && !hexUserRE.MatchString(suffix) {
+			return suffix
+		}
+	}
+	return username
+}
+
+// stringPtr returns a pointer to a copy of s. Use when storing string pointers
+// derived from loop-scoped variables so each entry gets its own allocation.
+func stringPtr(s string) *string {
+	return &s
+}
+
+// usernameMergeKey returns the username value used for ACS merge deduplication.
+// Legacy v2 entries may still store auth0|{id} values from older sync-helper
+// writes. When the suffix is a plain username, strip the prefix so it matches
+// ACS/plain LFX usernames during the transition. Hashed auth0|{id} values are
+// not safely reversible and are only normalized for dedup keying, not migration.
+func usernameMergeKey(username string) string {
+	if suffix, ok := strings.CutPrefix(username, "auth0|"); ok && suffix != "" {
+		return suffix
+	}
+	return username
 }
