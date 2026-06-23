@@ -259,16 +259,45 @@ Note: The replication slot is named `lfx_v2` (not `wal-listener`). The publicati
 
 ## One-shot Backfill Commands
 
-### `--backfill-acs-org` pass (`ingest_acs_org.go`)
+The following CLI flags run one-shot operations and exit. All are mutually exclusive. Use `--dry-run` with any of them to preview changes without writing.
 
-The `--backfill-acs-org` flag runs the org grants pass (`backfillACSOrgGrants`), which backfills ACS legacy org grants into v2 b2b_org settings:
+### `--backfill-alternate-emails [--limit N] [--dry-run]` (`backfill_email_profile.go`)
+
+Iterates Auth0 users (Username-Password-Authentication connection only), sorted by `updated_at` ascending, and links any v1 verified alternate emails not yet linked as Auth0 email-connection identities.
+
+- **Cursor**: stored at `v1-mappings` key `backfill.alternate-emails.cursor` (updated_at of last processed user). Re-run to advance.
+- **Per-user flow**: resolves v1 SFID via username secondary index → fetches alternate email SFIDs from `v1-mappings` → calls `linkEmailIdentity` for each verified, active, non-primary email.
+- **`--limit N`** (default 1000): caps users processed per run.
+- **Summary log fields**: `users_processed`, `emails_linked`, `emails_skipped`, `errors`.
+- **Manifest**: `manifests/backfill-alternate-emails-job.yaml`.
+
+### `--backfill-profiles [--limit N] [--dry-run]` (`backfill_email_profile.go`)
+
+Iterates Auth0 users (same connection filter and sort), syncs v1 profile fields (name, title, address, org, etc.) to Auth0 `user_metadata` via `syncProfileToAuth0`. No-ops when nothing has changed.
+
+- **Cursor**: stored at `v1-mappings` key `backfill.profiles.cursor`.
+- **`--limit N`** (default 1000): caps users processed per run.
+- **Summary log fields**: `users_processed`, `users_updated`, `users_skipped`, `errors`.
+- **Manifest**: `manifests/backfill-profiles-job.yaml`.
+- **Replaces** the removed `PROFILE_SYNC_BACKFILL` environment variable.
+
+### `--sync-user <username> [--dry-run]` (`backfill_email_profile.go`)
+
+Performs a full sync (profile + alternate emails) for a single user identified by their Auth0 username (the part after `auth0|`). Useful for debugging or targeted re-sync without a full backfill run.
+
+### `--backfill-acs-project [--dry-run]` (`ingest_acs_project.go`)
+
+Backfills ACS user grants into v2 project settings (Writers, Auditors, MeetingCoordinators). See `manifests/backfill-acs-job.yaml`.
+
+### `--backfill-acs-org [--dry-run]` (`ingest_acs_org.go`)
+
+Backfills ACS legacy org grants into v2 b2b_org settings:
 
 - **SFID source**: scans `$KV.v1-objects.salesforce_b2b-Account.*` keys from the `KV_v1-objects` JetStream stream using `DeliverAllPolicy` (last-write-wins, same trick as project SFID collection). Skips records where `IsDeleted=true` or `IsMember__c!=true`.
 - **UID resolution**: `sfutil.Normalize18(sfid)` — as of LFXV2-2049 the b2b_org UID is the 18-char normalized SFID. No network call.
 - **ACS query**: `GET /acs/v1/api/grantusers?object_type=organization&object_id={sfid}&rolename=company-admin,viewer` (paginated). `company-admin` → `writer`; `viewer` → `auditor`.
 - **Settings API**: raw HTTP `GET`/`PUT /b2b_orgs/{uid}/settings` via `client_members.go`. Requires `MEMBER_SERVICE_URL` env var.
 - **Merge**: additive-only; existing v2-only entries are logged as "extra" but never removed.
-- **Dry-run**: add `--dry-run` to preview without writing.
 - **Summary log fields**: `orgs_total`, `orgs_changed`, `writers_added`, `auditors_added`, `orgs_skipped`, `errors`.
 
 ### 4. `cmd/lfx-v1-sync-helper/handlers.go` — suppress unknown-object warnings (optional)

@@ -62,7 +62,11 @@ func main() {
 	var doRebuildUserIndexes = flag.Bool("rebuild-user-secondary-indexes", false, "populate user secondary indexes for existing data, then exit")
 	var doBackfillACSProject = flag.Bool("backfill-acs-project", false, "backfill ACS user grants to v2 project settings, then exit")
 	var doBackfillACSOrg = flag.Bool("backfill-acs-org", false, "backfill ACS org grants to v2 b2b_org settings, then exit")
-	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (only applicable with --backfill-acs-project or --backfill-acs-org)")
+	var doBackfillAltEmails = flag.Bool("backfill-alternate-emails", false, "backfill v1 alternate emails to Auth0 linked identities, then exit")
+	var doBackfillProfiles = flag.Bool("backfill-profiles", false, "backfill v1 profile fields to Auth0 user_metadata, then exit")
+	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
+	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-* and --sync-user)")
+	var backfillLimit = flag.Int("limit", 1000, "maximum number of users to process per backfill run (applicable with --backfill-alternate-emails and --backfill-profiles)")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -102,12 +106,9 @@ func main() {
 			logger.With(errKey, err).Error("error initializing v1 client")
 			os.Exit(1)
 		}
-		if err := initAuth0MgmtClient(cfg, cfg.ProfileSyncBackfill); err != nil {
+		if err := initAuth0MgmtClient(cfg, false); err != nil {
 			logger.With(errKey, err).Error("error initializing Auth0 Management API client")
 			os.Exit(1)
-		}
-		if cfg.ProfileSyncBackfill {
-			logger.Warn("PROFILE_SYNC_BACKFILL=true: profile sync is running in sync/NACK mode with no SDK retries")
 		}
 	}
 
@@ -275,6 +276,50 @@ func main() {
 			os.Exit(1)
 		}
 		logger.Info("ACS org grants backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --backfill-alternate-emails flag: link v1 verified alternate emails to Auth0, then exit.
+	if *doBackfillAltEmails {
+		logger.With("limit", *backfillLimit, "dry_run", *dryRun).Info("starting alternate-emails backfill")
+		result, err := backfillAlternateEmails(ctx, *backfillLimit, *dryRun)
+		if err != nil {
+			logger.With(errKey, err).Error("error during alternate-emails backfill")
+			os.Exit(1)
+		}
+		logger.With(
+			"users_processed", result.usersProcessed,
+			"emails_linked", result.emailsLinked,
+			"emails_skipped", result.emailsSkipped,
+			"errors", result.errors,
+		).Info("alternate-emails backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --backfill-profiles flag: sync v1 profile fields to Auth0 user_metadata, then exit.
+	if *doBackfillProfiles {
+		logger.With("limit", *backfillLimit, "dry_run", *dryRun).Info("starting profiles backfill")
+		result, err := backfillProfiles(ctx, *backfillLimit, *dryRun)
+		if err != nil {
+			logger.With(errKey, err).Error("error during profiles backfill")
+			os.Exit(1)
+		}
+		logger.With(
+			"users_processed", result.usersProcessed,
+			"users_updated", result.usersUpdated,
+			"users_skipped", result.usersSkipped,
+			"errors", result.errors,
+		).Info("profiles backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --sync-user flag: sync profile and alternate emails for a single user, then exit.
+	if *syncUser != "" {
+		logger.With("username", *syncUser, "dry_run", *dryRun).Info("starting single-user sync")
+		if err := syncSingleUser(ctx, *syncUser, *dryRun); err != nil {
+			logger.With(errKey, err).Error("error during single-user sync")
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 

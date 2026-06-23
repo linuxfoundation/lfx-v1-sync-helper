@@ -96,10 +96,9 @@ func TestEmailToKVKeyNormalization(t *testing.T) {
 	}
 }
 
-// TestDispatchProfileSync covers the live/backfill branching in
-// dispatchProfileSync. It uses a fake sync function to drive the three
-// outcomes that matter: retryable-error NACK, non-retryable drop, and the
-// async live path that always ACKs.
+// TestDispatchProfileSync covers the live (fire-and-forget) path in
+// dispatchProfileSync. It always returns false and invokes the sync
+// function asynchronously via a goroutine.
 func TestDispatchProfileSync(t *testing.T) {
 	origLogger := logger
 	origCfg := cfg
@@ -118,56 +117,18 @@ func TestDispatchProfileSync(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		backfill   bool
 		syncErr    error
 		wantNack   bool // return value from dispatchProfileSync
-		wantCalled bool // whether the fake sync was invoked (sync) or eventually invoked (live)
+		wantCalled bool // whether the fake sync was eventually invoked
 	}{
 		{
-			name:       "backfill success → ACK",
-			backfill:   true,
-			syncErr:    nil,
-			wantNack:   false,
-			wantCalled: true,
-		},
-		{
-			name:       "backfill retryable Auth0 error → NACK",
-			backfill:   true,
-			syncErr:    &fakeMgmtErr{status: 429, msg: "rate limited"},
-			wantNack:   true,
-			wantCalled: true,
-		},
-		{
-			name:       "backfill 5xx Auth0 error → NACK",
-			backfill:   true,
-			syncErr:    fmt.Errorf("wrapped: %w", &fakeMgmtErr{status: 503}),
-			wantNack:   true,
-			wantCalled: true,
-		},
-		{
-			name:       "backfill non-retryable Auth0 error → ACK (drop)",
-			backfill:   true,
-			syncErr:    &fakeMgmtErr{status: 404, msg: "not found"},
-			wantNack:   false,
-			wantCalled: true,
-		},
-		{
-			name:       "backfill org-lookup error → ACK (drop, keep moving)",
-			backfill:   true,
-			syncErr:    errors.New("failed to resolve v1 org acc_123: upstream timeout"),
-			wantNack:   false,
-			wantCalled: true,
-		},
-		{
 			name:       "live success → ACK (fire-and-forget)",
-			backfill:   false,
 			syncErr:    nil,
 			wantNack:   false,
 			wantCalled: true,
 		},
 		{
 			name:       "live retryable error → ACK (SDK retry handles it, not NACK)",
-			backfill:   false,
 			syncErr:    &fakeMgmtErr{status: 429, msg: "rate limited"},
 			wantNack:   false,
 			wantCalled: true,
@@ -176,7 +137,7 @@ func TestDispatchProfileSync(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg = &Config{ProfileSyncBackfill: tt.backfill}
+			cfg = &Config{}
 
 			var (
 				mu         sync.Mutex
@@ -204,8 +165,8 @@ func TestDispatchProfileSync(t *testing.T) {
 				t.Errorf("dispatchProfileSync nack = %v, want %v", gotNack, tt.wantNack)
 			}
 
-			// For the async/live path the sync runs in a goroutine; wait briefly.
-			if !tt.backfill && tt.wantCalled {
+			// The live path runs in a goroutine; wait briefly.
+			if tt.wantCalled {
 				select {
 				case <-callDone:
 				case <-time.After(2 * time.Second):
@@ -221,10 +182,10 @@ func TestDispatchProfileSync(t *testing.T) {
 			if tt.wantCalled && gotUID != "auth0|alice" {
 				t.Errorf("sync called with auth0UserID = %q, want %q", gotUID, "auth0|alice")
 			}
-			// Both paths must bound the sync call with a deadline so a
-			// hung Auth0 request can't wedge the consumer or leak a goroutine.
+			// The live path must bound the sync call with a deadline so a
+			// hung Auth0 request can't leak a goroutine.
 			if tt.wantCalled && !gotHasDead {
-				t.Errorf("sync ctx had no deadline; both paths must wrap the call in a timeout")
+				t.Errorf("sync ctx had no deadline; live path must wrap the call in a timeout")
 			}
 		})
 	}

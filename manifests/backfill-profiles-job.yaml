@@ -1,40 +1,46 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
 #
-# One-shot Job to backfill ACS user grants into v2 project settings
-# (Writers, Auditors, MeetingCoordinators). Reads all SFID→UID mappings from the
-# v1-mappings KV bucket, fetches ACS grantusers per project, and merges them
-# additively into v2 project settings. Existing v2 entries are never removed.
+# One-shot Job to backfill v1 profile fields (name, title, address, etc.)
+# to Auth0 user_metadata.
 #
-# To run the org pass only, change args to ["--backfill-acs-org"].
+# Iterates Auth0 users (Username-Password-Authentication connection only),
+# sorted by updated_at ascending. For each user, resolves the v1 SFID,
+# fetches the merged_user record from the v1-objects KV bucket, and calls
+# syncProfileToAuth0 (which no-ops when nothing has changed).
+# A cursor stored at v1-mappings key "backfill.profiles.cursor" enables
+# resumable runs: re-run the job to advance the cursor.
 #
-# One-shot: this manifest is applied manually via kubectl apply — it is NOT managed
-# by argocd and runs on demand only (e.g. after initial deployment).
+# This replaces the legacy PROFILE_SYNC_BACKFILL=true env-var approach.
 #
-# Dry run: to preview changes without writing, add "--dry-run" to args below before
-# applying. Remove it for the live run.
+# One-shot: this manifest is applied manually via kubectl apply — it is NOT
+# managed by argocd and runs on demand only.
+#
+# To adjust the batch size, change the --limit arg below (default: 1000 users).
+#
+# Dry run: to preview without writing, add "--dry-run" to args before applying.
+# Remove it for the live run.
 #
 # Credentials: every valueFrom.secretKeyRef below references a Kubernetes Secret
-# already provisioned in the v1-sync-helper namespace (e.g. v1-sync-helper-auth0-credentials,
-# heimdall-signer-cert). Only secret names are committed here — the kubelet
-# resolves the actual values at pod start. Safe to commit.
+# already provisioned in the v1-sync-helper namespace. Only secret names are
+# committed here. Safe to commit.
 #
 # Deploy with:
-#   kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-acs-job.yaml
+#   kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-profiles-job.yaml
 #
 # Monitor:
-#   kubectl --context lfx-v2-prod -n v1-sync-helper logs -f --timestamps=true job/backfill-acs
+#   kubectl --context lfx-v2-prod -n v1-sync-helper logs -f --timestamps=true job/backfill-profiles
 #
 # Abort:
-#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-acs
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-profiles
 #
 # Clean up (auto-cleans after 1h via ttlSecondsAfterFinished):
-#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-acs
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-profiles
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: backfill-acs
+  name: backfill-profiles
   namespace: v1-sync-helper
   labels:
     app.kubernetes.io/name: lfx-v1-sync-helper
@@ -50,11 +56,6 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: v1-sync-helper-sa
-      volumes:
-        - name: allowlists
-          configMap:
-            defaultMode: 420
-            name: lfx-v1-sync-helper-allowlists
       containers:
         - name: backfill
           # XXX: Replace with the image SHA for the release you want to run against.
@@ -63,7 +64,7 @@ spec:
           #     -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'
           image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:latest
           imagePullPolicy: IfNotPresent
-          args: ["--backfill-acs-project"]
+          args: ["--backfill-profiles", "--limit", "1000"]
           env:
             - name: NATS_URL
               value: "nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
@@ -73,10 +74,6 @@ spec:
               value: "*"
             - name: COMMITTEE_SERVICE_URL
               value: "http://lfx-v2-committee-service.committee-service.svc.cluster.local:8080"
-            - name: DYNAMODB_INGEST_ENABLED
-              value: "true"
-            - name: DYNAMODB_STREAM_NAME
-              value: "dynamodb_streams"
             - name: HEIMDALL_JWKS_URL
               value: "http://lfx-platform-heimdall.lfx.svc.cluster.local:4457/.well-known/jwks"
             - name: HEIMDALL_KEY_ID
@@ -85,8 +82,6 @@ spec:
               value: "https://api-gw.platform.linuxfoundation.org/"
             - name: PORT
               value: "8080"
-            - name: MEMBER_SERVICE_URL
-              value: "http://lfx-v2-member-service.member-service.svc.cluster.local:8080"
             - name: PROJECT_SERVICE_URL
               value: "http://lfx-v2-project-service.project-service.svc.cluster.local:8080"
             - name: USE_MSGPACK
@@ -112,20 +107,12 @@ spec:
                 secretKeyRef:
                   key: client_private_key
                   name: v1-sync-helper-auth0-credentials
-            - name: PROJECT_ALLOWLIST_FILE
-              value: "/etc/lfx/allowlists/project_allowlist"
-            - name: PROJECT_FAMILY_ALLOWLIST_FILE
-              value: "/etc/lfx/allowlists/project_family_allowlist"
-          volumeMounts:
-            - mountPath: /etc/lfx/allowlists
-              name: allowlists
-              readOnly: true
           resources:
             requests:
               memory: "128Mi"
               cpu: "10m"
             limits:
-              memory: "2Gi"
-              cpu: "500m"
+              memory: "512Mi"
+              cpu: "200m"
           securityContext:
             allowPrivilegeEscalation: false

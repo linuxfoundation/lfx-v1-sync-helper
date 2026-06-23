@@ -55,12 +55,6 @@ type Config struct {
 	DynamoDBIngestEnabled bool   // Whether to consume dynamodb_streams events (default: false)
 	DynamoDBStreamName    string // NATS stream name to consume (default: "dynamodb_streams")
 
-	// ProfileSyncBackfill switches v1→Auth0 profile sync from the default
-	// async/always-ACK path (with SDK retry) to a sync/NACK-on-retryable path
-	// (no SDK retry). Intended for bounded backfill runs where JetStream
-	// redelivery provides the backoff needed to avoid cascading 429s.
-	ProfileSyncBackfill bool
-
 	// ReindexPhaseTimeout caps the wall-clock time for each reindex phase
 	// (username, then email). Both the ListKeysFiltered consumer and every
 	// per-key Get/Put inside that phase share this deadline. Sized to cover
@@ -161,7 +155,6 @@ func LoadConfig() (*Config, error) {
 		UseMsgpack:                 parseBooleanEnv("USE_MSGPACK"),
 		DynamoDBIngestEnabled:      parseBooleanEnv("DYNAMODB_INGEST_ENABLED"),
 		DynamoDBStreamName:         os.Getenv("DYNAMODB_STREAM_NAME"),
-		ProfileSyncBackfill:        parseBooleanEnv("PROFILE_SYNC_BACKFILL"),
 		ProjectAllowlistFile:       os.Getenv("PROJECT_ALLOWLIST_FILE"),
 		ProjectFamilyAllowlistFile: os.Getenv("PROJECT_FAMILY_ALLOWLIST_FILE"),
 	}
