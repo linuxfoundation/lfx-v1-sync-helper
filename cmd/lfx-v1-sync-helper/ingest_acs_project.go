@@ -162,7 +162,9 @@ func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) 
 		sfid := subject[len(projectSFIDSubjectPrefix):]
 		kvKey := projectSFIDKVKeyPrefix + sfid
 
-		entry, getErr := mappingsKV.Get(ctx, kvKey)
+		getCtx, cancelGet := context.WithTimeout(ctx, cfg.NATSFetchMaxWait)
+		entry, getErr := mappingsKV.Get(getCtx, kvKey)
+		cancelGet()
 		if getErr != nil {
 			logger.With(errKey, getErr, "sfid", sfid).Warn("failed to get project SFID mapping value; skipping")
 			continue

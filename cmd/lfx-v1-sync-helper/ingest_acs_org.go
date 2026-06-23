@@ -185,7 +185,9 @@ func collectOrgAccountSFIDs(ctx context.Context) (map[string]struct{}, error) {
 		}
 		sfid := subject[len(b2bAccountSubjectPrefix):]
 
-		entry, getErr := v1KV.Get(ctx, "salesforce_b2b-Account."+sfid)
+		getCtx, cancelGet := context.WithTimeout(ctx, cfg.NATSFetchMaxWait)
+		entry, getErr := v1KV.Get(getCtx, "salesforce_b2b-Account."+sfid)
+		cancelGet()
 		if getErr != nil {
 			logger.With("sfid", sfid, errKey, getErr).WarnContext(ctx, "failed to get org account record, skipping")
 			continue
