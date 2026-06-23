@@ -155,16 +155,11 @@ func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) 
 
 		// fetchBatchSize is the number of messages to request per Fetch call.
 		fetchBatchSize = 512
-
-		// fetchMaxWaitDefault is the default per-Fetch timeout; see
-		// Config.NATSFetchMaxWait for rationale. Overridden at runtime
-		// via NATS_FETCH_MAX_WAIT.
-		fetchMaxWaitDefault = 120 * time.Second
 	)
 
 	fetchMaxWait := cfg.NATSFetchMaxWait
-	if fetchMaxWait == 0 {
-		fetchMaxWait = fetchMaxWaitDefault
+	if fetchMaxWait <= 0 {
+		fetchMaxWait = defaultNATSFetchMaxWait
 	}
 
 	cons, err := jsContext.CreateConsumer(ctx, kvMappingsStream, jetstream.ConsumerConfig{

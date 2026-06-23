@@ -596,12 +596,17 @@ func streamUserSecondaryIndex(
 	// Messages arrive in stream-seq order, so the last write per subject wins.
 	liveSubjects := make(map[string]bool)
 
+	fetchMaxWait := cfg.NATSFetchMaxWait
+	if fetchMaxWait <= 0 {
+		fetchMaxWait = defaultNATSFetchMaxWait
+	}
+
 	for {
 		if err := phaseCtx.Err(); err != nil {
 			return 0, 0, fmt.Errorf("%s reindex enumeration timed out after %d subjects: %w", phaseName, len(liveSubjects), err)
 		}
 
-		batch, fetchErr := cons.Fetch(reindexFetchBatchSize, jetstream.FetchMaxWait(cfg.NATSFetchMaxWait))
+		batch, fetchErr := cons.Fetch(reindexFetchBatchSize, jetstream.FetchMaxWait(fetchMaxWait))
 		if fetchErr != nil {
 			return 0, 0, fmt.Errorf("fetch error during %s reindex enumeration: %w", phaseName, fetchErr)
 		}
