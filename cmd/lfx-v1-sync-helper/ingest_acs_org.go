@@ -185,7 +185,11 @@ func collectOrgAccountSFIDs(ctx context.Context) (map[string]struct{}, error) {
 		}
 		sfid := subject[len(b2bAccountSubjectPrefix):]
 
-		getCtx, cancelGet := context.WithTimeout(ctx, cfg.NATSFetchMaxWait)
+		opTimeout := cfg.NATSFetchMaxWait
+		if opTimeout <= 0 {
+			opTimeout = defaultNATSFetchMaxWait
+		}
+		getCtx, cancelGet := context.WithTimeout(ctx, opTimeout)
 		entry, getErr := v1KV.Get(getCtx, "salesforce_b2b-Account."+sfid)
 		cancelGet()
 		if getErr != nil {

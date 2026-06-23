@@ -35,10 +35,10 @@ type enumerateOpts struct {
 }
 
 // defaultEnumerateInfoTimeout is the timeout for the cons.Info() call that
-// checks NumPending after each non-empty batch. 120s matches the default
-// FetchMaxWait and gives large buckets (33M+ / 52M+ sequences) enough time
-// to respond.
-const defaultEnumerateInfoTimeout = 120 * time.Second
+// checks NumPending after each batch. Matches defaultNATSFetchMaxWait so the
+// two defaults stay in sync if the value changes, and gives large buckets
+// (33M+ / 52M+ sequences) enough time to respond.
+const defaultEnumerateInfoTimeout = defaultNATSFetchMaxWait
 
 func defaultEnumerateOpts() enumerateOpts {
 	return enumerateOpts{
@@ -69,7 +69,7 @@ func WithBatchSize(n int) EnumerateOption {
 }
 
 // WithInfoTimeout overrides the timeout for the cons.Info() call that checks
-// NumPending after each non-empty batch (default: 120s).
+// NumPending after each batch (default: defaultNATSFetchMaxWait).
 func WithInfoTimeout(d time.Duration) EnumerateOption {
 	return func(o *enumerateOpts) {
 		if d > 0 {
@@ -97,8 +97,9 @@ func WithLogger(l *slog.Logger) EnumerateOption {
 // End-of-set detection uses cons.Info() NumPending==0 after each batch. This is
 // a correctness requirement: on sparse streams the server may exhaust
 // FetchMaxWait without filling a batch, and a subsequent empty Fetch would
-// silently terminate the loop with incomplete results. The Info timeout is
-// configurable via WithInfoTimeout (default 120s) to accommodate large buckets.
+// silently terminate the loop with incomplete results. The Info check runs after
+// every batch (including empty ones) and the timeout is configurable via
+// WithInfoTimeout (default: defaultNATSFetchMaxWait) to accommodate large buckets.
 //
 // Callers that need payloads should do point reads (KV.Get) after enumeration,
 // which returns the latest revision by definition (NATS direct-get uses
@@ -121,7 +122,13 @@ func EnumerateLiveSubjects(ctx context.Context, js jetstream.JetStream, stream, 
 		return nil, fmt.Errorf("failed to create enumeration consumer on %s (filter %s): %w", stream, subjectFilter, err)
 	}
 	defer func() {
-		if delErr := js.DeleteConsumer(ctx, stream, cons.CachedInfo().Name); delErr != nil {
+		// Use a fresh background context for the best-effort delete so that
+		// a cancelled or deadline-exceeded enumeration context does not prevent
+		// cleanup. The ephemeral consumer will be reclaimed by the server after
+		// InactiveThreshold regardless, but explicit deletion is faster.
+		delCtx, cancelDel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelDel()
+		if delErr := js.DeleteConsumer(delCtx, stream, cons.CachedInfo().Name); delErr != nil {
 			o.logger.With(errKey, delErr, "stream", stream).Warn("failed to delete ephemeral enumeration consumer")
 		}
 	}()

@@ -162,7 +162,11 @@ func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) 
 		sfid := subject[len(projectSFIDSubjectPrefix):]
 		kvKey := projectSFIDKVKeyPrefix + sfid
 
-		getCtx, cancelGet := context.WithTimeout(ctx, cfg.NATSFetchMaxWait)
+		opTimeout := cfg.NATSFetchMaxWait
+		if opTimeout <= 0 {
+			opTimeout = defaultNATSFetchMaxWait
+		}
+		getCtx, cancelGet := context.WithTimeout(ctx, opTimeout)
 		entry, getErr := mappingsKV.Get(getCtx, kvKey)
 		cancelGet()
 		if getErr != nil {
