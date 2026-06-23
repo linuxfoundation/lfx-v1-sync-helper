@@ -26,6 +26,7 @@ spec:
         app.kubernetes.io/component: meltano
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/managed-by: {{ .Release.Service }}
+        tags.datadoghq.com/service: {{ .Chart.Name }}
     spec:
       ttlSecondsAfterFinished: {{ .Values.meltano.dynamodbEtl.ttlSecondsAfterFinished }}
       backoffLimit: {{ .Values.meltano.dynamodbEtl.backoffLimit }}
@@ -36,6 +37,7 @@ spec:
             app.kubernetes.io/component: meltano
             app.kubernetes.io/instance: {{ .Release.Name }}
             app.kubernetes.io/managed-by: {{ .Release.Service }}
+            tags.datadoghq.com/service: {{ .Chart.Name }}
         spec:
           restartPolicy: Never
           serviceAccountName: {{ .Values.serviceAccount.name | default .Chart.Name }}

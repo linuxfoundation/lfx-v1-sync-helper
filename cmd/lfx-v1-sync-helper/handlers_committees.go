@@ -663,9 +663,7 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 		if err != nil {
 			logger.With(errKey, err, "contact_name_sfid", contactNameV1).WarnContext(ctx, "failed to lookup user from v1 API, leaving user fields unset")
 		} else {
-			// Map username to Auth0 "sub" format for v2 compatibility.
-			authSub := mapUsernameToAuthSub(user.Username)
-			payload.Username = &authSub
+			payload.Username = &user.Username
 			if user.FirstName != "" {
 				payload.FirstName = &user.FirstName
 			}
@@ -830,9 +828,7 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID s
 		if err != nil {
 			logger.With(errKey, err, "contact_name_sfid", contactNameV1).WarnContext(ctx, "failed to lookup user from v1 API, leaving user fields unset")
 		} else {
-			// Map username to Auth0 "sub" format for v2 compatibility.
-			authSub := mapUsernameToAuthSub(user.Username)
-			payload.Username = &authSub
+			payload.Username = &user.Username
 			if user.FirstName != "" {
 				payload.FirstName = &user.FirstName
 			}

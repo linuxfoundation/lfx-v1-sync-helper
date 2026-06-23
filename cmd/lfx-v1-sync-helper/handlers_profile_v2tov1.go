@@ -81,22 +81,22 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 		return
 	}
 
-	auth0UserID, err := extractAuth0UserIDSuffix(event.UserID)
+	v1Username, err := resolveV1UsernameFromV2UserID(event.UserID)
 	if err != nil {
-		log.With(errKey, err).WarnContext(ctx, "cannot safely derive v1 username from auth0 user ID, skipping")
+		log.With(errKey, err).WarnContext(ctx, "cannot safely derive v1 username from v2 user ID, skipping")
 		return
 	}
 
 	// ResolveV1UserSFIDByUsername uses the encoded secondary-index key
 	// (matching what handleMergedUserUpdate writes) and validates the resolved
 	// SFID by fetching the user and confirming the username still matches.
-	sfid, err := ResolveV1UserSFIDByUsername(ctx, auth0UserID)
+	sfid, err := ResolveV1UserSFIDByUsername(ctx, v1Username)
 	if err != nil {
 		log.With(errKey, err).ErrorContext(ctx, "failed to resolve v1 user SFID")
 		return
 	}
 	if sfid == "" {
-		log.WarnContext(ctx, "no v1 user found for auth0 user ID, skipping")
+		log.WarnContext(ctx, "no v1 user found for v2 user ID, skipping")
 		return
 	}
 
@@ -112,6 +112,23 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 	}
 
 	log.With("sfid", sfid).InfoContext(ctx, "synced v2 profile to v1 user-service")
+}
+
+// resolveV1UsernameFromV2UserID returns the LFX username to use for v1 user-service
+// lookups from a v2 profile event user_id. Plain LFX usernames are accepted
+// directly. Legacy auth0|{id} values are supported during transition by extracting
+// the suffix when it is safe to use as a v1 username lookup key.
+func resolveV1UsernameFromV2UserID(userID string) (string, error) {
+	if userID == "" {
+		return "", fmt.Errorf("empty user_id")
+	}
+	if strings.HasPrefix(userID, "auth0|") {
+		return extractAuth0UserIDSuffix(userID)
+	}
+	if strings.Contains(userID, "|") {
+		return "", fmt.Errorf("unsupported auth provider user_id format: %q", userID)
+	}
+	return userID, nil
 }
 
 // extractAuth0UserIDSuffix returns the portion of an Auth0 user_id after the
