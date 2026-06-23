@@ -24,9 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/vmihailenco/msgpack/v5"
 
 	sfutil "github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
@@ -158,72 +156,32 @@ func backfillACSOrgGrants(ctx context.Context, dryRun bool) error {
 // KV_v1-objects JetStream stream and returns the SFID set for live LF member
 // orgs (IsDeleted=false AND IsMember__c=true).
 //
-// Uses DeliverAllPolicy with last-write-wins deduplication (same as
-// collectProjectSFIDMappings) to avoid the O(N) server-side scan that
-// DeliverLastPerSubjectPolicy requires.
+// Uses EnumerateLiveSubjects for the headers-only stream walk with client-side
+// last-write-wins dedup, then does point reads (v1KV.Get) and filters each
+// record through isLiveMemberOrgAccount.
 func collectOrgAccountSFIDs(ctx context.Context) (map[string]struct{}, error) {
-	const (
-		fetchBatchSize = 512
+	liveSubjects, err := EnumerateLiveSubjects(ctx, jsContext, kvObjectsStream, b2bAccountSubject,
+		WithFetchMaxWait(cfg.NATSFetchMaxWait),
 	)
-
-	fetchMaxWait := cfg.NATSFetchMaxWait
-	if fetchMaxWait <= 0 {
-		fetchMaxWait = defaultNATSFetchMaxWait
-	}
-
-	cons, err := jsContext.CreateConsumer(ctx, kvObjectsStream, jetstream.ConsumerConfig{
-		DeliverPolicy:     jetstream.DeliverAllPolicy,
-		AckPolicy:         jetstream.AckNonePolicy,
-		FilterSubject:     b2bAccountSubject,
-		MemoryStorage:     true,
-		InactiveThreshold: 5 * time.Minute,
-	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create pull consumer for org account SFIDs: %w", err)
-	}
-	defer func() {
-		if err := jsContext.DeleteConsumer(ctx, kvObjectsStream, cons.CachedInfo().Name); err != nil {
-			logger.With("error", err).WarnContext(ctx, "failed to delete ephemeral org account SFIDs consumer")
-		}
-	}()
-
-	// last-write-wins: track the latest value per SFID across all revisions.
-	latest := make(map[string][]byte)
-
-	for {
-		batch, err := cons.Fetch(fetchBatchSize, jetstream.FetchMaxWait(fetchMaxWait))
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch org account SFIDs: %w", err)
-		}
-
-		empty := true
-		for msg := range batch.Messages() {
-			empty = false
-			if !strings.HasPrefix(msg.Subject(), b2bAccountSubjectPrefix) {
-				continue
-			}
-			sfid := msg.Subject()[len(b2bAccountSubjectPrefix):]
-			latest[sfid] = msg.Data()
-		}
-
-		if err := batch.Error(); err != nil {
-			return nil, fmt.Errorf("batch error reading org account SFIDs: %w", err)
-		}
-
-		// An empty batch means the server has no more matching messages for this
-		// consumer. cons.Info(ctx) is intentionally omitted here: on KV_v1-objects
-		// (52M+ sequences) the JetStream API call reliably times out under prod load
-		// within the 5 s SDK default, aborting the collection. The empty-batch
-		// signal is sufficient for correctness — worst case is one extra
-		// FetchMaxWait(5 s) at end-of-stream.
-		if empty {
-			break
-		}
+		return nil, fmt.Errorf("failed to enumerate org account SFIDs: %w", err)
 	}
 
-	sfids := make(map[string]struct{}, len(latest))
-	for sfid, data := range latest {
-		live, err := isLiveMemberOrgAccount(data)
+	sfids := make(map[string]struct{}, len(liveSubjects))
+
+	for subject := range liveSubjects {
+		if !strings.HasPrefix(subject, b2bAccountSubjectPrefix) {
+			continue
+		}
+		sfid := subject[len(b2bAccountSubjectPrefix):]
+
+		entry, getErr := v1KV.Get(ctx, "salesforce_b2b-Account."+sfid)
+		if getErr != nil {
+			logger.With("sfid", sfid, errKey, getErr).WarnContext(ctx, "failed to get org account record, skipping")
+			continue
+		}
+
+		live, err := isLiveMemberOrgAccount(entry.Value())
 		if err != nil {
 			if de, ok := err.(*orgDecodeError); ok {
 				logger.With("sfid", sfid, errKey, de.json, "msgpack_error", de.msgpack).WarnContext(ctx, "failed to decode org account record, skipping")

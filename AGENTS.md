@@ -257,11 +257,34 @@ Note: The replication slot is named `lfx_v2` (not `wal-listener`). The publicati
 
 ## One-shot Backfill Commands
 
+### `EnumerateLiveSubjects` — common stream-walk abstraction (`nats_enumerate.go`)
+
+All one-shot backfill and reindex jobs that need to scan a KV-backed JetStream stream use the shared `EnumerateLiveSubjects` function. It creates a headers-only ephemeral pull consumer with `DeliverAllPolicy` (O(1) creation), walks all messages in the filtered stream, applies client-side last-write-wins dedup, and returns `map[string]struct{}` of subjects whose latest revision is not a DEL/PURGE tombstone.
+
+**Any new backfill or reindex pass that needs to enumerate KV bucket keys should use `EnumerateLiveSubjects` rather than implementing its own consumer loop.** Callers that need payloads should do point reads (`KV.Get`) after enumeration.
+
+Key design decisions:
+- **No `cons.Info()`** — relies solely on empty-batch termination. Simpler and works universally on large buckets (33M+ / 52M+ sequences).
+- **No full-body walk** — callers do point reads after enumeration (same pattern the user reindex already uses at larger scale).
+- **Options**: `WithFetchMaxWait` (default 120s from `defaultNATSFetchMaxWait`), `WithBatchSize` (default 512), `WithLogger`.
+- **Ephemeral consumer lifecycle**: `MemoryStorage: true`, `InactiveThreshold: 5m`, explicitly deleted in defer.
+
+### `--backfill-acs-project` pass (`ingest_acs_project.go`)
+
+The `--backfill-acs-project` flag runs the project grants pass (`backfillACSProjectGrants`), which backfills ACS legacy user grants into v2 project settings:
+
+- **SFID source**: `EnumerateLiveSubjects` on `KV_v1-mappings` with filter `$KV.v1-mappings.project.sfid.*`, followed by point reads to get the SFID → v2 UID mapping value.
+- **ACS query**: `GET /acs/v1/api/grantusers?object_type=project&object_id={sfid}&rolename=admin,viewer,meetings-coordinator` (paginated). `admin` → `Writers`; `viewer` → `Auditors`; `meetings-coordinator` → `MeetingCoordinators`.
+- **Settings API**: `GetProjectSettings` / `UpdateProjectSettings` via Goa project-service client.
+- **Merge**: additive-only; existing v2-only entries are logged as "extra" but never removed.
+- **Dry-run**: add `--dry-run` to preview without writing.
+- **Summary log fields**: `processed`, `errors`.
+
 ### `--backfill-acs-org` pass (`ingest_acs_org.go`)
 
 The `--backfill-acs-org` flag runs the org grants pass (`backfillACSOrgGrants`), which backfills ACS legacy org grants into v2 b2b_org settings:
 
-- **SFID source**: scans `$KV.v1-objects.salesforce_b2b-Account.*` keys from the `KV_v1-objects` JetStream stream using `DeliverAllPolicy` (last-write-wins, same trick as project SFID collection). Skips records where `IsDeleted=true` or `IsMember__c!=true`.
+- **SFID source**: `EnumerateLiveSubjects` on `KV_v1-objects` with filter `$KV.v1-objects.salesforce_b2b-Account.*`, followed by point reads and `isLiveMemberOrgAccount` filtering. Skips records where `IsDeleted=true` or `IsMember__c!=true`.
 - **UID resolution**: `sfutil.Normalize18(sfid)` — as of LFXV2-2049 the b2b_org UID is the 18-char normalized SFID. No network call.
 - **ACS query**: `GET /acs/v1/api/grantusers?object_type=organization&object_id={sfid}&rolename=company-admin,viewer` (paginated). `company-admin` → `writer`; `viewer` → `auditor`.
 - **Settings API**: raw HTTP `GET`/`PUT /b2b_orgs/{uid}/settings` via `client_members.go`. Requires `MEMBER_SERVICE_URL` env var.
