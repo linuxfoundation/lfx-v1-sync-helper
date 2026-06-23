@@ -266,9 +266,9 @@ All one-shot backfill and reindex jobs that need to scan a KV-backed JetStream s
 **Any new backfill or reindex pass that needs to enumerate KV bucket keys should use `EnumerateLiveSubjects` rather than implementing its own consumer loop.** Callers that need payloads should do point reads (`KV.Get`) after enumeration.
 
 Key design decisions:
-- **No `cons.Info()`** — relies solely on empty-batch termination. Simpler and works universally on large buckets (33M+ / 52M+ sequences).
+- **`cons.Info()` with generous timeout** — checks `NumPending==0` after each batch as the authoritative end-of-stream signal. This is a correctness requirement: on sparse streams, relying on empty-batch termination alone can silently return incomplete results. Timeout defaults to 120s (configurable via `WithInfoTimeout`) to accommodate large buckets.
 - **No full-body walk** — callers do point reads after enumeration (same pattern the user reindex already uses at larger scale).
-- **Options**: `WithFetchMaxWait` (default 120s from `defaultNATSFetchMaxWait`), `WithBatchSize` (default 512), `WithLogger`.
+- **Options**: `WithFetchMaxWait` (default 120s from `defaultNATSFetchMaxWait`), `WithBatchSize` (default 512), `WithInfoTimeout` (default 120s), `WithLogger`.
 - **Ephemeral consumer lifecycle**: `MemoryStorage: true`, `InactiveThreshold: 5m`, explicitly deleted in defer.
 
 ### `--backfill-acs-project` pass (`ingest_acs_project.go`)

@@ -29,13 +29,21 @@ type EnumerateOption func(*enumerateOpts)
 
 type enumerateOpts struct {
 	fetchMaxWait time.Duration
+	infoTimeout  time.Duration
 	batchSize    int
 	logger       *slog.Logger
 }
 
+// defaultEnumerateInfoTimeout is the timeout for the cons.Info() call that
+// checks NumPending after each non-empty batch. 120s matches the default
+// FetchMaxWait and gives large buckets (33M+ / 52M+ sequences) enough time
+// to respond.
+const defaultEnumerateInfoTimeout = 120 * time.Second
+
 func defaultEnumerateOpts() enumerateOpts {
 	return enumerateOpts{
 		fetchMaxWait: defaultNATSFetchMaxWait,
+		infoTimeout:  defaultEnumerateInfoTimeout,
 		batchSize:    enumerateFetchBatchSize,
 		logger:       logger,
 	}
@@ -60,6 +68,16 @@ func WithBatchSize(n int) EnumerateOption {
 	}
 }
 
+// WithInfoTimeout overrides the timeout for the cons.Info() call that checks
+// NumPending after each non-empty batch (default: 120s).
+func WithInfoTimeout(d time.Duration) EnumerateOption {
+	return func(o *enumerateOpts) {
+		if d > 0 {
+			o.infoTimeout = d
+		}
+	}
+}
+
 // WithLogger overrides the logger used for progress and warning messages.
 func WithLogger(l *slog.Logger) EnumerateOption {
 	return func(o *enumerateOpts) {
@@ -76,9 +94,11 @@ func WithLogger(l *slog.Logger) EnumerateOption {
 //
 // The consumer uses DeliverAllPolicy (O(1) creation) to avoid the O(N)
 // server-side scan that DeliverLastPerSubjectPolicy triggers on large buckets.
-// End-of-set detection relies solely on empty-batch termination -- cons.Info()
-// is intentionally omitted because it reliably times out under prod load on
-// buckets with tens of millions of sequences.
+// End-of-set detection uses cons.Info() NumPending==0 after each batch. This is
+// a correctness requirement: on sparse streams the server may exhaust
+// FetchMaxWait without filling a batch, and a subsequent empty Fetch would
+// silently terminate the loop with incomplete results. The Info timeout is
+// configurable via WithInfoTimeout (default 120s) to accommodate large buckets.
 //
 // Callers that need payloads should do point reads (KV.Get) after enumeration,
 // which returns the latest revision by definition (NATS direct-get uses
@@ -123,9 +143,7 @@ func EnumerateLiveSubjects(ctx context.Context, js jetstream.JetStream, stream, 
 			return nil, fmt.Errorf("fetch error during enumeration on %s: %w", stream, fetchErr)
 		}
 
-		empty := true
 		for msg := range batch.Messages() {
-			empty = false
 			subj := msg.Subject()
 			kvOp := msg.Headers().Get("KV-Operation")
 			if kvOp == "DEL" || kvOp == "PURGE" {
@@ -141,7 +159,20 @@ func EnumerateLiveSubjects(ctx context.Context, js jetstream.JetStream, stream, 
 			return nil, fmt.Errorf("batch error during enumeration on %s: %w", stream, batchErr)
 		}
 
-		if empty {
+		// Correctness check: on sparse streams (e.g. 1:800 match ratio) the
+		// server may exhaust FetchMaxWait without filling a batch, return a
+		// partial result, and then the next Fetch may also time out with zero
+		// messages — causing the loop to terminate prematurely with no error.
+		// cons.Info() is the authoritative signal that all matching messages
+		// have been delivered. The timeout is generous (default 120s) to
+		// accommodate large buckets where the JetStream API response is slow.
+		infoCtx, cancelInfo := context.WithTimeout(ctx, o.infoTimeout)
+		info, infoErr := cons.Info(infoCtx)
+		cancelInfo()
+		if infoErr != nil {
+			return nil, fmt.Errorf("failed to get consumer info during enumeration on %s: %w", stream, infoErr)
+		}
+		if info.NumPending == 0 {
 			break
 		}
 	}
