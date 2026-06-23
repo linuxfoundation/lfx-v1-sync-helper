@@ -15,11 +15,15 @@ package main
 //     Stores a cursor (updated_at of last processed user) in the v1-mappings KV
 //     bucket under the key "backfill.alternate-emails.cursor" so the run is
 //     resumable: re-run with the same --limit to advance the cursor.
+//     The cursor uses an inclusive range query ([cursor TO *]), so the last user
+//     processed in the previous run will be re-processed on the next run. This is
+//     accepted/expected behavior and all operations are idempotent.
 //
 //   --backfill-profiles [--limit N] [--dry-run]
 //     Same Auth0-user-centric iteration, but syncs v1 profile fields
 //     (name, title, address, etc.) to Auth0 user_metadata instead.
 //     Cursor stored at "backfill.profiles.cursor".
+//     Same inclusive-cursor behavior as --backfill-alternate-emails.
 //     Replaces the legacy PROFILE_SYNC_BACKFILL env-var approach.
 //
 //   --sync-user <username> [--dry-run]
@@ -97,20 +101,23 @@ func saveBackfillCursor(ctx context.Context, cursorKey, value string) error {
 }
 
 // listAuth0UserPage fetches one page of Auth0 users for the given connection,
-// sorted by updated_at ascending, starting after the cursor.
+// sorted by updated_at ascending, starting from the cursor (inclusive).
 // cursor is the updated_at timestamp of the last processed user (RFC3339),
-// or "" for the first run. The page is returned as a *management.UserList.
+// or "" for the first run. The inclusive range means the last user from the
+// previous run will be re-processed on the next run; all operations are idempotent.
 func listAuth0UserPage(ctx context.Context, cursor string, limit int) (*management.UserList, error) {
 	if err := auth0RateLimiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limiter: %w", err)
 	}
 
-	// Build the Lucene query: filter to the connection; advance past the cursor
-	// by requiring updated_at > cursor when one is present.
+	// Build the Lucene query: filter to the connection; use an inclusive lower
+	// bound on updated_at so no users are skipped if multiple share the same
+	// timestamp. Auth0 updated_at has second precision, so the last user from
+	// the previous run will be re-processed — this is accepted behavior since
+	// all link/update operations are idempotent.
 	query := fmt.Sprintf(`identities.connection:"%s"`, backfillAuth0Connection)
 	if cursor != "" {
-		// Auth0 v3 search supports range queries on updated_at in ISO8601.
-		query += fmt.Sprintf(` AND updated_at:{%s TO *}`, cursor)
+		query += fmt.Sprintf(` AND updated_at:[%s TO *]`, cursor)
 	}
 
 	return auth0Users.Search(ctx,
@@ -157,12 +164,13 @@ func backfillAlternateEmails(ctx context.Context, limit int, dryRun bool) (*back
 
 		for _, auth0User := range page.Users {
 			auth0UserID := auth0User.GetID()
-			username := extractUsernameFromAuth0ID(auth0UserID)
+			username := auth0User.GetUsername()
 			if username == "" {
-				logger.With("auth0_user_id", auth0UserID).
-					Debug("skipping user with non-Username-Password-Authentication ID")
-				result.emailsSkipped++
-				continue
+				// All users in the Username-Password-Authentication connection must
+				// have a username. A missing username indicates a data inconsistency
+				// that would cause silent skips; stop and surface it rather than
+				// silently advancing the cursor past affected users.
+				return result, fmt.Errorf("Auth0 user %s has no username in connection %s; stopping backfill to avoid silent skips", auth0UserID, backfillAuth0Connection)
 			}
 
 			userCtx, cancel := context.WithTimeout(ctx, backfillCallTimeout)
@@ -304,10 +312,11 @@ func backfillProfiles(ctx context.Context, limit int, dryRun bool) (*backfillPro
 
 		for _, auth0User := range page.Users {
 			auth0UserID := auth0User.GetID()
-			username := extractUsernameFromAuth0ID(auth0UserID)
+			username := auth0User.GetUsername()
 			if username == "" {
-				result.usersSkipped++
-				continue
+				// All users in the Username-Password-Authentication connection must
+				// have a username. Stop to avoid silent skips.
+				return result, fmt.Errorf("Auth0 user %s has no username in connection %s; stopping backfill to avoid silent skips", auth0UserID, backfillAuth0Connection)
 			}
 
 			userCtx, cancel := context.WithTimeout(ctx, backfillCallTimeout)
@@ -374,6 +383,10 @@ func backfillProfileForUser(ctx context.Context, auth0UserID, username string, d
 		return nil
 	}
 
+	// Rate-limit before the Management API Read+Update inside syncProfileToAuth0.
+	if err := auth0RateLimiter.Wait(ctx); err != nil {
+		return fmt.Errorf("rate limiter: %w", err)
+	}
 	if err := syncProfileToAuth0Fn(ctx, auth0UserID, v1Data); err != nil {
 		return fmt.Errorf("syncing profile for %s: %w", auth0UserID, err)
 	}
@@ -471,15 +484,4 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 
 	logger.With("username", username, "auth0_user_id", auth0UserID).Info("single-user sync complete")
 	return nil
-}
-
-// extractUsernameFromAuth0ID extracts the username from an Auth0 user ID of
-// the form "auth0|<username>". Returns "" for any other format (social logins,
-// etc.), which are not v1 platform users.
-func extractUsernameFromAuth0ID(auth0UserID string) string {
-	prefix := "auth0|"
-	if !strings.HasPrefix(auth0UserID, prefix) {
-		return ""
-	}
-	return strings.TrimPrefix(auth0UserID, prefix)
 }

@@ -259,13 +259,13 @@ Note: The replication slot is named `lfx_v2` (not `wal-listener`). The publicati
 
 ## One-shot Backfill Commands
 
-The following CLI flags run one-shot operations and exit. All are mutually exclusive. Use `--dry-run` with any of them to preview changes without writing.
+The following CLI flags each perform their work and then exit without starting the NATS subscriber. All are mutually exclusive. Use `--dry-run` with any of them to preview changes without writing.
 
 ### `--backfill-alternate-emails [--limit N] [--dry-run]` (`backfill_email_profile.go`)
 
 Iterates Auth0 users (Username-Password-Authentication connection only), sorted by `updated_at` ascending, and links any v1 verified alternate emails not yet linked as Auth0 email-connection identities.
 
-- **Cursor**: stored at `v1-mappings` key `backfill.alternate-emails.cursor` (updated_at of last processed user). Re-run to advance.
+- **Cursor**: stored at `v1-mappings` key `backfill.alternate-emails.cursor` (updated_at of last processed user). Re-run to advance. Uses an inclusive range query so the last user of the previous run is re-processed on the next run; all operations are idempotent.
 - **Per-user flow**: resolves v1 SFID via username secondary index → fetches alternate email SFIDs from `v1-mappings` → calls `linkEmailIdentity` for each verified, active, non-primary email.
 - **`--limit N`** (default 1000): caps users processed per run.
 - **Summary log fields**: `users_processed`, `emails_linked`, `emails_skipped`, `errors`.
@@ -275,7 +275,7 @@ Iterates Auth0 users (Username-Password-Authentication connection only), sorted 
 
 Iterates Auth0 users (same connection filter and sort), syncs v1 profile fields (name, title, address, org, etc.) to Auth0 `user_metadata` via `syncProfileToAuth0`. No-ops when nothing has changed.
 
-- **Cursor**: stored at `v1-mappings` key `backfill.profiles.cursor`.
+- **Cursor**: stored at `v1-mappings` key `backfill.profiles.cursor`. Same inclusive-cursor behavior as `--backfill-alternate-emails`.
 - **`--limit N`** (default 1000): caps users processed per run.
 - **Summary log fields**: `users_processed`, `users_updated`, `users_skipped`, `errors`.
 - **Manifest**: `manifests/backfill-profiles-job.yaml`.

@@ -79,6 +79,18 @@ func main() {
 		os.Exit(2)
 	}
 
+	// Enforce mutual exclusion across all one-shot flags.
+	oneShotCount := 0
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doRebuildUserIndexes} {
+		if b {
+			oneShotCount++
+		}
+	}
+	if oneShotCount > 1 {
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-alternate-emails, --backfill-profiles, --sync-user, and --rebuild-user-secondary-indexes are mutually exclusive")
+		os.Exit(2)
+	}
+
 	// Initialize a default logger early so init functions can log errors.
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}))
 	slog.SetDefault(logger)
