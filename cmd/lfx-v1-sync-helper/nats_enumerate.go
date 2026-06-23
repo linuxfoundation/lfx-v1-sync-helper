@@ -122,16 +122,14 @@ func EnumerateLiveSubjects(ctx context.Context, js jetstream.JetStream, stream, 
 	}
 	defer func() {
 		if delErr := js.DeleteConsumer(ctx, stream, cons.CachedInfo().Name); delErr != nil {
-			o.logger.With("error", delErr, "stream", stream).Warn("failed to delete ephemeral enumeration consumer")
+			o.logger.With(errKey, delErr, "stream", stream).Warn("failed to delete ephemeral enumeration consumer")
 		}
 	}()
 
 	// liveSubjects tracks the latest observed state per subject (present = live).
 	// Messages arrive in stream-seq order, so the last write per subject wins.
 	liveSubjects := make(map[string]struct{})
-	// tombstoned tracks subjects that have been deleted or purged so they can
-	// be excluded from the final result.
-	tombstoned := make(map[string]struct{})
+	var tombstoned int
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -147,10 +145,11 @@ func EnumerateLiveSubjects(ctx context.Context, js jetstream.JetStream, stream, 
 			subj := msg.Subject()
 			kvOp := msg.Headers().Get("KV-Operation")
 			if kvOp == "DEL" || kvOp == "PURGE" {
+				if _, wasLive := liveSubjects[subj]; wasLive {
+					tombstoned++
+				}
 				delete(liveSubjects, subj)
-				tombstoned[subj] = struct{}{}
 			} else {
-				delete(tombstoned, subj)
 				liveSubjects[subj] = struct{}{}
 			}
 		}
@@ -177,7 +176,7 @@ func EnumerateLiveSubjects(ctx context.Context, js jetstream.JetStream, stream, 
 		}
 	}
 
-	o.logger.With("live_subjects", len(liveSubjects), "tombstoned", len(tombstoned), "stream", stream, "filter", subjectFilter).
+	o.logger.With("live_subjects", len(liveSubjects), "tombstoned", tombstoned, "stream", stream, "filter", subjectFilter).
 		Info("enumeration complete")
 
 	return liveSubjects, nil

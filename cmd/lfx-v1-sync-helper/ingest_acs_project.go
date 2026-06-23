@@ -141,7 +141,8 @@ func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) 
 		// SFID.
 		projectSFIDSubjectPrefix = "$KV.v1-mappings.project.sfid."
 
-		// projectSFIDKVKeyPrefix is stripped from the KV key to extract the SFID.
+		// projectSFIDKVKeyPrefix is used to construct the KV key for
+		// mappingsKV.Get (the SFID is appended to form the full key).
 		projectSFIDKVKeyPrefix = "project.sfid."
 	)
 
@@ -163,7 +164,7 @@ func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) 
 
 		entry, getErr := mappingsKV.Get(ctx, kvKey)
 		if getErr != nil {
-			logger.With("error", getErr, "sfid", sfid).Warn("failed to get project SFID mapping value; skipping")
+			logger.With(errKey, getErr, "sfid", sfid).Warn("failed to get project SFID mapping value; skipping")
 			continue
 		}
 
