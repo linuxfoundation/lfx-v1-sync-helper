@@ -88,6 +88,83 @@ func TestCreateWorkspace(t *testing.T) {
 	}
 }
 
+// TestDeleteWorkspace covers the 204, 404 (already gone), and error paths.
+func TestDeleteWorkspace(t *testing.T) {
+	setupMembersTestGlobals(t)
+
+	tests := []struct {
+		name    string
+		status  int
+		wantErr bool
+	}{
+		{"204 success", http.StatusNoContent, false},
+		{"404 already gone is success", http.StatusNotFound, false},
+		{"500 returns error", http.StatusInternalServerError, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete {
+					t.Errorf("expected DELETE, got %s", r.Method)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			u, _ := url.Parse(srv.URL)
+			cfg.MemberServiceURL = u
+
+			err := deleteWorkspace(context.Background(), "org-001", "ws-001")
+			if tc.wantErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// TestRemoveWorkspaceProject covers the 200, 204, 404 (idempotent), and error paths.
+func TestRemoveWorkspaceProject(t *testing.T) {
+	setupMembersTestGlobals(t)
+
+	tests := []struct {
+		name    string
+		status  int
+		wantErr bool
+	}{
+		{"200 success", http.StatusOK, false},
+		{"204 success", http.StatusNoContent, false},
+		{"404 already removed is success", http.StatusNotFound, false},
+		{"500 returns error", http.StatusInternalServerError, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete {
+					t.Errorf("expected DELETE, got %s", r.Method)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			u, _ := url.Parse(srv.URL)
+			cfg.MemberServiceURL = u
+
+			err := removeWorkspaceProject(context.Background(), "org-001", "ws-001", "proj-001")
+			if tc.wantErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 // TestBulkAddWorkspaceProjects covers the succeeded/failed response parsing.
 func TestBulkAddWorkspaceProjects(t *testing.T) {
 	setupMembersTestGlobals(t)
