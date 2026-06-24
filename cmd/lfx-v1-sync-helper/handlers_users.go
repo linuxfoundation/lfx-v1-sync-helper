@@ -461,16 +461,6 @@ const (
 	// kvObjectsSubjectPrefix is the NATS subject prefix the server prepends to
 	// every KV key stored in the v1-objects bucket. Strip it to recover the key.
 	kvObjectsSubjectPrefix = "$KV.v1-objects."
-
-	// reindexFetchBatchSize and reindexFetchMaxWait mirror the values in
-	// collectProjectSFIDMappings (ingest_acs.go). FetchMaxWait ≤ 10s prevents
-	// the SDK from auto-enabling idle heartbeats over high-latency connections.
-	reindexFetchBatchSize = 512
-	reindexFetchMaxWait   = 5 * time.Second
-
-	// reindexEphemeralInactiveTimeout is the server-side cleanup window for the
-	// ephemeral pull consumer if the client exits before the deferred delete runs.
-	reindexEphemeralInactiveTimeout = 5 * time.Minute
 )
 
 // extractUsernameIndex extracts the secondary index key and value for a
@@ -509,17 +499,11 @@ func extractEmailIndex(data map[string]any) (indexKey, value string) {
 // revision's different indexKey never cleans up. Dev is already at History=2;
 // prod must not be assumed to stay at 1.
 //
-// # Pass 1 — enumerate live subjects (HeadersOnly)
+// # Pass 1 — enumerate live subjects (via EnumerateLiveSubjects)
 //
-// An ephemeral pull consumer with HeadersOnly:true streams only message headers,
-// not bodies. This cuts per-message wire cost to ~100 B and avoids decoding work
-// for the N×history messages in the stream. The result is a map[subject]bool
-// that reflects only the latest observed state per subject:
-//
-//   - Normal header message  → subject marked live (true)
-//   - KV-Operation: DEL/PURGE header → subject marked deleted (false)
-//
-// Messages arrive in stream-seq order so the last write for a subject wins.
+// EnumerateLiveSubjects walks the stream with a HeadersOnly ephemeral consumer,
+// applies client-side last-write-wins dedup, and returns the set of subjects
+// whose latest revision is not a DEL/PURGE tombstone.
 //
 // # Pass 2 — fetch latest value per subject and write index
 //
@@ -544,78 +528,20 @@ func streamUserSecondaryIndex(
 	phaseCtx, phaseCancel := context.WithTimeout(ctx, cfg.ReindexPhaseTimeout)
 	defer phaseCancel()
 
-	// ---- Pass 1: enumerate live subjects via HeadersOnly consumer ----
+	// ---- Pass 1: enumerate live subjects ----
 
-	cons, err := jsContext.CreateConsumer(phaseCtx, kvObjectsStream, jetstream.ConsumerConfig{
-		DeliverPolicy:     jetstream.DeliverAllPolicy, // O(1) creation — no server-side seq scan
-		AckPolicy:         jetstream.AckNonePolicy,
-		FilterSubject:     subjectFilter,
-		HeadersOnly:       true, // server sends headers only; bodies not transmitted
-		MemoryStorage:     true,
-		InactiveThreshold: reindexEphemeralInactiveTimeout,
-	})
+	liveSubjects, err := EnumerateLiveSubjects(phaseCtx, jsContext, kvObjectsStream, subjectFilter,
+		WithFetchMaxWait(cfg.NATSFetchMaxWait),
+	)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to create enumeration consumer for %s reindex: %w", phaseName, err)
-	}
-	defer func() {
-		if delErr := jsContext.DeleteConsumer(ctx, kvObjectsStream, cons.CachedInfo().Name); delErr != nil {
-			logger.With("error", delErr, "phase", phaseName).Warn("failed to delete ephemeral reindex consumer")
-		}
-	}()
-
-	// liveSubjects tracks latest observed state per subject (true = live).
-	// Messages arrive in stream-seq order, so the last write per subject wins.
-	liveSubjects := make(map[string]bool)
-
-	for {
-		if err := phaseCtx.Err(); err != nil {
-			return 0, 0, fmt.Errorf("%s reindex enumeration timed out after %d subjects: %w", phaseName, len(liveSubjects), err)
-		}
-
-		batch, fetchErr := cons.Fetch(reindexFetchBatchSize, jetstream.FetchMaxWait(reindexFetchMaxWait))
-		if fetchErr != nil {
-			return 0, 0, fmt.Errorf("fetch error during %s reindex enumeration: %w", phaseName, fetchErr)
-		}
-
-		empty := true
-		for msg := range batch.Messages() {
-			empty = false
-			kvOp := msg.Headers().Get("KV-Operation")
-			if kvOp == "DEL" || kvOp == "PURGE" {
-				liveSubjects[msg.Subject()] = false
-			} else {
-				liveSubjects[msg.Subject()] = true
-			}
-		}
-
-		if batchErr := batch.Error(); batchErr != nil {
-			return 0, 0, fmt.Errorf("batch error during %s reindex enumeration: %w", phaseName, batchErr)
-		}
-
-		if empty {
-			break
-		}
-
-		infoCtx, cancelInfo := context.WithTimeout(ctx, cfg.ReindexNATSOpTimeout)
-		info, infoErr := cons.Info(infoCtx)
-		cancelInfo()
-		if infoErr != nil {
-			return 0, 0, fmt.Errorf("failed to get consumer info during %s reindex enumeration: %w", phaseName, infoErr)
-		}
-		if info.NumPending == 0 {
-			break
-		}
+		return 0, 0, fmt.Errorf("%s reindex enumeration: %w", phaseName, err)
 	}
 
 	logger.With("subjects", len(liveSubjects), "phase", phaseName).Info("reindex enumeration complete; starting index writes")
 
 	// ---- Pass 2: fetch latest value per live subject and write index ----
 
-	for subject, live := range liveSubjects {
-		if !live {
-			continue
-		}
-
+	for subject := range liveSubjects {
 		if err := phaseCtx.Err(); err != nil {
 			return written, errors, fmt.Errorf("%s reindex phase timed out after %d writes: %w", phaseName, written, err)
 		}

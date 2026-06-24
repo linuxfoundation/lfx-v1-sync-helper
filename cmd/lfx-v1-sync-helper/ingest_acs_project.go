@@ -19,9 +19,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
-
-	"github.com/nats-io/nats.go/jetstream"
 
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
 )
@@ -127,18 +124,9 @@ func backfillACSProjectGrants(ctx context.Context, dryRun bool) error {
 // KV_v1-mappings JetStream stream and returns a map of v1 SFID → v2 project
 // UID.
 //
-// This uses a direct JetStream pull consumer with DeliverAllPolicy rather than
-// the KV Watch API (which uses DeliverLastPerSubjectPolicy).
-// DeliverLastPerSubjectPolicy requires the server to scan all message blocks
-// to find the latest sequence per subject at consumer creation time — an O(N)
-// operation that exceeds the 5 second SDK API timeout on large buckets.
-// DeliverAllPolicy starts at seq 1 with no server-side scan (O(1) creation),
-// and we apply last-write-wins deduplication client-side as we stream through
-// all revisions.
-//
-// FetchMaxWait is kept ≤ 10 seconds to prevent the SDK from auto-enabling idle
-// heartbeats, which fail over high-latency connections (e.g. kubectl
-// port-forward). The loop terminates on an empty batch (no more messages).
+// Uses EnumerateLiveSubjects for the headers-only stream walk with client-side
+// last-write-wins dedup, then does point reads (mappingsKV.Get) to retrieve
+// the mapping value for each live subject.
 func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) {
 	const (
 		// kvMappingsStream is the JetStream stream backing the v1-mappings KV
@@ -153,74 +141,44 @@ func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) 
 		// SFID.
 		projectSFIDSubjectPrefix = "$KV.v1-mappings.project.sfid."
 
-		// fetchBatchSize is the number of messages to request per Fetch call.
-		fetchBatchSize = 512
-
-		// fetchMaxWait is the per-Fetch timeout. Must be ≤ 10 seconds to prevent
-		// the SDK from auto-enabling idle heartbeats (which require a low-latency
-		// connection).
-		fetchMaxWait = 5 * time.Second
+		// projectSFIDKVKeyPrefix is used to construct the KV key for
+		// mappingsKV.Get (the SFID is appended to form the full key).
+		projectSFIDKVKeyPrefix = "project.sfid."
 	)
 
-	cons, err := jsContext.CreateConsumer(ctx, kvMappingsStream, jetstream.ConsumerConfig{
-		DeliverPolicy: jetstream.DeliverAllPolicy,
-		AckPolicy:     jetstream.AckNonePolicy,
-		FilterSubject: projectSFIDSubject,
-		// MemoryStorage avoids disk I/O for this short-lived ephemeral consumer.
-		MemoryStorage: true,
-		// InactiveThreshold ensures the server cleans up the ephemeral consumer
-		// automatically if the client exits before the deferred delete runs.
-		InactiveThreshold: 5 * time.Minute,
-	})
+	liveSubjects, err := EnumerateLiveSubjects(ctx, jsContext, kvMappingsStream, projectSFIDSubject,
+		WithFetchMaxWait(cfg.NATSFetchMaxWait),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create pull consumer for project SFID mappings: %w", err)
+		return nil, fmt.Errorf("failed to enumerate project SFID mappings: %w", err)
 	}
-	defer func() {
-		if err := jsContext.DeleteConsumer(ctx, kvMappingsStream, cons.CachedInfo().Name); err != nil {
-			logger.With("error", err).WarnContext(ctx, "Failed to delete ephemeral SFID mappings consumer.")
+
+	mappings := make(map[string]string, len(liveSubjects))
+
+	for subject := range liveSubjects {
+		if !strings.HasPrefix(subject, projectSFIDSubjectPrefix) {
+			continue
 		}
-	}()
+		sfid := subject[len(projectSFIDSubjectPrefix):]
+		kvKey := projectSFIDKVKeyPrefix + sfid
 
-	mappings := make(map[string]string)
-
-	for {
-		batch, err := cons.Fetch(fetchBatchSize, jetstream.FetchMaxWait(fetchMaxWait))
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch project SFID mappings: %w", err)
+		opTimeout := cfg.NATSFetchMaxWait
+		if opTimeout <= 0 {
+			opTimeout = defaultNATSFetchMaxWait
 		}
-
-		empty := true
-		for msg := range batch.Messages() {
-			empty = false
-
-			if !strings.HasPrefix(msg.Subject(), projectSFIDSubjectPrefix) {
-				continue
-			}
-			sfid := msg.Subject()[len(projectSFIDSubjectPrefix):]
-			val := string(msg.Data())
-
-			// Last-write-wins: later revisions overwrite earlier ones. Tombstoned
-			// or empty values remove the entry so deleted mappings are excluded.
-			if isTombstonedMapping(msg.Data()) || val == "" {
-				delete(mappings, sfid)
-			} else {
-				mappings[sfid] = val
-			}
+		getCtx, cancelGet := context.WithTimeout(ctx, opTimeout)
+		entry, getErr := mappingsKV.Get(getCtx, kvKey)
+		cancelGet()
+		if getErr != nil {
+			logger.With(errKey, getErr, "sfid", sfid).Warn("failed to get project SFID mapping value; skipping")
+			continue
 		}
 
-		if err := batch.Error(); err != nil {
-			return nil, fmt.Errorf("batch error reading project SFID mappings: %w", err)
+		val := string(entry.Value())
+		if isTombstonedMapping(entry.Value()) || val == "" {
+			continue
 		}
-
-		// An empty batch means the server has no more matching messages for this
-		// consumer. cons.Info(ctx) is intentionally omitted here: on KV_v1-mappings
-		// the JetStream API call reliably times out under prod load within the 5 s
-		// SDK default, aborting the collection. The empty-batch signal is sufficient
-		// for correctness — worst case is one extra FetchMaxWait(5 s) at
-		// end-of-stream.
-		if empty {
-			break
-		}
+		mappings[sfid] = val
 	}
 
 	return mappings, nil
