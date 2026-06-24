@@ -11,7 +11,6 @@ import (
 	"hash/fnv"
 	"net/http"
 	"strings"
-	"time"
 
 	sfutil "github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
 	"github.com/nats-io/nats.go/jetstream"
@@ -23,9 +22,6 @@ const (
 	workspaceSubjectPrefix        = "$KV.v1-objects.platform-organization_workspace."
 	workspaceProjectSubject       = "$KV.v1-objects.platform-organization_workspace_project.*"
 	workspaceProjectSubjectPrefix = "$KV.v1-objects.platform-organization_workspace_project."
-
-	workspaceFetchBatchSize = 512
-	workspaceFetchMaxWait   = 5 * time.Second
 
 	workspaceBulkMaxSize = 100
 )
@@ -80,53 +76,39 @@ func fnv32hex(s string) string {
 	return fmt.Sprintf("%x", h.Sum32())
 }
 
-// fetchKVSubjectRecords creates an ephemeral pull consumer for subject, fetches
-// all records (last-write-wins per ID), and returns a map of id→raw bytes.
+// fetchKVSubjectRecords enumerates live subjects under subject using the
+// shared EnumerateLiveSubjects helper (headers-only, NumPending end-of-stream
+// guard, tombstone filtering), then point-reads each value via v1KV.Get.
+// Returns a map of id→raw bytes (key suffix after prefix).
 func fetchKVSubjectRecords(ctx context.Context, subject, prefix string) (map[string][]byte, error) {
-	cons, err := jsContext.CreateConsumer(ctx, kvObjectsStream, jetstream.ConsumerConfig{
-		DeliverPolicy:     jetstream.DeliverAllPolicy,
-		AckPolicy:         jetstream.AckNonePolicy,
-		FilterSubject:     subject,
-		MemoryStorage:     true,
-		InactiveThreshold: 5 * time.Minute,
-	})
+	liveSubjects, err := EnumerateLiveSubjects(ctx, jsContext, kvObjectsStream, subject,
+		WithFetchMaxWait(cfg.NATSFetchMaxWait),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create pull consumer for %s: %w", subject, err)
+		return nil, fmt.Errorf("failed to enumerate subjects for %s: %w", subject, err)
 	}
-	defer func() {
-		if err := jsContext.DeleteConsumer(ctx, kvObjectsStream, cons.CachedInfo().Name); err != nil {
-			logger.With("error", err).WarnContext(ctx, "failed to delete ephemeral consumer")
-		}
-	}()
 
-	latest := make(map[string][]byte)
-	for {
-		batch, err := cons.Fetch(workspaceFetchBatchSize, jetstream.FetchMaxWait(workspaceFetchMaxWait))
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch from %s: %w", subject, err)
+	result := make(map[string][]byte, len(liveSubjects))
+	for subj := range liveSubjects {
+		if !strings.HasPrefix(subj, prefix) {
+			continue
 		}
-		for msg := range batch.Messages() {
-			if !strings.HasPrefix(msg.Subject(), prefix) {
-				continue
-			}
-			latest[msg.Subject()[len(prefix):]] = msg.Data()
+		id := subj[len(prefix):]
+
+		opTimeout := cfg.NATSFetchMaxWait
+		if opTimeout <= 0 {
+			opTimeout = defaultNATSFetchMaxWait
 		}
-		if err := batch.Error(); err != nil {
-			return nil, fmt.Errorf("batch error reading from %s: %w", subject, err)
+		getCtx, cancelGet := context.WithTimeout(ctx, opTimeout)
+		entry, getErr := v1KV.Get(getCtx, subj[len("$KV.v1-objects."):])
+		cancelGet()
+		if getErr != nil {
+			logger.With("key", subj, errKey, getErr).WarnContext(ctx, "failed to get workspace record, skipping")
+			continue
 		}
-		// On sparse streams, Fetch can time out and return an empty batch even when
-		// more messages remain. Use NumPending as the authoritative end-of-stream signal.
-		infoCtx, cancelInfo := context.WithTimeout(ctx, 30*time.Second)
-		info, infoErr := cons.Info(infoCtx)
-		cancelInfo()
-		if infoErr != nil {
-			return nil, fmt.Errorf("failed to get consumer info for %s: %w", subject, infoErr)
-		}
-		if info.NumPending == 0 {
-			break
-		}
+		result[id] = entry.Value()
 	}
-	return latest, nil
+	return result, nil
 }
 
 // collectLegacyWorkspaces scans both workspace subjects from v1-objects using
