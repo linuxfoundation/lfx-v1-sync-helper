@@ -259,23 +259,28 @@ Note: The replication slot is named `lfx_v2` (not `wal-listener`). The publicati
 
 ## One-shot Backfill Commands
 
-### `EnumerateLiveSubjects` — common stream-walk abstraction (`nats_enumerate.go`)
+### `ScanSubjectData` — stream scan abstraction for all KV enumeration (`nats_scan.go`)
 
-All one-shot backfill and reindex jobs that need to scan a KV-backed JetStream stream use the shared `EnumerateLiveSubjects` function. It creates a headers-only ephemeral pull consumer with `DeliverAllPolicy` (O(1) creation), walks all messages in the filtered stream, applies client-side last-write-wins dedup, and returns `map[string]struct{}` of subjects whose latest revision is not a DEL/PURGE tombstone.
+All one-shot backfill and reindex jobs that need to scan a KV-backed JetStream stream use `ScanSubjectData`. It uses sequential `stream.GetMsg` calls with `jetstream.WithGetMsgSubject` (`next_by_subj` API): each call is an independent NATS request-reply asking the server for the first message at seq ≥ N matching the subject filter.
 
-**Any new backfill or reindex pass that needs to enumerate KV bucket keys should use `EnumerateLiveSubjects` rather than implementing its own consumer loop.** Callers that need payloads should do point reads (`KV.Get`) after enumeration.
+**Why not an ephemeral consumer?** Both `KV_v1-objects` (54M sequences, 35.6M tombstones) and `KV_v1-mappings` (34M sequences) in prod are too large for consumer-based enumeration. A `DeliverAllPolicy` consumer streams all sequences through a single connection, saturating NATS server CPU (~357%), preventing heartbeat delivery, and causing `nats: no heartbeat received` failures.
+
+**Signature**: `ScanSubjectData(ctx, js, streamName, subjectFilter, opTimeout) (map[string][]byte, error)`
+
+Returns `map[string][]byte` (subject → latest payload) with LWW applied; tombstoned subjects are excluded. Callers get payloads directly — no second-pass point reads needed.
 
 Key design decisions:
-- **`cons.Info()` with generous timeout** — checks `NumPending==0` after each batch as the authoritative end-of-stream signal. This is a correctness requirement: on sparse streams, relying on empty-batch termination alone can silently return incomplete results. Timeout defaults to 120s (configurable via `WithInfoTimeout`) to accommodate large buckets.
-- **No full-body walk** — callers do point reads after enumeration (same pattern the user reindex already uses at larger scale).
-- **Options**: `WithFetchMaxWait` (default 120s from `defaultNATSFetchMaxWait`), `WithBatchSize` (default 512), `WithInfoTimeout` (default 120s), `WithLogger`.
-- **Ephemeral consumer lifecycle**: `MemoryStorage: true`, `InactiveThreshold: 5m`, explicitly deleted in defer.
+- **No consumer** — no heartbeat, no consumer lifecycle, no CPU spike from bulk streaming.
+- **LWW via seq order** — messages are visited ascending; last write per subject overwrites earlier ones.
+- **`ErrMsgNotFound` = end of stream** — the clean signal that no further messages match the filter.
+- **Per-call deadline** — each `GetMsg` call uses `context.WithTimeout(ctx, opTimeout)`. Always pass `cfg.NATSFetchMaxWait` (default 120s); the SDK default of 5s is too short.
+- **Wildcard subjects** — the `next_by_subj` NATS server API accepts NATS subject wildcards.
 
 ### `--backfill-acs-project` pass (`ingest_acs_project.go`)
 
 The `--backfill-acs-project` flag runs the project grants pass (`backfillACSProjectGrants`), which backfills ACS legacy user grants into v2 project settings:
 
-- **SFID source**: `EnumerateLiveSubjects` on `KV_v1-mappings` with filter `$KV.v1-mappings.project.sfid.*`, followed by point reads to get the SFID → v2 UID mapping value.
+- **SFID source**: `ScanSubjectData` on `KV_v1-mappings` with filter `$KV.v1-mappings.project.sfid.*`. Returns subject → payload map directly; no separate point reads.
 - **ACS query**: `GET /acs/v1/api/grantusers?object_type=project&object_id={sfid}&rolename=admin,viewer,meetings-coordinator` (paginated). `admin` → `Writers`; `viewer` → `Auditors`; `meetings-coordinator` → `MeetingCoordinators`.
 - **Settings API**: `GetProjectSettings` / `UpdateProjectSettings` via Goa project-service client.
 - **Merge**: additive-only; existing v2-only entries are logged as "extra" but never removed.
@@ -286,7 +291,7 @@ The `--backfill-acs-project` flag runs the project grants pass (`backfillACSProj
 
 The `--backfill-acs-org` flag runs the org grants pass (`backfillACSOrgGrants`), which backfills ACS legacy org grants into v2 b2b_org settings:
 
-- **SFID source**: `EnumerateLiveSubjects` on `KV_v1-objects` with filter `$KV.v1-objects.salesforce_b2b-Account.*`, followed by point reads and `isLiveMemberOrgAccount` filtering. Skips records where `IsDeleted=true` or `IsMember__c!=true`.
+- **SFID source**: `ScanSubjectData` on `KV_v1-objects` with filter `$KV.v1-objects.salesforce_b2b-Account.*`. Returns subject → payload map directly; each payload passed through `isLiveMemberOrgAccount` to filter deleted/non-member records.
 - **UID resolution**: `sfutil.Normalize18(sfid)` — as of LFXV2-2049 the b2b_org UID is the 18-char normalized SFID. No network call.
 - **ACS query**: `GET /acs/v1/api/grantusers?object_type=organization&object_id={sfid}&rolename=company-admin,viewer` (paginated). `company-admin` → `writer`; `viewer` → `auditor`.
 - **Settings API**: raw HTTP `GET`/`PUT /b2b_orgs/{uid}/settings` via `client_members.go`. Requires `MEMBER_SERVICE_URL` env var.

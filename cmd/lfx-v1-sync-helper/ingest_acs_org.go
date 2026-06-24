@@ -166,38 +166,31 @@ func backfillACSOrgGrants(ctx context.Context, dryRun bool) error {
 // KV_v1-objects JetStream stream and returns the SFID set for live LF member
 // orgs (IsDeleted=false AND IsMember__c=true).
 //
-// Uses EnumerateLiveSubjects for the headers-only stream walk with client-side
-// last-write-wins dedup, then does point reads (v1KV.Get) and filters each
-// record through isLiveMemberOrgAccount.
+// Uses ScanSubjectData for sequential GetMsg (next_by_subj) iteration instead
+// of an ephemeral consumer. KV_v1-objects in prod has 54M sequences (18.5M
+// subjects, 35.6M tombstones); a DeliverAllPolicy consumer would cause the
+// same CPU spike and heartbeat failures seen on KV_v1-mappings. Payloads are
+// returned directly so no separate v1KV.Get per subject is needed.
 func collectOrgAccountSFIDs(ctx context.Context) (map[string]struct{}, error) {
-	liveSubjects, err := EnumerateLiveSubjects(ctx, jsContext, kvObjectsStream, b2bAccountSubject,
-		WithFetchMaxWait(cfg.NATSFetchMaxWait),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to enumerate org account SFIDs: %w", err)
+	opTimeout := cfg.NATSFetchMaxWait
+	if opTimeout <= 0 {
+		opTimeout = defaultNATSFetchMaxWait
 	}
 
-	sfids := make(map[string]struct{}, len(liveSubjects))
+	subjectData, err := ScanSubjectData(ctx, jsContext, kvObjectsStream, b2bAccountSubject, opTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan org account SFIDs: %w", err)
+	}
 
-	for subject := range liveSubjects {
+	sfids := make(map[string]struct{}, len(subjectData))
+
+	for subject, data := range subjectData {
 		if !strings.HasPrefix(subject, b2bAccountSubjectPrefix) {
 			continue
 		}
 		sfid := subject[len(b2bAccountSubjectPrefix):]
 
-		opTimeout := cfg.NATSFetchMaxWait
-		if opTimeout <= 0 {
-			opTimeout = defaultNATSFetchMaxWait
-		}
-		getCtx, cancelGet := context.WithTimeout(ctx, opTimeout)
-		entry, getErr := v1KV.Get(getCtx, "salesforce_b2b-Account."+sfid)
-		cancelGet()
-		if getErr != nil {
-			logger.With("sfid", sfid, errKey, getErr).WarnContext(ctx, "failed to get org account record, skipping")
-			continue
-		}
-
-		live, err := isLiveMemberOrgAccount(entry.Value())
+		live, err := isLiveMemberOrgAccount(data)
 		if err != nil {
 			if de, ok := err.(*orgDecodeError); ok {
 				logger.With("sfid", sfid, errKey, de.json, "msgpack_error", de.msgpack).WarnContext(ctx, "failed to decode org account record, skipping")
