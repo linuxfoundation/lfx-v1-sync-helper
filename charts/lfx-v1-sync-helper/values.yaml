@@ -326,6 +326,16 @@ walListener:
             - insert
             - update
             - delete
+          # platform.organization_workspace
+          organization_workspace:
+            - insert
+            - update
+            - delete
+          # platform.organization_workspace_project
+          organization_workspace_project:
+            - insert
+            - update
+            - delete
           # salesforce.project__c
           project__c:
             - insert
