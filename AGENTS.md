@@ -273,7 +273,18 @@ Key design decisions:
 - **Options**: `WithFetchMaxWait` (default 120s from `defaultNATSFetchMaxWait`), `WithBatchSize` (default 512), `WithInfoTimeout` (default 120s), `WithLogger`.
 - **Ephemeral consumer lifecycle**: `MemoryStorage: true`, `InactiveThreshold: 5m`, explicitly deleted in defer.
 
-### `--backfill-acs-project` pass (`ingest_acs_project.go`)
+### Auth0 Management API enumeration — pattern for user-centric backfills (`backfill_email_profile.go`)
+
+Backfills whose outer loop is over **Auth0 users** (rather than NATS KV keys) use the Auth0 Management API `List()` call instead of `EnumerateLiveSubjects`. Use this pattern when the canonical source of iteration is the Auth0 user set, not a NATS KV bucket.
+
+Key design decisions:
+- **Connection filter**: `Username-Password-Authentication` only — social/enterprise connections are not v1 platform accounts.
+- **Sort**: `updated_at:1` (ascending) so the cursor advances monotonically and recent changes are processed last.
+- **Resumable cursor**: the `updated_at` value of the last processed user is stored as a plain string in the `v1-mappings` KV bucket (e.g. `backfill.alternate-emails.cursor`). On the next run an inclusive range query `[cursor TO *]` re-processes the last user from the previous run; all per-user operations are idempotent.
+- **`--limit N`**: caps Auth0 users fetched per run (default 1000). Multiple runs advance the cursor through the full user population.
+- **No `EnumerateLiveSubjects`**: NATS KV is used for side-lookups (e.g. fetching the v1 SFID mapping) and cursor storage, not as the enumeration source.
+
+### `--backfill-acs-project [--dry-run]` (`ingest_acs_project.go`)
 
 The `--backfill-acs-project` flag runs the project grants pass (`backfillACSProjectGrants`), which backfills ACS legacy user grants into v2 project settings:
 
@@ -283,7 +294,18 @@ The `--backfill-acs-project` flag runs the project grants pass (`backfillACSProj
 - **Merge**: additive-only; existing v2-only entries are logged as "extra" but never removed.
 - **Dry-run**: add `--dry-run` to preview without writing.
 - **Summary log fields**: `processed`, `errors`.
+- **Manifest**: `manifests/backfill-acs-job.yaml`.
 
+### `--backfill-acs-org [--dry-run]` (`ingest_acs_org.go`)
+
+Backfills ACS legacy org grants into v2 b2b_org settings:
+
+- **SFID source**: `EnumerateLiveSubjects` on `KV_v1-objects` with filter `$KV.v1-objects.salesforce_b2b-Account.*`, followed by point reads and `isLiveMemberOrgAccount` filtering. Skips records where `IsDeleted=true` or `IsMember__c!=true`.
+- **UID resolution**: `sfutil.Normalize18(sfid)` — as of LFXV2-2049 the b2b_org UID is the 18-char normalized SFID. No network call.
+- **ACS query**: `GET /acs/v1/api/grantusers?object_type=organization&object_id={sfid}&rolename=company-admin,viewer` (paginated). `company-admin` → `writer`; `viewer` → `auditor`.
+- **Settings API**: raw HTTP `GET`/`PUT /b2b_orgs/{uid}/settings` via `client_members.go`. Requires `MEMBER_SERVICE_URL` env var.
+- **Merge**: additive-only; existing v2-only entries are logged as "extra" but never removed.
+- **Summary log fields**: `orgs_total`, `orgs_changed`, `writers_added`, `auditors_added`, `orgs_skipped`, `errors`.
 
 ### `--backfill-alternate-emails [--limit N] [--dry-run]` (`backfill_email_profile.go`)
 
@@ -308,21 +330,6 @@ Iterates Auth0 users (same connection filter and sort), syncs v1 profile fields 
 ### `--sync-user <username> [--dry-run]` (`backfill_email_profile.go`)
 
 Performs a full sync (profile + alternate emails) for a single user identified by their Auth0 username (the part after `auth0|`). Useful for debugging or targeted re-sync without a full backfill run.
-
-### `--backfill-acs-project [--dry-run]` (`ingest_acs_project.go`)
-
-Backfills ACS user grants into v2 project settings (Writers, Auditors, MeetingCoordinators). See `manifests/backfill-acs-job.yaml`.
-
-### `--backfill-acs-org [--dry-run]` (`ingest_acs_org.go`)
-
-Backfills ACS legacy org grants into v2 b2b_org settings:
-
-- **SFID source**: `EnumerateLiveSubjects` on `KV_v1-objects` with filter `$KV.v1-objects.salesforce_b2b-Account.*`, followed by point reads and `isLiveMemberOrgAccount` filtering. Skips records where `IsDeleted=true` or `IsMember__c!=true`.
-- **UID resolution**: `sfutil.Normalize18(sfid)` — as of LFXV2-2049 the b2b_org UID is the 18-char normalized SFID. No network call.
-- **ACS query**: `GET /acs/v1/api/grantusers?object_type=organization&object_id={sfid}&rolename=company-admin,viewer` (paginated). `company-admin` → `writer`; `viewer` → `auditor`.
-- **Settings API**: raw HTTP `GET`/`PUT /b2b_orgs/{uid}/settings` via `client_members.go`. Requires `MEMBER_SERVICE_URL` env var.
-- **Merge**: additive-only; existing v2-only entries are logged as "extra" but never removed.
-- **Summary log fields**: `orgs_total`, `orgs_changed`, `writers_added`, `auditors_added`, `orgs_skipped`, `errors`.
 
 ### 4. `cmd/lfx-v1-sync-helper/handlers.go` — suppress unknown-object warnings (optional)
 
