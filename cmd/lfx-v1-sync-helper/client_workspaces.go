@@ -56,6 +56,9 @@ type workspaceAPIResponse struct {
 // Returns (ws, false, nil) on success; (nil, true, nil) on conflict (409);
 // (nil, false, error) on other failure.
 func createWorkspace(ctx context.Context, orgUID, name string) (*workspaceResponse, bool, error) {
+	if cfg.MemberServiceURL == nil {
+		return nil, false, fmt.Errorf("MEMBER_SERVICE_URL is not configured")
+	}
 	token, err := generateCachedJWTToken(ctx, memberServiceAudience, "")
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to generate JWT token: %w", err)
@@ -102,6 +105,9 @@ func createWorkspace(ctx context.Context, orgUID, name string) (*workspaceRespon
 // deleteWorkspace deletes a workspace.
 // Returns nil on success or if the workspace is already gone (404).
 func deleteWorkspace(ctx context.Context, orgUID, workspaceUID string) error {
+	if cfg.MemberServiceURL == nil {
+		return fmt.Errorf("MEMBER_SERVICE_URL is not configured")
+	}
 	token, err := generateCachedJWTToken(ctx, memberServiceAudience, "")
 	if err != nil {
 		return fmt.Errorf("failed to generate JWT token: %w", err)
@@ -132,6 +138,9 @@ func deleteWorkspace(ctx context.Context, orgUID, workspaceUID string) error {
 
 // bulkAddWorkspaceProjects adds multiple projects to a workspace in one call.
 func bulkAddWorkspaceProjects(ctx context.Context, orgUID, workspaceUID string, projectIDs []string) (*workspaceBulkResponse, error) {
+	if cfg.MemberServiceURL == nil {
+		return nil, fmt.Errorf("MEMBER_SERVICE_URL is not configured")
+	}
 	token, err := generateCachedJWTToken(ctx, memberServiceAudience, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate JWT token: %w", err)
@@ -173,6 +182,9 @@ func bulkAddWorkspaceProjects(ctx context.Context, orgUID, workspaceUID string, 
 
 // removeWorkspaceProject removes a single project from a workspace.
 func removeWorkspaceProject(ctx context.Context, orgUID, workspaceUID, projectID string) error {
+	if cfg.MemberServiceURL == nil {
+		return fmt.Errorf("MEMBER_SERVICE_URL is not configured")
+	}
 	token, err := generateCachedJWTToken(ctx, memberServiceAudience, "")
 	if err != nil {
 		return fmt.Errorf("failed to generate JWT token: %w", err)
@@ -194,7 +206,7 @@ func removeWorkspaceProject(ctx context.Context, orgUID, workspaceUID, projectID
 		return fmt.Errorf("failed to read DELETE project response: %w", readErr)
 	}
 
-	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotFound {
 		return nil
 	}
 

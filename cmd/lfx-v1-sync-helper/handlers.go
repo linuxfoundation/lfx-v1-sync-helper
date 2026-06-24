@@ -158,9 +158,9 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 		return false
 	case "platform-organization_workspace",
 		"platform-organization_workspace_project":
-		// Workspace records are replicated to v1-objects KV for consumption by the member service.
-		// No additional v2 API processing needed here; the member service reads directly from KV.
-		logger.With("key", key).DebugContext(ctx, "workspace record updated, stored in KV for member service")
+		// Workspace records are handled by the one-shot --backfill-workspaces command via
+		// the member-service API. No continuous sync needed in the WAL watcher.
+		logger.With("key", key).DebugContext(ctx, "workspace record updated, handled by --backfill-workspaces")
 		return false
 	default:
 		logger.With("key", key).WarnContext(ctx, "unknown object type, ignoring")

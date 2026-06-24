@@ -105,9 +105,7 @@ func fetchKVSubjectRecords(ctx context.Context, subject, prefix string) (map[str
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch from %s: %w", subject, err)
 		}
-		empty := true
 		for msg := range batch.Messages() {
-			empty = false
 			if !strings.HasPrefix(msg.Subject(), prefix) {
 				continue
 			}
@@ -116,7 +114,15 @@ func fetchKVSubjectRecords(ctx context.Context, subject, prefix string) (map[str
 		if err := batch.Error(); err != nil {
 			return nil, fmt.Errorf("batch error reading from %s: %w", subject, err)
 		}
-		if empty {
+		// On sparse streams, Fetch can time out and return an empty batch even when
+		// more messages remain. Use NumPending as the authoritative end-of-stream signal.
+		infoCtx, cancelInfo := context.WithTimeout(ctx, 30*time.Second)
+		info, infoErr := cons.Info(infoCtx)
+		cancelInfo()
+		if infoErr != nil {
+			return nil, fmt.Errorf("failed to get consumer info for %s: %w", subject, infoErr)
+		}
+		if info.NumPending == 0 {
 			break
 		}
 	}
@@ -600,6 +606,7 @@ func reconcileProjects(
 		return
 	}
 
+	errorsBefore := *errors
 	changed := false
 
 	// Bulk-add toAdd (chunked at workspaceBulkMaxSize).
@@ -620,8 +627,9 @@ func reconcileProjects(
 
 	if changed {
 		*updated++
-		// Persist the new project set so the next re-run has an accurate current state.
-		if !dryRun {
+		// Only persist the new project set when no errors occurred — a partial
+		// apply must not be cached as complete, so a re-run can retry the delta.
+		if !dryRun && *errors == errorsBefore {
 			if err := putWorkspaceCacheEntry(ctx, orgUID, ws.Name, workspaceUID, desiredUIDs); err != nil {
 				logger.With(errKey, err, "workspace_id", ws.ID).
 					WarnContext(ctx, "updated workspace projects but failed to persist cache entry")
@@ -662,10 +670,10 @@ func bulkAddProjects(
 		added += len(resp.Succeeded)
 		*projectsAdded += len(resp.Succeeded)
 
-		// Treat failed[] entries as skip-and-log (not errors).
 		for _, f := range resp.Failed {
 			logger.With("workspace_id", ws.ID, "project_id", f.ProjectID, "reason", f.Error).
-				InfoContext(ctx, "bulk-add: project association failed, skipping")
+				ErrorContext(ctx, "bulk-add: project association failed")
+			*errors++
 		}
 	}
 	return added
