@@ -101,20 +101,17 @@ func saveBackfillCursor(ctx context.Context, cursorKey, value string) error {
 }
 
 // listAuth0UserPage fetches one page of Auth0 users for the given connection,
-// sorted by updated_at ascending, starting from the cursor (inclusive).
-// cursor is the updated_at timestamp of the last processed user (RFC3339),
-// or "" for the first run. The inclusive range means the last user from the
-// previous run will be re-processed on the next run; all operations are idempotent.
-func listAuth0UserPage(ctx context.Context, cursor string, limit int) (*management.UserList, error) {
+// sorted by updated_at ascending. cursor is the updated_at of the last
+// processed user from the previous run (RFC3339Nano), or "" for the first run;
+// the inclusive lower bound means the boundary user is re-processed on resume,
+// which is safe because all operations are idempotent. runPage is the
+// zero-based page offset within this run's query (used for within-run
+// pagination; it is not persisted between runs).
+func listAuth0UserPage(ctx context.Context, cursor string, runPage, limit int) (*management.UserList, error) {
 	if err := auth0RateLimiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limiter: %w", err)
 	}
 
-	// Build the Lucene query: filter to the connection; use an inclusive lower
-	// bound on updated_at so no users are skipped if multiple share the same
-	// timestamp. Auth0 updated_at has second precision, so the last user from
-	// the previous run will be re-processed — this is accepted behavior since
-	// all link/update operations are idempotent.
 	query := fmt.Sprintf(`identities.connection:"%s"`, backfillAuth0Connection)
 	if cursor != "" {
 		query += fmt.Sprintf(` AND updated_at:[%s TO *]`, cursor)
@@ -124,7 +121,7 @@ func listAuth0UserPage(ctx context.Context, cursor string, limit int) (*manageme
 		management.Query(query),
 		management.Parameter("sort", "updated_at:1"),
 		management.PerPage(limit),
-		management.Page(0),
+		management.Page(runPage),
 	)
 }
 
@@ -146,13 +143,14 @@ func backfillAlternateEmails(ctx context.Context, limit int, dryRun bool) (*back
 	).Info("starting alternate-emails backfill")
 
 	remaining := limit
+	runPage := 0
 	for remaining > 0 {
 		pageSize := remaining
 		if pageSize > backfillPageSize {
 			pageSize = backfillPageSize
 		}
 
-		page, err := listAuth0UserPage(ctx, cursor, pageSize)
+		page, err := listAuth0UserPage(ctx, cursor, runPage, pageSize)
 		if err != nil {
 			return result, fmt.Errorf("listing Auth0 users: %w", err)
 		}
@@ -162,6 +160,7 @@ func backfillAlternateEmails(ctx context.Context, limit int, dryRun bool) (*back
 			break
 		}
 
+		lastCursor := cursor
 		for _, auth0User := range page.Users {
 			auth0UserID := auth0User.GetID()
 			username := auth0User.GetUsername()
@@ -177,22 +176,27 @@ func backfillAlternateEmails(ctx context.Context, limit int, dryRun bool) (*back
 			err := backfillEmailsForUser(userCtx, auth0UserID, username, dryRun, result)
 			cancel()
 			if err != nil {
-				logger.With("error", err, "auth0_user_id", auth0UserID).
+				logger.With(errKey, err, "auth0_user_id", auth0UserID).
 					Warn("error processing user during alternate-emails backfill, continuing")
 				result.errors++
 			}
 
 			result.usersProcessed++
-			// Advance cursor to the updated_at of this user.
 			if updatedAt := auth0User.GetUpdatedAt(); !updatedAt.IsZero() {
-				cursor = updatedAt.UTC().Format(time.RFC3339)
+				lastCursor = updatedAt.UTC().Truncate(time.Millisecond).Format(time.RFC3339Nano)
 			}
 		}
+
+		// Advance the run-local page counter so the next fetch continues where
+		// this one left off within the same query. The cursor timestamp is only
+		// updated for cross-run resumability; runPage is not persisted.
+		runPage++
+		cursor = lastCursor
 
 		// Persist cursor after each page so partial runs are resumable.
 		if !dryRun {
 			if saveErr := saveBackfillCursor(ctx, backfillAltEmailsCursorKey, cursor); saveErr != nil {
-				logger.With("error", saveErr).Warn("failed to save backfill cursor, progress may be lost on restart")
+				logger.With(errKey, saveErr).Warn("failed to save backfill cursor, progress may be lost on restart")
 			}
 		}
 
@@ -294,13 +298,14 @@ func backfillProfiles(ctx context.Context, limit int, dryRun bool) (*backfillPro
 	).Info("starting profiles backfill")
 
 	remaining := limit
+	runPage := 0
 	for remaining > 0 {
 		pageSize := remaining
 		if pageSize > backfillPageSize {
 			pageSize = backfillPageSize
 		}
 
-		page, err := listAuth0UserPage(ctx, cursor, pageSize)
+		page, err := listAuth0UserPage(ctx, cursor, runPage, pageSize)
 		if err != nil {
 			return result, fmt.Errorf("listing Auth0 users: %w", err)
 		}
@@ -310,6 +315,7 @@ func backfillProfiles(ctx context.Context, limit int, dryRun bool) (*backfillPro
 			break
 		}
 
+		lastCursor := cursor
 		for _, auth0User := range page.Users {
 			auth0UserID := auth0User.GetID()
 			username := auth0User.GetUsername()
@@ -323,21 +329,24 @@ func backfillProfiles(ctx context.Context, limit int, dryRun bool) (*backfillPro
 			err := backfillProfileForUser(userCtx, auth0UserID, username, dryRun, result)
 			cancel()
 			if err != nil {
-				logger.With("error", err, "auth0_user_id", auth0UserID).
+				logger.With(errKey, err, "auth0_user_id", auth0UserID).
 					Warn("error processing user during profiles backfill, continuing")
 				result.errors++
 			}
 
 			result.usersProcessed++
 			if updatedAt := auth0User.GetUpdatedAt(); !updatedAt.IsZero() {
-				cursor = updatedAt.UTC().Format(time.RFC3339)
+				lastCursor = updatedAt.UTC().Truncate(time.Millisecond).Format(time.RFC3339Nano)
 			}
 		}
+
+		runPage++
+		cursor = lastCursor
 
 		// Persist cursor after each page so partial runs are resumable.
 		if !dryRun {
 			if saveErr := saveBackfillCursor(ctx, backfillProfilesCursorKey, cursor); saveErr != nil {
-				logger.With("error", saveErr).Warn("failed to save backfill cursor, progress may be lost on restart")
+				logger.With(errKey, saveErr).Warn("failed to save backfill cursor, progress may be lost on restart")
 			}
 		}
 

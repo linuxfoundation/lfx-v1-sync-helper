@@ -86,27 +86,27 @@ spec:
               value: "http://lfx-v2-project-service.project-service.svc.cluster.local:8080"
             - name: USE_MSGPACK
               value: "1"
-            # Before applying: replace this value with the actual client ID from the
-            # v1-sync-helper-auth0-credentials Kubernetes Secret:
-            #   kubectl --context lfx-v2-prod -n v1-sync-helper get secret v1-sync-helper-auth0-credentials \
-            #     -o jsonpath='{.data.heimdall_client_id}' | base64 -d
+            # Before applying: replace this value with the HEIMDALL_CLIENT_ID from the
+            # running deployment (it is not stored in a Secret):
+            #   kubectl --context lfx-v2-prod -n v1-sync-helper get deployment \
+            #     -o jsonpath'{.items[0].spec.template.spec.containers[0].env[?(@.name=="HEIMDALL_CLIENT_ID")].value}'
             - name: HEIMDALL_CLIENT_ID
               value: ""
             - name: HEIMDALL_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
-                  key: signer.pem
-                  name: heimdall-signer-cert
+                  key: key.pem
+                  name: heimdall-signer-cert-ad-hoc
             - name: AUTH0_CLIENT_ID
               valueFrom:
                 secretKeyRef:
                   key: client_id
-                  name: v1-sync-helper-auth0-credentials
+                  name: v1-sync-helper-secrets
             - name: AUTH0_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
                   key: client_private_key
-                  name: v1-sync-helper-auth0-credentials
+                  name: v1-sync-helper-secrets
           resources:
             requests:
               memory: "128Mi"

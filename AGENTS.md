@@ -259,7 +259,7 @@ Note: The replication slot is named `lfx_v2` (not `wal-listener`). The publicati
 
 ## One-shot Backfill Commands
 
-The following CLI flags each perform their work and then exit without starting the NATS subscriber. All are mutually exclusive. Use `--dry-run` with any of them to preview changes without writing.
+The following CLI flags each perform their work and then exit without starting the NATS subscriber. All are mutually exclusive. Use `--dry-run` with any of them to preview changes without writing (note: `--rebuild-user-secondary-indexes` does not support `--dry-run`).
 
 ### `EnumerateLiveSubjects` — common stream-walk abstraction (`nats_enumerate.go`)
 
@@ -275,7 +275,7 @@ Key design decisions:
 
 ### Auth0 Management API enumeration — pattern for user-centric backfills (`backfill_email_profile.go`)
 
-Backfills whose outer loop is over **Auth0 users** (rather than NATS KV keys) use the Auth0 Management API `List()` call instead of `EnumerateLiveSubjects`. Use this pattern when the canonical source of iteration is the Auth0 user set, not a NATS KV bucket.
+Backfills whose outer loop is over **Auth0 users** (rather than NATS KV keys) use the Auth0 Management API `Search()` call with a Lucene query instead of `EnumerateLiveSubjects`. Use this pattern when the canonical source of iteration is the Auth0 user set, not a NATS KV bucket.
 
 Key design decisions:
 - **Connection filter**: `Username-Password-Authentication` only — social/enterprise connections are not v1 platform accounts.
@@ -305,6 +305,7 @@ Backfills ACS legacy org grants into v2 b2b_org settings:
 - **ACS query**: `GET /acs/v1/api/grantusers?object_type=organization&object_id={sfid}&rolename=company-admin,viewer` (paginated). `company-admin` → `writer`; `viewer` → `auditor`.
 - **Settings API**: raw HTTP `GET`/`PUT /b2b_orgs/{uid}/settings` via `client_members.go`. Requires `MEMBER_SERVICE_URL` env var.
 - **Merge**: additive-only; existing v2-only entries are logged as "extra" but never removed.
+- **Dry-run**: add `--dry-run` to preview without writing.
 - **Summary log fields**: `orgs_total`, `orgs_changed`, `writers_added`, `auditors_added`, `orgs_skipped`, `errors`.
 
 ### `--backfill-alternate-emails [--limit N] [--dry-run]` (`backfill_email_profile.go`)
