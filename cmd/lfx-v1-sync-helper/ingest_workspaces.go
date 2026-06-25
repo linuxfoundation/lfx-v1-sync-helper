@@ -111,8 +111,7 @@ func fetchKVSubjectRecords(ctx context.Context, subject, prefix string) (map[str
 		result[id] = entry.Value()
 	}
 	if skipped > 0 {
-		logger.With("skipped", skipped, "subject", subject).
-			ErrorContext(ctx, "some workspace KV records could not be read — migration may be incomplete")
+		return result, fmt.Errorf("%d workspace KV records could not be read for subject %q — rerun to retry", skipped, subject)
 	}
 	return result, nil
 }
