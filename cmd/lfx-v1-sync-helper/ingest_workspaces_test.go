@@ -75,7 +75,8 @@ func TestWorkspaceCacheKey(t *testing.T) {
 	}
 }
 
-// TestResolveProjectUIDs covers T009 (project resolution) + T022/T024 (unmappable).
+// TestResolveProjectUIDs verifies project UID resolution: SFID lookup, uuid:slug extraction,
+// deleted-project exclusion, and unmappable-project skip behavior.
 func TestResolveProjectUIDs(t *testing.T) {
 	ctx := context.Background()
 	mappings := map[string]string{
@@ -87,8 +88,6 @@ func TestResolveProjectUIDs(t *testing.T) {
 		name     string
 		projects []legacyWorkspaceProject
 		wantUIDs []string
-		// Unmappable projects are now only logged (per FR-008a / FR-009): they do NOT
-		// increment workspaces_skipped. wantSkip field removed.
 	}{
 		{
 			name: "all mappable",

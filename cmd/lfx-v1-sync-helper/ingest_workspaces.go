@@ -89,6 +89,7 @@ func fetchKVSubjectRecords(ctx context.Context, subject, prefix string) (map[str
 	}
 
 	result := make(map[string][]byte, len(liveSubjects))
+	var skipped int
 	for subj := range liveSubjects {
 		if !strings.HasPrefix(subj, prefix) {
 			continue
@@ -103,10 +104,15 @@ func fetchKVSubjectRecords(ctx context.Context, subject, prefix string) (map[str
 		entry, getErr := v1KV.Get(getCtx, subj[len("$KV.v1-objects."):])
 		cancelGet()
 		if getErr != nil {
-			logger.With("key", subj, errKey, getErr).WarnContext(ctx, "failed to get workspace record, skipping")
+			logger.With("key", subj, errKey, getErr).ErrorContext(ctx, "failed to get workspace record, skipping")
+			skipped++
 			continue
 		}
 		result[id] = entry.Value()
+	}
+	if skipped > 0 {
+		logger.With("skipped", skipped, "subject", subject).
+			ErrorContext(ctx, "some workspace KV records could not be read — migration may be incomplete")
 	}
 	return result, nil
 }
@@ -167,6 +173,7 @@ func collectLegacyWorkspaces(ctx context.Context) ([]legacyWorkspace, error) {
 	// Decode and join workspace_project rows into the workspace map.
 	for assocID, data := range latestProjectAssocs {
 		if assocID == "" {
+			logger.WarnContext(ctx, "skipping workspace project association with empty id")
 			continue
 		}
 
@@ -181,6 +188,7 @@ func collectLegacyWorkspaces(ctx context.Context) ([]legacyWorkspace, error) {
 
 		workspaceID := stringField(raw, "workspace_id")
 		if workspaceID == "" {
+			logger.With("assoc_id", assocID).WarnContext(ctx, "skipping workspace project association with empty workspace_id")
 			continue
 		}
 
@@ -450,6 +458,7 @@ func resolveProjectUIDs(
 			continue
 		}
 		if p.ProjectSFID == "" {
+			logger.With("workspace_id", ws.ID).WarnContext(ctx, "skipping project with empty SFID")
 			continue
 		}
 
@@ -490,40 +499,44 @@ func reconcileUpsertWorkspace(
 		return
 	}
 
+	var wasCreated bool
 	if uid == "" {
 		// Cache miss — attempt create.
-		uid, currentProjects, err = createAndCacheWorkspace(ctx, ws, orgUID, dryRun, errors)
+		uid, currentProjects, wasCreated, err = createAndCacheWorkspace(ctx, ws, orgUID, dryRun, errors)
 		if err != nil || uid == "" {
 			return // already counted in errors
 		}
-		*created++
+		if wasCreated {
+			*created++
+		}
 	}
 
 	// Diff desired vs current project set and reconcile.
 	reconcileProjects(ctx, ws, orgUID, uid, desiredUIDs, currentProjects, dryRun,
-		updated, projectsAdded, projectsRemoved, errors)
+		wasCreated, updated, projectsAdded, projectsRemoved, errors)
 }
 
 // createAndCacheWorkspace creates a new workspace and stores the uid in the cache.
-// Returns ("", nil, nil) on a 409 cache-miss (already counted in errors).
+// wasCreated is true only for a real 201 create; false for a 409 cache-recovery.
+// Returns ("", nil, false, nil) on a 409 cache-miss (already counted in errors).
 func createAndCacheWorkspace(
 	ctx context.Context,
 	ws legacyWorkspace,
 	orgUID string,
 	dryRun bool,
 	errors *int,
-) (uid string, currentProjects []string, err error) {
+) (uid string, currentProjects []string, wasCreated bool, err error) {
 	if dryRun {
 		logger.With("workspace_id", ws.ID, "name", ws.Name, "org_uid", orgUID).
 			InfoContext(ctx, "[dry-run] would create workspace")
-		return "dry-run-placeholder", nil, nil
+		return "dry-run-placeholder", nil, true, nil
 	}
 
 	resp, conflict, err := createWorkspace(ctx, orgUID, ws.Name)
 	if err != nil {
 		logger.With(errKey, err, "workspace_id", ws.ID).ErrorContext(ctx, "failed to create workspace, skipping")
 		*errors++
-		return "", nil, err
+		return "", nil, false, err
 	}
 
 	if conflict {
@@ -533,10 +546,10 @@ func createAndCacheWorkspace(
 			logger.With("workspace_id", ws.ID, "name", ws.Name).
 				ErrorContext(ctx, "workspace already exists (409) but UID not in cache — skipping (no GET endpoint available)")
 			*errors++
-			return "", nil, fmt.Errorf("workspace %q exists in v2 but UID not found in cache", ws.Name)
+			return "", nil, false, fmt.Errorf("workspace %q exists in v2 but UID not found in cache", ws.Name)
 		}
-		// Also return cached project set so reconcileProjects can compute toRemove.
-		return cachedUID, cachedProjects, nil
+		// 409 recovery: workspace already existed — return cache state without counting as created.
+		return cachedUID, cachedProjects, false, nil
 	}
 
 	// 201: cache uid + initial project set for accurate removal diff on re-runs.
@@ -544,9 +557,12 @@ func createAndCacheWorkspace(
 		currentProjects = append(currentProjects, p.UID)
 	}
 	if err := putWorkspaceCacheEntry(ctx, orgUID, ws.Name, resp.UID, currentProjects); err != nil {
-		logger.With(errKey, err, "workspace_id", ws.ID).WarnContext(ctx, "created workspace but failed to cache entry")
+		logger.With(errKey, err, "workspace_id", ws.ID, "workspace_uid", resp.UID).
+			ErrorContext(ctx, "created workspace but failed to cache UID — workspace is unrecoverable on re-run without manual cache repair")
+		*errors++
+		return "", nil, false, fmt.Errorf("failed to cache workspace UID after create: %w", err)
 	}
-	return resp.UID, currentProjects, nil
+	return resp.UID, currentProjects, true, nil
 }
 
 // reconcileProjects diffs desired vs current project UIDs and applies adds/removes.
@@ -558,6 +574,7 @@ func reconcileProjects(
 	orgUID, workspaceUID string,
 	desiredUIDs, currentUIDs []string,
 	dryRun bool,
+	justCreated bool,
 	updated *int,
 	projectsAdded, projectsRemoved *int,
 	errors *int,
@@ -608,7 +625,11 @@ func reconcileProjects(
 	}
 
 	if changed {
-		*updated++
+		// Don't double-count: a newly-created workspace with projects to add is
+		// already counted in workspaces_created; only existing workspaces are "updated".
+		if !justCreated {
+			*updated++
+		}
 		// Only persist the new project set when no errors occurred — a partial
 		// apply must not be cached as complete, so a re-run can retry the delta.
 		if !dryRun && *errors == errorsBefore {

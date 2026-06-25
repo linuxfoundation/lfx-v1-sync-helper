@@ -42,9 +42,9 @@ plugins:
         platform-community__c:
           replication-key: systemmodstamp
         platform-organization_workspace:
-          replication-key: systemmodstamp
+          replication-key: updated_at
         platform-organization_workspace_project:
-          replication-key: systemmodstamp
+          replication-key: updated_at
         salesforce-project__c:
           replication-key: systemmodstamp
         salesforce_b2b-Account:

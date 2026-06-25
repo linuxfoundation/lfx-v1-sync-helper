@@ -28,7 +28,7 @@ func TestCreateWorkspace(t *testing.T) {
 		{
 			name:         "201 returns workspace uid",
 			status:       http.StatusCreated,
-			responseBody: `{"workspace":{"uid":"ws-001","name":"Test WS","projects":[]}}`,
+			responseBody: `{"uid":"ws-001","name":"Test WS","projects":[]}`,
 			wantUID:      "ws-001",
 			wantConflict: false,
 		},

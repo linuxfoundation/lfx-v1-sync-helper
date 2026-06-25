@@ -47,11 +47,6 @@ type workspaceBulkResponse struct {
 	Failed    []workspaceBulkAddItemError `json:"failed"`
 }
 
-// workspaceAPIResponse wraps a workspace in a {"workspace":{...}} envelope.
-type workspaceAPIResponse struct {
-	Workspace workspaceResponse `json:"workspace"`
-}
-
 // createWorkspace creates a new workspace for an org.
 // Returns (ws, false, nil) on success; (nil, true, nil) on conflict (409);
 // (nil, false, error) on other failure.
@@ -94,12 +89,12 @@ func createWorkspace(ctx context.Context, orgUID, name string) (*workspaceRespon
 		return nil, false, fmt.Errorf("POST /b2b_orgs/%s/workspaces returned status %d: %s", orgUID, resp.StatusCode, body)
 	}
 
-	var envelope workspaceAPIResponse
-	if err := json.Unmarshal(body, &envelope); err != nil {
+	var ws workspaceResponse
+	if err := json.Unmarshal(body, &ws); err != nil {
 		return nil, false, fmt.Errorf("failed to unmarshal create workspace response: %w", err)
 	}
 
-	return &envelope.Workspace, false, nil
+	return &ws, false, nil
 }
 
 // deleteWorkspace deletes a workspace.
