@@ -76,11 +76,12 @@ spec:
               value: "8080"
             - name: USE_MSGPACK
               value: "1"
+            # Before applying: replace this value with the HEIMDALL_CLIENT_ID from the
+            # running deployment (it is not stored in a Secret):
+            #   kubectl --context lfx-v2-prod -n v1-sync-helper get deployment \
+            #     -o jsonpath'{.items[0].spec.template.spec.containers[0].env[?(@.name=="HEIMDALL_CLIENT_ID")].value}'
             - name: HEIMDALL_CLIENT_ID
-              valueFrom:
-                secretKeyRef:
-                  key: heimdall_client_id
-                  name: v1-sync-helper-secrets
+              value: ""
             - name: HEIMDALL_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
