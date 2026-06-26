@@ -64,6 +64,7 @@ func main() {
 	var doBackfillACSOrg = flag.Bool("backfill-acs-org", false, "backfill ACS org grants to v2 b2b_org settings, then exit")
 	var doBackfillAltEmails = flag.Bool("backfill-alternate-emails", false, "backfill v1 alternate emails to Auth0 linked identities, then exit")
 	var doBackfillProfiles = flag.Bool("backfill-profiles", false, "backfill v1 profile fields to Auth0 user_metadata, then exit")
+	var doBackfillWorkspaces = flag.Bool("backfill-workspaces", false, "backfill legacy workspaces into v2 member-service, then exit")
 	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
 	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-* and --sync-user)")
 	var backfillLimit = flag.Int("limit", 1000, "maximum number of users to process per backfill run (applicable with --backfill-alternate-emails and --backfill-profiles)")
@@ -74,20 +75,15 @@ func main() {
 	}
 	flag.Parse()
 
-	if *doBackfillACSProject && *doBackfillACSOrg {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project and --backfill-acs-org are mutually exclusive")
-		os.Exit(2)
-	}
-
 	// Enforce mutual exclusion across all one-shot flags.
 	oneShotCount := 0
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doRebuildUserIndexes} {
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doRebuildUserIndexes} {
 		if b {
 			oneShotCount++
 		}
 	}
 	if oneShotCount > 1 {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-alternate-emails, --backfill-profiles, --sync-user, and --rebuild-user-secondary-indexes are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --sync-user, and --rebuild-user-secondary-indexes are mutually exclusive")
 		os.Exit(2)
 	}
 
@@ -332,6 +328,17 @@ func main() {
 			logger.With(errKey, err).Error("error during single-user sync")
 			os.Exit(1)
 		}
+		os.Exit(0)
+	}
+
+	// Handle --backfill-workspaces flag: backfill legacy workspaces into v2 member-service, then exit.
+	if *doBackfillWorkspaces {
+		logger.With("dry_run", *dryRun).Info("starting workspace backfill")
+		if err := backfillWorkspaces(ctx, *dryRun); err != nil {
+			logger.With(errKey, err).Error("error during workspace backfill")
+			os.Exit(1)
+		}
+		logger.Info("workspace backfill completed successfully")
 		os.Exit(0)
 	}
 
