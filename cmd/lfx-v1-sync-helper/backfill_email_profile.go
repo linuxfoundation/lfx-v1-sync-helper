@@ -144,12 +144,16 @@ func backfillAlternateEmails(ctx context.Context, limit int, dryRun bool) (*back
 
 	remaining := limit
 	runPage := 0
+	nextCursor := cursor
 	for remaining > 0 {
 		pageSize := remaining
 		if pageSize > backfillPageSize {
 			pageSize = backfillPageSize
 		}
 
+		// Always query with the original cursor so that offset pagination within
+		// this run stays stable. nextCursor is advanced per-user and only
+		// persisted for cross-run resumability.
 		page, err := listAuth0UserPage(ctx, cursor, runPage, pageSize)
 		if err != nil {
 			return result, fmt.Errorf("listing Auth0 users: %w", err)
@@ -160,7 +164,6 @@ func backfillAlternateEmails(ctx context.Context, limit int, dryRun bool) (*back
 			break
 		}
 
-		lastCursor := cursor
 		for _, auth0User := range page.Users {
 			auth0UserID := auth0User.GetID()
 			username := auth0User.GetUsername()
@@ -183,19 +186,17 @@ func backfillAlternateEmails(ctx context.Context, limit int, dryRun bool) (*back
 
 			result.usersProcessed++
 			if updatedAt := auth0User.GetUpdatedAt(); !updatedAt.IsZero() {
-				lastCursor = updatedAt.UTC().Truncate(time.Millisecond).Format(time.RFC3339Nano)
+				nextCursor = updatedAt.UTC().Truncate(time.Millisecond).Format(time.RFC3339Nano)
 			}
 		}
 
-		// Advance the run-local page counter so the next fetch continues where
-		// this one left off within the same query. The cursor timestamp is only
-		// updated for cross-run resumability; runPage is not persisted.
+		// Advance the run-local page counter; the query lower-bound (cursor)
+		// stays fixed for this run so offset pagination is correct.
 		runPage++
-		cursor = lastCursor
 
-		// Persist cursor after each page so partial runs are resumable.
+		// Persist the next-run cursor after each page so partial runs are resumable.
 		if !dryRun {
-			if saveErr := saveBackfillCursor(ctx, backfillAltEmailsCursorKey, cursor); saveErr != nil {
+			if saveErr := saveBackfillCursor(ctx, backfillAltEmailsCursorKey, nextCursor); saveErr != nil {
 				logger.With(errKey, saveErr).Warn("failed to save backfill cursor, progress may be lost on restart")
 			}
 		}
@@ -207,7 +208,7 @@ func backfillAlternateEmails(ctx context.Context, limit int, dryRun bool) (*back
 			"emails_linked", result.emailsLinked,
 			"emails_skipped", result.emailsSkipped,
 			"errors", result.errors,
-			"cursor", cursor,
+			"cursor", nextCursor,
 		).Info("alternate-emails backfill page complete")
 	}
 
@@ -299,12 +300,16 @@ func backfillProfiles(ctx context.Context, limit int, dryRun bool) (*backfillPro
 
 	remaining := limit
 	runPage := 0
+	nextCursor := cursor
 	for remaining > 0 {
 		pageSize := remaining
 		if pageSize > backfillPageSize {
 			pageSize = backfillPageSize
 		}
 
+		// Always query with the original cursor so that offset pagination within
+		// this run stays stable. nextCursor is advanced per-user and only
+		// persisted for cross-run resumability.
 		page, err := listAuth0UserPage(ctx, cursor, runPage, pageSize)
 		if err != nil {
 			return result, fmt.Errorf("listing Auth0 users: %w", err)
@@ -315,7 +320,6 @@ func backfillProfiles(ctx context.Context, limit int, dryRun bool) (*backfillPro
 			break
 		}
 
-		lastCursor := cursor
 		for _, auth0User := range page.Users {
 			auth0UserID := auth0User.GetID()
 			username := auth0User.GetUsername()
@@ -336,16 +340,17 @@ func backfillProfiles(ctx context.Context, limit int, dryRun bool) (*backfillPro
 
 			result.usersProcessed++
 			if updatedAt := auth0User.GetUpdatedAt(); !updatedAt.IsZero() {
-				lastCursor = updatedAt.UTC().Truncate(time.Millisecond).Format(time.RFC3339Nano)
+				nextCursor = updatedAt.UTC().Truncate(time.Millisecond).Format(time.RFC3339Nano)
 			}
 		}
 
+		// Advance the run-local page counter; the query lower-bound (cursor)
+		// stays fixed for this run so offset pagination is correct.
 		runPage++
-		cursor = lastCursor
 
-		// Persist cursor after each page so partial runs are resumable.
+		// Persist the next-run cursor after each page so partial runs are resumable.
 		if !dryRun {
-			if saveErr := saveBackfillCursor(ctx, backfillProfilesCursorKey, cursor); saveErr != nil {
+			if saveErr := saveBackfillCursor(ctx, backfillProfilesCursorKey, nextCursor); saveErr != nil {
 				logger.With(errKey, saveErr).Warn("failed to save backfill cursor, progress may be lost on restart")
 			}
 		}
@@ -357,7 +362,7 @@ func backfillProfiles(ctx context.Context, limit int, dryRun bool) (*backfillPro
 			"users_updated", result.usersUpdated,
 			"users_skipped", result.usersSkipped,
 			"errors", result.errors,
-			"cursor", cursor,
+			"cursor", nextCursor,
 		).Info("profiles backfill page complete")
 	}
 

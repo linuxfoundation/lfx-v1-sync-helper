@@ -95,18 +95,18 @@ spec:
             - name: HEIMDALL_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
-                  key: key.pem
-                  name: heimdall-signer-cert-ad-hoc
+                  key: signer.pem
+                  name: heimdall-signer-cert
             - name: AUTH0_CLIENT_ID
               valueFrom:
                 secretKeyRef:
                   key: client_id
-                  name: v1-sync-helper-secrets
+                  name: v1-sync-helper-auth0-credentials
             - name: AUTH0_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
                   key: client_private_key
-                  name: v1-sync-helper-secrets
+                  name: v1-sync-helper-auth0-credentials
           resources:
             requests:
               memory: "128Mi"
