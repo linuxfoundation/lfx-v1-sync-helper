@@ -62,7 +62,8 @@ func main() {
 	var doRebuildUserIndexes = flag.Bool("rebuild-user-secondary-indexes", false, "populate user secondary indexes for existing data, then exit")
 	var doBackfillACSProject = flag.Bool("backfill-acs-project", false, "backfill ACS user grants to v2 project settings, then exit")
 	var doBackfillACSOrg = flag.Bool("backfill-acs-org", false, "backfill ACS org grants to v2 b2b_org settings, then exit")
-	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (only applicable with --backfill-acs-project or --backfill-acs-org)")
+	var doBackfillWorkspaces = flag.Bool("backfill-workspaces", false, "backfill legacy workspaces into v2 member-service, then exit")
+	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (only applicable with --backfill-acs-project, --backfill-acs-org, or --backfill-workspaces)")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -70,8 +71,14 @@ func main() {
 	}
 	flag.Parse()
 
-	if *doBackfillACSProject && *doBackfillACSOrg {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project and --backfill-acs-org are mutually exclusive")
+	backfillFlagCount := 0
+	for _, f := range []*bool{doBackfillACSProject, doBackfillACSOrg, doBackfillWorkspaces} {
+		if *f {
+			backfillFlagCount++
+		}
+	}
+	if backfillFlagCount > 1 {
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, and --backfill-workspaces are mutually exclusive")
 		os.Exit(2)
 	}
 
@@ -275,6 +282,17 @@ func main() {
 			os.Exit(1)
 		}
 		logger.Info("ACS org grants backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --backfill-workspaces flag: backfill legacy workspaces into v2 member-service, then exit.
+	if *doBackfillWorkspaces {
+		logger.With("dry_run", *dryRun).Info("starting workspace backfill")
+		if err := backfillWorkspaces(ctx, *dryRun); err != nil {
+			logger.With(errKey, err).Error("error during workspace backfill")
+			os.Exit(1)
+		}
+		logger.Info("workspace backfill completed successfully")
 		os.Exit(0)
 	}
 

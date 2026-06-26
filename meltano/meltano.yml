@@ -22,6 +22,8 @@ plugins:
       select:
         - platform-collaboration__c.*
         - platform-community__c.*
+        - platform-organization_workspace.*
+        - platform-organization_workspace_project.*
         - salesforce-project__c.*
         - salesforce-alternate_email__c.*
         - salesforce-merged_user.*
@@ -39,6 +41,10 @@ plugins:
           replication-key: lastmodifieddate
         platform-community__c:
           replication-key: systemmodstamp
+        platform-organization_workspace:
+          replication-key: updated_at
+        platform-organization_workspace_project:
+          replication-key: updated_at
         salesforce-project__c:
           replication-key: systemmodstamp
         salesforce_b2b-Account:
