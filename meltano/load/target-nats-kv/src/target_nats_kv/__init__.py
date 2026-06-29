@@ -28,6 +28,76 @@ from singer.messages import (
 logger = singer.get_logger()
 
 
+def build_primary_key_value(
+    stream: str,
+    record: dict,
+    stream_key_properties: list[str],
+) -> str | None:
+    """Build a NATS KV key suffix from one or more Singer key properties."""
+    if len(stream_key_properties) == 0:
+        logger.warning(
+            (
+                "Ignoring record for stream %s because stream needs at least "
+                "1 configured key property"
+            ),
+            stream,
+        )
+        return None
+
+    primary_key_parts = []
+    for key_property in stream_key_properties:
+        if key_property not in record:
+            logger.warning(
+                (
+                    "Ignoring record for stream %s missing "
+                    "configured key property %s"
+                ),
+                stream,
+                key_property,
+            )
+            return None
+
+        primary_key_part = str(record[key_property])
+        # Jetstream allows any character in the subject/key except the nul
+        # character, space, ., * and >.
+        if len(primary_key_part) == 0:
+            logger.warning(
+                "Ignoring record for stream %s with empty primary key property %s",
+                stream,
+                key_property,
+            )
+            return None
+        for char in primary_key_part:
+            if char in [" ", ".", "*", ">", "\0"]:
+                logger.warning(
+                    (
+                        "Ignoring record for stream %s with primary key "
+                        "property %s containing invalid character %s"
+                    ),
+                    stream,
+                    key_property,
+                    repr(char),
+                )
+                return None
+
+        primary_key_parts.append(primary_key_part)
+
+    # Parts are joined with "-". This is unambiguous only when all key properties
+    # have a fixed-length format (e.g. UUIDs) that cannot themselves contain "-".
+    # For streams with variable-length parts that may contain "-", use a stream
+    # with a single key property or ensure values are UUID-format.
+    primary_key_value = "-".join(primary_key_parts)
+    # NATS KV keys cannot start with "$".
+    if primary_key_value[0] == "$":
+        logger.warning(
+            "Ignoring record for stream %s with primary key starting with $",
+            stream,
+        )
+        return None
+
+    return primary_key_value
+
+
 def emit_state(state: dict | None) -> None:
     """Emit the state to stdout in JSON format."""
     if state is None:
@@ -92,53 +162,23 @@ async def persist_messages(
                     "was encountered before a corresponding schema"
                 )
 
-            if stream not in key_properties or len(key_properties[stream]) != 1:
+            if stream not in key_properties:
                 logger.warning(
                     (
                         "Ignoring record for stream %s because stream "
-                        "needs exactly 1 configured key property"
+                        "is missing configured key properties"
                     ),
                     stream,
                 )
                 continue
 
-            if key_properties[stream][0] not in o.record:
-                logger.warning(
-                    (
-                        "Ignoring record for stream %s missing "
-                        "configured key property %s"
-                    ),
-                    stream,
-                    key_properties[stream][0],
-                )
+            primary_key_value = build_primary_key_value(
+                stream,
+                o.record,
+                key_properties[stream],
+            )
+            if primary_key_value is None:
                 continue
-
-            primary_key_value = str(o.record[key_properties[stream][0]])
-            # Jetstream allows any character in the subject/key except the nul
-            # character, space, ., * and >, and it cannot start with "$".
-            if len(primary_key_value) == 0:
-                logger.warning(
-                    "Ignoring record for stream %s with empty primary key",
-                    stream,
-                )
-                continue
-            if primary_key_value[0] == "$":
-                logger.warning(
-                    "Ignoring record for stream %s with primary key starting with $",
-                    stream,
-                )
-                continue
-            for char in primary_key_value:
-                if char in [" ", ".", "*", ">", "\0"]:
-                    logger.warning(
-                        (
-                            "Ignoring record for stream %s with primary key "
-                            "containing invalid character %s"
-                        ),
-                        stream,
-                        repr(char),
-                    )
-                    continue
 
             if validate_records:
                 try:

@@ -8,9 +8,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 )
+
+var errWorkspaceOrgNotFound = errors.New("workspace org not found")
 
 // workspaceProject is a single project association on a workspace.
 type workspaceProject struct {
@@ -49,6 +52,7 @@ type workspaceBulkResponse struct {
 
 // createWorkspace creates a new workspace for an org.
 // Returns (ws, false, nil) on success; (nil, true, nil) on conflict (409);
+// (nil, false, errWorkspaceOrgNotFound) when the org does not exist (404);
 // (nil, false, error) on other failure.
 func createWorkspace(ctx context.Context, orgUID, name string) (*workspaceResponse, bool, error) {
 	if cfg.MemberServiceURL == nil {
@@ -83,6 +87,10 @@ func createWorkspace(ctx context.Context, orgUID, name string) (*workspaceRespon
 
 	if resp.StatusCode == http.StatusConflict {
 		return nil, true, nil
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, false, fmt.Errorf("%w: org_uid=%s: %s", errWorkspaceOrgNotFound, orgUID, body)
 	}
 
 	if resp.StatusCode != http.StatusCreated {
