@@ -156,6 +156,12 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 		// Groups.io records are processed by lfx-v2-mailing-list-service eventing processor.
 		logger.With("key", key).DebugContext(ctx, "groupsio record updated, processed by lfx-v2-mailing-list-service")
 		return false
+	case "platform-organization_workspace",
+		"platform-organization_workspace_project":
+		// Workspace records are handled by the one-shot --backfill-workspaces command via
+		// the member-service API. No continuous sync needed in the WAL watcher.
+		logger.With("key", key).DebugContext(ctx, "workspace record updated, handled by --backfill-workspaces")
+		return false
 	default:
 		logger.With("key", key).WarnContext(ctx, "unknown object type, ignoring")
 		return false
@@ -257,6 +263,12 @@ func handleResourceDelete(ctx context.Context, key string, v1Data map[string]any
 		"itx-groupsio-v2-artifact":
 		// Groups.io records are processed by lfx-v2-mailing-list-service eventing processor.
 		logger.With("key", key).DebugContext(ctx, "groupsio record deleted, processed by lfx-v2-mailing-list-service")
+		return false
+	case "platform-organization_workspace",
+		"platform-organization_workspace_project":
+		// Workspace records are replicated to v1-objects KV for consumption by the --backfill-workspaces pass.
+		// No continuous-sync deletion processing needed here.
+		logger.With("key", key).DebugContext(ctx, "workspace record deleted, processed by backfill-workspaces pass")
 		return false
 	default:
 		logger.With("key", key).WarnContext(ctx, "unknown object type for deletion, ignoring")
