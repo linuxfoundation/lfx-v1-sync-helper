@@ -82,10 +82,13 @@ def build_primary_key_value(
 
         primary_key_parts.append(primary_key_part)
 
-    # Parts are joined with "-". This is unambiguous only when all key properties
-    # have a fixed-length format (e.g. UUIDs) that cannot themselves contain "-".
-    # For streams with variable-length parts that may contain "-", use a stream
-    # with a single key property or ensure values are UUID-format.
+    # Parts are joined with "-". The join is unambiguous only when all key
+    # properties have a fixed length (e.g. UUIDs): even though UUIDs themselves
+    # contain "-", a reader can recover the original parts by position because
+    # every part has the same width. For streams with variable-length parts,
+    # the join is ambiguous (e.g. ("a-b","c") and ("a","b-c") both produce
+    # "a-b-c"). Use a single key property or ensure all parts have a fixed
+    # width.
     primary_key_value = "-".join(primary_key_parts)
     # NATS KV keys cannot start with "$".
     if primary_key_value[0] == "$":
