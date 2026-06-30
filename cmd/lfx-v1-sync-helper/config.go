@@ -55,12 +55,6 @@ type Config struct {
 	DynamoDBIngestEnabled bool   // Whether to consume dynamodb_streams events (default: false)
 	DynamoDBStreamName    string // NATS stream name to consume (default: "dynamodb_streams")
 
-	// ProfileSyncBackfill switches v1→Auth0 profile sync from the default
-	// async/always-ACK path (with SDK retry) to a sync/NACK-on-retryable path
-	// (no SDK retry). Intended for bounded backfill runs where JetStream
-	// redelivery provides the backoff needed to avoid cascading 429s.
-	ProfileSyncBackfill bool
-
 	// NATSFetchMaxWait is the per-Fetch timeout used when scanning large
 	// KV streams with sparse subject filters (backfill and reindex passes).
 	// Both KV_v1-mappings and KV_v1-objects have millions of sequences; a
@@ -174,7 +168,6 @@ func LoadConfig() (*Config, error) {
 		UseMsgpack:                 parseBooleanEnv("USE_MSGPACK"),
 		DynamoDBIngestEnabled:      parseBooleanEnv("DYNAMODB_INGEST_ENABLED"),
 		DynamoDBStreamName:         os.Getenv("DYNAMODB_STREAM_NAME"),
-		ProfileSyncBackfill:        parseBooleanEnv("PROFILE_SYNC_BACKFILL"),
 		NATSFetchMaxWait:           parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
 		ProjectAllowlistFile:       os.Getenv("PROJECT_ALLOWLIST_FILE"),
 		ProjectFamilyAllowlistFile: os.Getenv("PROJECT_FAMILY_ALLOWLIST_FILE"),

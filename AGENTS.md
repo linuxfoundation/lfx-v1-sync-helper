@@ -267,6 +267,8 @@ Repeat for staging and prod with the matching Kubernetes context, AWS profile, a
 
 ## One-shot Backfill Commands
 
+The following CLI flags each perform their work and then exit without starting the NATS subscriber. All are mutually exclusive. Use `--dry-run` with any of them to preview changes without writing (note: `--rebuild-user-secondary-indexes` does not support `--dry-run`).
+
 ### `EnumerateLiveSubjects` — common stream-walk abstraction (`nats_enumerate.go`)
 
 All one-shot backfill and reindex jobs that need to scan a KV-backed JetStream stream use the shared `EnumerateLiveSubjects` function. It creates a headers-only ephemeral pull consumer with `DeliverAllPolicy` (O(1) creation), walks all messages in the filtered stream, applies client-side last-write-wins dedup, and returns `map[string]struct{}` of subjects whose latest revision is not a DEL/PURGE tombstone.
@@ -279,7 +281,18 @@ Key design decisions:
 - **Options**: `WithFetchMaxWait` (default 120s from `defaultNATSFetchMaxWait`), `WithBatchSize` (default 512), `WithInfoTimeout` (default 120s), `WithLogger`.
 - **Ephemeral consumer lifecycle**: `MemoryStorage: true`, `InactiveThreshold: 5m`, explicitly deleted in defer.
 
-### `--backfill-acs-project` pass (`ingest_acs_project.go`)
+### Auth0 Management API enumeration — pattern for user-centric backfills (`backfill_email_profile.go`)
+
+Backfills whose outer loop is over **Auth0 users** (rather than NATS KV keys) use the Auth0 Management API `Search()` call with a Lucene query instead of `EnumerateLiveSubjects`. Use this pattern when the canonical source of iteration is the Auth0 user set, not a NATS KV bucket.
+
+Key design decisions:
+- **Connection filter**: `Username-Password-Authentication` only — social/enterprise connections are not v1 platform accounts.
+- **Sort**: `updated_at:1` (ascending) so the cursor advances monotonically and recent changes are processed last.
+- **Resumable cursor**: the `updated_at` value of the last processed user is stored as a plain string in the `v1-mappings` KV bucket (e.g. `backfill.alternate-emails.cursor`). On the next run an inclusive range query `[cursor TO *]` re-processes the last user from the previous run; all per-user operations are idempotent.
+- **`--limit N`**: caps Auth0 users fetched per run (default 1000). Multiple runs advance the cursor through the full user population.
+- **No `EnumerateLiveSubjects`**: NATS KV is used for side-lookups (e.g. fetching the v1 SFID mapping) and cursor storage, not as the enumeration source.
+
+### `--backfill-acs-project [--dry-run]` (`ingest_acs_project.go`)
 
 The `--backfill-acs-project` flag runs the project grants pass (`backfillACSProjectGrants`), which backfills ACS legacy user grants into v2 project settings:
 
@@ -289,10 +302,11 @@ The `--backfill-acs-project` flag runs the project grants pass (`backfillACSProj
 - **Merge**: additive-only; existing v2-only entries are logged as "extra" but never removed.
 - **Dry-run**: add `--dry-run` to preview without writing.
 - **Summary log fields**: `processed`, `errors`.
+- **Manifest**: `manifests/backfill-acs-job.yaml`.
 
-### `--backfill-acs-org` pass (`ingest_acs_org.go`)
+### `--backfill-acs-org [--dry-run]` (`ingest_acs_org.go`)
 
-The `--backfill-acs-org` flag runs the org grants pass (`backfillACSOrgGrants`), which backfills ACS legacy org grants into v2 b2b_org settings:
+Backfills ACS legacy org grants into v2 b2b_org settings:
 
 - **SFID source**: `EnumerateLiveSubjects` on `KV_v1-objects` with filter `$KV.v1-objects.salesforce_b2b-Account.*`, followed by point reads and `isLiveMemberOrgAccount` filtering. Skips records where `IsDeleted=true` or `IsMember__c!=true`.
 - **UID resolution**: `sfutil.Normalize18(sfid)` — as of LFXV2-2049 the b2b_org UID is the 18-char normalized SFID. No network call.
@@ -301,6 +315,30 @@ The `--backfill-acs-org` flag runs the org grants pass (`backfillACSOrgGrants`),
 - **Merge**: additive-only; existing v2-only entries are logged as "extra" but never removed.
 - **Dry-run**: add `--dry-run` to preview without writing.
 - **Summary log fields**: `orgs_total`, `orgs_changed`, `writers_added`, `auditors_added`, `orgs_skipped`, `errors`.
+
+### `--backfill-alternate-emails [--limit N] [--dry-run]` (`backfill_email_profile.go`)
+
+Iterates Auth0 users (Username-Password-Authentication connection only), sorted by `updated_at` ascending, and links any v1 verified alternate emails not yet linked as Auth0 email-connection identities.
+
+- **Cursor**: stored at `v1-mappings` key `backfill.alternate-emails.cursor` (updated_at of last processed user). Re-run to advance. Uses an inclusive range query so the last user of the previous run is re-processed on the next run; all operations are idempotent.
+- **Per-user flow**: resolves v1 SFID via username secondary index → fetches alternate email SFIDs from `v1-mappings` → calls `linkEmailIdentity` for each verified, active, non-primary email.
+- **`--limit N`** (default 1000): caps users processed per run.
+- **Summary log fields**: `users_processed`, `emails_linked`, `emails_skipped`, `errors`.
+- **Manifest**: `manifests/backfill-alternate-emails-job.yaml`.
+
+### `--backfill-profiles [--limit N] [--dry-run]` (`backfill_email_profile.go`)
+
+Iterates Auth0 users (same connection filter and sort), syncs v1 profile fields (name, title, address, org, etc.) to Auth0 `user_metadata` via `syncProfileToAuth0`. No-ops when nothing has changed.
+
+- **Cursor**: stored at `v1-mappings` key `backfill.profiles.cursor`. Same inclusive-cursor behavior as `--backfill-alternate-emails`.
+- **`--limit N`** (default 1000): caps users processed per run.
+- **Summary log fields**: `users_processed`, `users_updated`, `users_skipped`, `errors`.
+- **Manifest**: `manifests/backfill-profiles-job.yaml`.
+- **Replaces** the removed `PROFILE_SYNC_BACKFILL` environment variable.
+
+### `--sync-user <username> [--dry-run]` (`backfill_email_profile.go`)
+
+Performs a full sync (profile + alternate emails) for a single user identified by their Auth0 username (the part after `auth0|`). Useful for debugging or targeted re-sync without a full backfill run.
 
 ### 4. `cmd/lfx-v1-sync-helper/handlers.go` — suppress unknown-object warnings (optional)
 
