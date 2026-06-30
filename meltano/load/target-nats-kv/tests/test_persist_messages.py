@@ -49,7 +49,7 @@ def record_message(stream: str, record: dict[str, Any]) -> str:
 
 
 class PersistMessagesTests(unittest.IsolatedAsyncioTestCase):
-    async def test_composite_key_properties_are_joined_into_stable_key(self) -> None:
+    async def test_composite_key_colon_is_normalized_in_key_only(self) -> None:
         kv = FakeKV()
         stream = "platform-organization_workspace_project"
         record = {
@@ -82,7 +82,7 @@ class PersistMessagesTests(unittest.IsolatedAsyncioTestCase):
             (
                 "platform-organization_workspace_project."
                 "03099013-f6d4-453b-888d-6fd9bf35fa8b-"
-                "bdf801de-d748-4b72-b64a-f0a26bec68a3:vllm"
+                "bdf801de-d748-4b72-b64a-f0a26bec68a3_vllm"
             ),
         )
         decoded = msgspec.json.decode(value)
