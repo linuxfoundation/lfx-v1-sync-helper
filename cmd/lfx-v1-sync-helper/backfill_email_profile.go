@@ -107,7 +107,12 @@ func saveBackfillCursor(ctx context.Context, cursorKey, value string) error {
 // which is safe because all operations are idempotent. runPage is the
 // zero-based page offset within this run's query (used for within-run
 // pagination; it is not persisted between runs).
-func listAuth0UserPage(ctx context.Context, cursor string, runPage, limit int) (*management.UserList, error) {
+//
+// PerPage is always backfillPageSize so that the Auth0 page offset
+// (page * per_page) remains stable as runPage increments. Callers enforce
+// the --limit cap by stopping when enough users have been processed, not by
+// shrinking the page size on the final request.
+func listAuth0UserPage(ctx context.Context, cursor string, runPage int) (*management.UserList, error) {
 	if err := auth0RateLimiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limiter: %w", err)
 	}
@@ -120,7 +125,7 @@ func listAuth0UserPage(ctx context.Context, cursor string, runPage, limit int) (
 	return auth0Users.Search(ctx,
 		management.Query(query),
 		management.Parameter("sort", "updated_at:1"),
-		management.PerPage(limit),
+		management.PerPage(backfillPageSize),
 		management.Page(runPage),
 	)
 }
@@ -146,15 +151,12 @@ func backfillAlternateEmails(ctx context.Context, limit int, dryRun bool) (*back
 	runPage := 0
 	nextCursor := cursor
 	for remaining > 0 {
-		pageSize := remaining
-		if pageSize > backfillPageSize {
-			pageSize = backfillPageSize
-		}
-
 		// Always query with the original cursor so that offset pagination within
 		// this run stays stable. nextCursor is advanced per-user and only
-		// persisted for cross-run resumability.
-		page, err := listAuth0UserPage(ctx, cursor, runPage, pageSize)
+		// persisted for cross-run resumability. PerPage is always backfillPageSize
+		// (never clamped) so that page*per_page offsets stay correct as runPage
+		// increments; remaining enforces the --limit cap after the fact.
+		page, err := listAuth0UserPage(ctx, cursor, runPage)
 		if err != nil {
 			return result, fmt.Errorf("listing Auth0 users: %w", err)
 		}
@@ -302,15 +304,12 @@ func backfillProfiles(ctx context.Context, limit int, dryRun bool) (*backfillPro
 	runPage := 0
 	nextCursor := cursor
 	for remaining > 0 {
-		pageSize := remaining
-		if pageSize > backfillPageSize {
-			pageSize = backfillPageSize
-		}
-
 		// Always query with the original cursor so that offset pagination within
 		// this run stays stable. nextCursor is advanced per-user and only
-		// persisted for cross-run resumability.
-		page, err := listAuth0UserPage(ctx, cursor, runPage, pageSize)
+		// persisted for cross-run resumability. PerPage is always backfillPageSize
+		// (never clamped) so that page*per_page offsets stay correct as runPage
+		// increments; remaining enforces the --limit cap after the fact.
+		page, err := listAuth0UserPage(ctx, cursor, runPage)
 		if err != nil {
 			return result, fmt.Errorf("listing Auth0 users: %w", err)
 		}

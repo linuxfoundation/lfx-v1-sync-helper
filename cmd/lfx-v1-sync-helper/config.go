@@ -55,7 +55,6 @@ type Config struct {
 	DynamoDBIngestEnabled bool   // Whether to consume dynamodb_streams events (default: false)
 	DynamoDBStreamName    string // NATS stream name to consume (default: "dynamodb_streams")
 
-
 	// NATSFetchMaxWait is the per-Fetch timeout used when scanning large
 	// KV streams with sparse subject filters (backfill and reindex passes).
 	// Both KV_v1-mappings and KV_v1-objects have millions of sequences; a
@@ -66,7 +65,6 @@ type Config struct {
 	// requests longer than 10s, which is fine for in-cluster use. Set via
 	// NATS_FETCH_MAX_WAIT (Go duration: "120s", "3m"). Default: 120s.
 	NATSFetchMaxWait time.Duration
-
 
 	// ReindexPhaseTimeout caps the wall-clock time for each reindex phase
 	// (username, then email). Both the ListKeysFiltered consumer and every
