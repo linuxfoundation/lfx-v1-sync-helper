@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -134,7 +135,10 @@ func TestResolveProjectUIDs(t *testing.T) {
 		},
 	}
 
-	uids, slugByUID := resolveProjectUIDs(ctx, ws, mappings, false, map[string]string{})
+	uids, slugByUID, complete := resolveProjectUIDs(ctx, ws, mappings, false, map[string]string{})
+	if !complete {
+		t.Fatal("complete = false, want true")
+	}
 
 	wantUIDs := []string{"uid-iree", "uid-A", "uid-ptproject"}
 	if !reflect.DeepEqual(uids, wantUIDs) {
@@ -149,6 +153,38 @@ func TestResolveProjectUIDs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(calls, []string{"iree", "ptproject", "slug:extra"}) {
 		t.Fatalf("slug lookup calls = %v, want [iree ptproject slug:extra]", calls)
+	}
+}
+
+func TestResolveProjectUIDsLookupErrorMarksIncomplete(t *testing.T) {
+	ctx := context.Background()
+
+	origLookup := lookupProjectUIDBySlugCachedFn
+	t.Cleanup(func() { lookupProjectUIDBySlugCachedFn = origLookup })
+
+	lookupProjectUIDBySlugCachedFn = func(_ context.Context, slug string, _ bool, _ map[string]string) (string, error) {
+		if slug != "vllm" {
+			t.Fatalf("slug = %q, want vllm", slug)
+		}
+		return "", errors.New("nats timeout")
+	}
+
+	ws := legacyWorkspace{
+		ID: "ws-1",
+		Projects: []legacyWorkspaceProject{
+			{ProjectSFID: "56fa1b4b-eca7-4824-a635-504a5e9a38cb:vllm"},
+		},
+	}
+
+	uids, slugByUID, complete := resolveProjectUIDs(ctx, ws, nil, false, map[string]string{})
+	if complete {
+		t.Fatal("complete = true, want false")
+	}
+	if len(uids) != 0 {
+		t.Fatalf("uids = %v, want empty", uids)
+	}
+	if len(slugByUID) != 0 {
+		t.Fatalf("slugByUID = %v, want empty", slugByUID)
 	}
 }
 

@@ -410,7 +410,13 @@ func reconcileWorkspace(
 	}
 
 	// Resolve project IDs → desired v2 UID set (unmappable projects skipped).
-	desiredUIDs, slugByUID := resolveProjectUIDs(ctx, ws, projectMappings, dryRun, projectSlugMemo)
+	desiredUIDs, slugByUID, complete := resolveProjectUIDs(ctx, ws, projectMappings, dryRun, projectSlugMemo)
+	if !complete {
+		logger.With("workspace_id", ws.ID, "name", ws.Name).
+			ErrorContext(ctx, "project resolution failed; skipping workspace to avoid reconciling a partial desired project set")
+		*errors++
+		return
+	}
 
 	// Create or cache-hit path.
 	reconcileUpsertWorkspace(ctx, ws, orgUID, desiredUIDs, slugByUID, dryRun,
@@ -466,14 +472,16 @@ func reconcileDeleteWorkspace(
 //
 // Unmappable projects are a per-project skip — they do NOT
 // increment the workspace-level workspaces_skipped counter; the workspace itself
-// still proceeds to create/update with the mappable subset.
+// still proceeds to create/update with the mappable subset. Transient lookup
+// errors mark the desired set incomplete so callers can skip reconciliation
+// rather than removing cached associations based on partial source data.
 func resolveProjectUIDs(
 	ctx context.Context,
 	ws legacyWorkspace,
 	projectMappings map[string]string,
 	dryRun bool,
 	projectSlugMemo map[string]string,
-) ([]string, map[string]string) {
+) ([]string, map[string]string, bool) {
 	var uids []string
 	slugByUID := map[string]string{}
 	for _, p := range ws.Projects {
@@ -496,8 +504,13 @@ func resolveProjectUIDs(
 				continue
 			}
 			uid, err := lookupProjectUIDBySlugCachedFn(ctx, slug, dryRun, projectSlugMemo)
-			if err != nil || uid == "" {
+			if err != nil {
 				logger.With(errKey, err, "workspace_id", ws.ID, "project_slug", slug).
+					ErrorContext(ctx, "failed to resolve project slug")
+				return uids, slugByUID, false
+			}
+			if uid == "" {
+				logger.With("workspace_id", ws.ID, "project_slug", slug).
 					InfoContext(ctx, "project slug has no v2 UID mapping, skipping project")
 				continue
 			}
@@ -515,7 +528,7 @@ func resolveProjectUIDs(
 		}
 		uids = append(uids, uid)
 	}
-	return uids, slugByUID
+	return uids, slugByUID, true
 }
 
 func projectSlugCacheKey(slug string) string {
