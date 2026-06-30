@@ -6,6 +6,9 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
@@ -69,7 +72,7 @@ func TestWorkspaceCacheKey(t *testing.T) {
 	if key == "" {
 		t.Fatal("cache key is empty")
 	}
-	expected := "workspace.org-123." + fnv32hex("My Workspace")
+	expected := "workspace.uid.org-123." + fnv32hex("My Workspace")
 	if key != expected {
 		t.Errorf("cache key = %q, want %q", key, expected)
 	}
@@ -197,5 +200,44 @@ func TestLoopPrevention(t *testing.T) {
 	v1Data := map[string]any{"lastmodifiedbyid": "some-v1-user"}
 	if shouldSkipSync(ctx, v1Data) {
 		t.Error("v1-authored record was incorrectly flagged by shouldSkipSync")
+	}
+}
+
+func TestCreateAndCacheWorkspaceSkipsMissingOrg(t *testing.T) {
+	setupMembersTestGlobals(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"org not found"}`))
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	cfg.MemberServiceURL = u
+
+	skipped := 0
+	errors := 0
+	uid, projects, wasCreated, err := createAndCacheWorkspace(
+		context.Background(),
+		legacyWorkspace{ID: "ws-1", Name: "Missing Org WS"},
+		"missing-org-uid",
+		false,
+		&skipped,
+		&errors,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if uid != "" || projects != nil || wasCreated {
+		t.Fatalf("got uid=%q projects=%v wasCreated=%v, want empty skip result", uid, projects, wasCreated)
+	}
+	if skipped != 1 {
+		t.Fatalf("skipped = %d, want 1", skipped)
+	}
+	if errors != 0 {
+		t.Fatalf("errors = %d, want 0", errors)
 	}
 }

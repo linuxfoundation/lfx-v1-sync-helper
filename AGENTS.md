@@ -222,7 +222,7 @@ Enable with `DEBUG=true` environment variable for detailed operation logs.
 
 ## Adding New PostgreSQL Tables to Replication
 
-When adding a new table from PostgreSQL to the `v1-objects` NATS KV replication pipeline, three places must be updated:
+When adding a new table from PostgreSQL to the `v1-objects` NATS KV replication pipeline, four places must be updated:
 
 ### 1. `meltano/meltano.yml` — Meltano backfill extractor
 
@@ -256,6 +256,14 @@ ORDER BY schemaname, tablename;
 ```
 
 Note: The replication slot is named `lfx_v2` (not `wal-listener`). The publication and slot names differ.
+
+### 4. `tap-postgres-catalog` ConfigMap — per-environment, ad hoc
+
+The PostgreSQL Meltano CronJob runs with `--catalog /catalogs/tap-postgres/catalog.json`, so `meltano.yml` changes are not picked up at runtime until the manually managed `tap-postgres-catalog` ConfigMap is regenerated in each environment.
+
+After updating `meltano/meltano.yml`, regenerate the per-environment ConfigMap, review the generated catalog for the new stream(s), and apply it manually to the target namespace.
+
+Repeat for staging and prod with the matching Kubernetes context, AWS profile, and PostgreSQL credentials. This ConfigMap is intentionally not managed by Helm.
 
 ## One-shot Backfill Commands
 

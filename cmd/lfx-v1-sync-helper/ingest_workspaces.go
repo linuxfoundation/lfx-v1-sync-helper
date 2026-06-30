@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"hash/fnv"
 	"net/http"
@@ -220,9 +221,9 @@ func collectLegacyWorkspaces(ctx context.Context) ([]legacyWorkspace, error) {
 }
 
 // workspaceCacheKey returns the v1-mappings key for a workspace cache entry.
-// key format: workspace.<orgUID>.<fnv32hex(name)>
+// key format: workspace.uid.<orgUID>.<fnv32hex(name)>
 func workspaceCacheKey(orgUID, name string) string {
-	return fmt.Sprintf("workspace.%s.%s", orgUID, fnv32hex(name))
+	return fmt.Sprintf("workspace.uid.%s.%s", orgUID, fnv32hex(name))
 }
 
 // workspaceCacheEntry is persisted as JSON in v1-mappings so re-runs can compute
@@ -393,7 +394,7 @@ func reconcileWorkspace(
 
 	// Create or cache-hit path.
 	reconcileUpsertWorkspace(ctx, ws, orgUID, desiredUIDs, dryRun,
-		created, updated, projectsAdded, projectsRemoved, errors)
+		created, updated, projectsAdded, projectsRemoved, skipped, errors)
 }
 
 // reconcileDeleteWorkspace handles the delete branch for a workspace marked deleted in v1.
@@ -489,7 +490,7 @@ func reconcileUpsertWorkspace(
 	dryRun bool,
 	created, updated *int,
 	projectsAdded, projectsRemoved *int,
-	errors *int,
+	skipped, errors *int,
 ) {
 	uid, currentProjects, err := getWorkspaceCacheEntry(ctx, orgUID, ws.Name)
 	if err != nil {
@@ -501,9 +502,9 @@ func reconcileUpsertWorkspace(
 	var wasCreated bool
 	if uid == "" {
 		// Cache miss — attempt create.
-		uid, currentProjects, wasCreated, err = createAndCacheWorkspace(ctx, ws, orgUID, dryRun, errors)
+		uid, currentProjects, wasCreated, err = createAndCacheWorkspace(ctx, ws, orgUID, dryRun, skipped, errors)
 		if err != nil || uid == "" {
-			return // already counted in errors
+			return // already counted (errors or skipped)
 		}
 		if wasCreated {
 			*created++
@@ -517,13 +518,14 @@ func reconcileUpsertWorkspace(
 
 // createAndCacheWorkspace creates a new workspace and stores the uid in the cache.
 // wasCreated is true only for a real 201 create; false for a 409 cache-recovery.
-// Returns ("", nil, false, nil) on a 409 cache-miss (already counted in errors).
+// Returns ("", nil, false, nil) when the org UID is not found in v2 (counted in skipped).
+// Returns ("", nil, false, err) on 409 cache-miss or other create/cache failure (counted in errors).
 func createAndCacheWorkspace(
 	ctx context.Context,
 	ws legacyWorkspace,
 	orgUID string,
 	dryRun bool,
-	errors *int,
+	skipped, errors *int,
 ) (uid string, currentProjects []string, wasCreated bool, err error) {
 	if dryRun {
 		logger.With("workspace_id", ws.ID, "name", ws.Name, "org_uid", orgUID).
@@ -533,6 +535,12 @@ func createAndCacheWorkspace(
 
 	resp, conflict, err := createWorkspace(ctx, orgUID, ws.Name)
 	if err != nil {
+		if stderrors.Is(err, errWorkspaceOrgNotFound) {
+			logger.With(errKey, err, "workspace_id", ws.ID, "org_uid", orgUID).
+				WarnContext(ctx, "workspace org not found in v2, skipping")
+			*skipped++
+			return "", nil, false, nil
+		}
 		logger.With(errKey, err, "workspace_id", ws.ID).ErrorContext(ctx, "failed to create workspace, skipping")
 		*errors++
 		return "", nil, false, err

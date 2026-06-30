@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -44,6 +45,11 @@ func TestCreateWorkspace(t *testing.T) {
 			status:  http.StatusInternalServerError,
 			wantErr: true,
 		},
+		{
+			name:    "404 org not found returns sentinel",
+			status:  http.StatusNotFound,
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -67,6 +73,9 @@ func TestCreateWorkspace(t *testing.T) {
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
+				}
+				if tc.status == http.StatusNotFound && !errors.Is(err, errWorkspaceOrgNotFound) {
+					t.Fatalf("err = %v, want errWorkspaceOrgNotFound", err)
 				}
 				return
 			}
