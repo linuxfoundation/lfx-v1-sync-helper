@@ -58,8 +58,12 @@ def build_primary_key_value(
             return None
 
         primary_key_part = str(record[key_property])
-        # Jetstream allows any character in the subject/key except the nul
-        # character, space, ., * and >.
+        # ":" is a valid column value (e.g. project_id stores "uuid:slug") but
+        # JetStream KV rejects it in subject tokens at runtime (InvalidKeyError).
+        # Normalize it to "_" in the key only; the payload is stored unchanged so
+        # the Go backfill can still split on ":" to extract the UUID prefix.
+        primary_key_part = primary_key_part.replace(":", "_")
+        # Guard against remaining JetStream-invalid characters.
         if len(primary_key_part) == 0:
             logger.warning(
                 "Ignoring record for stream %s with empty primary key property %s",
