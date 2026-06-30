@@ -27,6 +27,24 @@ const (
 	workspaceBulkMaxSize = 100
 )
 
+var (
+	getProjectUIDBySlugFn = getProjectUIDBySlug
+
+	mappingKVGetValueFn = func(ctx context.Context, key string) ([]byte, error) {
+		entry, err := mappingsKV.Get(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		return entry.Value(), nil
+	}
+	mappingKVPutValueFn = func(ctx context.Context, key string, value []byte) error {
+		_, err := mappingsKV.Put(ctx, key, value)
+		return err
+	}
+
+	lookupProjectUIDBySlugCachedFn = lookupProjectUIDBySlugCached
+)
+
 // legacyWorkspace is the assembled in-memory shape after joining the two KV subjects.
 type legacyWorkspace struct {
 	ID               string // row id (join key)
@@ -322,10 +340,11 @@ func backfillWorkspaces(ctx context.Context, dryRun bool) error {
 	logger.With("count", len(workspaces)).InfoContext(ctx, "collected legacy workspaces")
 
 	var workspacesTotal, created, updated, deleted, projectsAdded, projectsRemoved, skipped, errors int
+	projectSlugMemo := map[string]string{}
 
 	for _, ws := range workspaces {
 		workspacesTotal++
-		reconcileWorkspace(ctx, ws, projectMappings, dryRun,
+		reconcileWorkspace(ctx, ws, projectMappings, dryRun, projectSlugMemo,
 			&created, &updated, &deleted,
 			&projectsAdded, &projectsRemoved,
 			&skipped, &errors)
@@ -355,6 +374,7 @@ func reconcileWorkspace(
 	ws legacyWorkspace,
 	projectMappings map[string]string,
 	dryRun bool,
+	projectSlugMemo map[string]string,
 	created, updated, deleted *int,
 	projectsAdded, projectsRemoved *int,
 	skipped, errors *int,
@@ -390,10 +410,10 @@ func reconcileWorkspace(
 	}
 
 	// Resolve project IDs → desired v2 UID set (unmappable projects skipped).
-	desiredUIDs := resolveProjectUIDs(ctx, ws, projectMappings)
+	desiredUIDs, slugByUID := resolveProjectUIDs(ctx, ws, projectMappings, dryRun, projectSlugMemo)
 
 	// Create or cache-hit path.
-	reconcileUpsertWorkspace(ctx, ws, orgUID, desiredUIDs, dryRun,
+	reconcileUpsertWorkspace(ctx, ws, orgUID, desiredUIDs, slugByUID, dryRun,
 		created, updated, projectsAdded, projectsRemoved, skipped, errors)
 }
 
@@ -440,8 +460,8 @@ func reconcileDeleteWorkspace(
 //
 // The platform.organization_workspace_project table stores project_id as either
 // a Salesforce legacy SFID or a "uuid:slug" composite (e.g. "a1b2c3-…:iree").
-// When the field already embeds the v2 UUID we extract it directly; otherwise we
-// fall back to the SFID→UID mappings from collectProjectSFIDMappings.
+// For uuid:slug rows the UUID prefix is v1-internal; resolve the slug to the v2
+// UID. Raw SFIDs fall back to the mappings from collectProjectSFIDMappings.
 // Unmappable entries are logged and excluded.
 //
 // Unmappable projects are a per-project skip — they do NOT
@@ -451,8 +471,11 @@ func resolveProjectUIDs(
 	ctx context.Context,
 	ws legacyWorkspace,
 	projectMappings map[string]string,
-) []string {
+	dryRun bool,
+	projectSlugMemo map[string]string,
+) ([]string, map[string]string) {
 	var uids []string
+	slugByUID := map[string]string{}
 	for _, p := range ws.Projects {
 		if p.Deleted {
 			continue
@@ -462,10 +485,24 @@ func resolveProjectUIDs(
 			continue
 		}
 
-		// "uuid:slug" composite — extract the UUID prefix directly.
+		// "uuid:slug" composite — the UUID prefix is v1-internal. Resolve
+		// the slug to the canonical v2 project UID before reconciling so the
+		// workspace cache stays UID-keyed and idempotent.
 		if colonIdx := strings.Index(p.ProjectSFID, ":"); colonIdx > 0 {
-			uid := p.ProjectSFID[:colonIdx]
+			slug := p.ProjectSFID[colonIdx+1:]
+			if slug == "" {
+				logger.With("workspace_id", ws.ID, "project_id", p.ProjectSFID).
+					InfoContext(ctx, "project composite has empty slug, skipping project")
+				continue
+			}
+			uid, err := lookupProjectUIDBySlugCachedFn(ctx, slug, dryRun, projectSlugMemo)
+			if err != nil || uid == "" {
+				logger.With(errKey, err, "workspace_id", ws.ID, "project_slug", slug).
+					InfoContext(ctx, "project slug has no v2 UID mapping, skipping project")
+				continue
+			}
 			uids = append(uids, uid)
+			slugByUID[uid] = slug
 			continue
 		}
 
@@ -478,7 +515,52 @@ func resolveProjectUIDs(
 		}
 		uids = append(uids, uid)
 	}
-	return uids
+	return uids, slugByUID
+}
+
+func projectSlugCacheKey(slug string) string {
+	return "project.slug." + fnv32hex(slug)
+}
+
+func lookupProjectUIDBySlugCached(ctx context.Context, slug string, dryRun bool, memo map[string]string) (string, error) {
+	if uid, ok := memo[slug]; ok {
+		return uid, nil
+	}
+
+	cacheKey := projectSlugCacheKey(slug)
+	value, err := mappingKVGetValueFn(ctx, cacheKey)
+	if err == nil {
+		uid := strings.TrimSpace(string(value))
+		if uid != "" && !isTombstonedMapping(value) {
+			memo[slug] = uid
+			logger.With("project_slug", slug, "project_uid", uid, "cache_key", cacheKey).
+				DebugContext(ctx, "found project UID from slug cache")
+			return uid, nil
+		}
+	} else if !stderrors.Is(err, jetstream.ErrKeyNotFound) {
+		logger.With(errKey, err, "project_slug", slug, "cache_key", cacheKey).
+			WarnContext(ctx, "failed to read project slug cache; falling back to NATS lookup")
+	}
+
+	uid, err := getProjectUIDBySlugFn(ctx, slug)
+	if err != nil {
+		return "", err
+	}
+	uid = strings.TrimSpace(uid)
+	if uid == "" {
+		return "", nil
+	}
+	memo[slug] = uid
+
+	if dryRun {
+		return uid, nil
+	}
+	if err := mappingKVPutValueFn(ctx, cacheKey, []byte(uid)); err != nil {
+		return "", fmt.Errorf("failed to cache project UID for slug %s: %w", slug, err)
+	}
+	logger.With("project_slug", slug, "project_uid", uid, "cache_key", cacheKey).
+		DebugContext(ctx, "cached project UID from slug")
+	return uid, nil
 }
 
 // reconcileUpsertWorkspace implements the create-or-update path.
@@ -487,6 +569,7 @@ func reconcileUpsertWorkspace(
 	ws legacyWorkspace,
 	orgUID string,
 	desiredUIDs []string,
+	slugByUID map[string]string,
 	dryRun bool,
 	created, updated *int,
 	projectsAdded, projectsRemoved *int,
@@ -512,7 +595,7 @@ func reconcileUpsertWorkspace(
 	}
 
 	// Diff desired vs current project set and reconcile.
-	reconcileProjects(ctx, ws, orgUID, uid, desiredUIDs, currentProjects, dryRun,
+	reconcileProjects(ctx, ws, orgUID, uid, desiredUIDs, currentProjects, slugByUID, dryRun,
 		wasCreated, updated, projectsAdded, projectsRemoved, errors)
 }
 
@@ -580,6 +663,7 @@ func reconcileProjects(
 	ws legacyWorkspace,
 	orgUID, workspaceUID string,
 	desiredUIDs, currentUIDs []string,
+	slugByUID map[string]string,
 	dryRun bool,
 	justCreated bool,
 	updated *int,
@@ -617,7 +701,7 @@ func reconcileProjects(
 
 	// Bulk-add toAdd (chunked at workspaceBulkMaxSize).
 	if len(toAdd) > 0 {
-		added := bulkAddProjects(ctx, ws, orgUID, workspaceUID, toAdd, dryRun, projectsAdded, errors)
+		added := bulkAddProjects(ctx, ws, orgUID, workspaceUID, toAdd, slugByUID, dryRun, projectsAdded, errors)
 		if added > 0 {
 			changed = true
 		}
@@ -655,6 +739,7 @@ func bulkAddProjects(
 	ws legacyWorkspace,
 	orgUID, workspaceUID string,
 	toAdd []string,
+	slugByUID map[string]string,
 	dryRun bool,
 	projectsAdded, errors *int,
 ) int {
@@ -681,7 +766,7 @@ func bulkAddProjects(
 		*projectsAdded += len(resp.Succeeded)
 
 		for _, f := range resp.Failed {
-			logger.With("workspace_id", ws.ID, "project_id", f.ProjectID, "reason", f.Error).
+			logger.With("workspace_id", ws.ID, "project_id", f.ProjectID, "project_slug", slugByUID[f.ProjectID], "reason", f.Error).
 				ErrorContext(ctx, "bulk-add: project association failed")
 			*errors++
 		}

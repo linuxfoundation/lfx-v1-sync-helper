@@ -6,10 +6,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"testing"
+
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // TestIsDeletedRecord covers all soft-delete detection paths.
@@ -78,8 +82,16 @@ func TestWorkspaceCacheKey(t *testing.T) {
 	}
 }
 
-// TestResolveProjectUIDs verifies project UID resolution: SFID lookup, uuid:slug extraction,
-// deleted-project exclusion, and unmappable-project skip behavior.
+func TestProjectSlugCacheKey(t *testing.T) {
+	got := projectSlugCacheKey("vllm.with.unsafe:chars")
+	want := "project.slug." + fnv32hex("vllm.with.unsafe:chars")
+	if got != want {
+		t.Fatalf("projectSlugCacheKey() = %q, want %q", got, want)
+	}
+}
+
+// TestResolveProjectUIDs verifies project UID resolution: SFID lookup, uuid:slug
+// slug resolution, deleted-project exclusion, and unmappable-project skip behavior.
 func TestResolveProjectUIDs(t *testing.T) {
 	ctx := context.Background()
 	mappings := map[string]string{
@@ -87,96 +99,206 @@ func TestResolveProjectUIDs(t *testing.T) {
 		"sfid-B": "uid-B",
 	}
 
-	tests := []struct {
-		name     string
-		projects []legacyWorkspaceProject
-		wantUIDs []string
-	}{
-		{
-			name: "all mappable",
-			projects: []legacyWorkspaceProject{
-				{ProjectSFID: "sfid-A"},
-				{ProjectSFID: "sfid-B"},
-			},
-			wantUIDs: []string{"uid-A", "uid-B"},
-		},
-		{
-			name: "one unmappable — workspace still proceeds with mappable subset",
-			projects: []legacyWorkspaceProject{
-				{ProjectSFID: "sfid-A"},
-				{ProjectSFID: "sfid-MISSING"},
-			},
-			wantUIDs: []string{"uid-A"},
-		},
-		{
-			name: "deleted project excluded",
-			projects: []legacyWorkspaceProject{
-				{ProjectSFID: "sfid-A", Deleted: true},
-				{ProjectSFID: "sfid-B"},
-			},
-			wantUIDs: []string{"uid-B"},
-		},
-		{
-			name:     "empty projects list",
-			projects: []legacyWorkspaceProject{},
-			wantUIDs: nil,
-		},
-		{
-			// platform.organization_workspace_project stores project_id as
-			// "uuid:slug" when the record was created via the v2 platform.
-			// The UUID prefix is extracted directly without an SFID map lookup.
-			name: "uuid:slug composite - uuid extracted",
-			projects: []legacyWorkspaceProject{
-				{ProjectSFID: "56fa1b4b-eca7-4824-a635-504a5e9a38cb:iree"},
-				{ProjectSFID: "8234d49d-b9ca-4ba0-a287-0c7585c96590:ptproject"},
-			},
-			wantUIDs: []string{
-				"56fa1b4b-eca7-4824-a635-504a5e9a38cb",
-				"8234d49d-b9ca-4ba0-a287-0c7585c96590",
-			},
-		},
-		{
-			// Mixed: some uuid:slug and some legacy SFIDs in the same workspace.
-			name: "mixed uuid:slug and sfid",
-			projects: []legacyWorkspaceProject{
-				{ProjectSFID: "56fa1b4b-eca7-4824-a635-504a5e9a38cb:iree"},
-				{ProjectSFID: "sfid-A"},
-				{ProjectSFID: "sfid-MISSING"},
-			},
-			wantUIDs: []string{
-				"56fa1b4b-eca7-4824-a635-504a5e9a38cb",
-				"uid-A",
-			},
-		},
-		{
-			// A uuid:slug where the slug portion contains a colon (edge case) —
-			// only the first segment is used as the UUID.
-			name: "uuid:slug with colon in slug",
-			projects: []legacyWorkspaceProject{
-				{ProjectSFID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:slug:extra"},
-			},
-			wantUIDs: []string{"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+	origLookup := lookupProjectUIDBySlugCachedFn
+	t.Cleanup(func() { lookupProjectUIDBySlugCachedFn = origLookup })
+
+	var calls []string
+	lookupProjectUIDBySlugCachedFn = func(_ context.Context, slug string, dryRun bool, memo map[string]string) (string, error) {
+		if dryRun {
+			t.Fatalf("dryRun = true, want false")
+		}
+		calls = append(calls, slug)
+		switch slug {
+		case "iree":
+			memo[slug] = "uid-iree"
+			return "uid-iree", nil
+		case "ptproject":
+			memo[slug] = "uid-ptproject"
+			return "uid-ptproject", nil
+		default:
+			return "", nil
+		}
+	}
+
+	ws := legacyWorkspace{
+		ID:      "ws-1",
+		Name:    "Test",
+		OrgSFID: "sfid-org",
+		Projects: []legacyWorkspaceProject{
+			{ProjectSFID: "56fa1b4b-eca7-4824-a635-504a5e9a38cb:iree"},
+			{ProjectSFID: "sfid-A"},
+			{ProjectSFID: "sfid-MISSING"},
+			{ProjectSFID: "sfid-B", Deleted: true},
+			{ProjectSFID: "8234d49d-b9ca-4ba0-a287-0c7585c96590:ptproject"},
+			{ProjectSFID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:slug:extra"},
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ws := legacyWorkspace{ID: "ws-1", Name: "Test", OrgSFID: "sfid-org", Projects: tc.projects}
-			uids := resolveProjectUIDs(ctx, ws, mappings)
+	uids, slugByUID := resolveProjectUIDs(ctx, ws, mappings, false, map[string]string{})
 
-			if len(uids) != len(tc.wantUIDs) {
-				t.Errorf("uid count = %d, want %d; got %v", len(uids), len(tc.wantUIDs), uids)
-			}
-			for i, want := range tc.wantUIDs {
-				if i >= len(uids) {
-					t.Errorf("missing uid at index %d; want %q", i, want)
-					continue
-				}
-				if uids[i] != want {
-					t.Errorf("uid[%d] = %q, want %q", i, uids[i], want)
-				}
-			}
-		})
+	wantUIDs := []string{"uid-iree", "uid-A", "uid-ptproject"}
+	if !reflect.DeepEqual(uids, wantUIDs) {
+		t.Fatalf("uids = %v, want %v", uids, wantUIDs)
+	}
+	wantSlugByUID := map[string]string{
+		"uid-iree":      "iree",
+		"uid-ptproject": "ptproject",
+	}
+	if !reflect.DeepEqual(slugByUID, wantSlugByUID) {
+		t.Fatalf("slugByUID = %v, want %v", slugByUID, wantSlugByUID)
+	}
+	if !reflect.DeepEqual(calls, []string{"iree", "ptproject", "slug:extra"}) {
+		t.Fatalf("slug lookup calls = %v, want [iree ptproject slug:extra]", calls)
+	}
+}
+
+func TestLookupProjectUIDBySlugCached(t *testing.T) {
+	ctx := context.Background()
+
+	origGet := mappingKVGetValueFn
+	origPut := mappingKVPutValueFn
+	origLookup := getProjectUIDBySlugFn
+	t.Cleanup(func() {
+		mappingKVGetValueFn = origGet
+		mappingKVPutValueFn = origPut
+		getProjectUIDBySlugFn = origLookup
+	})
+
+	stored := map[string][]byte{}
+	rpcCalls := 0
+	mappingKVGetValueFn = func(_ context.Context, key string) ([]byte, error) {
+		if val, ok := stored[key]; ok {
+			return val, nil
+		}
+		return nil, jetstream.ErrKeyNotFound
+	}
+	mappingKVPutValueFn = func(_ context.Context, key string, value []byte) error {
+		stored[key] = append([]byte(nil), value...)
+		return nil
+	}
+	getProjectUIDBySlugFn = func(_ context.Context, slug string) (string, error) {
+		rpcCalls++
+		if slug != "vllm" {
+			t.Fatalf("slug = %q, want vllm", slug)
+		}
+		return "uid-vllm", nil
+	}
+
+	memo := map[string]string{}
+	uid, err := lookupProjectUIDBySlugCached(context.Background(), "vllm", false, memo)
+	if err != nil {
+		t.Fatalf("lookupProjectUIDBySlugCached() error = %v", err)
+	}
+	if uid != "uid-vllm" {
+		t.Fatalf("uid = %q, want uid-vllm", uid)
+	}
+	if rpcCalls != 1 {
+		t.Fatalf("rpcCalls = %d, want 1", rpcCalls)
+	}
+	key := projectSlugCacheKey("vllm")
+	if got := string(stored[key]); got != "uid-vllm" {
+		t.Fatalf("stored[%q] = %q, want uid-vllm", key, got)
+	}
+
+	uid, err = lookupProjectUIDBySlugCached(ctx, "vllm", false, memo)
+	if err != nil {
+		t.Fatalf("second lookup error = %v", err)
+	}
+	if uid != "uid-vllm" || rpcCalls != 1 {
+		t.Fatalf("second lookup uid=%q rpcCalls=%d, want uid-vllm and 1 call", uid, rpcCalls)
+	}
+
+	uid, err = lookupProjectUIDBySlugCached(ctx, "vllm", false, map[string]string{})
+	if err != nil {
+		t.Fatalf("persistent cache lookup error = %v", err)
+	}
+	if uid != "uid-vllm" || rpcCalls != 1 {
+		t.Fatalf("persistent cache lookup uid=%q rpcCalls=%d, want uid-vllm and 1 call", uid, rpcCalls)
+	}
+}
+
+func TestLookupProjectUIDBySlugCachedDryRunDoesNotWrite(t *testing.T) {
+	origGet := mappingKVGetValueFn
+	origPut := mappingKVPutValueFn
+	origLookup := getProjectUIDBySlugFn
+	t.Cleanup(func() {
+		mappingKVGetValueFn = origGet
+		mappingKVPutValueFn = origPut
+		getProjectUIDBySlugFn = origLookup
+	})
+
+	putCalls := 0
+	mappingKVGetValueFn = func(_ context.Context, _ string) ([]byte, error) {
+		return nil, jetstream.ErrKeyNotFound
+	}
+	mappingKVPutValueFn = func(_ context.Context, _ string, _ []byte) error {
+		putCalls++
+		return nil
+	}
+	getProjectUIDBySlugFn = func(_ context.Context, _ string) (string, error) {
+		return "uid-vllm", nil
+	}
+
+	uid, err := lookupProjectUIDBySlugCached(context.Background(), "vllm", true, map[string]string{})
+	if err != nil {
+		t.Fatalf("lookupProjectUIDBySlugCached() error = %v", err)
+	}
+	if uid != "uid-vllm" {
+		t.Fatalf("uid = %q, want uid-vllm", uid)
+	}
+	if putCalls != 0 {
+		t.Fatalf("putCalls = %d, want 0 for dry-run", putCalls)
+	}
+}
+
+func TestReconcileProjectsDoesNotCachePartialProjectFailures(t *testing.T) {
+	setupMembersTestGlobals(t)
+
+	responseBody := workspaceBulkResponse{
+		Workspace: workspaceResponse{UID: "ws-001", Name: "Test WS"},
+		Failed: []workspaceBulkAddItemError{
+			{ProjectID: "uid-vllm", Error: "unknown project \"uid-vllm\": project not found"},
+		},
+	}
+	bodyBytes, _ := json.Marshal(responseBody)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bodyBytes)
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	cfg.MemberServiceURL = u
+
+	updated := 0
+	projectsAdded := 0
+	projectsRemoved := 0
+	errors := 0
+
+	reconcileProjects(
+		context.Background(),
+		legacyWorkspace{ID: "ws-1", Name: "Test WS"},
+		"org-001",
+		"ws-001",
+		[]string{"uid-vllm"},
+		nil,
+		map[string]string{"uid-vllm": "vllm"},
+		false,
+		false,
+		&updated,
+		&projectsAdded,
+		&projectsRemoved,
+		&errors,
+	)
+
+	if projectsAdded != 0 {
+		t.Fatalf("projectsAdded = %d, want 0", projectsAdded)
+	}
+	if updated != 0 {
+		t.Fatalf("updated = %d, want 0; failed associations must not cache project-set success", updated)
+	}
+	if errors != 1 {
+		t.Fatalf("errors = %d, want 1", errors)
 	}
 }
 
