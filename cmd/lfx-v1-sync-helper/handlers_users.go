@@ -145,7 +145,7 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 // dispatchProfileSync runs the v1→Auth0 profile sync in a background goroutine
 // and always returns false (never requests a NACK). Backfill is handled by
 // --backfill-profiles, not by this path.
-func dispatchProfileSync(ctx context.Context, key, auth0UserID string, v1Data map[string]any) bool {
+func dispatchProfileSync(_ context.Context, key, auth0UserID string, v1Data map[string]any) bool {
 	// Live: fire-and-forget goroutine with a short delay to mitigate
 	// contention with lf-login-backend. The goroutine runs detached from the
 	// JetStream message (which is ACKed immediately), so its timeout is
