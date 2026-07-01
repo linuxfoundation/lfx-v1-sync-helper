@@ -219,6 +219,10 @@ func deleteCommitteeMember(ctx context.Context, committeeUID, memberUID string, 
 		MemberUID:   memberUID,
 		Version:     "1",
 		IfMatch:     stringToStringPtr(etag),
+		// SkipNotification suppresses the removal email for V1/PCC-synced deletes.
+		// Requires committee-service >= v0.4.9 (adds X-Skip-Notification to DELETE endpoint).
+		// TODO(LFXV2-2567): uncomment after bumping the committee-service dependency.
+		// SkipNotification: true,
 	}
 
 	err = committeeClient.DeleteCommitteeMember(ctx, payload)
