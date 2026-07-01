@@ -167,18 +167,18 @@ func LoadConfig() (*Config, error) {
 		Auth0ClientID:   os.Getenv("AUTH0_CLIENT_ID"),
 		Auth0PrivateKey: os.Getenv("AUTH0_PRIVATE_KEY"),
 		// Other configuration
-		NATSURL:                    os.Getenv("NATS_URL"),
-		Port:                       os.Getenv("PORT"),
-		Bind:                       os.Getenv("BIND"),
-		Debug:                      parseBooleanEnv("DEBUG"),
-		HTTPDebug:                  parseBooleanEnv("HTTP_DEBUG"),
-		UseMsgpack:                 parseBooleanEnv("USE_MSGPACK"),
+		NATSURL:                          os.Getenv("NATS_URL"),
+		Port:                             os.Getenv("PORT"),
+		Bind:                             os.Getenv("BIND"),
+		Debug:                            parseBooleanEnv("DEBUG"),
+		HTTPDebug:                        parseBooleanEnv("HTTP_DEBUG"),
+		UseMsgpack:                       parseBooleanEnv("USE_MSGPACK"),
 		DynamoDBIngestEnabled:            parseBooleanEnv("DYNAMODB_INGEST_ENABLED"),
 		CommitteeSkipMemberNotifications: parseBooleanEnvWithDefault("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS", true),
 		DynamoDBStreamName:               os.Getenv("DYNAMODB_STREAM_NAME"),
-		NATSFetchMaxWait:           parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
-		ProjectAllowlistFile:       os.Getenv("PROJECT_ALLOWLIST_FILE"),
-		ProjectFamilyAllowlistFile: os.Getenv("PROJECT_FAMILY_ALLOWLIST_FILE"),
+		NATSFetchMaxWait:                 parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
+		ProjectAllowlistFile:             os.Getenv("PROJECT_ALLOWLIST_FILE"),
+		ProjectFamilyAllowlistFile:       os.Getenv("PROJECT_FAMILY_ALLOWLIST_FILE"),
 	}
 
 	// Project allowlists — file path overrides env var overrides built-in defaults.
