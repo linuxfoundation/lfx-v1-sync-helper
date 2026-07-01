@@ -51,7 +51,7 @@ var (
 	// design (globals can be harder to test, maintain, and reason about),
 	// so the lock backend, lifecycle, and injection strategy will need
 	// a proper design review.
-	distributedSync mappingLocker
+	distributedSync mappingLocker //nolint:unused
 )
 
 // main parses optional flags and starts the NATS subscribers.
@@ -147,7 +147,7 @@ func main() {
 		// endpoint is expected to be used as a Kubernetes liveness check, this
 		// service must likewise self-detect non-recoverable errors and
 		// self-terminate.
-		fmt.Fprintf(w, "OK\n")
+		fmt.Fprintf(w, "OK\n") //nolint:errcheck
 	})
 
 	// Basic health check.
@@ -160,7 +160,7 @@ func main() {
 			http.Error(w, "NATS connection not ready", http.StatusServiceUnavailable)
 			return
 		}
-		fmt.Fprintf(w, "OK\n")
+		fmt.Fprintf(w, "OK\n") //nolint:errcheck
 	})
 
 	// Add an http listener for health checks. This server does NOT participate

@@ -273,7 +273,7 @@ Key design decisions:
 - **No consumer** — no heartbeat, no consumer lifecycle, no CPU spike from bulk streaming.
 - **LWW via seq order** — messages are visited ascending; last write per subject overwrites earlier ones.
 - **`ErrMsgNotFound` = end of stream** — the clean signal that no further messages match the filter.
-- **Per-call deadline** — each `GetMsg` call uses `context.WithTimeout(ctx, opTimeout)`. Always pass `cfg.NATSFetchMaxWait` (default 120s); the SDK default of 5s is too short.
+- **Per-call deadline** — each `GetMsg` call uses `context.WithTimeout(ctx, opTimeout)`. Pass the appropriate per-call timeout: `cfg.NATSFetchMaxWait` (default 120s) for backfill scans, `cfg.ReindexNATSOpTimeout` (default 30s) for reindex scans. Avoid the SDK's 5s default — it is too short for in-cluster use.
 - **Wildcard subjects** — the `next_by_subj` NATS server API accepts NATS subject wildcards.
 
 ### `--backfill-acs-project` pass (`ingest_acs_project.go`)

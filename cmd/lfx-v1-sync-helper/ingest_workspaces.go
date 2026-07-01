@@ -76,58 +76,22 @@ func fnv32hex(s string) string {
 	return fmt.Sprintf("%x", h.Sum32())
 }
 
-// fetchKVSubjectRecords enumerates live subjects under subject using the
-// shared EnumerateLiveSubjects helper (headers-only, NumPending end-of-stream
-// guard, tombstone filtering), then point-reads each value via v1KV.Get.
-// Returns a map of id→raw bytes (key suffix after prefix).
-func fetchKVSubjectRecords(ctx context.Context, subject, prefix string) (map[string][]byte, error) {
-	liveSubjects, err := EnumerateLiveSubjects(ctx, jsContext, kvObjectsStream, subject,
-		WithFetchMaxWait(cfg.NATSFetchMaxWait),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to enumerate subjects for %s: %w", subject, err)
-	}
-
-	result := make(map[string][]byte, len(liveSubjects))
-	var skipped int
-	for subj := range liveSubjects {
-		if !strings.HasPrefix(subj, prefix) {
-			continue
-		}
-		id := subj[len(prefix):]
-
-		opTimeout := cfg.NATSFetchMaxWait
-		if opTimeout <= 0 {
-			opTimeout = defaultNATSFetchMaxWait
-		}
-		getCtx, cancelGet := context.WithTimeout(ctx, opTimeout)
-		entry, getErr := v1KV.Get(getCtx, subj[len("$KV.v1-objects."):])
-		cancelGet()
-		if getErr != nil {
-			logger.With("key", subj, errKey, getErr).ErrorContext(ctx, "failed to get workspace record, skipping")
-			skipped++
-			continue
-		}
-		result[id] = entry.Value()
-	}
-	if skipped > 0 {
-		return result, fmt.Errorf("%d workspace KV records could not be read for subject %q — rerun to retry", skipped, subject)
-	}
-	return result, nil
-}
-
 // collectLegacyWorkspaces scans both workspace subjects from v1-objects using
-// DeliverAllPolicy + last-write-wins, decodes each row (JSON then msgpack),
+// ScanSubjectData last-write-wins, decodes each row (JSON then msgpack),
 // and joins association rows by workspace id.
 func collectLegacyWorkspaces(ctx context.Context) ([]legacyWorkspace, error) {
-	latestWorkspaces, err := fetchKVSubjectRecords(ctx, workspaceSubject, workspaceSubjectPrefix)
+	workspaceSubjectData, err := ScanSubjectData(ctx, jsContext, kvObjectsStream, workspaceSubject, cfg.NATSFetchMaxWait)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch workspace records: %w", err)
+		return nil, fmt.Errorf("failed to scan workspace records: %w", err)
 	}
 
 	// Decode workspace rows into a map keyed by ID.
 	workspaceMap := make(map[string]legacyWorkspace)
-	for wsID, data := range latestWorkspaces {
+	for subj, data := range workspaceSubjectData {
+		if !strings.HasPrefix(subj, workspaceSubjectPrefix) {
+			continue
+		}
+		wsID := subj[len(workspaceSubjectPrefix):]
 		if wsID == "" {
 			logger.WarnContext(ctx, "skipping workspace with empty id")
 			continue
@@ -164,13 +128,17 @@ func collectLegacyWorkspaces(ctx context.Context) ([]legacyWorkspace, error) {
 	}
 
 	// Now consume workspace_project associations.
-	latestProjectAssocs, err := fetchKVSubjectRecords(ctx, workspaceProjectSubject, workspaceProjectSubjectPrefix)
+	assocSubjectData, err := ScanSubjectData(ctx, jsContext, kvObjectsStream, workspaceProjectSubject, cfg.NATSFetchMaxWait)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch workspace project records: %w", err)
+		return nil, fmt.Errorf("failed to scan workspace project records: %w", err)
 	}
 
 	// Decode and join workspace_project rows into the workspace map.
-	for assocID, data := range latestProjectAssocs {
+	for subj, data := range assocSubjectData {
+		if !strings.HasPrefix(subj, workspaceProjectSubjectPrefix) {
+			continue
+		}
+		assocID := subj[len(workspaceProjectSubjectPrefix):]
 		if assocID == "" {
 			logger.WarnContext(ctx, "skipping workspace project association with empty id")
 			continue
