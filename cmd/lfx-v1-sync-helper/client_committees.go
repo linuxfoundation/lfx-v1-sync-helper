@@ -201,7 +201,7 @@ func deleteCommittee(ctx context.Context, committeeUID string, v1Principal strin
 }
 
 // deleteCommitteeMember deletes a committee member by committee UID and member UID.
-func deleteCommitteeMember(ctx context.Context, committeeUID, memberUID string, v1Principal string) error {
+func deleteCommitteeMember(ctx context.Context, committeeUID, memberUID string, v1Principal string, skipNotification bool) error {
 	// Fetch current committee member to get etag.
 	_, etag, err := fetchCommitteeMember(ctx, committeeUID, memberUID)
 	if err != nil {
@@ -219,8 +219,7 @@ func deleteCommitteeMember(ctx context.Context, committeeUID, memberUID string, 
 		MemberUID:   memberUID,
 		Version:     "1",
 		IfMatch:     stringToStringPtr(etag),
-		// SkipNotification suppresses the removal email for V1/PCC-synced deletes.
-		SkipNotification: true,
+		SkipNotification: skipNotification,
 	}
 
 	err = committeeClient.DeleteCommitteeMember(ctx, payload)
