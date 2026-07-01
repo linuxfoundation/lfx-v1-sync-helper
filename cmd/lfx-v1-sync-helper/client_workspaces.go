@@ -15,9 +15,13 @@ import (
 
 var errWorkspaceOrgNotFound = errors.New("workspace org not found")
 
-// workspaceProject is a single project association on a workspace.
+// workspaceProject is a single project association on a workspace, as
+// returned by member-service. project_uid is member-service generated;
+// project_slug is the caller-supplied identifier used for idempotency.
 type workspaceProject struct {
-	UID string `json:"uid"`
+	UID  string `json:"project_uid"`
+	Slug string `json:"project_slug"`
+	Name string `json:"project_name"`
 }
 
 // workspaceResponse is the workspace object returned by create/update/add-project endpoints.
@@ -32,15 +36,24 @@ type workspaceCreateBody struct {
 	Name string `json:"name"`
 }
 
+// workspaceBulkAddItem is a single project reference in a bulk-add request.
+// project_slug is the caller-owned identifier (member-service PR #67);
+// project_name is intentionally never populated — no source available to
+// this migration returns a project display name (see design.md D3).
+type workspaceBulkAddItem struct {
+	Slug string `json:"project_slug"`
+	Name string `json:"project_name,omitempty"`
+}
+
 // workspaceBulkAddBody is the POST body for bulk-adding projects.
 type workspaceBulkAddBody struct {
-	ProjectIDs []string `json:"project_ids"`
+	Projects []workspaceBulkAddItem `json:"projects"`
 }
 
 // workspaceBulkAddItemError is a single failure entry in a bulk-add response.
 type workspaceBulkAddItemError struct {
-	ProjectID string `json:"project_id"`
-	Error     string `json:"error"`
+	Slug  string `json:"project_slug"`
+	Error string `json:"error"`
 }
 
 // workspaceBulkResponse is the response body for bulk-add.
@@ -140,7 +153,8 @@ func deleteWorkspace(ctx context.Context, orgUID, workspaceUID string) error {
 }
 
 // bulkAddWorkspaceProjects adds multiple projects to a workspace in one call.
-func bulkAddWorkspaceProjects(ctx context.Context, orgUID, workspaceUID string, projectIDs []string) (*workspaceBulkResponse, error) {
+// slugs are sent verbatim as project_slug; project_name is never populated.
+func bulkAddWorkspaceProjects(ctx context.Context, orgUID, workspaceUID string, slugs []string) (*workspaceBulkResponse, error) {
 	if cfg.MemberServiceURL == nil {
 		return nil, fmt.Errorf("MEMBER_SERVICE_URL is not configured")
 	}
@@ -149,7 +163,11 @@ func bulkAddWorkspaceProjects(ctx context.Context, orgUID, workspaceUID string, 
 		return nil, fmt.Errorf("failed to generate JWT token: %w", err)
 	}
 
-	bodyBytes, err := json.Marshal(workspaceBulkAddBody{ProjectIDs: projectIDs})
+	items := make([]workspaceBulkAddItem, len(slugs))
+	for i, slug := range slugs {
+		items[i] = workspaceBulkAddItem{Slug: slug}
+	}
+	bodyBytes, err := json.Marshal(workspaceBulkAddBody{Projects: items})
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal bulk add body: %w", err)
 	}
