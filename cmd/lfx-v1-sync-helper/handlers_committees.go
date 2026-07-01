@@ -273,7 +273,8 @@ func handleCommitteeMemberDelete(ctx context.Context, key string, sfid string, v
 	// Delete the committee member using the API.
 	logger.With("committee_uid", committeeUID, "member_uid", memberUID, "sfid", sfid, "key", key, "v1_principal", v1Principal).InfoContext(ctx, "deleting committee member")
 
-	err = deleteCommitteeMember(ctx, committeeUID, memberUID, v1Principal, cfg != nil && cfg.CommitteeSkipMemberNotifications)
+	skipNotification := cfg != nil && cfg.CommitteeSkipMemberNotifications
+	err = deleteCommitteeMember(ctx, committeeUID, memberUID, v1Principal, skipNotification)
 	if err != nil {
 		logger.With(errKey, err, "committee_uid", committeeUID, "member_uid", memberUID, "sfid", sfid, "key", key).ErrorContext(ctx, "failed to delete committee member")
 		return true // Retry on error.
