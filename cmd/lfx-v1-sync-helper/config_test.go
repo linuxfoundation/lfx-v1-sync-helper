@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -397,5 +398,35 @@ func TestProjectAllowlistCaseInsensitive(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("parseStringListEnv(PROJECT_ALLOWLIST)[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestCommitteeSkipMemberNotificationsConfig(t *testing.T) {
+	parseSkipNotifications := func() bool {
+		return strings.ToLower(strings.TrimSpace(os.Getenv("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS"))) != "false"
+	}
+
+	tests := []struct {
+		name   string
+		envVal string
+		want   bool
+	}{
+		{"unset defaults to true (skip)", "", true},
+		{"explicit true", "true", true},
+		{"explicit false", "false", false},
+		{"FALSE uppercase", "FALSE", false},
+		{"false with whitespace", "  false  ", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Unsetenv("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS")
+			if tt.envVal != "" {
+				t.Setenv("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS", tt.envVal)
+			}
+			got := parseSkipNotifications()
+			if got != tt.want {
+				t.Errorf("CommitteeSkipMemberNotifications = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

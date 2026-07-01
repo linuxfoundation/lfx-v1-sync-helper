@@ -98,6 +98,13 @@ type Config struct {
 	ProjectFamilyAllowlistFile string   // Path to a YAML list file; overrides PROJECT_FAMILY_ALLOWLIST
 	ProjectAllowlist           []string // Root slugs synced without their children
 	ProjectFamilyAllowlist     []string // Root slugs synced together with all descendants
+
+	// CommitteeSkipMemberNotifications controls whether committee member creates
+	// from this sync process suppress V2 notification emails. When true (default),
+	// skip_notification is set on every member create so V1-synced adds are silent.
+	// Set COMMITTEE_SKIP_MEMBER_NOTIFICATIONS=false to allow emails from V1-sync
+	// (e.g. when enabling notifications more broadly at GA).
+	CommitteeSkipMemberNotifications bool
 }
 
 const (
@@ -167,6 +174,7 @@ func LoadConfig() (*Config, error) {
 		HTTPDebug:                  parseBooleanEnv("HTTP_DEBUG"),
 		UseMsgpack:                 parseBooleanEnv("USE_MSGPACK"),
 		DynamoDBIngestEnabled:      parseBooleanEnv("DYNAMODB_INGEST_ENABLED"),
+		CommitteeSkipMemberNotifications: strings.ToLower(strings.TrimSpace(os.Getenv("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS"))) != "false",
 		DynamoDBStreamName:         os.Getenv("DYNAMODB_STREAM_NAME"),
 		NATSFetchMaxWait:           parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
 		ProjectAllowlistFile:       os.Getenv("PROJECT_ALLOWLIST_FILE"),

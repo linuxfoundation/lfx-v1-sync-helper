@@ -651,9 +651,10 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 	}
 
 	payload := &committeeservice.CreateCommitteeMemberPayload{
-		UID:     committeeUID,
-		Email:   email,
-		Version: "1",
+		UID:              committeeUID,
+		Email:            email,
+		Version:          "1",
+		SkipNotification: cfg != nil && cfg.CommitteeSkipMemberNotifications,
 	}
 
 	// Map contact information.
