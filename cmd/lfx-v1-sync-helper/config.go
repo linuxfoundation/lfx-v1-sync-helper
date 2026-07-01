@@ -173,9 +173,9 @@ func LoadConfig() (*Config, error) {
 		Debug:                      parseBooleanEnv("DEBUG"),
 		HTTPDebug:                  parseBooleanEnv("HTTP_DEBUG"),
 		UseMsgpack:                 parseBooleanEnv("USE_MSGPACK"),
-		DynamoDBIngestEnabled:      parseBooleanEnv("DYNAMODB_INGEST_ENABLED"),
-		CommitteeSkipMemberNotifications: strings.ToLower(strings.TrimSpace(os.Getenv("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS"))) != "false",
-		DynamoDBStreamName:         os.Getenv("DYNAMODB_STREAM_NAME"),
+		DynamoDBIngestEnabled:            parseBooleanEnv("DYNAMODB_INGEST_ENABLED"),
+		CommitteeSkipMemberNotifications: parseBooleanEnvWithDefault("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS", true),
+		DynamoDBStreamName:               os.Getenv("DYNAMODB_STREAM_NAME"),
 		NATSFetchMaxWait:           parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
 		ProjectAllowlistFile:       os.Getenv("PROJECT_ALLOWLIST_FILE"),
 		ProjectFamilyAllowlistFile: os.Getenv("PROJECT_FAMILY_ALLOWLIST_FILE"),
@@ -337,6 +337,18 @@ func readYAMLListFile(path string) ([]string, error) {
 //   - parseBooleanEnv("USE_MSGPACK") where USE_MSGPACK="" returns false
 func parseBooleanEnv(envVar string) bool {
 	value := strings.ToLower(strings.TrimSpace(os.Getenv(envVar)))
+	truthyValues := []string{"true", "yes", "t", "y", "1"}
+	return slices.Contains(truthyValues, value)
+}
+
+// parseBooleanEnvWithDefault is like parseBooleanEnv but returns def when the
+// variable is unset or empty. Truthy tokens (true/yes/t/y/1) return true; any
+// other non-empty value (false/no/0/off) returns false.
+func parseBooleanEnvWithDefault(envVar string, def bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(envVar)))
+	if value == "" {
+		return def
+	}
 	truthyValues := []string{"true", "yes", "t", "y", "1"}
 	return slices.Contains(truthyValues, value)
 }
