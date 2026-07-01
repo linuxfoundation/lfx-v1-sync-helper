@@ -214,11 +214,11 @@ func deleteCommitteeMember(ctx context.Context, committeeUID, memberUID string, 
 	}
 
 	payload := &committeeservice.DeleteCommitteeMemberPayload{
-		BearerToken: &token,
-		UID:         committeeUID,
-		MemberUID:   memberUID,
-		Version:     "1",
-		IfMatch:     stringToStringPtr(etag),
+		BearerToken:      &token,
+		UID:              committeeUID,
+		MemberUID:        memberUID,
+		Version:          "1",
+		IfMatch:          stringToStringPtr(etag),
 		SkipNotification: skipNotification,
 	}
 
