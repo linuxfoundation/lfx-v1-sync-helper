@@ -15,7 +15,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.42.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
-	github.com/linuxfoundation/lfx-v2-committee-service v0.4.8
+	github.com/linuxfoundation/lfx-v2-committee-service v0.4.12
 	github.com/linuxfoundation/lfx-v2-project-service v0.6.11
 	github.com/nats-io/nats.go v1.52.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
