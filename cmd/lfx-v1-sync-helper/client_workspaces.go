@@ -39,7 +39,7 @@ type workspaceCreateBody struct {
 // workspaceBulkAddItem is a single project reference in a bulk-add request.
 // project_slug is the caller-owned identifier (member-service PR #67);
 // project_name is intentionally never populated — no source available to
-// this migration returns a project display name (see design.md D3).
+// this migration returns a project display name.
 type workspaceBulkAddItem struct {
 	Slug string `json:"project_slug"`
 	Name string `json:"project_name,omitempty"`

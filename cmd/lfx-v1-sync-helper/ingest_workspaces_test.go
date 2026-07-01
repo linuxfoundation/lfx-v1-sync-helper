@@ -83,7 +83,7 @@ func TestWorkspaceCacheKey(t *testing.T) {
 // TestDesiredProjectSlugs verifies that every non-deleted, non-empty
 // project_id is sent verbatim as project_slug: no split on ":", no NATS or
 // v1-mappings lookup, and no row is skipped for its shape (uuid:slug,
-// raw SFID, or anything else) — see design.md D3.
+// raw SFID, or anything else).
 func TestDesiredProjectSlugs(t *testing.T) {
 	ctx := context.Background()
 
@@ -161,10 +161,136 @@ func TestReconcileProjectsDoesNotCachePartialProjectFailures(t *testing.T) {
 	}
 }
 
+// TestReconcileProjectsDoesNotCacheOnPartialSuccess verifies that when one
+// project in a bulk-add succeeds and another fails, the successful add is
+// still counted (updated, projectsAdded) but the project-set cache is not
+// persisted — a re-run must recompute the delta rather than trust a partial
+// apply. mappingsKV is left nil by setupMembersTestGlobals, so a stray
+// putWorkspaceCacheEntry call here would panic.
+func TestReconcileProjectsDoesNotCacheOnPartialSuccess(t *testing.T) {
+	setupMembersTestGlobals(t)
+
+	responseBody := workspaceBulkResponse{
+		Workspace: workspaceResponse{
+			UID:  "ws-001",
+			Name: "Test WS",
+			Projects: []workspaceProject{
+				{UID: "gen-uid-vllm", Slug: "vllm"},
+			},
+		},
+		Succeeded: []string{"vllm"},
+		Failed: []workspaceBulkAddItemError{
+			{Slug: "bad-project", Error: "unknown project \"bad-project\": project not found"},
+		},
+	}
+	bodyBytes, _ := json.Marshal(responseBody)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bodyBytes)
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	cfg.MemberServiceURL = u
+
+	updated := 0
+	projectsAdded := 0
+	projectsRemoved := 0
+	errors := 0
+
+	reconcileProjects(
+		context.Background(),
+		legacyWorkspace{ID: "ws-1", Name: "Test WS"},
+		"org-001",
+		"ws-001",
+		[]string{"vllm", "bad-project"},
+		nil,
+		false,
+		false,
+		&updated,
+		&projectsAdded,
+		&projectsRemoved,
+		&errors,
+	)
+
+	if projectsAdded != 1 {
+		t.Fatalf("projectsAdded = %d, want 1", projectsAdded)
+	}
+	if updated != 1 {
+		t.Fatalf("updated = %d, want 1; a partial success must still be reported as an update", updated)
+	}
+	if errors != 1 {
+		t.Fatalf("errors = %d, want 1", errors)
+	}
+}
+
+// TestReconcileProjectsDedupesDuplicateDesiredSlugs verifies that a
+// workspace with two non-deleted associations sharing the same project_id
+// sends each slug to member-service only once, instead of a duplicate
+// bulk-add entry per repeated desiredSlugs value. The response reports the
+// slug as failed (rather than succeeded) so the assertion can be made
+// without exercising the project-set cache write, which needs a mappingsKV
+// that setupMembersTestGlobals does not provide (see
+// TestReconcileProjectsDoesNotCacheOnPartialSuccess).
+func TestReconcileProjectsDedupesDuplicateDesiredSlugs(t *testing.T) {
+	setupMembersTestGlobals(t)
+
+	var gotSlugs []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body workspaceBulkAddBody
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+		for _, item := range body.Projects {
+			gotSlugs = append(gotSlugs, item.Slug)
+		}
+		responseBody := workspaceBulkResponse{
+			Workspace: workspaceResponse{UID: "ws-001"},
+			Failed: []workspaceBulkAddItemError{
+				{Slug: "vllm", Error: "unknown project \"vllm\": project not found"},
+			},
+		}
+		bodyBytes, _ := json.Marshal(responseBody)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bodyBytes)
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	cfg.MemberServiceURL = u
+
+	updated := 0
+	projectsAdded := 0
+	projectsRemoved := 0
+	errors := 0
+
+	reconcileProjects(
+		context.Background(),
+		legacyWorkspace{ID: "ws-1", Name: "Test WS"},
+		"org-001",
+		"ws-001",
+		[]string{"vllm", "vllm"},
+		nil,
+		false,
+		false,
+		&updated,
+		&projectsAdded,
+		&projectsRemoved,
+		&errors,
+	)
+
+	want := []string{"vllm"}
+	if !reflect.DeepEqual(gotSlugs, want) {
+		t.Fatalf("bulk-add request slugs = %v, want %v", gotSlugs, want)
+	}
+	if errors != 1 {
+		t.Fatalf("errors = %d, want 1", errors)
+	}
+}
+
 // TestReconcileProjectsDryRunMakesNoCallsAndNoCacheWrite verifies dry-run
 // computes planned add/remove counts without calling member-service or
-// writing to the workspace project cache — see design.md D3 and the
-// "Dry-run does not write workspace project cache" spec scenario.
+// writing to the workspace project cache.
 func TestReconcileProjectsDryRunMakesNoCallsAndNoCacheWrite(t *testing.T) {
 	setupMembersTestGlobals(t)
 
@@ -213,7 +339,7 @@ func TestReconcileProjectsDryRunMakesNoCallsAndNoCacheWrite(t *testing.T) {
 // TestBulkAddProjectsMatchesGeneratedUIDFromWorkspaceProjects verifies a
 // successful bulk-add returns the project_slug -> generated project_uid
 // pairs matched from the response's nested workspace.projects[], not from
-// the succeeded list (which carries slugs only) — see design.md D3.
+// the succeeded list (which carries slugs only).
 func TestBulkAddProjectsMatchesGeneratedUIDFromWorkspaceProjects(t *testing.T) {
 	setupMembersTestGlobals(t)
 

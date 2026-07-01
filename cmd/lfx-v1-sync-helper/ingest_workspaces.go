@@ -390,7 +390,7 @@ func reconcileWorkspace(
 		return
 	}
 
-	// Every non-empty project_id is sent verbatim as project_slug — see design.md D3.
+	// Every non-empty project_id is sent verbatim as project_slug.
 	desiredSlugs := desiredProjectSlugs(ctx, ws)
 
 	// Create or cache-hit path.
@@ -440,7 +440,7 @@ func reconcileDeleteWorkspace(
 // desiredProjectSlugs returns the full, unmodified source project_id value
 // for each non-deleted workspace-project reference, to be sent verbatim as
 // project_slug (member-service PR #67 makes project_slug an opaque
-// caller-owned string with no catalog validation — see design.md D3). No
+// caller-owned string with no catalog validation). No
 // split on ":", no NATS or v1-mappings lookup, and no row is skipped for
 // any project_id shape — only a genuinely empty value is excluded.
 func desiredProjectSlugs(ctx context.Context, ws legacyWorkspace) []string {
@@ -575,10 +575,16 @@ func reconcileProjects(
 	}
 
 	var toAdd []string
+	seenToAdd := make(map[string]struct{}, len(desiredSlugs))
 	for _, s := range desiredSlugs {
-		if _, ok := currentBySlug[s]; !ok {
-			toAdd = append(toAdd, s)
+		if _, ok := currentBySlug[s]; ok {
+			continue
 		}
+		if _, ok := seenToAdd[s]; ok {
+			continue
+		}
+		seenToAdd[s] = struct{}{}
+		toAdd = append(toAdd, s)
 	}
 	var toRemove []workspaceCacheProject
 	for slug, p := range currentBySlug {
@@ -642,8 +648,7 @@ func reconcileProjects(
 // bulkAddProjects adds project slugs in chunks of workspaceBulkMaxSize.
 // Returns the project_slug/project_uid pairs member-service confirmed added.
 // The generated project_uid is matched from the nested workspace.projects[]
-// entries, not from the succeeded list, which carries slugs only — see
-// design.md D3.
+// entries, not from the succeeded list, which carries slugs only.
 func bulkAddProjects(
 	ctx context.Context,
 	ws legacyWorkspace,
