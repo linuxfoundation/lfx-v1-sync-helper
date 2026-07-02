@@ -6,9 +6,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"testing"
 )
 
@@ -78,105 +80,356 @@ func TestWorkspaceCacheKey(t *testing.T) {
 	}
 }
 
-// TestResolveProjectUIDs verifies project UID resolution: SFID lookup, uuid:slug extraction,
-// deleted-project exclusion, and unmappable-project skip behavior.
-func TestResolveProjectUIDs(t *testing.T) {
+// TestDesiredProjectSlugs verifies that every non-deleted, non-empty
+// project_id is sent verbatim as project_slug: no split on ":", no NATS or
+// v1-mappings lookup, and no row is skipped for its shape (uuid:slug,
+// raw SFID, or anything else).
+func TestDesiredProjectSlugs(t *testing.T) {
 	ctx := context.Background()
-	mappings := map[string]string{
-		"sfid-A": "uid-A",
-		"sfid-B": "uid-B",
-	}
 
-	tests := []struct {
-		name     string
-		projects []legacyWorkspaceProject
-		wantUIDs []string
-	}{
-		{
-			name: "all mappable",
-			projects: []legacyWorkspaceProject{
-				{ProjectSFID: "sfid-A"},
-				{ProjectSFID: "sfid-B"},
-			},
-			wantUIDs: []string{"uid-A", "uid-B"},
-		},
-		{
-			name: "one unmappable — workspace still proceeds with mappable subset",
-			projects: []legacyWorkspaceProject{
-				{ProjectSFID: "sfid-A"},
-				{ProjectSFID: "sfid-MISSING"},
-			},
-			wantUIDs: []string{"uid-A"},
-		},
-		{
-			name: "deleted project excluded",
-			projects: []legacyWorkspaceProject{
-				{ProjectSFID: "sfid-A", Deleted: true},
-				{ProjectSFID: "sfid-B"},
-			},
-			wantUIDs: []string{"uid-B"},
-		},
-		{
-			name:     "empty projects list",
-			projects: []legacyWorkspaceProject{},
-			wantUIDs: nil,
-		},
-		{
-			// platform.organization_workspace_project stores project_id as
-			// "uuid:slug" when the record was created via the v2 platform.
-			// The UUID prefix is extracted directly without an SFID map lookup.
-			name: "uuid:slug composite - uuid extracted",
-			projects: []legacyWorkspaceProject{
-				{ProjectSFID: "56fa1b4b-eca7-4824-a635-504a5e9a38cb:iree"},
-				{ProjectSFID: "8234d49d-b9ca-4ba0-a287-0c7585c96590:ptproject"},
-			},
-			wantUIDs: []string{
-				"56fa1b4b-eca7-4824-a635-504a5e9a38cb",
-				"8234d49d-b9ca-4ba0-a287-0c7585c96590",
-			},
-		},
-		{
-			// Mixed: some uuid:slug and some legacy SFIDs in the same workspace.
-			name: "mixed uuid:slug and sfid",
-			projects: []legacyWorkspaceProject{
-				{ProjectSFID: "56fa1b4b-eca7-4824-a635-504a5e9a38cb:iree"},
-				{ProjectSFID: "sfid-A"},
-				{ProjectSFID: "sfid-MISSING"},
-			},
-			wantUIDs: []string{
-				"56fa1b4b-eca7-4824-a635-504a5e9a38cb",
-				"uid-A",
-			},
-		},
-		{
-			// A uuid:slug where the slug portion contains a colon (edge case) —
-			// only the first segment is used as the UUID.
-			name: "uuid:slug with colon in slug",
-			projects: []legacyWorkspaceProject{
-				{ProjectSFID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:slug:extra"},
-			},
-			wantUIDs: []string{"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+	ws := legacyWorkspace{
+		ID:      "ws-1",
+		Name:    "Test",
+		OrgSFID: "sfid-org",
+		Projects: []legacyWorkspaceProject{
+			{ProjectSFID: "56fa1b4b-eca7-4824-a635-504a5e9a38cb:iree"},
+			{ProjectSFID: "sfid-A"},
+			{ProjectSFID: "sfid-B", Deleted: true},
+			{ProjectSFID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:slug:extra"},
+			{ProjectSFID: ""},
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ws := legacyWorkspace{ID: "ws-1", Name: "Test", OrgSFID: "sfid-org", Projects: tc.projects}
-			uids := resolveProjectUIDs(ctx, ws, mappings)
+	got := desiredProjectSlugs(ctx, ws)
+	want := []string{
+		"56fa1b4b-eca7-4824-a635-504a5e9a38cb:iree",
+		"sfid-A",
+		"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:slug:extra",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("desiredProjectSlugs() = %v, want %v", got, want)
+	}
+}
 
-			if len(uids) != len(tc.wantUIDs) {
-				t.Errorf("uid count = %d, want %d; got %v", len(uids), len(tc.wantUIDs), uids)
-			}
-			for i, want := range tc.wantUIDs {
-				if i >= len(uids) {
-					t.Errorf("missing uid at index %d; want %q", i, want)
-					continue
-				}
-				if uids[i] != want {
-					t.Errorf("uid[%d] = %q, want %q", i, uids[i], want)
-				}
-			}
-		})
+func TestReconcileProjectsDoesNotCachePartialProjectFailures(t *testing.T) {
+	setupMembersTestGlobals(t)
+
+	responseBody := workspaceBulkResponse{
+		Workspace: workspaceResponse{UID: "ws-001", Name: "Test WS"},
+		Failed: []workspaceBulkAddItemError{
+			{Slug: "vllm", Error: "unknown project \"vllm\": project not found"},
+		},
+	}
+	bodyBytes, _ := json.Marshal(responseBody)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bodyBytes)
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	cfg.MemberServiceURL = u
+
+	updated := 0
+	projectsAdded := 0
+	projectsRemoved := 0
+	errors := 0
+
+	reconcileProjects(
+		context.Background(),
+		legacyWorkspace{ID: "ws-1", Name: "Test WS"},
+		"org-001",
+		"ws-001",
+		[]string{"vllm"},
+		nil,
+		false,
+		false,
+		&updated,
+		&projectsAdded,
+		&projectsRemoved,
+		&errors,
+	)
+
+	if projectsAdded != 0 {
+		t.Fatalf("projectsAdded = %d, want 0", projectsAdded)
+	}
+	if updated != 0 {
+		t.Fatalf("updated = %d, want 0; failed associations must not cache project-set success", updated)
+	}
+	if errors != 1 {
+		t.Fatalf("errors = %d, want 1", errors)
+	}
+}
+
+// TestReconcileProjectsDoesNotCacheOnPartialSuccess verifies that when one
+// project in a bulk-add succeeds and another fails, the successful add is
+// still counted (updated, projectsAdded) but the project-set cache is not
+// persisted — a re-run must recompute the delta rather than trust a partial
+// apply. mappingsKV is left nil by setupMembersTestGlobals, so a stray
+// putWorkspaceCacheEntry call here would panic.
+func TestReconcileProjectsDoesNotCacheOnPartialSuccess(t *testing.T) {
+	setupMembersTestGlobals(t)
+
+	responseBody := workspaceBulkResponse{
+		Workspace: workspaceResponse{
+			UID:  "ws-001",
+			Name: "Test WS",
+			Projects: []workspaceProject{
+				{UID: "gen-uid-vllm", Slug: "vllm"},
+			},
+		},
+		Succeeded: []string{"vllm"},
+		Failed: []workspaceBulkAddItemError{
+			{Slug: "bad-project", Error: "unknown project \"bad-project\": project not found"},
+		},
+	}
+	bodyBytes, _ := json.Marshal(responseBody)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bodyBytes)
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	cfg.MemberServiceURL = u
+
+	updated := 0
+	projectsAdded := 0
+	projectsRemoved := 0
+	errors := 0
+
+	reconcileProjects(
+		context.Background(),
+		legacyWorkspace{ID: "ws-1", Name: "Test WS"},
+		"org-001",
+		"ws-001",
+		[]string{"vllm", "bad-project"},
+		nil,
+		false,
+		false,
+		&updated,
+		&projectsAdded,
+		&projectsRemoved,
+		&errors,
+	)
+
+	if projectsAdded != 1 {
+		t.Fatalf("projectsAdded = %d, want 1", projectsAdded)
+	}
+	if updated != 1 {
+		t.Fatalf("updated = %d, want 1; a partial success must still be reported as an update", updated)
+	}
+	if errors != 1 {
+		t.Fatalf("errors = %d, want 1", errors)
+	}
+}
+
+// TestReconcileProjectsDedupesDuplicateDesiredSlugs verifies that a
+// workspace with two non-deleted associations sharing the same project_id
+// sends each slug to member-service only once, instead of a duplicate
+// bulk-add entry per repeated desiredSlugs value. The response reports the
+// slug as failed (rather than succeeded) so the assertion can be made
+// without exercising the project-set cache write, which needs a mappingsKV
+// that setupMembersTestGlobals does not provide (see
+// TestReconcileProjectsDoesNotCacheOnPartialSuccess).
+func TestReconcileProjectsDedupesDuplicateDesiredSlugs(t *testing.T) {
+	setupMembersTestGlobals(t)
+
+	var gotSlugs []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body workspaceBulkAddBody
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+		for _, item := range body.Projects {
+			gotSlugs = append(gotSlugs, item.Slug)
+		}
+		responseBody := workspaceBulkResponse{
+			Workspace: workspaceResponse{UID: "ws-001"},
+			Failed: []workspaceBulkAddItemError{
+				{Slug: "vllm", Error: "unknown project \"vllm\": project not found"},
+			},
+		}
+		bodyBytes, _ := json.Marshal(responseBody)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bodyBytes)
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	cfg.MemberServiceURL = u
+
+	updated := 0
+	projectsAdded := 0
+	projectsRemoved := 0
+	errors := 0
+
+	reconcileProjects(
+		context.Background(),
+		legacyWorkspace{ID: "ws-1", Name: "Test WS"},
+		"org-001",
+		"ws-001",
+		[]string{"vllm", "vllm"},
+		nil,
+		false,
+		false,
+		&updated,
+		&projectsAdded,
+		&projectsRemoved,
+		&errors,
+	)
+
+	want := []string{"vllm"}
+	if !reflect.DeepEqual(gotSlugs, want) {
+		t.Fatalf("bulk-add request slugs = %v, want %v", gotSlugs, want)
+	}
+	if errors != 1 {
+		t.Fatalf("errors = %d, want 1", errors)
+	}
+}
+
+// TestReconcileProjectsDryRunMakesNoCallsAndNoCacheWrite verifies dry-run
+// computes planned add/remove counts without calling member-service or
+// writing to the workspace project cache.
+func TestReconcileProjectsDryRunMakesNoCallsAndNoCacheWrite(t *testing.T) {
+	setupMembersTestGlobals(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected member-service call in dry-run: %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	cfg.MemberServiceURL = u
+
+	updated := 0
+	projectsAdded := 0
+	projectsRemoved := 0
+	errors := 0
+
+	reconcileProjects(
+		context.Background(),
+		legacyWorkspace{ID: "ws-1", Name: "Test WS"},
+		"org-001",
+		"ws-001",
+		[]string{"vllm"},
+		[]workspaceCacheProject{{Slug: "stale-project", UID: "uid-stale"}},
+		true,
+		false,
+		&updated,
+		&projectsAdded,
+		&projectsRemoved,
+		&errors,
+	)
+
+	if projectsAdded != 1 {
+		t.Fatalf("projectsAdded = %d, want 1", projectsAdded)
+	}
+	if projectsRemoved != 1 {
+		t.Fatalf("projectsRemoved = %d, want 1", projectsRemoved)
+	}
+	if updated != 1 {
+		t.Fatalf("updated = %d, want 1", updated)
+	}
+	if errors != 0 {
+		t.Fatalf("errors = %d, want 0", errors)
+	}
+}
+
+// TestBulkAddProjectsMatchesGeneratedUIDFromWorkspaceProjects verifies a
+// successful bulk-add returns the project_slug -> generated project_uid
+// pairs matched from the response's nested workspace.projects[], not from
+// the succeeded list (which carries slugs only).
+func TestBulkAddProjectsMatchesGeneratedUIDFromWorkspaceProjects(t *testing.T) {
+	setupMembersTestGlobals(t)
+
+	responseBody := workspaceBulkResponse{
+		Workspace: workspaceResponse{
+			UID:  "ws-001",
+			Name: "Test WS",
+			Projects: []workspaceProject{
+				{UID: "gen-uid-vllm", Slug: "vllm"},
+			},
+		},
+		Succeeded: []string{"vllm"},
+	}
+	bodyBytes, _ := json.Marshal(responseBody)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bodyBytes)
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	cfg.MemberServiceURL = u
+
+	projectsAdded := 0
+	errors := 0
+	added := bulkAddProjects(
+		context.Background(),
+		legacyWorkspace{ID: "ws-1", Name: "Test WS"},
+		"org-001", "ws-001",
+		[]string{"vllm"},
+		false,
+		&projectsAdded, &errors,
+	)
+
+	if errors != 0 {
+		t.Fatalf("errors = %d, want 0", errors)
+	}
+	if projectsAdded != 1 {
+		t.Fatalf("projectsAdded = %d, want 1", projectsAdded)
+	}
+	want := []workspaceCacheProject{{Slug: "vllm", UID: "gen-uid-vllm"}}
+	if !reflect.DeepEqual(added, want) {
+		t.Fatalf("added = %v, want %v", added, want)
+	}
+}
+
+// TestBulkAddProjectsCountsErrorOnMissingUIDMatch verifies that a slug
+// reported as succeeded but absent from workspace.projects[] is counted as
+// an error and not silently dropped.
+func TestBulkAddProjectsCountsErrorOnMissingUIDMatch(t *testing.T) {
+	setupMembersTestGlobals(t)
+
+	responseBody := workspaceBulkResponse{
+		Workspace: workspaceResponse{
+			UID:  "ws-001",
+			Name: "Test WS",
+		},
+		Succeeded: []string{"vllm"},
+	}
+	bodyBytes, _ := json.Marshal(responseBody)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bodyBytes)
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	cfg.MemberServiceURL = u
+
+	projectsAdded := 0
+	errors := 0
+	added := bulkAddProjects(
+		context.Background(),
+		legacyWorkspace{ID: "ws-1", Name: "Test WS"},
+		"org-001", "ws-001",
+		[]string{"vllm"},
+		false,
+		&projectsAdded, &errors,
+	)
+
+	if errors != 1 {
+		t.Fatalf("errors = %d, want 1", errors)
+	}
+	if projectsAdded != 0 {
+		t.Fatalf("projectsAdded = %d, want 0", projectsAdded)
+	}
+	if len(added) != 0 {
+		t.Fatalf("added = %v, want empty", added)
 	}
 }
 

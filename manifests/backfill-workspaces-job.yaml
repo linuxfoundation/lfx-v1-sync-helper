@@ -8,8 +8,8 @@
 # never removed without a corresponding v1 soft-delete.
 #
 # One-shot: this manifest is applied manually via kubectl apply — it is NOT
-# managed by argocd and runs on demand only (after WAL publication is applied
-# per environment).
+# managed by argocd and runs on demand only after the tap-postgres catalog
+# ConfigMap is applied and workspace rows are replicated per environment.
 #
 # Dry run: to preview changes without writing, add "--dry-run" to args below
 # before applying. Remove it for the live run.

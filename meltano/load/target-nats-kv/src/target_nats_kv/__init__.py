@@ -61,7 +61,7 @@ def build_primary_key_value(
         # ":" is a valid column value (e.g. project_id stores "uuid:slug") but
         # JetStream KV rejects it in subject tokens at runtime (InvalidKeyError).
         # Normalize it to "_" in the key only; the payload is stored unchanged so
-        # the Go backfill can still split on ":" to extract the UUID prefix.
+        # the Go backfill reads the full project_id verbatim.
         primary_key_part = primary_key_part.replace(":", "_")
         # Guard against remaining JetStream-invalid characters.
         if len(primary_key_part) == 0:
