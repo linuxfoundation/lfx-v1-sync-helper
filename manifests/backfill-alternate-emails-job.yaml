@@ -1,40 +1,44 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
 #
-# One-shot Job to backfill legacy platform.organization_workspace and
-# organization_workspace_project records into the v2 member-service. Reads
-# workspace records from the v1-objects NATS KV bucket and syncs them
-# additively into v2 via the b2b_org workspaces API. Existing v2 entries are
-# never removed without a corresponding v1 soft-delete.
+# One-shot Job to backfill v1 verified alternate emails to Auth0 linked
+# email-connection identities.
+#
+# Iterates Auth0 users (Username-Password-Authentication connection only),
+# sorted by updated_at ascending. For each user, resolves the v1 SFID,
+# fetches alternate email SFIDs from the v1-mappings KV bucket, and calls
+# linkEmailIdentity for any verified, active, non-primary email not yet linked.
+# A cursor stored at v1-mappings key "backfill.alternate-emails.cursor"
+# enables resumable runs: re-run the job to advance the cursor.
 #
 # One-shot: this manifest is applied manually via kubectl apply — it is NOT
-# managed by argocd and runs on demand only after the tap-postgres catalog
-# ConfigMap is applied and workspace rows are replicated per environment.
+# managed by argocd and runs on demand only.
 #
-# Dry run: to preview changes without writing, add "--dry-run" to args below
-# before applying. Remove it for the live run.
+# To adjust the batch size, change the --limit arg below (default: 1000 users).
 #
-# Credentials: every valueFrom.secretKeyRef below references a Kubernetes
-# Secret already provisioned in the v1-sync-helper namespace. Only secret
-# names are committed here — the kubelet resolves actual values at pod start.
-# Safe to commit.
+# Dry run: to preview without writing, add "--dry-run" to args before applying.
+# Remove it for the live run.
+#
+# Credentials: every valueFrom.secretKeyRef below references a Kubernetes Secret
+# already provisioned in the v1-sync-helper namespace. Only secret names are
+# committed here. Safe to commit.
 #
 # Deploy with:
-#   kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-workspaces-job.yaml
+#   kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-alternate-emails-job.yaml
 #
 # Monitor:
-#   kubectl --context lfx-v2-prod -n v1-sync-helper logs -f --timestamps=true job/backfill-workspaces
+#   kubectl --context lfx-v2-prod -n v1-sync-helper logs -f --timestamps=true job/backfill-alternate-emails
 #
-# Cancel:
-#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-workspaces
+# Abort:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-alternate-emails
 #
 # Clean up (auto-cleans after 1h via ttlSecondsAfterFinished):
-#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-workspaces
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-alternate-emails
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: backfill-workspaces
+  name: backfill-alternate-emails
   namespace: v1-sync-helper
   labels:
     app.kubernetes.io/name: lfx-v1-sync-helper
@@ -58,7 +62,7 @@ spec:
           #     -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'
           image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:latest
           imagePullPolicy: IfNotPresent
-          args: ["--backfill-workspaces"]
+          args: ["--backfill-alternate-emails", "--limit", "1000"]
           env:
             - name: NATS_URL
               value: "nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
@@ -66,14 +70,18 @@ spec:
               value: "linuxfoundation"
             - name: BIND
               value: "*"
+            - name: COMMITTEE_SERVICE_URL
+              value: "http://lfx-v2-committee-service.committee-service.svc.cluster.local:8080"
             - name: HEIMDALL_JWKS_URL
               value: "http://lfx-platform-heimdall.lfx.svc.cluster.local:4457/.well-known/jwks"
             - name: HEIMDALL_KEY_ID
               value: "prod-rsa-2025-12-12-001"
-            - name: MEMBER_SERVICE_URL
-              value: "http://lfx-v2-member-service.member-service.svc.cluster.local:8080"
+            - name: LFX_API_GW
+              value: "https://api-gw.platform.linuxfoundation.org/"
             - name: PORT
               value: "8080"
+            - name: PROJECT_SERVICE_URL
+              value: "http://lfx-v2-project-service.project-service.svc.cluster.local:8080"
             - name: USE_MSGPACK
               value: "1"
             # Before applying: replace this value with the HEIMDALL_CLIENT_ID from the

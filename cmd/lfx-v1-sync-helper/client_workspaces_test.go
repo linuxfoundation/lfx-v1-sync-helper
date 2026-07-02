@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -44,6 +45,11 @@ func TestCreateWorkspace(t *testing.T) {
 			status:  http.StatusInternalServerError,
 			wantErr: true,
 		},
+		{
+			name:    "404 org not found returns sentinel",
+			status:  http.StatusNotFound,
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -67,6 +73,9 @@ func TestCreateWorkspace(t *testing.T) {
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
+				}
+				if tc.status == http.StatusNotFound && !errors.Is(err, errWorkspaceOrgNotFound) {
+					t.Fatalf("err = %v, want errWorkspaceOrgNotFound", err)
 				}
 				return
 			}
@@ -173,12 +182,16 @@ func TestBulkAddWorkspaceProjects(t *testing.T) {
 		Workspace: workspaceResponse{UID: "ws-001", Name: "Test WS"},
 		Succeeded: []string{"proj-a", "proj-b"},
 		Failed: []workspaceBulkAddItemError{
-			{ProjectID: "proj-c", Error: "project not found"},
+			{Slug: "proj-c", Error: "project not found"},
 		},
 	}
 	bodyBytes, _ := json.Marshal(responseBody)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var gotBody workspaceBulkAddBody
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("failed to decode request body: %v", err)
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(bodyBytes)
 	}))
@@ -197,7 +210,20 @@ func TestBulkAddWorkspaceProjects(t *testing.T) {
 	if len(resp.Failed) != 1 {
 		t.Errorf("failed count = %d, want 1", len(resp.Failed))
 	}
-	if resp.Failed[0].ProjectID != "proj-c" {
-		t.Errorf("failed[0].project_id = %q, want %q", resp.Failed[0].ProjectID, "proj-c")
+	if resp.Failed[0].Slug != "proj-c" {
+		t.Errorf("failed[0].project_slug = %q, want %q", resp.Failed[0].Slug, "proj-c")
+	}
+
+	wantProjects := []workspaceBulkAddItem{{Slug: "proj-a"}, {Slug: "proj-b"}, {Slug: "proj-c"}}
+	if len(gotBody.Projects) != len(wantProjects) {
+		t.Fatalf("request body projects = %+v, want %+v", gotBody.Projects, wantProjects)
+	}
+	for i, p := range gotBody.Projects {
+		if p != wantProjects[i] {
+			t.Errorf("request body projects[%d] = %+v, want %+v", i, p, wantProjects[i])
+		}
+		if p.Name != "" {
+			t.Errorf("request body projects[%d].project_name = %q, want empty", i, p.Name)
+		}
 	}
 }

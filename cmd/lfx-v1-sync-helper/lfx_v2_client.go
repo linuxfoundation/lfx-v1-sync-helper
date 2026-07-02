@@ -224,6 +224,8 @@ func initGoaClients(cfg *Config) error {
 			committeeHTTPClient.Livez(),
 			committeeHTTPClient.CreateCommitteeMember(),
 			committeeHTTPClient.GetCommitteeMember(),
+			committeeHTTPClient.GetOrgCommitteeSeats(),
+			committeeHTTPClient.ReassignOrgCommitteeSeat(),
 			committeeHTTPClient.UpdateCommitteeMember(),
 			committeeHTTPClient.DeleteCommitteeMember(),
 			committeeHTTPClient.GetInvite(),
@@ -249,6 +251,9 @@ func initGoaClients(cfg *Config) error {
 			committeeHTTPClient.GetCommitteeDocument(),
 			committeeHTTPClient.DownloadCommitteeDocument(),
 			committeeHTTPClient.DeleteCommitteeDocument(),
+			committeeHTTPClient.GetCurrentWeeklyBrief(),
+			committeeHTTPClient.GenerateWeeklyBrief(),
+			committeeHTTPClient.UpdateCurrentWeeklyBrief(),
 		)
 	}
 

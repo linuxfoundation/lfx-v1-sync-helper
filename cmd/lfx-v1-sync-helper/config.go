@@ -55,12 +55,6 @@ type Config struct {
 	DynamoDBIngestEnabled bool   // Whether to consume dynamodb_streams events (default: false)
 	DynamoDBStreamName    string // NATS stream name to consume (default: "dynamodb_streams")
 
-	// ProfileSyncBackfill switches v1→Auth0 profile sync from the default
-	// async/always-ACK path (with SDK retry) to a sync/NACK-on-retryable path
-	// (no SDK retry). Intended for bounded backfill runs where JetStream
-	// redelivery provides the backoff needed to avoid cascading 429s.
-	ProfileSyncBackfill bool
-
 	// NATSFetchMaxWait is the per-Fetch timeout used when scanning large
 	// KV streams with sparse subject filters (backfill and reindex passes).
 	// Both KV_v1-mappings and KV_v1-objects have millions of sequences; a
@@ -104,6 +98,13 @@ type Config struct {
 	ProjectFamilyAllowlistFile string   // Path to a YAML list file; overrides PROJECT_FAMILY_ALLOWLIST
 	ProjectAllowlist           []string // Root slugs synced without their children
 	ProjectFamilyAllowlist     []string // Root slugs synced together with all descendants
+
+	// CommitteeSkipMemberNotifications controls whether committee member creates
+	// from this sync process suppress V2 notification emails. When true (default),
+	// skip_notification is set on every member create so V1-synced adds are silent.
+	// Set COMMITTEE_SKIP_MEMBER_NOTIFICATIONS=false to allow emails from V1-sync
+	// (e.g. when enabling notifications more broadly at GA).
+	CommitteeSkipMemberNotifications bool
 }
 
 const (
@@ -166,18 +167,18 @@ func LoadConfig() (*Config, error) {
 		Auth0ClientID:   os.Getenv("AUTH0_CLIENT_ID"),
 		Auth0PrivateKey: os.Getenv("AUTH0_PRIVATE_KEY"),
 		// Other configuration
-		NATSURL:                    os.Getenv("NATS_URL"),
-		Port:                       os.Getenv("PORT"),
-		Bind:                       os.Getenv("BIND"),
-		Debug:                      parseBooleanEnv("DEBUG"),
-		HTTPDebug:                  parseBooleanEnv("HTTP_DEBUG"),
-		UseMsgpack:                 parseBooleanEnv("USE_MSGPACK"),
-		DynamoDBIngestEnabled:      parseBooleanEnv("DYNAMODB_INGEST_ENABLED"),
-		DynamoDBStreamName:         os.Getenv("DYNAMODB_STREAM_NAME"),
-		ProfileSyncBackfill:        parseBooleanEnv("PROFILE_SYNC_BACKFILL"),
-		NATSFetchMaxWait:           parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
-		ProjectAllowlistFile:       os.Getenv("PROJECT_ALLOWLIST_FILE"),
-		ProjectFamilyAllowlistFile: os.Getenv("PROJECT_FAMILY_ALLOWLIST_FILE"),
+		NATSURL:                          os.Getenv("NATS_URL"),
+		Port:                             os.Getenv("PORT"),
+		Bind:                             os.Getenv("BIND"),
+		Debug:                            parseBooleanEnv("DEBUG"),
+		HTTPDebug:                        parseBooleanEnv("HTTP_DEBUG"),
+		UseMsgpack:                       parseBooleanEnv("USE_MSGPACK"),
+		DynamoDBIngestEnabled:            parseBooleanEnv("DYNAMODB_INGEST_ENABLED"),
+		CommitteeSkipMemberNotifications: parseBooleanEnvWithDefault("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS", true),
+		DynamoDBStreamName:               os.Getenv("DYNAMODB_STREAM_NAME"),
+		NATSFetchMaxWait:                 parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
+		ProjectAllowlistFile:             os.Getenv("PROJECT_ALLOWLIST_FILE"),
+		ProjectFamilyAllowlistFile:       os.Getenv("PROJECT_FAMILY_ALLOWLIST_FILE"),
 	}
 
 	// Project allowlists — file path overrides env var overrides built-in defaults.
@@ -336,6 +337,18 @@ func readYAMLListFile(path string) ([]string, error) {
 //   - parseBooleanEnv("USE_MSGPACK") where USE_MSGPACK="" returns false
 func parseBooleanEnv(envVar string) bool {
 	value := strings.ToLower(strings.TrimSpace(os.Getenv(envVar)))
+	truthyValues := []string{"true", "yes", "t", "y", "1"}
+	return slices.Contains(truthyValues, value)
+}
+
+// parseBooleanEnvWithDefault is like parseBooleanEnv but returns def when the
+// variable is unset or empty. Truthy tokens (true/yes/t/y/1) return true; any
+// other non-empty value (false/no/0/off) returns false.
+func parseBooleanEnvWithDefault(envVar string, def bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(envVar)))
+	if value == "" {
+		return def
+	}
 	truthyValues := []string{"true", "yes", "t", "y", "1"}
 	return slices.Contains(truthyValues, value)
 }

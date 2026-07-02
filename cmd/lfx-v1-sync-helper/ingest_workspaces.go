@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"hash/fnv"
 	"net/http"
@@ -188,21 +189,29 @@ func collectLegacyWorkspaces(ctx context.Context) ([]legacyWorkspace, error) {
 }
 
 // workspaceCacheKey returns the v1-mappings key for a workspace cache entry.
-// key format: workspace.<orgUID>.<fnv32hex(name)>
+// key format: workspace.uid.<orgUID>.<fnv32hex(name)>
 func workspaceCacheKey(orgUID, name string) string {
-	return fmt.Sprintf("workspace.%s.%s", orgUID, fnv32hex(name))
+	return fmt.Sprintf("workspace.uid.%s.%s", orgUID, fnv32hex(name))
+}
+
+// workspaceCacheProject is one project association's cached state: the
+// caller-owned project_slug (the full source project_id string) and the
+// member-service generated project_uid needed to issue a delete later.
+type workspaceCacheProject struct {
+	Slug string `json:"slug"`
+	UID  string `json:"uid"`
 }
 
 // workspaceCacheEntry is persisted as JSON in v1-mappings so re-runs can compute
 // the project association diff without a GET endpoint.
 type workspaceCacheEntry struct {
-	UID      string   `json:"uid"`
-	Projects []string `json:"projects"`
+	UID      string                  `json:"uid"`
+	Projects []workspaceCacheProject `json:"projects"`
 }
 
 // getWorkspaceCacheEntry retrieves uid and projects from the cache in one KV read.
 // Returns ("", nil, nil) on a cache miss or tombstone.
-func getWorkspaceCacheEntry(ctx context.Context, orgUID, name string) (uid string, projects []string, err error) {
+func getWorkspaceCacheEntry(ctx context.Context, orgUID, name string) (uid string, projects []workspaceCacheProject, err error) {
 	key := workspaceCacheKey(orgUID, name)
 	entry, kvErr := mappingsKV.Get(ctx, key)
 	if kvErr != nil {
@@ -226,10 +235,10 @@ func getWorkspaceCacheEntry(ctx context.Context, orgUID, name string) (uid strin
 }
 
 // putWorkspaceCacheEntry stores uid + current project set in v1-mappings.
-func putWorkspaceCacheEntry(ctx context.Context, orgUID, name, workspaceUID string, projects []string) error {
+func putWorkspaceCacheEntry(ctx context.Context, orgUID, name, workspaceUID string, projects []workspaceCacheProject) error {
 	key := workspaceCacheKey(orgUID, name)
 	if projects == nil {
-		projects = []string{}
+		projects = []workspaceCacheProject{}
 	}
 	data, err := json.Marshal(workspaceCacheEntry{UID: workspaceUID, Projects: projects})
 	if err != nil {
@@ -275,12 +284,6 @@ func backfillWorkspaces(ctx context.Context, dryRun bool) error {
 		logger.InfoContext(ctx, "running workspace backfill in dry-run mode — no changes will be written")
 	}
 
-	// projectMappings is collected once and shared across all workspace reconciliations.
-	projectMappings, err := collectProjectSFIDMappings(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to collect project SFID mappings: %w", err)
-	}
-
 	workspaces, err := collectLegacyWorkspaces(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to collect legacy workspaces: %w", err)
@@ -292,7 +295,7 @@ func backfillWorkspaces(ctx context.Context, dryRun bool) error {
 
 	for _, ws := range workspaces {
 		workspacesTotal++
-		reconcileWorkspace(ctx, ws, projectMappings, dryRun,
+		reconcileWorkspace(ctx, ws, dryRun,
 			&created, &updated, &deleted,
 			&projectsAdded, &projectsRemoved,
 			&skipped, &errors)
@@ -320,7 +323,6 @@ func backfillWorkspaces(ctx context.Context, dryRun bool) error {
 func reconcileWorkspace(
 	ctx context.Context,
 	ws legacyWorkspace,
-	projectMappings map[string]string,
 	dryRun bool,
 	created, updated, deleted *int,
 	projectsAdded, projectsRemoved *int,
@@ -356,12 +358,12 @@ func reconcileWorkspace(
 		return
 	}
 
-	// Resolve project IDs → desired v2 UID set (unmappable projects skipped).
-	desiredUIDs := resolveProjectUIDs(ctx, ws, projectMappings)
+	// Every non-empty project_id is sent verbatim as project_slug.
+	desiredSlugs := desiredProjectSlugs(ctx, ws)
 
 	// Create or cache-hit path.
-	reconcileUpsertWorkspace(ctx, ws, orgUID, desiredUIDs, dryRun,
-		created, updated, projectsAdded, projectsRemoved, errors)
+	reconcileUpsertWorkspace(ctx, ws, orgUID, desiredSlugs, dryRun,
+		created, updated, projectsAdded, projectsRemoved, skipped, errors)
 }
 
 // reconcileDeleteWorkspace handles the delete branch for a workspace marked deleted in v1.
@@ -403,49 +405,25 @@ func reconcileDeleteWorkspace(
 	*deleted++
 }
 
-// resolveProjectUIDs maps each non-deleted project reference to its v2 UID.
-//
-// The platform.organization_workspace_project table stores project_id as either
-// a Salesforce legacy SFID or a "uuid:slug" composite (e.g. "a1b2c3-…:iree").
-// When the field already embeds the v2 UUID we extract it directly; otherwise we
-// fall back to the SFID→UID mappings from collectProjectSFIDMappings.
-// Unmappable entries are logged and excluded.
-//
-// Unmappable projects are a per-project skip — they do NOT
-// increment the workspace-level workspaces_skipped counter; the workspace itself
-// still proceeds to create/update with the mappable subset.
-func resolveProjectUIDs(
-	ctx context.Context,
-	ws legacyWorkspace,
-	projectMappings map[string]string,
-) []string {
-	var uids []string
+// desiredProjectSlugs returns the full, unmodified source project_id value
+// for each non-deleted workspace-project reference, to be sent verbatim as
+// project_slug (member-service PR #67 makes project_slug an opaque
+// caller-owned string with no catalog validation). No
+// split on ":", no NATS or v1-mappings lookup, and no row is skipped for
+// any project_id shape — only a genuinely empty value is excluded.
+func desiredProjectSlugs(ctx context.Context, ws legacyWorkspace) []string {
+	var slugs []string
 	for _, p := range ws.Projects {
 		if p.Deleted {
 			continue
 		}
 		if p.ProjectSFID == "" {
-			logger.With("workspace_id", ws.ID).WarnContext(ctx, "skipping project with empty SFID")
+			logger.With("workspace_id", ws.ID).WarnContext(ctx, "skipping project with empty project_id")
 			continue
 		}
-
-		// "uuid:slug" composite — extract the UUID prefix directly.
-		if colonIdx := strings.Index(p.ProjectSFID, ":"); colonIdx > 0 {
-			uid := p.ProjectSFID[:colonIdx]
-			uids = append(uids, uid)
-			continue
-		}
-
-		// Legacy Salesforce SFID — look up via the v1-mappings project.sfid.* index.
-		uid, ok := projectMappings[p.ProjectSFID]
-		if !ok || uid == "" {
-			logger.With("workspace_id", ws.ID, "project_sfid", p.ProjectSFID).
-				InfoContext(ctx, "project SFID has no v2 UID mapping, skipping project")
-			continue
-		}
-		uids = append(uids, uid)
+		slugs = append(slugs, p.ProjectSFID)
 	}
-	return uids
+	return slugs
 }
 
 // reconcileUpsertWorkspace implements the create-or-update path.
@@ -453,11 +431,11 @@ func reconcileUpsertWorkspace(
 	ctx context.Context,
 	ws legacyWorkspace,
 	orgUID string,
-	desiredUIDs []string,
+	desiredSlugs []string,
 	dryRun bool,
 	created, updated *int,
 	projectsAdded, projectsRemoved *int,
-	errors *int,
+	skipped, errors *int,
 ) {
 	uid, currentProjects, err := getWorkspaceCacheEntry(ctx, orgUID, ws.Name)
 	if err != nil {
@@ -469,9 +447,9 @@ func reconcileUpsertWorkspace(
 	var wasCreated bool
 	if uid == "" {
 		// Cache miss — attempt create.
-		uid, currentProjects, wasCreated, err = createAndCacheWorkspace(ctx, ws, orgUID, dryRun, errors)
+		uid, currentProjects, wasCreated, err = createAndCacheWorkspace(ctx, ws, orgUID, dryRun, skipped, errors)
 		if err != nil || uid == "" {
-			return // already counted in errors
+			return // already counted (errors or skipped)
 		}
 		if wasCreated {
 			*created++
@@ -479,20 +457,21 @@ func reconcileUpsertWorkspace(
 	}
 
 	// Diff desired vs current project set and reconcile.
-	reconcileProjects(ctx, ws, orgUID, uid, desiredUIDs, currentProjects, dryRun,
+	reconcileProjects(ctx, ws, orgUID, uid, desiredSlugs, currentProjects, dryRun,
 		wasCreated, updated, projectsAdded, projectsRemoved, errors)
 }
 
 // createAndCacheWorkspace creates a new workspace and stores the uid in the cache.
 // wasCreated is true only for a real 201 create; false for a 409 cache-recovery.
-// Returns ("", nil, false, nil) on a 409 cache-miss (already counted in errors).
+// Returns ("", nil, false, nil) when the org UID is not found in v2 (counted in skipped).
+// Returns ("", nil, false, err) on 409 cache-miss or other create/cache failure (counted in errors).
 func createAndCacheWorkspace(
 	ctx context.Context,
 	ws legacyWorkspace,
 	orgUID string,
 	dryRun bool,
-	errors *int,
-) (uid string, currentProjects []string, wasCreated bool, err error) {
+	skipped, errors *int,
+) (uid string, currentProjects []workspaceCacheProject, wasCreated bool, err error) {
 	if dryRun {
 		logger.With("workspace_id", ws.ID, "name", ws.Name, "org_uid", orgUID).
 			InfoContext(ctx, "[dry-run] would create workspace")
@@ -501,6 +480,12 @@ func createAndCacheWorkspace(
 
 	resp, conflict, err := createWorkspace(ctx, orgUID, ws.Name)
 	if err != nil {
+		if stderrors.Is(err, errWorkspaceOrgNotFound) {
+			logger.With(errKey, err, "workspace_id", ws.ID, "org_uid", orgUID).
+				WarnContext(ctx, "workspace org not found in v2, skipping")
+			*skipped++
+			return "", nil, false, nil
+		}
 		logger.With(errKey, err, "workspace_id", ws.ID).ErrorContext(ctx, "failed to create workspace, skipping")
 		*errors++
 		return "", nil, false, err
@@ -521,7 +506,7 @@ func createAndCacheWorkspace(
 
 	// 201: cache uid + initial project set for accurate removal diff on re-runs.
 	for _, p := range resp.Projects {
-		currentProjects = append(currentProjects, p.UID)
+		currentProjects = append(currentProjects, workspaceCacheProject{Slug: p.Slug, UID: p.UID})
 	}
 	if err := putWorkspaceCacheEntry(ctx, orgUID, ws.Name, resp.UID, currentProjects); err != nil {
 		logger.With(errKey, err, "workspace_id", ws.ID, "workspace_uid", resp.UID).
@@ -532,39 +517,47 @@ func createAndCacheWorkspace(
 	return resp.UID, currentProjects, true, nil
 }
 
-// reconcileProjects diffs desired vs current project UIDs and applies adds/removes.
-// After any change it persists the new project set to the cache so subsequent
-// re-runs can compute an accurate diff without a GET endpoint.
+// reconcileProjects diffs desired vs current project_slug sets and applies
+// adds/removes. After any change it persists the new project set to the
+// cache so subsequent re-runs can compute an accurate diff without a GET
+// endpoint.
 func reconcileProjects(
 	ctx context.Context,
 	ws legacyWorkspace,
 	orgUID, workspaceUID string,
-	desiredUIDs, currentUIDs []string,
+	desiredSlugs []string,
+	currentProjects []workspaceCacheProject,
 	dryRun bool,
 	justCreated bool,
 	updated *int,
 	projectsAdded, projectsRemoved *int,
 	errors *int,
 ) {
-	current := make(map[string]struct{}, len(currentUIDs))
-	for _, u := range currentUIDs {
-		current[u] = struct{}{}
+	currentBySlug := make(map[string]workspaceCacheProject, len(currentProjects))
+	for _, p := range currentProjects {
+		currentBySlug[p.Slug] = p
 	}
-	desired := make(map[string]struct{}, len(desiredUIDs))
-	for _, u := range desiredUIDs {
-		desired[u] = struct{}{}
+	desired := make(map[string]struct{}, len(desiredSlugs))
+	for _, s := range desiredSlugs {
+		desired[s] = struct{}{}
 	}
 
 	var toAdd []string
-	for u := range desired {
-		if _, ok := current[u]; !ok {
-			toAdd = append(toAdd, u)
+	seenToAdd := make(map[string]struct{}, len(desiredSlugs))
+	for _, s := range desiredSlugs {
+		if _, ok := currentBySlug[s]; ok {
+			continue
 		}
+		if _, ok := seenToAdd[s]; ok {
+			continue
+		}
+		seenToAdd[s] = struct{}{}
+		toAdd = append(toAdd, s)
 	}
-	var toRemove []string
-	for u := range current {
-		if _, ok := desired[u]; !ok {
-			toRemove = append(toRemove, u)
+	var toRemove []workspaceCacheProject
+	for slug, p := range currentBySlug {
+		if _, ok := desired[slug]; !ok {
+			toRemove = append(toRemove, p)
 		}
 	}
 
@@ -573,43 +566,57 @@ func reconcileProjects(
 	}
 
 	errorsBefore := *errors
-	changed := false
+	var addedProjects, removedProjects []workspaceCacheProject
 
 	// Bulk-add toAdd (chunked at workspaceBulkMaxSize).
 	if len(toAdd) > 0 {
-		added := bulkAddProjects(ctx, ws, orgUID, workspaceUID, toAdd, dryRun, projectsAdded, errors)
-		if added > 0 {
-			changed = true
-		}
+		addedProjects = bulkAddProjects(ctx, ws, orgUID, workspaceUID, toAdd, dryRun, projectsAdded, errors)
 	}
 
 	// Remove each toRemove.
 	if len(toRemove) > 0 {
-		removed := removeProjects(ctx, ws, orgUID, workspaceUID, toRemove, dryRun, projectsRemoved, errors)
-		if removed > 0 {
-			changed = true
-		}
+		removedProjects = removeProjects(ctx, ws, orgUID, workspaceUID, toRemove, dryRun, projectsRemoved, errors)
 	}
 
-	if changed {
-		// Don't double-count: a newly-created workspace with projects to add is
-		// already counted in workspaces_created; only existing workspaces are "updated".
-		if !justCreated {
-			*updated++
+	// In a real run only actual successes count as "changed"; dry-run has no
+	// successes to report yet, so any attempted add/remove counts as changed.
+	changed := len(addedProjects) > 0 || len(removedProjects) > 0 || (dryRun && (len(toAdd) > 0 || len(toRemove) > 0))
+	if !changed {
+		return
+	}
+
+	// Don't double-count: a newly-created workspace with projects to add is
+	// already counted in workspaces_created; only existing workspaces are "updated".
+	if !justCreated {
+		*updated++
+	}
+
+	// Only persist the new project set when no errors occurred — a partial
+	// apply must not be cached as complete, so a re-run can retry the delta.
+	if !dryRun && *errors == errorsBefore {
+		removedSlugs := make(map[string]struct{}, len(removedProjects))
+		for _, p := range removedProjects {
+			removedSlugs[p.Slug] = struct{}{}
 		}
-		// Only persist the new project set when no errors occurred — a partial
-		// apply must not be cached as complete, so a re-run can retry the delta.
-		if !dryRun && *errors == errorsBefore {
-			if err := putWorkspaceCacheEntry(ctx, orgUID, ws.Name, workspaceUID, desiredUIDs); err != nil {
-				logger.With(errKey, err, "workspace_id", ws.ID).
-					WarnContext(ctx, "updated workspace projects but failed to persist cache entry")
+		newProjects := make([]workspaceCacheProject, 0, len(currentProjects)+len(addedProjects))
+		for _, p := range currentProjects {
+			if _, gone := removedSlugs[p.Slug]; gone {
+				continue
 			}
+			newProjects = append(newProjects, p)
+		}
+		newProjects = append(newProjects, addedProjects...)
+		if err := putWorkspaceCacheEntry(ctx, orgUID, ws.Name, workspaceUID, newProjects); err != nil {
+			logger.With(errKey, err, "workspace_id", ws.ID).
+				WarnContext(ctx, "updated workspace projects but failed to persist cache entry")
 		}
 	}
 }
 
-// bulkAddProjects adds project UIDs in chunks of workspaceBulkMaxSize.
-// Returns the number of successfully added projects.
+// bulkAddProjects adds project slugs in chunks of workspaceBulkMaxSize.
+// Returns the project_slug/project_uid pairs member-service confirmed added.
+// The generated project_uid is matched from the nested workspace.projects[]
+// entries, not from the succeeded list, which carries slugs only.
 func bulkAddProjects(
 	ctx context.Context,
 	ws legacyWorkspace,
@@ -617,15 +624,15 @@ func bulkAddProjects(
 	toAdd []string,
 	dryRun bool,
 	projectsAdded, errors *int,
-) int {
+) []workspaceCacheProject {
 	if dryRun {
 		logger.With("workspace_id", ws.ID, "count", len(toAdd)).
 			InfoContext(ctx, "[dry-run] would bulk-add projects to workspace")
 		*projectsAdded += len(toAdd)
-		return len(toAdd)
+		return nil
 	}
 
-	added := 0
+	var added []workspaceCacheProject
 	for i := 0; i < len(toAdd); i += workspaceBulkMaxSize {
 		chunk := toAdd[i:min(i+workspaceBulkMaxSize, len(toAdd))]
 
@@ -637,11 +644,25 @@ func bulkAddProjects(
 			continue
 		}
 
-		added += len(resp.Succeeded)
-		*projectsAdded += len(resp.Succeeded)
+		uidBySlug := make(map[string]string, len(resp.Workspace.Projects))
+		for _, p := range resp.Workspace.Projects {
+			uidBySlug[p.Slug] = p.UID
+		}
+
+		for _, slug := range resp.Succeeded {
+			uid := uidBySlug[slug]
+			if uid == "" {
+				logger.With("workspace_id", ws.ID, "project_slug", slug).
+					ErrorContext(ctx, "bulk-add succeeded for slug but no matching project_uid in workspace.projects[]")
+				*errors++
+				continue
+			}
+			added = append(added, workspaceCacheProject{Slug: slug, UID: uid})
+			*projectsAdded++
+		}
 
 		for _, f := range resp.Failed {
-			logger.With("workspace_id", ws.ID, "project_id", f.ProjectID, "reason", f.Error).
+			logger.With("workspace_id", ws.ID, "project_slug", f.Slug, "reason", f.Error).
 				ErrorContext(ctx, "bulk-add: project association failed")
 			*errors++
 		}
@@ -649,32 +670,32 @@ func bulkAddProjects(
 	return added
 }
 
-// removeProjects removes a list of project UIDs from the workspace one by one.
-// Returns the number of successfully removed projects.
+// removeProjects removes a list of projects from the workspace one by one,
+// using each cached project_uid. Returns the projects successfully removed.
 func removeProjects(
 	ctx context.Context,
 	ws legacyWorkspace,
 	orgUID, workspaceUID string,
-	toRemove []string,
+	toRemove []workspaceCacheProject,
 	dryRun bool,
 	projectsRemoved, errors *int,
-) int {
+) []workspaceCacheProject {
 	if dryRun {
 		logger.With("workspace_id", ws.ID, "count", len(toRemove)).
 			InfoContext(ctx, "[dry-run] would remove projects from workspace")
 		*projectsRemoved += len(toRemove)
-		return len(toRemove)
+		return nil
 	}
 
-	removed := 0
-	for _, uid := range toRemove {
-		if err := removeWorkspaceProject(ctx, orgUID, workspaceUID, uid); err != nil {
-			logger.With(errKey, err, "workspace_id", ws.ID, "project_uid", uid).
+	var removed []workspaceCacheProject
+	for _, p := range toRemove {
+		if err := removeWorkspaceProject(ctx, orgUID, workspaceUID, p.UID); err != nil {
+			logger.With(errKey, err, "workspace_id", ws.ID, "project_uid", p.UID, "project_slug", p.Slug).
 				ErrorContext(ctx, "failed to remove workspace project, skipping")
 			*errors++
 			continue
 		}
-		removed++
+		removed = append(removed, p)
 		*projectsRemoved++
 	}
 	return removed

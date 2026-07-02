@@ -326,8 +326,9 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 		return "", false, false, false, fmt.Errorf("email record %s has no email address", emailSfid)
 	}
 
-	// Check if the email is verified
-	if verifiedFlag, ok := emailData["verified__c"].(bool); ok {
+	// Check if the email is verified using email_verified__c (the active field).
+	// verified__c is a deprecated legacy column that is almost never set.
+	if verifiedFlag, ok := emailData["email_verified__c"].(bool); ok {
 		isVerified = verifiedFlag
 	}
 

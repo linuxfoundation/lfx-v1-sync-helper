@@ -8,8 +8,8 @@
 # by argocd and runs on demand only (e.g. after a migration that requires reindexing).
 #
 # Credentials: every valueFrom.secretKeyRef below references a Kubernetes Secret
-# already provisioned in the v1-sync-helper namespace (e.g. v1-sync-helper-secrets,
-# heimdall-signer-cert-ad-hoc). Only secret names are committed here — the kubelet
+# already provisioned in the v1-sync-helper namespace (e.g. v1-sync-helper-auth0-credentials,
+# heimdall-signer-cert). Only secret names are committed here — the kubelet
 # resolves the actual values at pod start. Safe to commit.
 #
 # Tuning: the REINDEX_* env vars below control timeouts and pacing. Edit and
@@ -111,27 +111,27 @@ spec:
             - name: REINDEX_OP_DELAY
               value: "1ms"
             # ----------------------------------------------------------------------
-            # Before applying: replace this value with the actual client ID from the
-            # v1-sync-helper-secrets Kubernetes Secret:
-            #   kubectl --context lfx-v2-prod -n v1-sync-helper get secret v1-sync-helper-secrets \
-            #     -o jsonpath='{.data.heimdall_client_id}' | base64 -d
+            # Before applying: replace this value with the HEIMDALL_CLIENT_ID from the
+            # running deployment (it is not stored in a Secret):
+            #   kubectl --context lfx-v2-prod -n v1-sync-helper get deployment \
+            #     -o jsonpath='{.items[0].spec.template.spec.containers[0].env[?(@.name=="HEIMDALL_CLIENT_ID")].value}'
             - name: HEIMDALL_CLIENT_ID
               value: ""
             - name: HEIMDALL_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
-                  key: key.pem
-                  name: heimdall-signer-cert-ad-hoc
+                  key: signer.pem
+                  name: heimdall-signer-cert
             - name: AUTH0_CLIENT_ID
               valueFrom:
                 secretKeyRef:
                   key: client_id
-                  name: v1-sync-helper-secrets
+                  name: v1-sync-helper-auth0-credentials
             - name: AUTH0_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
                   key: client_private_key
-                  name: v1-sync-helper-secrets
+                  name: v1-sync-helper-auth0-credentials
             - name: PROJECT_ALLOWLIST_FILE
               value: "/etc/lfx/allowlists/project_allowlist"
             - name: PROJECT_FAMILY_ALLOWLIST_FILE

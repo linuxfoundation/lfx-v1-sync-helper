@@ -83,22 +83,15 @@ func usernameToKVKey(name string) string { return toKVKey(name) }
 // secondary index for username -> user SFID lookups, and syncs profile
 // fields from the v1 platform DB to Auth0 user_metadata.
 //
-// The profile sync runs in one of two modes (selected via PROFILE_SYNC_BACKFILL):
+// The Auth0 update runs in a background goroutine after a short delay to
+// avoid contention with lf-login-backend, which may write to Auth0
+// user_metadata for the same user at roughly the same time. The NATS
+// message is always ACKed immediately so we don't hold up the KV consumer
+// queue. The SDK's built-in retry absorbs transient 429/5xx failures; if
+// retries are exhausted the error is logged and the message is not
+// redelivered (acknowledged tradeoff of async processing).
 //
-//   - Live (default): the Auth0 update runs in a background goroutine after a
-//     short delay to avoid contention with lf-login-backend, which may write to
-//     Auth0 user_metadata for the same user at roughly the same time. The NATS
-//     message is always ACKed immediately so we don't hold up the KV consumer
-//     queue. The SDK's built-in retry absorbs transient 429/5xx failures; if
-//     retries are exhausted the error is logged and the message is not
-//     redelivered (acknowledged tradeoff of async processing).
-//
-//   - Backfill: the Auth0 update runs inline. Retryable errors (429/5xx,
-//     network failures) cause the message to be NACKed so JetStream
-//     redelivery provides natural backoff. The SDK is configured with no
-//     retries in this mode to avoid holding the consumer queue. This mode is
-//     intended for bounded replay runs where fanning out thousands of async
-//     writes would guarantee cascading Auth0 rate limits.
+// Bulk profile backfill is handled separately by --backfill-profiles.
 func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	sfid, ok := v1Data["sfid"].(string)
 	if !ok || sfid == "" {
@@ -149,33 +142,10 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 	return dispatchProfileSync(ctx, key, auth0UserID, v1Data)
 }
 
-// dispatchProfileSync runs the v1→Auth0 profile sync in the configured mode
-// and reports whether the caller should NACK the JetStream message. Split out
-// from handleMergedUserUpdate so the mode branching can be unit-tested without
-// a live NATS KV bucket.
-func dispatchProfileSync(ctx context.Context, key, auth0UserID string, v1Data map[string]any) bool {
-	if cfg.ProfileSyncBackfill {
-		// Backfill: process inline, NACK on retryable Auth0 errors so
-		// JetStream redelivery throttles throughput. Other errors (org
-		// lookup failures, unmappable data) are logged and ACKed so the
-		// backfill keeps moving. No 5s delay — backfill runs separately
-		// from live user activity, so the lf-login-backend race is moot.
-		// Bound the call with auth0CallTimeout (< AckWait) so a stuck Auth0
-		// request can't stall the handler past JetStream's redelivery window.
-		syncCtx, cancel := context.WithTimeout(ctx, auth0CallTimeout)
-		defer cancel()
-		if err := syncProfileToAuth0Fn(syncCtx, auth0UserID, v1Data); err != nil {
-			if isRetryableAuth0Error(err) {
-				logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
-					WarnContext(syncCtx, "retryable Auth0 error during backfill, NACKing for redelivery")
-				return true
-			}
-			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
-				ErrorContext(syncCtx, "profile sync failed during backfill, dropping")
-		}
-		return false
-	}
-
+// dispatchProfileSync runs the v1→Auth0 profile sync in a background goroutine
+// and always returns false (never requests a NACK). Backfill is handled by
+// --backfill-profiles, not by this path.
+func dispatchProfileSync(_ context.Context, key, auth0UserID string, v1Data map[string]any) bool {
 	// Live: fire-and-forget goroutine with a short delay to mitigate
 	// contention with lf-login-backend. The goroutine runs detached from the
 	// JetStream message (which is ACKed immediately), so its timeout is
