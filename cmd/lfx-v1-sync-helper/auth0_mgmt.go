@@ -46,7 +46,6 @@ var auth0Users auth0UserAPI
 // v1ToAuth0Fields maps v1 platform DB column names to Auth0 user_metadata keys.
 // Address fields use the Salesforce MailingAddress columns (mailingstreet, etc.);
 // merged_user has no bare street/city/state/country/postalcode columns.
-// v1ToAuth0Fields maps v1 platform DB column names to Auth0 user_metadata keys.
 // Name fields (given_name, family_name, name) are intentionally omitted: they
 // are owned by whoever receives the profile-update action (auth service for v2
 // writes; v1 pushes them directly on its own path). The same rationale applies

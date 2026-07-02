@@ -77,13 +77,11 @@ func usernameToKVKey(name string) string { return toKVKey(name) }
 // secondary index for username -> user SFID lookups, and syncs profile
 // fields from the v1 platform DB to Auth0 user_metadata.
 //
-// The Auth0 update runs in a background goroutine after a short delay to
-// avoid contention with lf-login-backend, which may write to Auth0
-// user_metadata for the same user at roughly the same time. The NATS
-// message is always ACKed immediately so we don't hold up the KV consumer
-// queue. The SDK's built-in retry absorbs transient 429/5xx failures; if
-// retries are exhausted the error is logged and the message is not
-// redelivered (acknowledged tradeoff of async processing).
+// The Auth0 profile sync runs synchronously before ACKing the JetStream
+// message. Retryable Auth0 errors (429, 5xx) return true to NACK the
+// message so JetStream redelivery provides backoff; non-retryable errors
+// are logged and dropped. WithNoRetries is set on the management client so
+// the handler controls retry behaviour directly.
 //
 // Bulk profile backfill is handled separately by --backfill-profiles.
 func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
