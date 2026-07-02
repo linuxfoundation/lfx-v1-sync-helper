@@ -114,7 +114,7 @@ func main() {
 			logger.With(errKey, err).Error("error initializing v1 client")
 			os.Exit(1)
 		}
-		if err := initAuth0MgmtClient(cfg, false); err != nil {
+		if err := initAuth0MgmtClient(cfg); err != nil {
 			logger.With(errKey, err).Error("error initializing Auth0 Management API client")
 			os.Exit(1)
 		}

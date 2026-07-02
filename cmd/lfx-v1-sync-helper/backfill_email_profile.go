@@ -113,10 +113,6 @@ func saveBackfillCursor(ctx context.Context, cursorKey, value string) error {
 // the --limit cap by stopping when enough users have been processed, not by
 // shrinking the page size on the final request.
 func listAuth0UserPage(ctx context.Context, cursor string, runPage int) (*management.UserList, error) {
-	if err := auth0RateLimiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("rate limiter: %w", err)
-	}
-
 	query := fmt.Sprintf(`identities.connection:"%s"`, backfillAuth0Connection)
 	if cursor != "" {
 		query += fmt.Sprintf(` AND updated_at:[%s TO *]`, cursor)
@@ -177,13 +173,22 @@ func backfillAlternateEmails(ctx context.Context, limit int, dryRun bool) (*back
 				return result, fmt.Errorf("Auth0 user %s has no username in connection %s; stopping backfill to avoid silent skips", auth0UserID, backfillAuth0Connection)
 			}
 
+			if err := auth0RateLimiter.Wait(ctx); err != nil {
+				return result, fmt.Errorf("rate limiter: %w", err)
+			}
+
 			userCtx, cancel := context.WithTimeout(ctx, backfillCallTimeout)
 			err := backfillEmailsForUser(userCtx, auth0UserID, username, dryRun, result)
 			cancel()
 			if err != nil {
 				logger.With(errKey, err, "auth0_user_id", auth0UserID).
-					Warn("error processing user during alternate-emails backfill, continuing")
-				result.errors++
+					Warn("aborting alternate-emails backfill after error")
+				if !dryRun {
+					if saveErr := saveBackfillCursor(ctx, backfillAltEmailsCursorKey, nextCursor); saveErr != nil {
+						logger.With(errKey, saveErr).Warn("failed to save backfill cursor on abort")
+					}
+				}
+				return result, fmt.Errorf("processing user %s: %w", auth0UserID, err)
 			}
 
 			result.usersProcessed++
@@ -273,10 +278,7 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 		}
 
 		if err := linkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
-			logger.With("error", err, "auth0_user_id", auth0UserID, "email", email).
-				Warn("failed to link alternate email, skipping")
-			result.errors++
-			continue
+			return fmt.Errorf("linking email %s: %w", email, err)
 		}
 		result.emailsLinked++
 	}
@@ -328,13 +330,22 @@ func backfillProfiles(ctx context.Context, limit int, dryRun bool) (*backfillPro
 				return result, fmt.Errorf("Auth0 user %s has no username in connection %s; stopping backfill to avoid silent skips", auth0UserID, backfillAuth0Connection)
 			}
 
+			if err := auth0RateLimiter.Wait(ctx); err != nil {
+				return result, fmt.Errorf("rate limiter: %w", err)
+			}
+
 			userCtx, cancel := context.WithTimeout(ctx, backfillCallTimeout)
 			err := backfillProfileForUser(userCtx, auth0UserID, username, dryRun, result)
 			cancel()
 			if err != nil {
 				logger.With(errKey, err, "auth0_user_id", auth0UserID).
-					Warn("error processing user during profiles backfill, continuing")
-				result.errors++
+					Warn("aborting profiles backfill after error")
+				if !dryRun {
+					if saveErr := saveBackfillCursor(ctx, backfillProfilesCursorKey, nextCursor); saveErr != nil {
+						logger.With(errKey, saveErr).Warn("failed to save backfill cursor on abort")
+					}
+				}
+				return result, fmt.Errorf("processing user %s: %w", auth0UserID, err)
 			}
 
 			result.usersProcessed++
@@ -396,10 +407,6 @@ func backfillProfileForUser(ctx context.Context, auth0UserID, username string, d
 		return nil
 	}
 
-	// Rate-limit before the Management API Read+Update inside syncProfileToAuth0.
-	if err := auth0RateLimiter.Wait(ctx); err != nil {
-		return fmt.Errorf("rate limiter: %w", err)
-	}
 	if err := syncProfileToAuth0Fn(ctx, auth0UserID, v1Data); err != nil {
 		return fmt.Errorf("syncing profile for %s: %w", auth0UserID, err)
 	}

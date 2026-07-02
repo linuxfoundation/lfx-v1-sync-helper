@@ -13,7 +13,6 @@ import (
 
 	"github.com/auth0/go-auth0"
 	"github.com/auth0/go-auth0/management"
-	"golang.org/x/time/rate"
 )
 
 func init() {
@@ -129,12 +128,9 @@ func newEmailIdentity(userID, email string) management.UserIdentity {
 func setupLinkTest(t *testing.T, fake *fakeAuth0Users) func() {
 	t.Helper()
 	origUsers := auth0Users
-	origLimiter := auth0RateLimiter
 	auth0Users = fake
-	auth0RateLimiter = rate.NewLimiter(rate.Inf, 1) // no throttle in tests
 	return func() {
 		auth0Users = origUsers
-		auth0RateLimiter = origLimiter
 	}
 }
 

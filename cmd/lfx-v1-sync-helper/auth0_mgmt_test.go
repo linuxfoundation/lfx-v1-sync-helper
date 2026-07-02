@@ -18,9 +18,10 @@ func TestBuildAuth0Metadata(t *testing.T) {
 		orgName         string
 		wantChanged     bool
 		wantFieldChecks map[string]string // key -> expected value
+		wantAbsent      []string          // keys that must NOT appear in merged
 	}{
 		{
-			name:     "maps all fields from v1 to auth0 keys",
+			name:     "maps all v1-owned fields, ignores name fields",
 			existing: map[string]interface{}{},
 			v1Data: map[string]any{
 				"firstname":         "Joan",
@@ -38,9 +39,6 @@ func TestBuildAuth0Metadata(t *testing.T) {
 			},
 			wantChanged: true,
 			wantFieldChecks: map[string]string{
-				"given_name":     "Joan",
-				"family_name":    "Reyero",
-				"name":           "Joan Reyero",
 				"job_title":      "Engineer",
 				"address":        "123 Main St",
 				"city":           "SF",
@@ -52,13 +50,12 @@ func TestBuildAuth0Metadata(t *testing.T) {
 				"picture":        "https://example.com/photo.jpg",
 				"zoneinfo":       "America/Los_Angeles",
 			},
+			// Name fields are NOT written by v1-sync-helper; owned by auth service.
+			wantAbsent: []string{"given_name", "family_name", "name"},
 		},
 		{
 			name: "no change when v1 matches existing",
 			existing: map[string]interface{}{
-				"given_name":     "Joan",
-				"family_name":    "Reyero",
-				"name":           "Joan Reyero",
 				"job_title":      "",
 				"address":        "",
 				"city":           "",
@@ -70,63 +67,25 @@ func TestBuildAuth0Metadata(t *testing.T) {
 				"picture":        "",
 				"zoneinfo":       "",
 			},
-			v1Data: map[string]any{
-				"firstname": "Joan",
-				"lastname":  "Reyero",
-			},
+			v1Data:      map[string]any{},
 			wantChanged: false,
 		},
 		{
-			name: "preserves fields we don't own",
+			name: "preserves fields we don't own, including name fields",
 			existing: map[string]interface{}{
 				"custom_field": "keep me",
-				"given_name":   "Old",
+				"given_name":   "Joan",
+				"family_name":  "Reyero",
+				"name":         "Joan Reyero",
 			},
-			v1Data: map[string]any{
-				"firstname": "New",
-				"lastname":  "Name",
-			},
-			wantChanged: true,
+			v1Data:      map[string]any{"firstname": "New", "lastname": "Name"},
+			wantChanged: false,
 			wantFieldChecks: map[string]string{
 				"custom_field": "keep me",
-				"given_name":   "New",
-				"family_name":  "Name",
-				"name":         "New Name",
-			},
-		},
-		{
-			name:     "derives name from first + last, never reads v1 name column",
-			existing: map[string]interface{}{},
-			v1Data: map[string]any{
-				"firstname": "Alice",
-				"lastname":  "Smith",
-				"name":      "WRONG NAME FROM V1",
-			},
-			wantChanged: true,
-			wantFieldChecks: map[string]string{
-				"name": "Alice Smith",
-			},
-		},
-		{
-			name:     "handles first name only",
-			existing: map[string]interface{}{},
-			v1Data: map[string]any{
-				"firstname": "Alice",
-			},
-			wantChanged: true,
-			wantFieldChecks: map[string]string{
-				"name": "Alice",
-			},
-		},
-		{
-			name:     "handles last name only",
-			existing: map[string]interface{}{},
-			v1Data: map[string]any{
-				"lastname": "Smith",
-			},
-			wantChanged: true,
-			wantFieldChecks: map[string]string{
-				"name": "Smith",
+				// Name fields are preserved as-is from existing; not overwritten.
+				"given_name":  "Joan",
+				"family_name": "Reyero",
+				"name":        "Joan Reyero",
 			},
 		},
 		{
@@ -168,7 +127,7 @@ func TestBuildAuth0Metadata(t *testing.T) {
 			wantChanged: false,
 		},
 		{
-			name: "empty v1 clears existing fields",
+			name: "empty v1 clears owned fields but preserves name fields",
 			existing: map[string]interface{}{
 				"given_name":  "Joan",
 				"family_name": "Reyero",
@@ -178,10 +137,12 @@ func TestBuildAuth0Metadata(t *testing.T) {
 			v1Data:      map[string]any{},
 			wantChanged: true,
 			wantFieldChecks: map[string]string{
-				"given_name":  "",
-				"family_name": "",
-				"name":        "",
-				"job_title":   "",
+				// Name fields owned by auth service: preserved unchanged.
+				"given_name":  "Joan",
+				"family_name": "Reyero",
+				"name":        "Joan Reyero",
+				// v1-owned field cleared because v1 sent an empty value.
+				"job_title": "",
 			},
 		},
 	}
@@ -198,6 +159,12 @@ func TestBuildAuth0Metadata(t *testing.T) {
 				got, _ := merged[key].(string)
 				if got != want {
 					t.Errorf("merged[%q] = %q, want %q", key, got, want)
+				}
+			}
+
+			for _, key := range tt.wantAbsent {
+				if _, present := merged[key]; present {
+					t.Errorf("merged[%q] should be absent but was present with value %v", key, merged[key])
 				}
 			}
 		})

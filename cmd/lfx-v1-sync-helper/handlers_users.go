@@ -31,12 +31,6 @@ const (
 	reindexProgressInterval = 100_000
 )
 
-// profileSyncDelay is the time the live path waits before pushing a v1
-// profile change to Auth0. Mitigates contention with lf-login-backend, which
-// may update Auth0 user_metadata for the same user at roughly the same time.
-// Var (not const) so tests can collapse the delay.
-var profileSyncDelay = 5 * time.Second
-
 // auth0CallTimeout bounds Auth0 Management API work on handler-blocking paths.
 // Chosen comfortably under the JetStream AckWait (30s, see main.go) so the
 // handler always ACKs/NACKs before server-side redelivery. The 10s slack
@@ -139,28 +133,23 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 		DebugContext(ctx, "successfully updated username index")
 
 	auth0UserID := mapUsernameToAuthSub(username)
-	return dispatchProfileSync(ctx, key, auth0UserID, v1Data)
+	return syncMergedUserProfile(ctx, key, auth0UserID, v1Data)
 }
 
-// dispatchProfileSync runs the v1→Auth0 profile sync in a background goroutine
-// and always returns false (never requests a NACK). Backfill is handled by
-// --backfill-profiles, not by this path.
-func dispatchProfileSync(_ context.Context, key, auth0UserID string, v1Data map[string]any) bool {
-	// Live: fire-and-forget goroutine with a short delay to mitigate
-	// contention with lf-login-backend. The goroutine runs detached from the
-	// JetStream message (which is ACKed immediately), so its timeout is
-	// independent of AckWait — kept at 30s to give Auth0 room without
-	// leaking long-lived goroutines.
-	go func() {
-		time.Sleep(profileSyncDelay)
-		syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := syncProfileToAuth0Fn(syncCtx, auth0UserID, v1Data); err != nil {
+// syncMergedUserProfile calls syncProfileToAuth0Fn synchronously and returns
+// true if the error is retryable so the caller can NACK the JetStream message.
+func syncMergedUserProfile(ctx context.Context, key, auth0UserID string, v1Data map[string]any) bool {
+	syncCtx, cancel := context.WithTimeout(ctx, auth0CallTimeout)
+	defer cancel()
+	if err := syncProfileToAuth0Fn(syncCtx, auth0UserID, v1Data); err != nil {
+		if isRetryableAuth0Error(err) {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
-				ErrorContext(syncCtx, "failed to sync profile to Auth0")
+				WarnContext(ctx, "retryable Auth0 error during profile sync, NACKing for redelivery")
+			return true
 		}
-	}()
-
+		logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
+			ErrorContext(ctx, "failed to sync profile to Auth0, dropping non-retryable error")
+	}
 	return false
 }
 

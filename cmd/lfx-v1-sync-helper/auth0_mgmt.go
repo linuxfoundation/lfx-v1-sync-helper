@@ -46,9 +46,12 @@ var auth0Users auth0UserAPI
 // v1ToAuth0Fields maps v1 platform DB column names to Auth0 user_metadata keys.
 // Address fields use the Salesforce MailingAddress columns (mailingstreet, etc.);
 // merged_user has no bare street/city/state/country/postalcode columns.
+// v1ToAuth0Fields maps v1 platform DB column names to Auth0 user_metadata keys.
+// Name fields (given_name, family_name, name) are intentionally omitted: they
+// are owned by whoever receives the profile-update action (auth service for v2
+// writes; v1 pushes them directly on its own path). The same rationale applies
+// as for primary email — v1-sync-helper is not the authoritative writer.
 var v1ToAuth0Fields = map[string]string{
-	"firstname":         "given_name",
-	"lastname":          "family_name",
 	"title":             "job_title",
 	"mailingstreet":     "address",
 	"mailingcity":       "city",
@@ -65,15 +68,12 @@ var v1ToAuth0Fields = map[string]string{
 // a real v2 organization value.
 const v1NoAccountPlaceholder = "Individual - No Account"
 
-// initAuth0MgmtClient initializes the Auth0 Management API client using private key JWT.
-//
-// The client's retry strategy depends on the profile-sync mode:
-//   - Live mode (backfill=false): SDK retries on 429/5xx so the async
-//     fire-and-forget goroutine absorbs transient failures on its own.
-//   - Backfill mode (backfill=true): no SDK retries. The sync-path handler
-//     NACKs on retryable errors so JetStream redelivery becomes the backoff,
-//     throttling Management API throughput naturally.
-func initAuth0MgmtClient(cfg *Config, backfill bool) error {
+// initAuth0MgmtClient initializes the Auth0 Management API client using
+// private key JWT with no SDK-level retries. All callers (live handler and
+// backfill) use WithNoRetries: the live path NACKs on retryable errors so
+// JetStream redelivery provides backoff; the backfill path aborts on error
+// and saves its cursor.
+func initAuth0MgmtClient(cfg *Config) error {
 	domain := fmt.Sprintf("%s.auth0.com", cfg.Auth0Tenant)
 
 	opts := []management.Option{
@@ -83,11 +83,7 @@ func initAuth0MgmtClient(cfg *Config, backfill bool) error {
 			cfg.Auth0PrivateKey,
 			"RS256",
 		),
-	}
-	if backfill {
-		opts = append(opts, management.WithNoRetries())
-	} else {
-		opts = append(opts, management.WithRetries(3, []int{429, 500, 502, 503, 504}))
+		management.WithNoRetries(),
 	}
 
 	mgmt, err := management.New(domain, opts...)
@@ -144,16 +140,6 @@ func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, 
 		}
 	}
 
-	// Derive the full name from first + last (never read v1 "name" column).
-	firstName, _ := v1Data["firstname"].(string)
-	lastName, _ := v1Data["lastname"].(string)
-	derivedName := strings.TrimSpace(firstName + " " + lastName)
-	existingName, _ := merged["name"].(string)
-	if derivedName != existingName {
-		merged["name"] = derivedName
-		changed = true
-	}
-
 	// Organization mapping: don't overwrite a real org with the placeholder.
 	if orgName != "" {
 		existingOrg, _ := merged["organization"].(string)
@@ -167,11 +153,10 @@ func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, 
 	return merged, changed
 }
 
-// auth0RateLimiter throttles Auth0 Management API calls in the email-identity
-// link/unlink flow to avoid rate limits, especially during KV consumer replay
-// (backfill). The profile sync flow (syncProfileToAuth0) is not rate-limited
-// because it runs in a delayed goroutine with natural backpressure.
-var auth0RateLimiter = rate.NewLimiter(rate.Limit(20), 5)
+// auth0RateLimiter throttles Auth0 Management API calls in the backfill outer
+// loops (one token consumed per user before processing). Not used on the live
+// handler path, which relies on NACK-based backoff instead.
+var auth0RateLimiter = rate.NewLimiter(rate.Limit(10), 1)
 
 // luceneQuoteEscape escapes the two characters that have meaning inside an
 // Auth0 v3 search-engine quoted phrase: backslash and double-quote.
@@ -238,10 +223,6 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[stri
 // primary account. This is the two-step M2M flow: create secondary user, then link.
 // It is idempotent: if the email is already linked to this user, it returns nil.
 func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error {
-	if err := auth0RateLimiter.Wait(ctx); err != nil {
-		return fmt.Errorf("rate limiter: %w", err)
-	}
-
 	// Check if the email is already linked to this user.
 	primaryUser, err := auth0Users.Read(ctx, primaryAuth0ID)
 	if err != nil {
@@ -264,9 +245,6 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 	// primary user that owns the linked identity (and never returns the
 	// detached email|... account, since its own primary identity has no
 	// profileData).
-	if err := auth0RateLimiter.Wait(ctx); err != nil {
-		return fmt.Errorf("rate limiter: %w", err)
-	}
 	query := fmt.Sprintf(`identities.profileData.email:"%s" AND identities.provider:"email"`, luceneQuoteEscape(email))
 	searchResult, err := auth0Users.Search(ctx, management.Query(query))
 	if err != nil {
@@ -294,9 +272,6 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 	}
 
 	// Step 1: Create secondary user in the "email" connection with email_verified=true.
-	if err := auth0RateLimiter.Wait(ctx); err != nil {
-		return fmt.Errorf("rate limiter: %w", err)
-	}
 	secondaryUser := &management.User{
 		Connection:    auth0.String("email"),
 		Email:         auth0.String(email),
@@ -308,9 +283,6 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 		var mgmtErr management.Error
 		if errors.As(err, &mgmtErr) && mgmtErr.Status() == http.StatusConflict {
 			// Find the existing email user to get its ID for linking.
-			if waitErr := auth0RateLimiter.Wait(ctx); waitErr != nil {
-				return fmt.Errorf("rate limiter: %w", waitErr)
-			}
 			users, listErr := auth0Users.ListByEmail(ctx, email)
 			if listErr != nil {
 				return fmt.Errorf("failed to find existing email user for %s: %w", email, listErr)
@@ -336,9 +308,6 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 	secondaryID = strings.TrimPrefix(secondaryID, "email|")
 
 	// Step 2: Link the secondary user to the primary.
-	if err := auth0RateLimiter.Wait(ctx); err != nil {
-		return fmt.Errorf("rate limiter: %w", err)
-	}
 	_, err = auth0Users.Link(ctx, primaryAuth0ID, &management.UserIdentityLink{
 		Provider: auth0.String("email"),
 		UserID:   auth0.String(secondaryID),
@@ -364,10 +333,6 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 // unlinkEmailIdentity removes a linked email identity from the primary Auth0 account.
 // It is idempotent: if the email is not linked, it returns nil.
 func unlinkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error {
-	if err := auth0RateLimiter.Wait(ctx); err != nil {
-		return fmt.Errorf("rate limiter: %w", err)
-	}
-
 	// Read the primary user to find the linked email identity.
 	primaryUser, err := auth0Users.Read(ctx, primaryAuth0ID)
 	if err != nil {
@@ -395,9 +360,6 @@ func unlinkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) erro
 	}
 
 	// Unlink the identity.
-	if err := auth0RateLimiter.Wait(ctx); err != nil {
-		return fmt.Errorf("rate limiter: %w", err)
-	}
 	_, err = auth0Users.Unlink(ctx, primaryAuth0ID, "email", secondaryUserID)
 	if err != nil {
 		// 404 means already unlinked (idempotent).

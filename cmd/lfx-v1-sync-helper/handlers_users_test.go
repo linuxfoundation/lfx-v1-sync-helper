@@ -9,9 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"sync"
 	"testing"
-	"time"
 )
 
 func TestToKVKey(t *testing.T) {
@@ -96,40 +94,39 @@ func TestEmailToKVKeyNormalization(t *testing.T) {
 	}
 }
 
-// TestDispatchProfileSync covers the live (fire-and-forget) path in
-// dispatchProfileSync. It always returns false and invokes the sync
-// function asynchronously via a goroutine.
-func TestDispatchProfileSync(t *testing.T) {
+func TestSyncMergedUserProfile(t *testing.T) {
 	origLogger := logger
 	origCfg := cfg
 	origSync := syncProfileToAuth0Fn
-	origDelay := profileSyncDelay
 	t.Cleanup(func() {
 		logger = origLogger
 		cfg = origCfg
 		syncProfileToAuth0Fn = origSync
-		profileSyncDelay = origDelay
 	})
 
-	// Silence log output during tests.
 	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-	profileSyncDelay = 0
 
 	tests := []struct {
 		name       string
 		syncErr    error
-		wantNack   bool // return value from dispatchProfileSync
-		wantCalled bool // whether the fake sync was eventually invoked
+		wantNack   bool
+		wantCalled bool
 	}{
 		{
-			name:       "live success → ACK (fire-and-forget)",
+			name:       "success → ACK",
 			syncErr:    nil,
 			wantNack:   false,
 			wantCalled: true,
 		},
 		{
-			name:       "live retryable error → ACK (SDK retry handles it, not NACK)",
+			name:       "retryable 429 → NACK",
 			syncErr:    &fakeMgmtErr{status: 429, msg: "rate limited"},
+			wantNack:   true,
+			wantCalled: true,
+		},
+		{
+			name:       "non-retryable 400 → ACK",
+			syncErr:    &fakeMgmtErr{status: 400, msg: "bad request"},
 			wantNack:   false,
 			wantCalled: true,
 		},
@@ -139,53 +136,19 @@ func TestDispatchProfileSync(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg = &Config{}
 
-			var (
-				mu         sync.Mutex
-				called     bool
-				gotUID     string
-				gotHasDead bool
-				callDone   = make(chan struct{}, 1)
-			)
-			syncProfileToAuth0Fn = func(syncCtx context.Context, auth0UserID string, _ map[string]any) error {
-				mu.Lock()
+			var called bool
+			syncProfileToAuth0Fn = func(_ context.Context, _ string, _ map[string]any) error {
 				called = true
-				gotUID = auth0UserID
-				_, gotHasDead = syncCtx.Deadline()
-				mu.Unlock()
-				select {
-				case callDone <- struct{}{}:
-				default:
-				}
 				return tt.syncErr
 			}
 
-			gotNack := dispatchProfileSync(context.Background(), "salesforce-merged_user.sfid123", "auth0|alice", map[string]any{"firstname": "Alice"})
+			gotNack := syncMergedUserProfile(context.Background(), "salesforce-merged_user.sfid123", "auth0|alice", map[string]any{"firstname": "Alice"})
 
 			if gotNack != tt.wantNack {
-				t.Errorf("dispatchProfileSync nack = %v, want %v", gotNack, tt.wantNack)
+				t.Errorf("syncMergedUserProfile nack = %v, want %v", gotNack, tt.wantNack)
 			}
-
-			// The live path runs in a goroutine; wait briefly.
-			if tt.wantCalled {
-				select {
-				case <-callDone:
-				case <-time.After(2 * time.Second):
-					t.Fatal("live goroutine did not call syncProfileToAuth0Fn within 2s")
-				}
-			}
-
-			mu.Lock()
-			defer mu.Unlock()
 			if called != tt.wantCalled {
 				t.Errorf("sync called = %v, want %v", called, tt.wantCalled)
-			}
-			if tt.wantCalled && gotUID != "auth0|alice" {
-				t.Errorf("sync called with auth0UserID = %q, want %q", gotUID, "auth0|alice")
-			}
-			// The live path must bound the sync call with a deadline so a
-			// hung Auth0 request can't leak a goroutine.
-			if tt.wantCalled && !gotHasDead {
-				t.Errorf("sync ctx had no deadline; live path must wrap the call in a timeout")
 			}
 		})
 	}
@@ -236,9 +199,11 @@ func TestSyncAlternateEmailToAuth0(t *testing.T) {
 		userResult *V1User
 		userErr    error
 		linkErr    error
+		unlinkErr  error
 
-		wantRetry     bool
-		wantLinkEmail string // empty string = expect no call
+		wantRetry       bool
+		wantLinkEmail   string // empty string = expect no call
+		wantUnlinkEmail string // empty string = expect no call
 	}{
 		{
 			name:          "verified active → link with KV email",
@@ -252,9 +217,40 @@ func TestSyncAlternateEmailToAuth0(t *testing.T) {
 			userResult: &V1User{Username: username},
 		},
 		{
-			name:       "tombstoned → skip (delete path handles unlink)",
-			lookup:     altEmailLookup{email: kvEmail, isTombstoned: true},
+			name:            "tombstoned (active__c=false) → unlink",
+			lookup:          altEmailLookup{email: kvEmail, isTombstoned: true},
+			userResult:      &V1User{Username: username},
+			wantUnlinkEmail: kvEmail,
+		},
+		{
+			name:            "tombstoned unlink 429 → retry",
+			lookup:          altEmailLookup{email: kvEmail, isTombstoned: true},
+			userResult:      &V1User{Username: username},
+			unlinkErr:       retryable429,
+			wantRetry:       true,
+			wantUnlinkEmail: kvEmail,
+		},
+		{
+			name:            "tombstoned unlink 400 → drop",
+			lookup:          altEmailLookup{email: kvEmail, isTombstoned: true},
+			userResult:      &V1User{Username: username},
+			unlinkErr:       permanent400,
+			wantUnlinkEmail: kvEmail,
+		},
+		{
+			name:       "tombstoned no email → skip unlink",
+			lookup:     altEmailLookup{email: "", isTombstoned: true},
 			userResult: &V1User{Username: username},
+		},
+		{
+			name:    "tombstoned user lookup error → drop",
+			lookup:  altEmailLookup{email: kvEmail, isTombstoned: true},
+			userErr: errors.New("lookup failed"),
+		},
+		{
+			name:       "tombstoned empty username → drop",
+			lookup:     altEmailLookup{email: kvEmail, isTombstoned: true},
+			userResult: &V1User{Username: ""},
 		},
 		{
 			name:       "unverified alternate → skip",
@@ -345,6 +341,14 @@ func TestSyncAlternateEmailToAuth0(t *testing.T) {
 				linkCalls = append(linkCalls, gotEmail)
 				return tt.linkErr
 			}
+			var unlinkCalls []string
+			unlinkEmailIdentityFn = func(_ context.Context, gotAuth0ID, gotEmail string) error {
+				if gotAuth0ID != expectedAuth0ID {
+					t.Errorf("unlinkEmailIdentity called with auth0 id %q, want %q", gotAuth0ID, expectedAuth0ID)
+				}
+				unlinkCalls = append(unlinkCalls, gotEmail)
+				return tt.unlinkErr
+			}
 
 			gotRetry := syncAlternateEmailToAuth0(context.Background(), "test-key", userSfid, emailSfid, tt.eventEmail)
 
@@ -361,6 +365,17 @@ func TestSyncAlternateEmailToAuth0(t *testing.T) {
 				}
 			} else if len(linkCalls) != 0 {
 				t.Errorf("expected no link calls, got %v", linkCalls)
+			}
+
+			if tt.wantUnlinkEmail != "" {
+				if len(unlinkCalls) != 1 {
+					t.Fatalf("expected 1 unlink call, got %d (%v)", len(unlinkCalls), unlinkCalls)
+				}
+				if unlinkCalls[0] != tt.wantUnlinkEmail {
+					t.Errorf("unlink called with email %q, want %q", unlinkCalls[0], tt.wantUnlinkEmail)
+				}
+			} else if len(unlinkCalls) != 0 {
+				t.Errorf("expected no unlink calls, got %v", unlinkCalls)
 			}
 		})
 	}
