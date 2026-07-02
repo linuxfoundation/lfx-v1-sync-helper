@@ -268,7 +268,8 @@ func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Da
 		}
 	}
 
-	// Skip primary emails — managed by auth0-sync-userdb, not this flow.
+	// Skip primary emails — the primary email is the Auth0 user's own email
+	// field, not a linked identity, so it is out of scope for this handler.
 	if isPrimary, _ := v1Data["primary_email__c"].(bool); isPrimary {
 		return shouldRetry
 	}
@@ -306,10 +307,19 @@ func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Da
 	return shouldRetry
 }
 
-// syncAlternateEmailToAuth0 links a verified alternate email as an Auth0
-// identity on the user's primary account. eventEmail is the email address
-// from the KV event payload, used as a fallback when getAlternateEmailDetails
-// can't return one. Unlinks live in handleAlternateEmailDelete.
+// syncAlternateEmailToAuth0 links or unlinks a verified alternate email as an
+// Auth0 identity on the user's primary account. eventEmail is the email
+// address from the KV event payload, used as a fallback when
+// getAlternateEmailDetails can't return one.
+//
+// Two v1 soft-delete paths both arrive here as KV PUTs:
+//   - active__c=false: user-service sets the email inactive without deleting
+//     the database row; WAL replicates this as a plain PUT with no
+//     _sdc_deleted_at. isTombstoned=true triggers an Auth0 unlink here.
+//   - _sdc_deleted_at set: Meltano WAL marks the row deleted; handleKVPut
+//     routes these directly to handleAlternateEmailDelete, which also
+//     calls unlinkEmailIdentityFn.
+//
 // Returns true if the operation should be retried (transient failure).
 func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid, eventEmail string) bool {
 	email, isPrimary, isVerified, isTombstoned, err := getAlternateEmailDetailsFn(ctx, emailSfid)
@@ -323,12 +333,43 @@ func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid, ev
 		email = eventEmail
 	}
 
-	// Skip primary emails - handled by auth0-sync-userdb.
+	// Skip primary emails — the primary email is the Auth0 user's own email
+	// field, not a linked identity, so it is out of scope for this handler.
 	if isPrimary {
 		return false
 	}
-	// Tombstoned/inactive: a delete event will (or did) handle the unlink.
+
+	// Tombstoned/inactive (active__c=false): unlink from Auth0. This handles
+	// the soft-delete path where v1 sets active__c=false without deleting the
+	// database row (no _sdc_deleted_at). The _sdc_deleted_at path is handled
+	// separately by handleAlternateEmailDelete.
 	if isTombstoned {
+		if email == "" {
+			logger.With("key", key, "email_sfid", emailSfid).
+				WarnContext(ctx, "tombstoned alternate email has no address, cannot unlink Auth0 identity")
+			return false
+		}
+		v1User, err := lookupMergedUserFn(ctx, userSfid)
+		if err != nil {
+			logger.With(errKey, err, "key", key, "user_sfid", userSfid).
+				WarnContext(ctx, "failed to resolve v1 user for Auth0 email unlink")
+			return false
+		}
+		if v1User.Username == "" {
+			logger.With("key", key, "user_sfid", userSfid).
+				WarnContext(ctx, "v1 user has no username, cannot resolve Auth0 ID for unlink")
+			return false
+		}
+		auth0UserID := mapUsernameToAuthSub(v1User.Username)
+		if err := unlinkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
+			if isRetryableAuth0Error(err) {
+				logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
+					WarnContext(ctx, "retryable Auth0 error during unlink, NACKing for redelivery")
+				return true
+			}
+			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
+				ErrorContext(ctx, "failed to unlink email identity from Auth0, dropping non-retryable error")
+		}
 		return false
 	}
 	if !isVerified {

@@ -307,9 +307,10 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 	}
 
 	// Extract email address and primary flag before the active check: downstream
-	// callers use isPrimary to short-circuit (primary emails are managed by
-	// auth0-sync-userdb, not this flow), and they need the address to unlink
-	// tombstoned/inactive records.
+	// callers use isPrimary to short-circuit (the primary email is the Auth0
+	// user's own email field, not a linked identity, so it is out of scope for
+	// this handler), and they need the address to unlink tombstoned/inactive
+	// records.
 	if emailAddr, ok := emailData["alternate_email_address__c"].(string); ok && emailAddr != "" {
 		email = emailAddr
 	}
