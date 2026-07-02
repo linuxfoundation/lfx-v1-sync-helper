@@ -80,13 +80,7 @@ func TestBuildAuth0Metadata(t *testing.T) {
 			},
 			v1Data:      map[string]any{"firstname": "New", "lastname": "Name"},
 			wantChanged: false,
-			wantFieldChecks: map[string]string{
-				"custom_field": "keep me",
-				// Name fields are preserved as-is from existing; not overwritten.
-				"given_name":  "Joan",
-				"family_name": "Reyero",
-				"name":        "Joan Reyero",
-			},
+			// Patch is empty: unowned fields are absent (Auth0 PATCH preserves them).
 		},
 		{
 			name:        "org name is set when provided",
@@ -99,25 +93,23 @@ func TestBuildAuth0Metadata(t *testing.T) {
 			},
 		},
 		{
-			name: "placeholder org does not overwrite existing real org",
+			name: "placeholder org is skipped even when existing org is present",
 			existing: map[string]interface{}{
 				"organization": "Linux Foundation",
 			},
 			v1Data:      map[string]any{},
 			orgName:     "Individual - No Account",
 			wantChanged: false,
-			wantFieldChecks: map[string]string{
-				"organization": "Linux Foundation",
-			},
+			// Patch is empty: existing org is preserved by Auth0 PATCH semantics.
 		},
 		{
-			name:        "placeholder org is set when no existing org",
+			name:        "placeholder org is skipped even when no existing org",
 			existing:    map[string]interface{}{},
 			v1Data:      map[string]any{},
 			orgName:     "Individual - No Account",
-			wantChanged: true,
+			wantChanged: false,
 			wantFieldChecks: map[string]string{
-				"organization": "Individual - No Account",
+				"organization": "",
 			},
 		},
 		{
@@ -127,7 +119,7 @@ func TestBuildAuth0Metadata(t *testing.T) {
 			wantChanged: false,
 		},
 		{
-			name: "empty v1 clears owned fields but preserves name fields",
+			name: "empty v1 clears owned fields but does not include unowned fields in patch",
 			existing: map[string]interface{}{
 				"given_name":  "Joan",
 				"family_name": "Reyero",
@@ -137,12 +129,12 @@ func TestBuildAuth0Metadata(t *testing.T) {
 			v1Data:      map[string]any{},
 			wantChanged: true,
 			wantFieldChecks: map[string]string{
-				// Name fields owned by auth service: preserved unchanged.
-				"given_name":  "Joan",
-				"family_name": "Reyero",
-				"name":        "Joan Reyero",
 				// v1-owned field cleared because v1 sent an empty value.
 				"job_title": "",
+				// Name fields are absent from the patch (Auth0 PATCH preserves them).
+				"given_name":  "",
+				"family_name": "",
+				"name":        "",
 			},
 		},
 	}

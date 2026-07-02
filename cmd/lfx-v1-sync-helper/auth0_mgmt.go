@@ -63,8 +63,9 @@ var v1ToAuth0Fields = map[string]string{
 	"timezone__c":       "zoneinfo",
 }
 
-// v1NoAccountPlaceholder is the v1 placeholder org name that should not overwrite
-// a real v2 organization value.
+// v1NoAccountPlaceholder is the v1 sentinel org name for individuals with no
+// company affiliation. It is not a real organization and is never written to
+// Auth0 user_metadata; when resolved as a user's org it is treated as "no org".
 const v1NoAccountPlaceholder = "Individual - No Account"
 
 // initAuth0MgmtClient initializes the Auth0 Management API client using
@@ -119,37 +120,40 @@ func isRetryableAuth0Error(err error) bool {
 	return false
 }
 
-// buildAuth0Metadata merges v1 platform DB fields into an existing Auth0
-// user_metadata map and reports whether anything changed. The orgName parameter
-// is the resolved organization name (empty to skip org mapping).
-func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, orgName string) (merged map[string]interface{}, changed bool) {
-	merged = make(map[string]interface{}, len(existing))
-	for k, v := range existing {
-		merged[k] = v
-	}
+// buildAuth0Metadata diffs v1 platform DB fields against the existing Auth0
+// user_metadata and returns a patch map containing only the keys that changed,
+// plus a boolean indicating whether any change was detected. The orgName
+// parameter is the resolved organization name (empty or the individual
+// placeholder to skip org mapping). The patch map is safe to send as the
+// user_metadata body of an Auth0 Management API PATCH: Auth0 merges top-level
+// keys, so sending only changed keys avoids unnecessary writes and is
+// race-safer than sending the full metadata object.
+func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, orgName string) (patch map[string]interface{}, changed bool) {
+	patch = make(map[string]interface{})
 
 	// Map each v1 field to the corresponding Auth0 user_metadata key.
 	for v1Key, auth0Key := range v1ToAuth0Fields {
 		v1Val, _ := v1Data[v1Key].(string)
-		existingVal, _ := merged[auth0Key].(string)
+		existingVal, _ := existing[auth0Key].(string)
 
 		if v1Val != existingVal {
-			merged[auth0Key] = v1Val
+			patch[auth0Key] = v1Val
 			changed = true
 		}
 	}
 
-	// Organization mapping: don't overwrite a real org with the placeholder.
-	if orgName != "" {
-		existingOrg, _ := merged["organization"].(string)
-		isPlaceholder := orgName == v1NoAccountPlaceholder && existingOrg != ""
-		if !isPlaceholder && orgName != existingOrg {
-			merged["organization"] = orgName
+	// Organization mapping: skip v1's individual-placeholder sentinel entirely;
+	// the v2 organization field is either already set by the auth service or is
+	// legitimately empty — the v1 placeholder is not meaningful in v2.
+	if orgName != "" && orgName != v1NoAccountPlaceholder {
+		existingOrg, _ := existing["organization"].(string)
+		if orgName != existingOrg {
+			patch["organization"] = orgName
 			changed = true
 		}
 	}
 
-	return merged, changed
+	return patch, changed
 }
 
 // auth0RateLimiter throttles Auth0 Management API calls in the backfill outer
@@ -166,8 +170,8 @@ func luceneQuoteEscape(s string) string {
 }
 
 // syncProfileToAuth0 maps v1 merged_user fields to Auth0 user_metadata and
-// pushes the update via the Management API. It reads the current user_metadata
-// first to avoid clobbering fields we don't own.
+// pushes the update via the Management API. It reads current user_metadata first
+// so that no-op updates can be detected and skipped.
 func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[string]any) error {
 	// Read the current Auth0 user to get existing user_metadata.
 	existing, err := auth0Users.Read(ctx, auth0UserID)
@@ -175,7 +179,7 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[stri
 		return fmt.Errorf("failed to read Auth0 user %s: %w", auth0UserID, err)
 	}
 
-	// Start from existing user_metadata (or empty map).
+	// Start from existing user_metadata (or empty map) for diffing.
 	existingMetadata := make(map[string]interface{})
 	if existing.UserMetadata != nil {
 		for k, v := range *existing.UserMetadata {
@@ -276,6 +280,7 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 		Email:         auth0.String(email),
 		EmailVerified: auth0.Bool(true),
 	}
+	// Create unmarshals the API response back into secondaryUser, populating user_id.
 	err = auth0Users.Create(ctx, secondaryUser)
 	if err != nil {
 		// If user already exists (409), find it and proceed to link.
