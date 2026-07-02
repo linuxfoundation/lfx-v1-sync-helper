@@ -16,9 +16,9 @@ func TestBuildAuth0Metadata(t *testing.T) {
 		existing        map[string]interface{}
 		v1Data          map[string]any
 		orgName         string
-		wantChanged     bool
-		wantFieldChecks map[string]string // key -> expected value
-		wantAbsent      []string          // keys that must NOT appear in merged
+		wantEmpty       bool // true when no changes are expected (patch should be empty)
+		wantFieldChecks map[string]string // key -> expected value in patch
+		wantAbsent      []string          // keys that must NOT appear in patch
 	}{
 		{
 			name:     "maps all v1-owned fields, ignores name fields",
@@ -37,7 +37,6 @@ func TestBuildAuth0Metadata(t *testing.T) {
 				"photo_url__c":      "https://example.com/photo.jpg",
 				"timezone__c":       "America/Los_Angeles",
 			},
-			wantChanged: true,
 			wantFieldChecks: map[string]string{
 				"job_title":      "Engineer",
 				"address":        "123 Main St",
@@ -67,8 +66,8 @@ func TestBuildAuth0Metadata(t *testing.T) {
 				"picture":        "",
 				"zoneinfo":       "",
 			},
-			v1Data:      map[string]any{},
-			wantChanged: false,
+			v1Data:    map[string]any{},
+			wantEmpty: true,
 		},
 		{
 			name: "preserves fields we don't own, including name fields",
@@ -78,16 +77,15 @@ func TestBuildAuth0Metadata(t *testing.T) {
 				"family_name":  "Reyero",
 				"name":         "Joan Reyero",
 			},
-			v1Data:      map[string]any{"firstname": "New", "lastname": "Name"},
-			wantChanged: false,
+			v1Data:    map[string]any{"firstname": "New", "lastname": "Name"},
+			wantEmpty: true,
 			// Patch is empty: unowned fields are absent (Auth0 PATCH preserves them).
 		},
 		{
-			name:        "org name is set when provided",
-			existing:    map[string]interface{}{},
-			v1Data:      map[string]any{},
-			orgName:     "Linux Foundation",
-			wantChanged: true,
+			name:     "org name is set when provided",
+			existing: map[string]interface{}{},
+			v1Data:   map[string]any{},
+			orgName:  "Linux Foundation",
 			wantFieldChecks: map[string]string{
 				"organization": "Linux Foundation",
 			},
@@ -97,26 +95,24 @@ func TestBuildAuth0Metadata(t *testing.T) {
 			existing: map[string]interface{}{
 				"organization": "Linux Foundation",
 			},
-			v1Data:      map[string]any{},
-			orgName:     "Individual - No Account",
-			wantChanged: false,
+			v1Data:    map[string]any{},
+			orgName:   "Individual - No Account",
+			wantEmpty: true,
 			// Patch is empty: existing org is preserved by Auth0 PATCH semantics.
 		},
 		{
-			name:        "placeholder org is skipped even when no existing org",
-			existing:    map[string]interface{}{},
-			v1Data:      map[string]any{},
-			orgName:     "Individual - No Account",
-			wantChanged: false,
-			wantFieldChecks: map[string]string{
-				"organization": "",
-			},
+			name:      "placeholder org is skipped even when no existing org",
+			existing:  map[string]interface{}{},
+			v1Data:    map[string]any{},
+			orgName:   "Individual - No Account",
+			wantEmpty: true,
+			wantAbsent: []string{"organization"},
 		},
 		{
-			name:        "empty v1 data with empty existing produces no change",
-			existing:    map[string]interface{}{},
-			v1Data:      map[string]any{},
-			wantChanged: false,
+			name:      "empty v1 data with empty existing produces no change",
+			existing:  map[string]interface{}{},
+			v1Data:    map[string]any{},
+			wantEmpty: true,
 		},
 		{
 			name: "empty v1 clears owned fields but does not include unowned fields in patch",
@@ -126,37 +122,34 @@ func TestBuildAuth0Metadata(t *testing.T) {
 				"name":        "Joan Reyero",
 				"job_title":   "Engineer",
 			},
-			v1Data:      map[string]any{},
-			wantChanged: true,
+			v1Data: map[string]any{},
 			wantFieldChecks: map[string]string{
 				// v1-owned field cleared because v1 sent an empty value.
 				"job_title": "",
-				// Name fields are absent from the patch (Auth0 PATCH preserves them).
-				"given_name":  "",
-				"family_name": "",
-				"name":        "",
 			},
+			// Name fields are absent from the patch (Auth0 PATCH preserves them).
+			wantAbsent: []string{"given_name", "family_name", "name"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			merged, changed := buildAuth0Metadata(tt.existing, tt.v1Data, tt.orgName)
+			patch := buildAuth0Metadata(tt.existing, tt.v1Data, tt.orgName)
 
-			if changed != tt.wantChanged {
-				t.Errorf("changed = %v, want %v", changed, tt.wantChanged)
+			if tt.wantEmpty && len(patch) != 0 {
+				t.Errorf("expected empty patch, got %v", patch)
 			}
 
 			for key, want := range tt.wantFieldChecks {
-				got, _ := merged[key].(string)
+				got, _ := patch[key].(string)
 				if got != want {
-					t.Errorf("merged[%q] = %q, want %q", key, got, want)
+					t.Errorf("patch[%q] = %q, want %q", key, got, want)
 				}
 			}
 
 			for _, key := range tt.wantAbsent {
-				if _, present := merged[key]; present {
-					t.Errorf("merged[%q] should be absent but was present with value %v", key, merged[key])
+				if _, present := patch[key]; present {
+					t.Errorf("patch[%q] should be absent but was present with value %v", key, patch[key])
 				}
 			}
 		})

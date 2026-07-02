@@ -121,15 +121,15 @@ func isRetryableAuth0Error(err error) bool {
 }
 
 // buildAuth0Metadata diffs v1 platform DB fields against the existing Auth0
-// user_metadata and returns a patch map containing only the keys that changed,
-// plus a boolean indicating whether any change was detected. The orgName
-// parameter is the resolved organization name (empty or the individual
-// placeholder to skip org mapping). The patch map is safe to send as the
-// user_metadata body of an Auth0 Management API PATCH: Auth0 merges top-level
-// keys, so sending only changed keys avoids unnecessary writes and is
-// race-safer than sending the full metadata object.
-func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, orgName string) (patch map[string]interface{}, changed bool) {
-	patch = make(map[string]interface{})
+// user_metadata and returns a patch map containing only the keys that changed.
+// The orgName parameter is the resolved organization name (empty or the
+// individual placeholder to skip org mapping). The patch map is safe to send
+// as the user_metadata body of an Auth0 Management API PATCH: Auth0 merges
+// top-level keys, so sending only changed keys avoids unnecessary writes and
+// is race-safer than sending the full metadata object. An empty patch map
+// means nothing changed.
+func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, orgName string) map[string]interface{} {
+	patch := make(map[string]interface{})
 
 	// Map each v1 field to the corresponding Auth0 user_metadata key.
 	for v1Key, auth0Key := range v1ToAuth0Fields {
@@ -138,7 +138,6 @@ func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, 
 
 		if v1Val != existingVal {
 			patch[auth0Key] = v1Val
-			changed = true
 		}
 	}
 
@@ -149,11 +148,10 @@ func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, 
 		existingOrg, _ := existing["organization"].(string)
 		if orgName != existingOrg {
 			patch["organization"] = orgName
-			changed = true
 		}
 	}
 
-	return patch, changed
+	return patch
 }
 
 // auth0RateLimiter throttles Auth0 Management API calls in the backfill outer
@@ -201,9 +199,9 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[stri
 		}
 	}
 
-	metadata, changed := buildAuth0Metadata(existingMetadata, v1Data, orgName)
+	metadata := buildAuth0Metadata(existingMetadata, v1Data, orgName)
 
-	if !changed {
+	if len(metadata) == 0 {
 		logger.With("auth0_user_id", auth0UserID).
 			DebugContext(ctx, "no profile field changes detected, skipping Auth0 update")
 		return nil
