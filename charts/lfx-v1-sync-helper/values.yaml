@@ -190,6 +190,12 @@ app:
     # DYNAMODB_STREAM_NAME is the NATS stream name to consume DynamoDB events from.
     DYNAMODB_STREAM_NAME:
       value: "dynamodb_streams"
+    # COMMITTEE_SKIP_MEMBER_NOTIFICATIONS controls whether committee member-add events
+    # originating from this V1 sync process suppress V2 notification emails (default: true).
+    # Set to "false" to allow emails from V1-sync adds (e.g. at GA when enabling broadly).
+    # Accepts truthy values: "true", "yes", "t", "y", "1" (case-insensitive).
+    COMMITTEE_SKIP_MEMBER_NOTIFICATIONS:
+      value: "true"
   # heimdall is the configuration for JWT impersonation of Heimdall-authorized
   # principals for v1 data ingest.
   heimdall:

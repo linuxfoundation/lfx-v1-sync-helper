@@ -399,3 +399,35 @@ func TestProjectAllowlistCaseInsensitive(t *testing.T) {
 		}
 	}
 }
+
+func TestCommitteeSkipMemberNotificationsConfig(t *testing.T) {
+	tests := []struct {
+		name   string
+		envVal string
+		want   bool
+	}{
+		{"unset defaults to true (skip)", "", true},
+		{"explicit true", "true", true},
+		{"explicit false", "false", false},
+		{"FALSE uppercase", "FALSE", false},
+		{"false with whitespace", "  false  ", false},
+		{"0 re-enables notifications", "0", false},
+		{"no re-enables notifications", "no", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredEnvs(t)
+			os.Unsetenv("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS")
+			if tt.envVal != "" {
+				t.Setenv("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS", tt.envVal)
+			}
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("LoadConfig() error = %v", err)
+			}
+			if cfg.CommitteeSkipMemberNotifications != tt.want {
+				t.Errorf("CommitteeSkipMemberNotifications = %v, want %v", cfg.CommitteeSkipMemberNotifications, tt.want)
+			}
+		})
+	}
+}
