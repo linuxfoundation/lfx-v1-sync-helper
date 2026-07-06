@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -182,6 +183,9 @@ func TestIsRetryableAuth0Error(t *testing.T) {
 		{"wrapped 404", fmt.Errorf("read Auth0: %w", &fakeMgmtErr{status: 404}), false},
 		{"net error", &net.OpError{Op: "dial", Err: errors.New("timeout")}, true},
 		{"wrapped net error", fmt.Errorf("request: %w", &net.OpError{Op: "dial", Err: errors.New("timeout")}), true},
+		{"context deadline exceeded", context.DeadlineExceeded, true},
+		{"wrapped context deadline", fmt.Errorf("auth0 call: %w", context.DeadlineExceeded), true},
+		{"context canceled", context.Canceled, true},
 		{"generic error", errors.New("something"), false},
 	}
 

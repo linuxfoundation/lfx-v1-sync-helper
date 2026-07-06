@@ -93,13 +93,13 @@ func initAuth0MgmtClient(cfg *Config) error {
 }
 
 // isRetryableAuth0Error reports whether an Auth0 Management API error is
-// transient and safe to retry via JetStream redelivery. It is only consulted
-// on the sync (backfill) path; the async path relies on SDK-level retries and
-// always ACKs.
+// transient and safe to retry via JetStream redelivery. Both the live handler
+// path (which NACKs on retryable errors) and the backfill path (which aborts
+// and saves its cursor) consult this function.
 //
 // Retryable: HTTP 429 and any 5xx, plus network-level errors (timeouts, DNS
-// failures, connection resets) that surface as net.Error / wrapped errors
-// before a Management API response is returned.
+// failures, connection resets) that surface as net.Error or context deadline /
+// cancellation errors from the per-call timeout wrapper.
 func isRetryableAuth0Error(err error) bool {
 	if err == nil {
 		return false
@@ -110,7 +110,10 @@ func isRetryableAuth0Error(err error) bool {
 		return status == 429 || status >= 500
 	}
 	var netErr net.Error
-	return errors.As(err, &netErr)
+	if errors.As(err, &netErr) {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
 // buildAuth0Metadata diffs v1 platform DB fields against the existing Auth0
