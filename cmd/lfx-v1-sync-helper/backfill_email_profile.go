@@ -68,7 +68,6 @@ type backfillEmailsResult struct {
 	usersProcessed int
 	emailsLinked   int
 	emailsSkipped  int
-	errors         int
 }
 
 // backfillProfilesResult summarises one run of backfillProfiles.
@@ -76,7 +75,6 @@ type backfillProfilesResult struct {
 	usersProcessed int
 	usersUpdated   int
 	usersSkipped   int
-	errors         int
 }
 
 // getAlternateEmailDetailsFn is injectable for tests.
@@ -187,6 +185,9 @@ func backfillAlternateEmails(ctx context.Context, limit int, dryRun bool) (*back
 				logger.With(errKey, err, "auth0_user_id", auth0UserID).
 					Warn("aborting alternate-emails backfill after error")
 				if !dryRun {
+					// nextCursor holds the last successfully processed user's
+					// updated_at, so the failing user will be retried on the
+					// next run (inclusive cursor query).
 					if saveErr := saveBackfillCursor(ctx, backfillAltEmailsCursorKey, nextCursor); saveErr != nil {
 						logger.With(errKey, saveErr).Warn("failed to save backfill cursor on abort")
 					}
@@ -217,7 +218,6 @@ func backfillAlternateEmails(ctx context.Context, limit int, dryRun bool) (*back
 			"users_processed", result.usersProcessed,
 			"emails_linked", result.emailsLinked,
 			"emails_skipped", result.emailsSkipped,
-			"errors", result.errors,
 			"cursor", nextCursor,
 		).Info("alternate-emails backfill page complete")
 	}
@@ -344,6 +344,9 @@ func backfillProfiles(ctx context.Context, limit int, dryRun bool) (*backfillPro
 				logger.With(errKey, err, "auth0_user_id", auth0UserID).
 					Warn("aborting profiles backfill after error")
 				if !dryRun {
+					// nextCursor holds the last successfully processed user's
+					// updated_at, so the failing user will be retried on the
+					// next run (inclusive cursor query).
 					if saveErr := saveBackfillCursor(ctx, backfillProfilesCursorKey, nextCursor); saveErr != nil {
 						logger.With(errKey, saveErr).Warn("failed to save backfill cursor on abort")
 					}
@@ -374,7 +377,6 @@ func backfillProfiles(ctx context.Context, limit int, dryRun bool) (*backfillPro
 			"users_processed", result.usersProcessed,
 			"users_updated", result.usersUpdated,
 			"users_skipped", result.usersSkipped,
-			"errors", result.errors,
 			"cursor", nextCursor,
 		).Info("profiles backfill page complete")
 	}

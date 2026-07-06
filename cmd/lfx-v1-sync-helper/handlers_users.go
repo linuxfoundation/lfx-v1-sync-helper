@@ -132,7 +132,7 @@ func handleMergedUserDelete(ctx context.Context, key, userSfid string, v1Data ma
 	username, _ := v1Data["username__c"].(string)
 	if encodedUsername := usernameToKVKey(username); encodedUsername != "" {
 		indexKey := kvKeyUsernamePrefix + encodedUsername
-		if err := mappingsKV.Delete(ctx, indexKey); err != nil {
+		if err := deleteIndexKeyFn(ctx, indexKey); err != nil {
 			logger.With("error", err, "key", key, "indexKey", indexKey).
 				ErrorContext(ctx, "failed to delete username index for deleted user")
 		} else {
