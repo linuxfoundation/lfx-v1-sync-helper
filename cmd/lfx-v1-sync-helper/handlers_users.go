@@ -485,10 +485,6 @@ func updateEmailsList(currentEmails []string, emailSfid string, isDeleted bool) 
 const (
 	// kvObjectsStream is the JetStream stream backing the v1-objects KV bucket.
 	kvObjectsStream = "KV_v1-objects"
-
-	// kvObjectsSubjectPrefix is the NATS subject prefix the server prepends to
-	// every KV key stored in the v1-objects bucket. Strip it to recover the key.
-	kvObjectsSubjectPrefix = "$KV.v1-objects."
 )
 
 // extractUsernameIndex extracts the secondary index key and value for a
@@ -516,35 +512,20 @@ func extractEmailIndex(data map[string]any) (indexKey, value string) {
 }
 
 // streamUserSecondaryIndex rebuilds one class of secondary index (username or
-// email) using a two-pass strategy that is correct regardless of the
-// v1-objects bucket's History setting.
+// email) by scanning the v1-objects stream with ScanSubjectData and writing
+// an index entry for each live, non-deleted subject.
 //
-// # Why two passes
-//
-// With DeliverAllPolicy and History>1 a single-pass consumer receives every
-// retained revision per subject. Processing in order would cause earlier
-// revisions (e.g. an old username) to write stale index entries that the later
-// revision's different indexKey never cleans up. Dev is already at History=2;
-// prod must not be assumed to stay at 1.
-//
-// # Pass 1 — enumerate live subjects (via EnumerateLiveSubjects)
-//
-// EnumerateLiveSubjects walks the stream with a HeadersOnly ephemeral consumer,
-// applies client-side last-write-wins dedup, and returns the set of subjects
-// whose latest revision is not a DEL/PURGE tombstone.
-//
-// # Pass 2 — fetch latest value per subject and write index
-//
-// For each live subject, v1KV.Get returns the latest revision by definition
-// (NATS direct-get uses last_by_subj). Decode, apply existing skip logic
-// (isdeleted, _sdc_deleted_at), extract the index entry, and Put into mappings.
+// KV_v1-objects in prod has 54M sequences (18.5M subjects, 35.6M tombstones).
+// A DeliverAllPolicy consumer would stream all sequences through a single
+// connection, saturating NATS server CPU and preventing heartbeat delivery.
+// ScanSubjectData uses sequential GetMsg with next_by_subj: each call is an
+// independent request-reply, spreading the server load across ~N round trips.
+// Payloads are returned directly so no separate KV.Get per subject is needed.
 //
 // # Deadline strategy (env-configurable via REINDEX_* env vars)
 //
-//   - REINDEX_PHASE_TIMEOUT (default 45m): total budget for pass 1 + pass 2
-//     combined. Pass 2 dominates runtime (~unique-keys × REINDEX_OP_DELAY + RTT).
-//   - REINDEX_NATS_OP_TIMEOUT (default 30s): per-op cap on each KV.Get and Put.
-//     Without this the SDK injects a 5s default (2026-04-23 incident).
+//   - REINDEX_PHASE_TIMEOUT (default 45m): total budget for scan + index writes.
+//   - REINDEX_NATS_OP_TIMEOUT (default 30s): per-op cap on each GetMsg and Put.
 //   - REINDEX_OP_DELAY (default 1ms): inter-iteration sleep to cap op-rate on
 //     the shared broker. Primary throughput knob for prod runs.
 func streamUserSecondaryIndex(
@@ -556,46 +537,26 @@ func streamUserSecondaryIndex(
 	phaseCtx, phaseCancel := context.WithTimeout(ctx, cfg.ReindexPhaseTimeout)
 	defer phaseCancel()
 
-	// ---- Pass 1: enumerate live subjects ----
-
-	liveSubjects, err := EnumerateLiveSubjects(phaseCtx, jsContext, kvObjectsStream, subjectFilter,
-		WithFetchMaxWait(cfg.NATSFetchMaxWait),
-	)
+	subjectData, err := ScanSubjectData(phaseCtx, jsContext, kvObjectsStream, subjectFilter, cfg.ReindexNATSOpTimeout)
 	if err != nil {
-		return 0, 0, fmt.Errorf("%s reindex enumeration: %w", phaseName, err)
+		return 0, 0, fmt.Errorf("%s reindex scan: %w", phaseName, err)
 	}
 
-	logger.With("subjects", len(liveSubjects), "phase", phaseName).Info("reindex enumeration complete; starting index writes")
+	logger.With("subjects", len(subjectData), "phase", phaseName).Info("reindex scan complete; starting index writes")
 
-	// ---- Pass 2: fetch latest value per live subject and write index ----
-
-	for subject := range liveSubjects {
+	for subject, rawData := range subjectData {
 		if err := phaseCtx.Err(); err != nil {
 			return written, errors, fmt.Errorf("%s reindex phase timed out after %d writes: %w", phaseName, written, err)
 		}
 
-		kvKey := strings.TrimPrefix(subject, kvObjectsSubjectPrefix)
-
-		getCtx, cancelGet := context.WithTimeout(ctx, cfg.ReindexNATSOpTimeout)
-		entry, getErr := v1KV.Get(getCtx, kvKey)
-		cancelGet()
-		if getErr != nil {
-			if getErr == jetstream.ErrKeyNotFound || getErr == jetstream.ErrKeyDeleted {
-				continue
-			}
-			logger.With("error", getErr, "subject", subject, "phase", phaseName).Warn("failed to get latest value during reindex; skipping")
-			errors++
-			continue
-		}
-
-		if isTombstonedMapping(entry.Value()) {
+		if isTombstonedMapping(rawData) {
 			continue
 		}
 
 		// Decode JSON, fall back to msgpack — mirrors getV1ObjectData in lfx_v1_client.go.
 		var data map[string]any
-		if jsonErr := json.Unmarshal(entry.Value(), &data); jsonErr != nil {
-			if mpErr := msgpack.Unmarshal(entry.Value(), &data); mpErr != nil {
+		if jsonErr := json.Unmarshal(rawData, &data); jsonErr != nil {
+			if mpErr := msgpack.Unmarshal(rawData, &data); mpErr != nil {
 				logger.With("subject", subject, "phase", phaseName).Warn("failed to decode reindex value; skipping")
 				errors++
 				continue

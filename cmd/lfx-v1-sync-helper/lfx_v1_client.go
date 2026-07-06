@@ -515,7 +515,7 @@ func getV1OrganizationFromOrgSvc(ctx context.Context, sfid string) (*V1Organizat
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -559,7 +559,7 @@ func searchV1OrgsByWebsite(ctx context.Context, website string) (*V1Organization
 	if err != nil {
 		return nil, fmt.Errorf("failed to send org search request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -607,7 +607,7 @@ func createV1OrgInOrgSvc(ctx context.Context, name, website string) (*V1Organiza
 	if err != nil {
 		return nil, fmt.Errorf("failed to send org create request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -912,7 +912,7 @@ func createV1Committee(ctx context.Context, projectSFID string, payload projectS
 	if err != nil {
 		return nil, fmt.Errorf("failed to send create committee request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -956,7 +956,7 @@ func updateV1Committee(ctx context.Context, projectSFID, committeeSFID string, p
 	if err != nil {
 		return fmt.Errorf("failed to send update committee request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -989,7 +989,7 @@ func deleteV1Committee(ctx context.Context, projectSFID, committeeSFID string) e
 	if err != nil {
 		return fmt.Errorf("failed to send delete committee request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, _ := io.ReadAll(resp.Body)
 	logger.DebugContext(ctx, "deleteV1Committee response", "status", resp.StatusCode, "body", string(respBody))
@@ -1073,7 +1073,7 @@ func createV1CommitteeMember(ctx context.Context, projectSFID, committeeSFID str
 	if err != nil {
 		return nil, fmt.Errorf("failed to send create committee member request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1115,7 +1115,7 @@ func updateV1CommitteeMember(ctx context.Context, projectSFID, committeeSFID, me
 	if err != nil {
 		return fmt.Errorf("failed to send update committee member request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1146,7 +1146,7 @@ func deleteV1CommitteeMember(ctx context.Context, projectSFID, committeeSFID, me
 	if err != nil {
 		return fmt.Errorf("failed to send delete committee member request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, _ := io.ReadAll(resp.Body)
 	logger.DebugContext(ctx, "deleteV1CommitteeMember response", "status", resp.StatusCode, "body", string(respBody))

@@ -124,9 +124,11 @@ func backfillACSProjectGrants(ctx context.Context, dryRun bool) error {
 // KV_v1-mappings JetStream stream and returns a map of v1 SFID → v2 project
 // UID.
 //
-// Uses EnumerateLiveSubjects for the headers-only stream walk with client-side
-// last-write-wins dedup, then does point reads (mappingsKV.Get) to retrieve
-// the mapping value for each live subject.
+// Uses ScanSubjectData for sequential GetMsg (next_by_subj) iteration instead
+// of an ephemeral consumer. KV_v1-mappings in prod has 34M sequences; a
+// DeliverAllPolicy consumer saturates NATS server CPU and causes heartbeat
+// failures. ScanSubjectData returns payloads directly so no separate
+// mappingsKV.Get per subject is needed.
 func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) {
 	const (
 		// kvMappingsStream is the JetStream stream backing the v1-mappings KV
@@ -140,45 +142,29 @@ func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) 
 		// projectSFIDSubjectPrefix is stripped from the subject to extract the
 		// SFID.
 		projectSFIDSubjectPrefix = "$KV.v1-mappings.project.sfid."
-
-		// projectSFIDKVKeyPrefix is used to construct the KV key for
-		// mappingsKV.Get (the SFID is appended to form the full key).
-		projectSFIDKVKeyPrefix = "project.sfid."
 	)
 
-	liveSubjects, err := EnumerateLiveSubjects(ctx, jsContext, kvMappingsStream, projectSFIDSubject,
-		WithFetchMaxWait(cfg.NATSFetchMaxWait),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to enumerate project SFID mappings: %w", err)
+	opTimeout := cfg.NATSFetchMaxWait
+	if opTimeout <= 0 {
+		opTimeout = defaultNATSFetchMaxWait
 	}
 
-	mappings := make(map[string]string, len(liveSubjects))
+	subjectData, err := ScanSubjectData(ctx, jsContext, kvMappingsStream, projectSFIDSubject, opTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan project SFID mappings: %w", err)
+	}
 
-	for subject := range liveSubjects {
+	mappings := make(map[string]string, len(subjectData))
+
+	for subject, data := range subjectData {
 		if !strings.HasPrefix(subject, projectSFIDSubjectPrefix) {
 			continue
 		}
 		sfid := subject[len(projectSFIDSubjectPrefix):]
-		kvKey := projectSFIDKVKeyPrefix + sfid
-
-		opTimeout := cfg.NATSFetchMaxWait
-		if opTimeout <= 0 {
-			opTimeout = defaultNATSFetchMaxWait
-		}
-		getCtx, cancelGet := context.WithTimeout(ctx, opTimeout)
-		entry, getErr := mappingsKV.Get(getCtx, kvKey)
-		cancelGet()
-		if getErr != nil {
-			logger.With(errKey, getErr, "sfid", sfid).Warn("failed to get project SFID mapping value; skipping")
+		if isTombstonedMapping(data) || len(data) == 0 {
 			continue
 		}
-
-		val := string(entry.Value())
-		if isTombstonedMapping(entry.Value()) || val == "" {
-			continue
-		}
-		mappings[sfid] = val
+		mappings[sfid] = string(data)
 	}
 
 	return mappings, nil

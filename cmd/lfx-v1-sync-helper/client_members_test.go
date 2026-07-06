@@ -109,12 +109,12 @@ func TestPutB2BOrgSettings_412Retry(t *testing.T) {
 					*calls++
 					if *calls == 1 {
 						w.WriteHeader(http.StatusPreconditionFailed)
-						fmt.Fprintf(w, `{"message":"%s"}`, sentinel)
+						fmt.Fprintf(w, `{"message":"%s"}`, sentinel) //nolint:errcheck
 						return
 					}
 					w.Header().Set("ETag", `"v2"`)
 					w.WriteHeader(http.StatusOK)
-					w.Write(okBody())
+					w.Write(okBody()) //nolint:errcheck
 				}
 			},
 			wantErr:   false,
@@ -127,7 +127,7 @@ func TestPutB2BOrgSettings_412Retry(t *testing.T) {
 				return func(w http.ResponseWriter, _ *http.Request) {
 					*calls++
 					w.WriteHeader(http.StatusPreconditionFailed)
-					fmt.Fprint(w, `{"message":"etag mismatch"}`)
+					fmt.Fprint(w, `{"message":"etag mismatch"}`) //nolint:errcheck
 				}
 			},
 			wantErr:   true,
@@ -142,7 +142,7 @@ func TestPutB2BOrgSettings_412Retry(t *testing.T) {
 				return func(w http.ResponseWriter, _ *http.Request) {
 					*calls++
 					w.WriteHeader(http.StatusPreconditionFailed)
-					fmt.Fprintf(w, `{"message":"%s"}`, sentinel)
+					fmt.Fprintf(w, `{"message":"%s"}`, sentinel) //nolint:errcheck
 				}
 			},
 			wantErr:   true,

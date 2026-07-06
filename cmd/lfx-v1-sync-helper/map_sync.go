@@ -42,7 +42,7 @@ const (
 //   - A distributed lock backed by Redis (e.g. Redlock algorithm)
 //   - A local in-process lock backed by Go sync.Mutex (useful for single-instance
 //     deployments or testing)
-type mappingLocker interface {
+type mappingLocker interface { //nolint:unused
 	// acquire tries to acquire the lock for key.
 	// Returns (acquired, waited) — waited is true if at least one retry was made.
 	acquire(ctx context.Context, key string) (acquired bool, waited bool)
