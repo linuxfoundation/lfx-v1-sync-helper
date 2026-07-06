@@ -17,7 +17,7 @@ func TestBuildAuth0Metadata(t *testing.T) {
 		existing        map[string]interface{}
 		v1Data          map[string]any
 		orgName         string
-		wantEmpty       bool // true when no changes are expected (patch should be empty)
+		wantEmpty       bool              // true when no changes are expected (patch should be empty)
 		wantFieldChecks map[string]string // key -> expected value in patch
 		wantAbsent      []string          // keys that must NOT appear in patch
 	}{
@@ -102,11 +102,11 @@ func TestBuildAuth0Metadata(t *testing.T) {
 			// Patch is empty: existing org is preserved by Auth0 PATCH semantics.
 		},
 		{
-			name:      "placeholder org is skipped even when no existing org",
-			existing:  map[string]interface{}{},
-			v1Data:    map[string]any{},
-			orgName:   "Individual - No Account",
-			wantEmpty: true,
+			name:       "placeholder org is skipped even when no existing org",
+			existing:   map[string]interface{}{},
+			v1Data:     map[string]any{},
+			orgName:    "Individual - No Account",
+			wantEmpty:  true,
 			wantAbsent: []string{"organization"},
 		},
 		{

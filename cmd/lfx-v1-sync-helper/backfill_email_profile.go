@@ -79,6 +79,9 @@ type backfillProfilesResult struct {
 	errors         int
 }
 
+// getAlternateEmailDetailsFn is injectable for tests.
+var getAlternateEmailDetailsFn = getAlternateEmailDetails
+
 // loadBackfillCursor reads the cursor value from the v1-mappings KV bucket.
 // Returns ("", nil) when the key does not exist (first run).
 func loadBackfillCursor(ctx context.Context, cursorKey string) (string, error) {
@@ -255,14 +258,14 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 	}
 
 	for _, emailSfid := range emailSfids {
-		email, isPrimary, isVerified, isTombstoned, err := getAlternateEmailDetailsFn(ctx, emailSfid)
+		email, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, emailSfid)
 		if err != nil {
 			logger.With("error", err, "email_sfid", emailSfid, "auth0_user_id", auth0UserID).
 				Warn("failed to get alternate email details, skipping")
 			result.emailsSkipped++
 			continue
 		}
-		if isPrimary || isTombstoned || !isVerified || email == "" {
+		if isPrimary || !isActive || !isVerified || email == "" {
 			result.emailsSkipped++
 			continue
 		}
@@ -470,12 +473,12 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 	}
 
 	for _, emailSfid := range emailSfids {
-		email, isPrimary, isVerified, isTombstoned, err := getAlternateEmailDetailsFn(ctx, emailSfid)
+		email, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, emailSfid)
 		if err != nil {
 			logger.With("error", err, "email_sfid", emailSfid).Warn("failed to get email details, skipping")
 			continue
 		}
-		if isPrimary || isTombstoned {
+		if isPrimary || !isActive {
 			continue
 		}
 		if !isVerified {

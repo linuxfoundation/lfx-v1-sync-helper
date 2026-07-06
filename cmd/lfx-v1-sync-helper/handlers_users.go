@@ -46,12 +46,11 @@ var syncProfileToAuth0Fn = syncProfileToAuth0
 // for the KV reads and Auth0 identity operations without needing a live
 // v1-objects bucket or Management API.
 var (
-	getAlternateEmailDetailsFn  = getAlternateEmailDetails
-	lookupMergedUserFn          = lookupMergedUser
-	linkEmailIdentityFn         = linkEmailIdentity
-	unlinkEmailIdentityFn       = unlinkEmailIdentity
-	updateUserAlternateEmailsFn = updateUserAlternateEmails
-	tombstoneMappingFn          = tombstoneMapping
+	lookupMergedUserFn               = lookupMergedUser
+	linkEmailIdentityFn              = linkEmailIdentity
+	unlinkEmailIdentityFn            = unlinkEmailIdentity
+	updateContactEmailMappingIndexFn = updateContactEmailMappingIndex
+	deleteIndexKeyFn                 = deleteIndexKey
 )
 
 // toKVKey normalizes a user-provided string and encodes it as a URL-safe base64
@@ -91,26 +90,7 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 		return false
 	}
 
-	isDeleted := false
-	if deletedVal, ok := v1Data["isdeleted"].(bool); ok {
-		isDeleted = deletedVal
-	}
-
 	username, _ := v1Data["username__c"].(string)
-
-	if isDeleted {
-		if encodedUsername := usernameToKVKey(username); encodedUsername != "" {
-			indexKey := kvKeyUsernamePrefix + encodedUsername
-			if err := tombstoneMapping(ctx, indexKey); err != nil {
-				logger.With("error", err, "key", key, "indexKey", indexKey).
-					ErrorContext(ctx, "failed to tombstone username index")
-			} else {
-				logger.With("key", key, "indexKey", indexKey).
-					DebugContext(ctx, "tombstoned username index for deleted user")
-			}
-		}
-		return false
-	}
 
 	encodedUsername := usernameToKVKey(username)
 	if encodedUsername == "" {
@@ -134,6 +114,40 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 	return syncMergedUserProfile(ctx, key, auth0UserID, v1Data)
 }
 
+// handleMergedUserDelete processes deletion of a merged user record: deletes
+// the username -> SFID secondary index so future lookups do not resolve a
+// deleted user. Soft deletes and hard KV deletes both arrive here; v1Data is
+// nil for a hard KV delete.
+// Returns true if the operation should be retried, false otherwise.
+func handleMergedUserDelete(ctx context.Context, key, userSfid string, v1Data map[string]any) bool {
+	if v1Data == nil {
+		// Hard KV delete — the payload is gone so we cannot resolve the
+		// username to delete the secondary index. Soft deletes should
+		// always carry a payload, so log a warning if we see this.
+		logger.With("key", key, "user_sfid", userSfid).
+			WarnContext(ctx, "merged_user hard-deleted with no payload; cannot clean up username index")
+		return false
+	}
+
+	username, _ := v1Data["username__c"].(string)
+	if encodedUsername := usernameToKVKey(username); encodedUsername != "" {
+		indexKey := kvKeyUsernamePrefix + encodedUsername
+		if err := mappingsKV.Delete(ctx, indexKey); err != nil {
+			logger.With("error", err, "key", key, "indexKey", indexKey).
+				ErrorContext(ctx, "failed to delete username index for deleted user")
+		} else {
+			logger.With("key", key, "indexKey", indexKey).
+				DebugContext(ctx, "deleted username index for deleted user")
+		}
+	}
+	// TODO: also delete the alternate-email mapping array (v1-user.alternate-emails.<userSfid>)
+	// and the per-email reverse indexes (v1-user.email.*) for each entry in that array.
+	// In practice the alternate email rows are deleted before or alongside the user row, so
+	// handleAlternateEmailDelete cleans those up individually — but if the user is deleted
+	// without its alternate emails being deleted first, those entries will be orphaned.
+	return false
+}
+
 // syncMergedUserProfile calls syncProfileToAuth0Fn synchronously and returns
 // true if the error is retryable so the caller can NACK the JetStream message.
 func syncMergedUserProfile(ctx context.Context, key, auth0UserID string, v1Data map[string]any) bool {
@@ -154,11 +168,8 @@ func syncMergedUserProfile(ctx context.Context, key, auth0UserID string, v1Data 
 // handleAlternateEmailUpdate processes additive alternate email updates:
 // maintains v1-mapping records for merged users' alternate emails and the
 // email -> user SFID index, and links the email as an identity on the user's
-// Auth0 account. Auth0 unlinks are NOT handled here — soft deletes flow
-// through handleAlternateEmailDelete via handleKVPut's _sdc_deleted_at branch.
-// The isDeleted (Salesforce isdeleted__c) defense-in-depth path only updates
-// the v1-mapping cleanup; LFX in practice doesn't set isdeleted=true, so the
-// Auth0 sync is gated to non-deleted records.
+// Auth0 account. Soft deletes are intercepted by handleKVPut before reaching
+// this function and routed to handleAlternateEmailDelete instead.
 // Returns true if the operation should be retried, false otherwise.
 func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	leadorcontactid, ok := v1Data["leadorcontactid"].(string)
@@ -173,62 +184,67 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 		return false
 	}
 
-	isDeleted := false
-	if deletedVal, ok := v1Data["isdeleted"].(bool); ok {
-		isDeleted = deletedVal
+	// active__c=false means the user-service deactivated the email without
+	// deleting the row. Treat this the same as a soft delete.
+	if isActive, ok := v1Data["active__c"].(bool); ok && !isActive {
+		logger.With("key", key, "email_sfid", emailSfid).
+			DebugContext(ctx, "alternate email inactive (active__c=false), routing to delete handler")
+		return handleAlternateEmailDelete(ctx, key, emailSfid, v1Data)
 	}
 
-	shouldRetry := updateUserAlternateEmails(ctx, leadorcontactid, emailSfid, isDeleted)
+	shouldRetry := updateContactEmailMappingIndex(ctx, leadorcontactid, emailSfid, false)
 
 	emailAddr, _ := v1Data["alternate_email_address__c"].(string)
 	if encodedEmail := emailToKVKey(emailAddr); encodedEmail != "" {
 		indexKey := kvKeyEmailPrefix + encodedEmail
-
-		if isDeleted {
-			if err := tombstoneMapping(ctx, indexKey); err != nil {
-				logger.With("error", err, "key", key, "indexKey", indexKey).
-					ErrorContext(ctx, "failed to tombstone email index")
-			} else {
-				logger.With("key", key, "indexKey", indexKey).
-					DebugContext(ctx, "tombstoned email index for deleted email")
-			}
+		if _, err := mappingsKV.Put(ctx, indexKey, []byte(leadorcontactid)); err != nil {
+			logger.With("error", err, "key", key, "indexKey", indexKey).
+				ErrorContext(ctx, "failed to write email index")
 		} else {
-			if _, err := mappingsKV.Put(ctx, indexKey, []byte(leadorcontactid)); err != nil {
-				logger.With("error", err, "key", key, "indexKey", indexKey).
-					ErrorContext(ctx, "failed to write email index")
-			} else {
-				logger.With("key", key, "indexKey", indexKey, "userSfid", leadorcontactid).
-					DebugContext(ctx, "successfully updated email index")
-			}
+			logger.With("key", key, "indexKey", indexKey, "userSfid", leadorcontactid).
+				DebugContext(ctx, "successfully updated email index")
 		}
 	}
 
-	// Auth0 link only runs for non-deleted records. Bound with auth0CallTimeout
-	// (< AckWait) so a stuck Auth0 request can't stall the handler past
-	// JetStream's redelivery window.
-	if !isDeleted {
-		syncCtx, cancel := context.WithTimeout(ctx, auth0CallTimeout)
-		defer cancel()
-		if retry := syncAlternateEmailToAuth0(syncCtx, key, leadorcontactid, emailSfid, emailAddr); retry {
-			return true
-		}
+	// Skip primary emails — the primary email is the Auth0 user's own email
+	// field, not a linked identity, so it is out of scope for this handler.
+	if isPrimary, _ := v1Data["primary_email__c"].(bool); isPrimary {
+		return shouldRetry
+	}
+
+	// Only link verified, non-empty emails.
+	isVerified, _ := v1Data["email_verified__c"].(bool)
+	if !isVerified {
+		logger.With("key", key, "email_sfid", emailSfid).
+			DebugContext(ctx, "alternate email not verified, skipping Auth0 link")
+		return shouldRetry
+	}
+	if emailAddr == "" {
+		return shouldRetry
+	}
+
+	// Bound with auth0CallTimeout (< AckWait) so a stuck Auth0 request can't
+	// stall the handler past JetStream's redelivery window.
+	syncCtx, cancel := context.WithTimeout(ctx, auth0CallTimeout)
+	defer cancel()
+	if retry := linkAlternateEmailToAuth0(syncCtx, key, leadorcontactid, emailAddr); retry {
+		return true
 	}
 
 	return shouldRetry
 }
 
-// handleAlternateEmailDelete processes a WAL-driven soft delete of an alternate
-// email record: cleans up the v1-mapping secondary indexes and unlinks the
+// handleAlternateEmailDelete processes a soft delete of an alternate email
+// record: cleans up the v1-mapping secondary indexes and unlinks the
 // corresponding linked identity from the user's Auth0 account. This is the
 // only path that drives Auth0 unlinks — the update handler doesn't fire on
-// soft deletes (handleKVPut routes _sdc_deleted_at records here).
+// soft deletes (handleKVPut routes them here).
 // Returns true if the operation should be retried, false otherwise.
 func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Data map[string]any) bool {
 	if v1Data == nil {
-		// True hard delete from the KV bucket — the payload is gone, so we
-		// can't resolve the user or email. WAL never produces this for
-		// alternate emails (it sets _sdc_deleted_at instead), so this path
-		// is unexpected enough to warrant a warning.
+		// Hard KV delete — the payload is gone, so we
+		// can't resolve the user or email. Soft deletes should always carry
+		// a payload, so log a warning if we see this.
 		logger.With("key", key, "email_sfid", emailSfid).
 			WarnContext(ctx, "alternate email hard-deleted with no payload; cannot clean up indexes or unlink Auth0 identity")
 		return false
@@ -243,15 +259,14 @@ func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Da
 		return false
 	}
 
-	// Mirror the v1-mapping cleanup that handleAlternateEmailUpdate would have
-	// performed if isdeleted=true had come through (it usually doesn't on LFX).
-	shouldRetry := updateUserAlternateEmailsFn(ctx, userSfid, emailSfid, true)
+	// Clean up the v1-mapping entry for this alternate email.
+	shouldRetry := updateContactEmailMappingIndexFn(ctx, userSfid, emailSfid, true)
 
 	if encodedEmail := emailToKVKey(emailAddr); encodedEmail != "" {
 		indexKey := kvKeyEmailPrefix + encodedEmail
-		if err := tombstoneMappingFn(ctx, indexKey); err != nil {
+		if err := deleteIndexKeyFn(ctx, indexKey); err != nil {
 			logger.With("error", err, "key", key, "indexKey", indexKey).
-				ErrorContext(ctx, "failed to tombstone email index on delete")
+				ErrorContext(ctx, "failed to delete email index on delete")
 		}
 	}
 
@@ -294,84 +309,15 @@ func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Da
 	return shouldRetry
 }
 
-// syncAlternateEmailToAuth0 links or unlinks a verified alternate email as an
-// Auth0 identity on the user's primary account. eventEmail is the email
-// address from the KV event payload, used as a fallback when
-// getAlternateEmailDetails can't return one.
-//
-// Two v1 soft-delete paths both arrive here as KV PUTs:
-//   - active__c=false: user-service sets the email inactive without deleting
-//     the database row; WAL replicates this as a plain PUT with no
-//     _sdc_deleted_at. isTombstoned=true triggers an Auth0 unlink here.
-//   - _sdc_deleted_at set: Meltano WAL marks the row deleted; handleKVPut
-//     routes these directly to handleAlternateEmailDelete, which also
-//     calls unlinkEmailIdentityFn.
-//
+// linkAlternateEmailToAuth0 links an alternate email as an Auth0 identity on
+// the user's primary account. The caller is responsible for all field checks
+// (primary, verified, active, non-empty address) before calling this function.
 // Returns true if the operation should be retried (transient failure).
-func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid, eventEmail string) bool {
-	email, isPrimary, isVerified, isTombstoned, err := getAlternateEmailDetailsFn(ctx, emailSfid)
-	if err != nil {
-		logger.With(errKey, err, "key", key, "email_sfid", emailSfid).
-			WarnContext(ctx, "failed to get alternate email details for Auth0 sync")
-		return false
-	}
-
-	if email == "" && eventEmail != "" {
-		email = eventEmail
-	}
-
-	// Skip primary emails — the primary email is the Auth0 user's own email
-	// field, not a linked identity, so it is out of scope for this handler.
-	if isPrimary {
-		return false
-	}
-
-	// Tombstoned/inactive (active__c=false): unlink from Auth0. This handles
-	// the soft-delete path where v1 sets active__c=false without deleting the
-	// database row (no _sdc_deleted_at). The _sdc_deleted_at path is handled
-	// separately by handleAlternateEmailDelete.
-	if isTombstoned {
-		if email == "" {
-			logger.With("key", key, "email_sfid", emailSfid).
-				WarnContext(ctx, "tombstoned alternate email has no address, cannot unlink Auth0 identity")
-			return false
-		}
-		v1User, err := lookupMergedUserFn(ctx, userSfid)
-		if err != nil {
-			logger.With(errKey, err, "key", key, "user_sfid", userSfid).
-				WarnContext(ctx, "failed to resolve v1 user for Auth0 email unlink")
-			return false
-		}
-		if v1User.Username == "" {
-			logger.With("key", key, "user_sfid", userSfid).
-				WarnContext(ctx, "v1 user has no username, cannot resolve Auth0 ID for unlink")
-			return false
-		}
-		auth0UserID := mapUsernameToAuthSub(v1User.Username)
-		if err := unlinkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
-			if isRetryableAuth0Error(err) {
-				logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
-					WarnContext(ctx, "retryable Auth0 error during unlink, NACKing for redelivery")
-				return true
-			}
-			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
-				ErrorContext(ctx, "failed to unlink email identity from Auth0, dropping non-retryable error")
-		}
-		return false
-	}
-	if !isVerified {
-		logger.With("key", key, "email_sfid", emailSfid).
-			DebugContext(ctx, "alternate email not verified, skipping Auth0 sync")
-		return false
-	}
-	if email == "" {
-		return false
-	}
-
+func linkAlternateEmailToAuth0(ctx context.Context, key, userSfid, email string) bool {
 	v1User, err := lookupMergedUserFn(ctx, userSfid)
 	if err != nil {
 		logger.With(errKey, err, "key", key, "user_sfid", userSfid).
-			WarnContext(ctx, "failed to resolve v1 user for Auth0 email sync")
+			WarnContext(ctx, "failed to resolve v1 user for Auth0 email link")
 		return false
 	}
 	if v1User.Username == "" {
@@ -393,10 +339,10 @@ func syncAlternateEmailToAuth0(ctx context.Context, key, userSfid, emailSfid, ev
 	return false
 }
 
-// updateUserAlternateEmails updates the v1-mapping record for a user's alternate emails
+// updateContactEmailMappingIndex updates the v1-mapping record for a user's alternate emails
 // with concurrency control using atomic KV operations.
 // Returns true if the operation should be retried, false otherwise.
-func updateUserAlternateEmails(ctx context.Context, userSfid, emailSfid string, isDeleted bool) bool {
+func updateContactEmailMappingIndex(ctx context.Context, userSfid, emailSfid string, isDeleted bool) bool {
 	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
 
 	entry, err := mappingsKV.Get(ctx, mappingKey)
