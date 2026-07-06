@@ -217,7 +217,7 @@ func patchV1User(ctx context.Context, sfid string, fields map[string]any) error 
 	if err != nil {
 		return fmt.Errorf("failed to send user-service request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 

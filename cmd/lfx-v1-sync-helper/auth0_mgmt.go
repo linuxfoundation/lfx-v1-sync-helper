@@ -36,10 +36,7 @@ type auth0UserAPI interface {
 	Unlink(ctx context.Context, id, provider, userID string, opts ...management.RequestOption) ([]management.UserIdentity, error)
 }
 
-// auth0Mgmt is the Auth0 Management API client, initialized once at startup.
-var auth0Mgmt *management.Management
-
-// auth0Users is the user operations interface, set to auth0Mgmt.User at init.
+// auth0Users is the user operations interface, set at init.
 // Tests can replace this with a fake.
 var auth0Users auth0UserAPI
 
@@ -87,7 +84,10 @@ func initAuth0MgmtClient(cfg *Config, backfill bool) error {
 	if backfill {
 		opts = append(opts, management.WithNoRetries())
 	} else {
-		opts = append(opts, management.WithRetries(3, []int{429, 500, 502, 503, 504}))
+		opts = append(opts, management.WithRetryStrategy(management.RetryStrategy{
+			MaxRetries: 3,
+			Statuses:   []int{429, 500, 502, 503, 504},
+		}))
 	}
 
 	mgmt, err := management.New(domain, opts...)
@@ -95,7 +95,6 @@ func initAuth0MgmtClient(cfg *Config, backfill bool) error {
 		return fmt.Errorf("failed to create Auth0 Management API client: %w", err)
 	}
 
-	auth0Mgmt = mgmt
 	auth0Users = mgmt.User
 	return nil
 }
@@ -118,10 +117,7 @@ func isRetryableAuth0Error(err error) bool {
 		return status == 429 || status >= 500
 	}
 	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return true
-	}
-	return false
+	return errors.As(err, &netErr)
 }
 
 // buildAuth0Metadata merges v1 platform DB fields into an existing Auth0

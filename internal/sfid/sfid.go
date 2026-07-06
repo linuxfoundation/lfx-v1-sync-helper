@@ -26,7 +26,7 @@ func Normalize18(s string) (string, error) {
 	}
 	for i := range len(s) {
 		c := s[i]
-		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') {
 			return "", fmt.Errorf("invalid character %q at position %d in Salesforce ID", c, i)
 		}
 	}

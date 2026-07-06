@@ -84,14 +84,14 @@ func main() {
 
 	// Health check server.
 	http.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, "OK\n")
+		fmt.Fprintf(w, "OK\n") //nolint:errcheck
 	})
 	http.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
 		if natsConn == nil || !natsConn.IsConnected() || natsConn.IsDraining() {
 			http.Error(w, "NATS connection not ready", http.StatusServiceUnavailable)
 			return
 		}
-		fmt.Fprintf(w, "OK\n")
+		fmt.Fprintf(w, "OK\n") //nolint:errcheck
 	})
 
 	var addr string

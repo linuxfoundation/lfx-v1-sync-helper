@@ -180,7 +180,7 @@ func TestFetchACSOrgInvitesByRole_TimeFilter(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
-				fmt.Fprint(w, body)
+				fmt.Fprint(w, body) //nolint:errcheck
 			}))
 			defer srv.Close()
 
@@ -233,13 +233,13 @@ func TestFetchACSOrgInvitesByRole_Pagination(t *testing.T) {
 		default:
 			// Page 2: 1 result, rawFetched(2) >= TotalSize(2) → stop.
 			body = fmt.Sprintf(`{
-				"data":[{"invite_id":"inv2","email":"p2@example.com","role_name":%q,"status":"pending","updated_at":"%d"}],
-				"metadata":{"TotalSize":2,"Offset":1,"PageSize":1}
-			}`, acsOrgRoleNameAdmin, inside)
+			"data":[{"invite_id":"inv2","email":"p2@example.com","role_name":%q,"status":"pending","updated_at":"%d"}],
+			"metadata":{"TotalSize":2,"Offset":1,"PageSize":1}
+		}`, acsOrgRoleNameAdmin, inside)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, body)
+		fmt.Fprint(w, body) //nolint:errcheck
 	}))
 	defer srv.Close()
 
