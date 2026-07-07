@@ -541,8 +541,24 @@ func getV1OrganizationFromOrgSvc(ctx context.Context, sfid string) (*V1Organizat
 	return org, nil
 }
 
+// normalizeDomain strips protocol, www prefix, and any path component from a website
+// string and lowercases it, producing a bare hostname suitable for exact domain comparison.
+func normalizeDomain(website string) string {
+	s := strings.ToLower(strings.TrimSpace(website))
+	for _, prefix := range []string{"https://", "http://"} {
+		s = strings.TrimPrefix(s, prefix)
+	}
+	s = strings.TrimPrefix(s, "www.")
+	if i := strings.Index(s, "/"); i != -1 {
+		s = s[:i]
+	}
+	return s
+}
+
 // searchV1OrgsByWebsite searches for organizations in the v1 Organization Service by website.
-// Returns the first matching organization, or nil if none found.
+// Returns the organization whose domain exactly matches the search website, or nil if none found.
+// The org-service search uses a substring LIKE query, so results may include unrelated orgs
+// whose website merely contains the search term; this function filters to an exact domain match.
 func searchV1OrgsByWebsite(ctx context.Context, website string) (*V1Organization, error) {
 	baseURL := fmt.Sprintf("%sorganization-service/v1/orgs/search", cfg.LFXAPIGateway.String())
 	params := url.Values{}
@@ -574,17 +590,21 @@ func searchV1OrgsByWebsite(ctx context.Context, website string) (*V1Organization
 		return nil, fmt.Errorf("failed to unmarshal org search response: %w", err)
 	}
 
-	if len(listResp.Data) == 0 {
-		return nil, nil
+	searchDomain := normalizeDomain(website)
+	for _, org := range listResp.Data {
+		if normalizeDomain(org.Domain) == searchDomain {
+			return &V1Organization{
+				ID:          org.ID,
+				Name:        org.Name,
+				Domain:      org.Domain,
+				LastFetched: time.Now().UTC(),
+			}, nil
+		}
 	}
 
-	first := listResp.Data[0]
-	return &V1Organization{
-		ID:          first.ID,
-		Name:        first.Name,
-		Domain:      first.Domain,
-		LastFetched: time.Now().UTC(),
-	}, nil
+	logger.With("website", website, "result_count", len(listResp.Data)).
+		DebugContext(ctx, "org search returned no exact domain match, falling through to org creation")
+	return nil, nil
 }
 
 // createV1OrgInOrgSvc creates a new organization in the v1 Organization Service.
