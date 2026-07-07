@@ -262,13 +262,13 @@ func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error
 	// Single pass: look for primary email while tracking first valid fallback
 	var fallbackEmail string
 	for _, emailSfid := range emailSfids {
-		email, isPrimary, _, isTombstoned, err := getAlternateEmailDetails(ctx, emailSfid)
+		email, isPrimary, _, isActive, err := getAlternateEmailDetails(ctx, emailSfid)
 		if err != nil {
 			logger.With("email_sfid", emailSfid, "error", err).DebugContext(ctx, "failed to get alternate email details")
 			continue
 		}
-		if isTombstoned {
-			logger.With("email_sfid", emailSfid).DebugContext(ctx, "skipping tombstoned email record")
+		if !isActive {
+			logger.With("email_sfid", emailSfid).DebugContext(ctx, "skipping inactive email record")
 			continue
 		}
 
@@ -292,24 +292,31 @@ func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error
 	return "", fmt.Errorf("no valid emails found for user %s", userSfid)
 }
 
-// getAlternateEmailDetails retrieves email address, primary status, and verification status from the v1-objects KV bucket.
-// Returns (email, isPrimary, isVerified, isTombstoned, error)
-func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email string, isPrimary bool, isVerified bool, isTombstoned bool, err error) {
+// getAlternateEmailDetails retrieves email address, primary status, verification
+// status, and active status from the v1-objects KV bucket.
+// Returns (email, isPrimary, isVerified, isActive, error) where isActive is
+// false when active__c=false (email deactivated by the user-service). A missing,
+// deleted, or tombstoned record returns isActive=false with an empty email —
+// callers should treat that as "not found" rather than "deactivated".
+func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email string, isPrimary bool, isVerified bool, isActive bool, err error) {
 	emailKey := v1AlternateEmailKVPrefix + emailSfid
 
-	// Parse the alternate email record.
+	// Parse the alternate email record. getV1ObjectData returns !exists for
+	// hard-deleted and tombstoned KV entries. The delete handler previously
+	// wrote a "!del" tombstone marker; it now calls KV.Delete(), but tombstone
+	// checks remain for any stale entries written by older versions.
 	emailData, exists, err := getV1ObjectData(ctx, emailKey)
 	if err != nil {
 		return "", false, false, false, fmt.Errorf("failed to get email data: %w", err)
 	}
 	if !exists {
-		return "", false, false, true, nil
+		return "", false, false, false, nil
 	}
 
 	// Extract email address and primary flag before the active check: downstream
-	// callers use isPrimary to short-circuit (primary emails are managed by
-	// auth0-sync-userdb, not this flow), and they need the address to unlink
-	// tombstoned/inactive records.
+	// callers use isPrimary to short-circuit (the primary email is the Auth0
+	// user's own email field, not a linked identity, so it is out of scope for
+	// this handler), and they need the address for inactive (active__c=false) records.
 	if emailAddr, ok := emailData["alternate_email_address__c"].(string); ok && emailAddr != "" {
 		email = emailAddr
 	}
@@ -317,9 +324,9 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 		isPrimary = primaryFlag
 	}
 
-	// Check if the email is inactive (active__c is not true).
-	if isActive, ok := emailData["active__c"].(bool); !ok || !isActive {
-		return email, isPrimary, false, true, nil
+	// Check if the email is active (active__c must be explicitly true).
+	if activeFlag, ok := emailData["active__c"].(bool); !ok || !activeFlag {
+		return email, isPrimary, false, false, nil
 	}
 
 	if email == "" {
@@ -332,7 +339,7 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 		isVerified = verifiedFlag
 	}
 
-	return email, isPrimary, isVerified, false, nil
+	return email, isPrimary, isVerified, true, nil
 }
 
 // ResolveV1UserSFIDByUsername looks up a v1 user SFID by username using the secondary index.
@@ -478,13 +485,13 @@ func ResolveV1UserSFIDByEmail(ctx context.Context, email string) (string, error)
 
 	// Check each email to see if any matches the queried email.
 	for _, emailSfid := range emailSfids {
-		emailAddr, _, _, isTombstoned, err := getAlternateEmailDetails(ctx, emailSfid)
+		emailAddr, _, _, isActive, err := getAlternateEmailDetails(ctx, emailSfid)
 		if err != nil {
 			logger.With("email_sfid", emailSfid, "error", err).
 				DebugContext(ctx, "failed to get alternate email details, skipping")
 			continue
 		}
-		if isTombstoned {
+		if !isActive {
 			continue
 		}
 
@@ -1199,16 +1206,22 @@ func getV1ObjectData(ctx context.Context, key string) (map[string]any, bool, err
 		}
 	}
 
-	// Check if the record is deleted.
-	if isDeleted, ok := data["isdeleted"].(bool); ok && isDeleted {
-		return nil, false, nil
-	}
-
-	// Also check for WAL-based soft deletes (indicated by _sdc_deleted_at).
+	// Check for WAL-based soft deletes first: a non-empty _sdc_deleted_at means
+	// the source DB row was physically deleted and the WAL handler preserved the
+	// last-known image with this marker. If this is set there is no need to also
+	// check the SFDC-semantic isdeleted flag.
 	if deletedAt, ok := data["_sdc_deleted_at"]; ok {
 		if s, okStr := deletedAt.(string); (okStr && strings.TrimSpace(s) != "") || (!okStr && deletedAt != nil) {
 			return nil, false, nil
 		}
+	}
+
+	// Check for the Salesforce-semantic soft deletion flag. isdeleted is rarely
+	// set in LFX (SFDC soft-deletes shouldn't be seen outside the
+	// salesforce_b2b schema, and perhaps not even there), but we check for
+	// exhaustiveness so the caller never sees a logically deleted record.
+	if isDeleted, ok := data["isdeleted"].(bool); ok && isDeleted {
+		return nil, false, nil
 	}
 
 	return data, true, nil
