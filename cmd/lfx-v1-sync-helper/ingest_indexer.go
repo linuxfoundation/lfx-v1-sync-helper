@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	nats "github.com/nats-io/nats.go"
 )
 
@@ -488,8 +487,8 @@ func syncCommitteeMemberDeleteToV1(ctx context.Context, memberUID, projectSFID, 
 
 // resolveOrgIDFromEventData extracts and resolves an organization SFID from committee member event data.
 // Returns empty string (no error) if no organization data is present or fields are all empty.
-// CDP/v2 organization UUIDs in organization.id are ignored so v1 sync can resolve or proceed
-// without org instead of failing project-service validation.
+// Only 15- or 18-char Salesforce Account SFIDs are sent to v1 as OrganizationID; any other
+// organization.id value is ignored so sync can resolve from name/website or proceed without org.
 func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string, error) {
 	org, ok := data["organization"].(map[string]any)
 	if !ok {
@@ -499,9 +498,9 @@ func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string
 	orgName, _ := org["name"].(string)
 	orgWebsite, _ := org["website"].(string)
 	orgID = strings.TrimSpace(orgID)
-	if isCDPOrganizationUUID(orgID) {
+	if orgID != "" && !looksLikeAccountSFID(orgID) {
 		logger.With("organization_id", orgID, "organization_name", orgName, "organization_website", orgWebsite).
-			InfoContext(ctx, "ignoring CDP organization UUID on committee member, resolving from name/website")
+			InfoContext(ctx, "ignoring non-SFID organization id on committee member, resolving from name/website")
 		orgID = ""
 	}
 	if orgID != "" {
@@ -510,31 +509,7 @@ func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string
 	return resolveV1OrgID(ctx, orgName, orgWebsite)
 }
 
-// isCDPOrganizationUUID reports whether id is a CDP/v2 organization UUID stored by self-serve.
-// These must not be sent to v1 as OrganizationID (v1 expects Salesforce Account SFIDs).
-func isCDPOrganizationUUID(id string) bool {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return false
-	}
-	if looksLikeAccountSFID(id) {
-		return false
-	}
-	if _, err := uuid.Parse(id); err == nil {
-		return true
-	}
-	// CDP identifiers may appear as 32 hex chars without hyphens.
-	if len(id) == 32 {
-		for _, c := range id {
-			if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
-				return false
-			}
-		}
-		return true
-	}
-	return false
-}
-
+// looksLikeAccountSFID reports whether id is a 15- or 18-char Salesforce Account SFID.
 func looksLikeAccountSFID(id string) bool {
 	if len(id) != 15 && len(id) != 18 {
 		return false
