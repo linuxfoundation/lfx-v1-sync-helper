@@ -7,8 +7,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
+	"github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
 	nats "github.com/nats-io/nats.go"
 )
 
@@ -486,6 +488,9 @@ func syncCommitteeMemberDeleteToV1(ctx context.Context, memberUID, projectSFID, 
 
 // resolveOrgIDFromEventData extracts and resolves an organization SFID from committee member event data.
 // Returns empty string (no error) if no organization data is present or fields are all empty.
+// Only 15- or 18-char Salesforce ID-shaped organization.id values are sent to v1 as
+// OrganizationID; any other organization.id value is ignored so sync can resolve from
+// name/website or proceed without org.
 func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string, error) {
 	org, ok := data["organization"].(map[string]any)
 	if !ok {
@@ -494,6 +499,12 @@ func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string
 	orgID, _ := org["id"].(string)
 	orgName, _ := org["name"].(string)
 	orgWebsite, _ := org["website"].(string)
+	orgID = strings.TrimSpace(orgID)
+	if orgID != "" && !sfid.IsValid(orgID) {
+		logger.With("organization_id", orgID, "organization_name", orgName, "organization_website", orgWebsite).
+			InfoContext(ctx, "ignoring non-SFID organization id on committee member, resolving from name/website")
+		orgID = ""
+	}
 	if orgID != "" {
 		return orgID, nil
 	}
