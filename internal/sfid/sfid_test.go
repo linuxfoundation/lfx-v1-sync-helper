@@ -18,6 +18,9 @@ func TestIsValid(t *testing.T) {
 		{"001B000000IqhSLIAZ", true},
 		{"0014100000Te2ovAAB", true},
 		{"0014100000Te0OK", true},
+		// post b2b/b2c split — IDs start with "lf" rather than "001"; still valid format
+		{"lf00000001Te0OK", true},
+		{"lf00000001Te0OKAAZ", true},
 		{"51fde723-67df-4e0e-91c6-936d01d59559", false},
 		{"4340abc06f4e11f1944c4bb16c3aa46c", false},
 		{"org-123456", false},
