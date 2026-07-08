@@ -68,7 +68,6 @@ type backfillEmailsResult struct {
 	usersProcessed int
 	emailsLinked   int
 	emailsSkipped  int
-	errors         int
 }
 
 // backfillProfilesResult summarises one run of backfillProfiles.
@@ -76,8 +75,10 @@ type backfillProfilesResult struct {
 	usersProcessed int
 	usersUpdated   int
 	usersSkipped   int
-	errors         int
 }
+
+// getAlternateEmailDetailsFn is injectable for tests.
+var getAlternateEmailDetailsFn = getAlternateEmailDetails
 
 // loadBackfillCursor reads the cursor value from the v1-mappings KV bucket.
 // Returns ("", nil) when the key does not exist (first run).
@@ -113,10 +114,6 @@ func saveBackfillCursor(ctx context.Context, cursorKey, value string) error {
 // the --limit cap by stopping when enough users have been processed, not by
 // shrinking the page size on the final request.
 func listAuth0UserPage(ctx context.Context, cursor string, runPage int) (*management.UserList, error) {
-	if err := auth0RateLimiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("rate limiter: %w", err)
-	}
-
 	query := fmt.Sprintf(`identities.connection:"%s"`, backfillAuth0Connection)
 	if cursor != "" {
 		query += fmt.Sprintf(` AND updated_at:[%s TO *]`, cursor)
@@ -177,13 +174,25 @@ func backfillAlternateEmails(ctx context.Context, limit int, dryRun bool) (*back
 				return result, fmt.Errorf("Auth0 user %s has no username in connection %s; stopping backfill to avoid silent skips", auth0UserID, backfillAuth0Connection)
 			}
 
+			if err := auth0RateLimiter.Wait(ctx); err != nil {
+				return result, fmt.Errorf("rate limiter: %w", err)
+			}
+
 			userCtx, cancel := context.WithTimeout(ctx, backfillCallTimeout)
 			err := backfillEmailsForUser(userCtx, auth0UserID, username, dryRun, result)
 			cancel()
 			if err != nil {
 				logger.With(errKey, err, "auth0_user_id", auth0UserID).
-					Warn("error processing user during alternate-emails backfill, continuing")
-				result.errors++
+					Warn("aborting alternate-emails backfill after error")
+				if !dryRun {
+					// nextCursor holds the last successfully processed user's
+					// updated_at, so the failing user will be retried on the
+					// next run (inclusive cursor query).
+					if saveErr := saveBackfillCursor(ctx, backfillAltEmailsCursorKey, nextCursor); saveErr != nil {
+						logger.With(errKey, saveErr).Warn("failed to save backfill cursor on abort")
+					}
+				}
+				return result, fmt.Errorf("processing user %s: %w", auth0UserID, err)
 			}
 
 			result.usersProcessed++
@@ -209,7 +218,6 @@ func backfillAlternateEmails(ctx context.Context, limit int, dryRun bool) (*back
 			"users_processed", result.usersProcessed,
 			"emails_linked", result.emailsLinked,
 			"emails_skipped", result.emailsSkipped,
-			"errors", result.errors,
 			"cursor", nextCursor,
 		).Info("alternate-emails backfill page complete")
 	}
@@ -250,14 +258,14 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 	}
 
 	for _, emailSfid := range emailSfids {
-		email, isPrimary, isVerified, isTombstoned, err := getAlternateEmailDetailsFn(ctx, emailSfid)
+		email, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, emailSfid)
 		if err != nil {
 			logger.With("error", err, "email_sfid", emailSfid, "auth0_user_id", auth0UserID).
 				Warn("failed to get alternate email details, skipping")
 			result.emailsSkipped++
 			continue
 		}
-		if isPrimary || isTombstoned || !isVerified || email == "" {
+		if isPrimary || !isActive || !isVerified || email == "" {
 			result.emailsSkipped++
 			continue
 		}
@@ -273,10 +281,7 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 		}
 
 		if err := linkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
-			logger.With("error", err, "auth0_user_id", auth0UserID, "email", email).
-				Warn("failed to link alternate email, skipping")
-			result.errors++
-			continue
+			return fmt.Errorf("linking email %s: %w", email, err)
 		}
 		result.emailsLinked++
 	}
@@ -328,13 +333,25 @@ func backfillProfiles(ctx context.Context, limit int, dryRun bool) (*backfillPro
 				return result, fmt.Errorf("Auth0 user %s has no username in connection %s; stopping backfill to avoid silent skips", auth0UserID, backfillAuth0Connection)
 			}
 
+			if err := auth0RateLimiter.Wait(ctx); err != nil {
+				return result, fmt.Errorf("rate limiter: %w", err)
+			}
+
 			userCtx, cancel := context.WithTimeout(ctx, backfillCallTimeout)
 			err := backfillProfileForUser(userCtx, auth0UserID, username, dryRun, result)
 			cancel()
 			if err != nil {
 				logger.With(errKey, err, "auth0_user_id", auth0UserID).
-					Warn("error processing user during profiles backfill, continuing")
-				result.errors++
+					Warn("aborting profiles backfill after error")
+				if !dryRun {
+					// nextCursor holds the last successfully processed user's
+					// updated_at, so the failing user will be retried on the
+					// next run (inclusive cursor query).
+					if saveErr := saveBackfillCursor(ctx, backfillProfilesCursorKey, nextCursor); saveErr != nil {
+						logger.With(errKey, saveErr).Warn("failed to save backfill cursor on abort")
+					}
+				}
+				return result, fmt.Errorf("processing user %s: %w", auth0UserID, err)
 			}
 
 			result.usersProcessed++
@@ -360,7 +377,6 @@ func backfillProfiles(ctx context.Context, limit int, dryRun bool) (*backfillPro
 			"users_processed", result.usersProcessed,
 			"users_updated", result.usersUpdated,
 			"users_skipped", result.usersSkipped,
-			"errors", result.errors,
 			"cursor", nextCursor,
 		).Info("profiles backfill page complete")
 	}
@@ -396,10 +412,6 @@ func backfillProfileForUser(ctx context.Context, auth0UserID, username string, d
 		return nil
 	}
 
-	// Rate-limit before the Management API Read+Update inside syncProfileToAuth0.
-	if err := auth0RateLimiter.Wait(ctx); err != nil {
-		return fmt.Errorf("rate limiter: %w", err)
-	}
 	if err := syncProfileToAuth0Fn(ctx, auth0UserID, v1Data); err != nil {
 		return fmt.Errorf("syncing profile for %s: %w", auth0UserID, err)
 	}
@@ -463,12 +475,12 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 	}
 
 	for _, emailSfid := range emailSfids {
-		email, isPrimary, isVerified, isTombstoned, err := getAlternateEmailDetailsFn(ctx, emailSfid)
+		email, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, emailSfid)
 		if err != nil {
 			logger.With("error", err, "email_sfid", emailSfid).Warn("failed to get email details, skipping")
 			continue
 		}
-		if isPrimary || isTombstoned {
+		if isPrimary || !isActive {
 			continue
 		}
 		if !isVerified {

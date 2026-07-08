@@ -114,7 +114,7 @@ func main() {
 			logger.With(errKey, err).Error("error initializing v1 client")
 			os.Exit(1)
 		}
-		if err := initAuth0MgmtClient(cfg, false); err != nil {
+		if err := initAuth0MgmtClient(cfg); err != nil {
 			logger.With(errKey, err).Error("error initializing Auth0 Management API client")
 			os.Exit(1)
 		}
@@ -299,7 +299,6 @@ func main() {
 			"users_processed", result.usersProcessed,
 			"emails_linked", result.emailsLinked,
 			"emails_skipped", result.emailsSkipped,
-			"errors", result.errors,
 		).Info("alternate-emails backfill completed successfully")
 		os.Exit(0)
 	}
@@ -316,7 +315,6 @@ func main() {
 			"users_processed", result.usersProcessed,
 			"users_updated", result.usersUpdated,
 			"users_skipped", result.usersSkipped,
-			"errors", result.errors,
 		).Info("profiles backfill completed successfully")
 		os.Exit(0)
 	}

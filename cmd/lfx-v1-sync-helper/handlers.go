@@ -88,6 +88,16 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 		return handleResourceDelete(ctx, key, v1Data)
 	}
 
+	// Check for the Salesforce-semantic soft deletion flag. isdeleted is rarely
+	// set in LFX (SFDC soft-deletes shouldn't be seen outside the
+	// salesforce_b2b schema, and perhaps not even there), but we check for
+	// exhaustiveness and route to handleResourceDelete so each object type's
+	// delete handler runs the same cleanup as it would for a _sdc_deleted_at.
+	if isDeleted, ok := v1Data["isdeleted"].(bool); ok && isDeleted {
+		logger.With("key", key).InfoContext(ctx, "processing SFDC-semantic soft delete (isdeleted=true)")
+		return handleResourceDelete(ctx, key, v1Data)
+	}
+
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return false
@@ -215,11 +225,7 @@ func handleResourceDelete(ctx context.Context, key string, v1Data map[string]any
 	case "platform-community__c":
 		return handleCommitteeMemberDelete(ctx, key, sfid, v1Principal)
 	case "salesforce-merged_user":
-		// Merged user records are used on-demand during user lookups from the v1-objects KV bucket.
-		// No special processing needed here for hard deletes; this handler does not write a KV tombstone.
-		// TODO: Should clean up (tombstone) any per-user mappings, like the user sfid->email sfid index mapping.
-		logger.With("key", key).DebugContext(ctx, "salesforce-merged_user record deleted")
-		return false
+		return handleMergedUserDelete(ctx, key, sfid, v1Data)
 	case "salesforce-alternate_email__c":
 		return handleAlternateEmailDelete(ctx, key, sfid, v1Data)
 	case "itx-zoom-meetings-v2",
@@ -280,6 +286,17 @@ func handleResourceDelete(ctx context.Context, key string, v1Data map[string]any
 func tombstoneMapping(ctx context.Context, mappingKey string) error {
 	if _, err := mappingsKV.Put(ctx, mappingKey, []byte(tombstoneMarker)); err != nil {
 		return fmt.Errorf("failed to tombstone mapping %s: %w", mappingKey, err)
+	}
+	return nil
+}
+
+// deleteIndexKey removes a secondary-index key from the mappings KV store.
+// Unlike tombstoneMapping, this does not leave a "!del" marker — secondary
+// indexes have no resurrection-prevention requirement, so a native KV delete
+// is sufficient.
+func deleteIndexKey(ctx context.Context, mappingKey string) error {
+	if err := mappingsKV.Delete(ctx, mappingKey); err != nil {
+		return fmt.Errorf("failed to delete index key %s: %w", mappingKey, err)
 	}
 	return nil
 }
