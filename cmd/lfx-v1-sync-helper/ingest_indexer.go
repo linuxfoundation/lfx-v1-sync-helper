@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
 	nats "github.com/nats-io/nats.go"
 )
 
@@ -498,7 +499,7 @@ func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string
 	orgName, _ := org["name"].(string)
 	orgWebsite, _ := org["website"].(string)
 	orgID = strings.TrimSpace(orgID)
-	if orgID != "" && !looksLikeAccountSFID(orgID) {
+	if orgID != "" && !sfid.IsValid(orgID) {
 		logger.With("organization_id", orgID, "organization_name", orgName, "organization_website", orgWebsite).
 			InfoContext(ctx, "ignoring non-SFID organization id on committee member, resolving from name/website")
 		orgID = ""
@@ -507,19 +508,6 @@ func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string
 		return orgID, nil
 	}
 	return resolveV1OrgID(ctx, orgName, orgWebsite)
-}
-
-// looksLikeAccountSFID reports whether id is a 15- or 18-char Salesforce Account SFID.
-func looksLikeAccountSFID(id string) bool {
-	if len(id) != 15 && len(id) != 18 {
-		return false
-	}
-	for _, c := range id {
-		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') {
-			return false
-		}
-	}
-	return true
 }
 
 // splitTwoParts splits an "a:b" string into its two parts.

@@ -9,6 +9,28 @@ import (
 	"github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
 )
 
+func TestIsValid(t *testing.T) {
+	tests := []struct {
+		id   string
+		want bool
+	}{
+		{"", false},
+		{"001B000000IqhSLIAZ", true},
+		{"0014100000Te2ovAAB", true},
+		{"0014100000Te0OK", true},
+		{"51fde723-67df-4e0e-91c6-936d01d59559", false},
+		{"4340abc06f4e11f1944c4bb16c3aa46c", false},
+		{"org-123456", false},
+		{"111", false},
+		{"0014100000Te0OKAA!", false},
+	}
+	for _, tt := range tests {
+		if got := sfid.IsValid(tt.id); got != tt.want {
+			t.Errorf("IsValid(%q) = %v, want %v", tt.id, got, tt.want)
+		}
+	}
+}
+
 func TestNormalize18(t *testing.T) {
 	const id15 = "0014100000Te0OK"
 	const want18 = "0014100000Te0OKAAZ"
