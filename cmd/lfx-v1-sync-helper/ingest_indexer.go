@@ -488,8 +488,9 @@ func syncCommitteeMemberDeleteToV1(ctx context.Context, memberUID, projectSFID, 
 
 // resolveOrgIDFromEventData extracts and resolves an organization SFID from committee member event data.
 // Returns empty string (no error) if no organization data is present or fields are all empty.
-// Only 15- or 18-char Salesforce Account SFIDs are sent to v1 as OrganizationID; any other
-// organization.id value is ignored so sync can resolve from name/website or proceed without org.
+// Only 15- or 18-char Salesforce ID-shaped organization.id values are sent to v1 as
+// OrganizationID; any other organization.id value is ignored so sync can resolve from
+// name/website or proceed without org.
 func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string, error) {
 	org, ok := data["organization"].(map[string]any)
 	if !ok {

@@ -12,7 +12,8 @@ import (
 // suffixChars maps a 5-bit value (0–31) to its 18-char-SFID checksum character.
 const suffixChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
 
-// IsValid reports whether s is a 15- or 18-char alphanumeric Salesforce Account SFID.
+// IsValid reports whether s is a 15- or 18-char alphanumeric Salesforce ID.
+// This is a format check only; it does not verify object type (e.g. Account prefix) or checksum.
 func IsValid(s string) bool {
 	if len(s) != 15 && len(s) != 18 {
 		return false
