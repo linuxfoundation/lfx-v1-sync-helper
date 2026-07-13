@@ -176,6 +176,24 @@ lfx-v1-sync-helper --backfill-acs-project [--dry-run]
 lfx-v1-sync-helper --backfill-acs-org [--dry-run]
 ```
 
+**Committee-member reverse-mapping repair (`--backfill-committee-member-mappings`):**
+
+Repairs committee-member reverse mappings (`committee_member.uid.*` in `v1-mappings`) that store the `platform-community__c` record sfid instead of the contact SFID (v1 API "MemberID") — the root cause of v1 committee-member deletes 404ing and leaving members on the committee / meeting invites (LFXV2-2673). Resolves the contact SFID from the `v1-objects` KV bucket; makes no calls to any other service. Writes are optimistic-concurrency guarded against the live sync-helper, idempotent, and safe to re-run.
+
+Run once after deploying the fix, to repair already-affected mappings. A dry-run pass is recommended first:
+
+```sh
+kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-committee-member-mappings-job.yaml
+```
+
+Add `--dry-run` to the manifest args, apply, inspect logs (`inspected`/`poisoned`/`fixed`/`already_ok`/`unresolved`/`malformed`/`tombstoned`/`conflicted` counts), then re-apply without it for the live run.
+
+Locally (with NATS port-forwarded):
+
+```sh
+lfx-v1-sync-helper --backfill-committee-member-mappings [--dry-run]
+```
+
 ## Architecture Diagrams
 
 Regarding the following sequence diagrams:
