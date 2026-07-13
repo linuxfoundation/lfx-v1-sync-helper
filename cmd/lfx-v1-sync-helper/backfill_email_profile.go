@@ -257,6 +257,20 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 		return fmt.Errorf("parsing email SFIDs for %s: %w", userSfid, err)
 	}
 
+	// Single pass: collect candidate (non-primary, active, verified) emails to
+	// link, while also counting "qualifying" emails (active and either
+	// verified or primary) across ALL of the user's alternate email rows. If
+	// only one email qualifies, that row is a lone alternate_email__c acting
+	// as a de-facto primary — v1 lazy-sync may not have created/synced the
+	// primary row yet — so it should not be linked as a secondary identity,
+	// even if it was collected as a link candidate (see LFXV2-2662; this
+	// mirrors auth0-db-sync.js's heuristic).
+	type emailCandidate struct {
+		emailSfid string
+		email     string
+	}
+	var candidates []emailCandidate
+	qualifying := 0
 	for _, emailSfid := range emailSfids {
 		email, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, emailSfid)
 		if err != nil {
@@ -265,23 +279,36 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 			result.emailsSkipped++
 			continue
 		}
+		if isActive && (isVerified || isPrimary) {
+			qualifying++
+		}
 		if isPrimary || !isActive || !isVerified || email == "" {
 			result.emailsSkipped++
 			continue
 		}
+		candidates = append(candidates, emailCandidate{emailSfid: emailSfid, email: email})
+	}
 
+	if qualifying <= 1 {
+		logger.With("user_sfid", userSfid, "auth0_user_id", auth0UserID).
+			Debug("sole qualifying alternate email, treating as de-facto primary, skipping link candidates")
+		result.emailsSkipped += len(candidates)
+		return nil
+	}
+
+	for _, c := range candidates {
 		if dryRun {
 			logger.With(
 				"auth0_user_id", auth0UserID,
-				"email", email,
-				"email_sfid", emailSfid,
+				"email", c.email,
+				"email_sfid", c.emailSfid,
 			).Info("[dry-run] would link alternate email to Auth0 user")
 			result.emailsLinked++
 			continue
 		}
 
-		if err := linkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
-			return fmt.Errorf("linking email %s: %w", email, err)
+		if err := linkEmailIdentityFn(ctx, auth0UserID, c.email); err != nil {
+			return fmt.Errorf("linking email %s: %w", c.email, err)
 		}
 		result.emailsLinked++
 	}
@@ -474,11 +501,28 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 		return fmt.Errorf("parsing email SFIDs: %w", err)
 	}
 
+	// Single pass: collect candidate (non-primary, active, verified) emails to
+	// link, while also counting "qualifying" emails (active and either
+	// verified or primary) across ALL of the user's alternate email rows. If
+	// only one email qualifies, that row is a lone alternate_email__c acting
+	// as a de-facto primary — v1 lazy-sync may not have created/synced the
+	// primary row yet — so it should not be linked as a secondary identity,
+	// even if it was collected as a link candidate (see LFXV2-2662; this
+	// mirrors auth0-db-sync.js's heuristic).
+	type emailCandidate struct {
+		emailSfid string
+		email     string
+	}
+	var candidates []emailCandidate
+	qualifying := 0
 	for _, emailSfid := range emailSfids {
 		email, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, emailSfid)
 		if err != nil {
 			logger.With("error", err, "email_sfid", emailSfid).Warn("failed to get email details, skipping")
 			continue
+		}
+		if isActive && (isVerified || isPrimary) {
+			qualifying++
 		}
 		if isPrimary || !isActive {
 			continue
@@ -491,18 +535,27 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 		if email == "" {
 			continue
 		}
+		candidates = append(candidates, emailCandidate{emailSfid: emailSfid, email: email})
+	}
 
+	if qualifying <= 1 {
+		logger.With("user_sfid", userSfid, "auth0_user_id", auth0UserID).
+			Debug("sole qualifying alternate email, treating as de-facto primary, skipping link candidates")
+		candidates = nil
+	}
+
+	for _, c := range candidates {
 		if dryRun {
-			logger.With("auth0_user_id", auth0UserID, "email", email).
+			logger.With("auth0_user_id", auth0UserID, "email", c.email).
 				Info("[dry-run] would link alternate email to Auth0 user")
 			continue
 		}
 
-		if err := linkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
-			logger.With("error", err, "auth0_user_id", auth0UserID, "email", email).
+		if err := linkEmailIdentityFn(ctx, auth0UserID, c.email); err != nil {
+			logger.With("error", err, "auth0_user_id", auth0UserID, "email", c.email).
 				Warn("failed to link email, skipping")
 		} else {
-			logger.With("auth0_user_id", auth0UserID, "email", email).
+			logger.With("auth0_user_id", auth0UserID, "email", c.email).
 				Info("linked email identity")
 		}
 	}

@@ -185,10 +185,13 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 	}
 
 	// active__c=false means the user-service deactivated the email without
-	// deleting the row. Treat this the same as a soft delete.
-	if isActive, ok := v1Data["active__c"].(bool); ok && !isActive {
-		logger.With("key", key, "email_sfid", emailSfid).
-			DebugContext(ctx, "alternate email inactive (active__c=false), routing to delete handler")
+	// deleting the row. A ".old" domain suffix is a v1 convention for the
+	// same intent without flipping active__c. Treat both the same as a soft delete.
+	emailAddrForActiveCheck, _ := v1Data["alternate_email_address__c"].(string)
+	isOld := strings.HasSuffix(strings.ToLower(emailAddrForActiveCheck), ".old")
+	if isActive, ok := v1Data["active__c"].(bool); (ok && !isActive) || isOld {
+		logger.With("key", key, "email_sfid", emailSfid, "old_domain", isOld).
+			DebugContext(ctx, "alternate email inactive (active__c=false or .old domain), routing to delete handler")
 		return handleAlternateEmailDelete(ctx, key, emailSfid, v1Data)
 	}
 
@@ -209,6 +212,18 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 	// Skip primary emails — the primary email is the Auth0 user's own email
 	// field, not a linked identity, so it is out of scope for this handler.
 	if isPrimary, _ := v1Data["primary_email__c"].(bool); isPrimary {
+		return shouldRetry
+	}
+
+	// If this is the user's only qualifying alternate email, treat it as
+	// though it were flagged primary (see isSoleQualifyingAlternateEmail):
+	// v1 lazy-sync may not have created/synced the primary row yet.
+	if sole, err := isSoleQualifyingAlternateEmail(ctx, leadorcontactid, emailSfid); err != nil {
+		logger.With(errKey, err, "key", key, "user_sfid", leadorcontactid).
+			DebugContext(ctx, "failed to determine sole-qualifying-email status, proceeding with normal link logic")
+	} else if sole {
+		logger.With("key", key, "email_sfid", emailSfid, "user_sfid", leadorcontactid).
+			DebugContext(ctx, "treating sole qualifying alternate email as de-facto primary, skipping Auth0 link")
 		return shouldRetry
 	}
 
