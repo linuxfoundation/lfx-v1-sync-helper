@@ -217,11 +217,24 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 
 	// If this is the user's only qualifying alternate email, treat it as
 	// though it were flagged primary (see isSoleQualifyingAlternateEmail):
-	// v1 lazy-sync may not have created/synced the primary row yet.
-	if sole, err := isSoleQualifyingAlternateEmail(ctx, leadorcontactid, emailSfid); err != nil {
+	// v1 lazy-sync may not have created/synced the primary row yet. A read
+	// failure while determining sole status could just as easily be masking
+	// a true sole-email case as a true multi-email case, so do nothing
+	// (rather than guess non-sole and risk wrongly linking a row that
+	// should be de-facto primary) and let a later event or backfill run
+	// make the correct determination once the read succeeds.
+	//
+	// Known limitation: if this row is skipped here as sole, and a second
+	// qualifying row (including a later primary-flagged row) arrives after
+	// it, only the new row is considered by its own event — this row is not
+	// revisited until a backfill run reconciles it. See LFXV2-2662.
+	sole, err := isSoleQualifyingAlternateEmail(ctx, leadorcontactid)
+	if err != nil {
 		logger.With(errKey, err, "key", key, "user_sfid", leadorcontactid).
-			DebugContext(ctx, "failed to determine sole-qualifying-email status, proceeding with normal link logic")
-	} else if sole {
+			WarnContext(ctx, "failed to determine sole-qualifying-email status, deferring link decision")
+		return shouldRetry
+	}
+	if sole {
 		logger.With("key", key, "email_sfid", emailSfid, "user_sfid", leadorcontactid).
 			DebugContext(ctx, "treating sole qualifying alternate email as de-facto primary, skipping Auth0 link")
 		return shouldRetry

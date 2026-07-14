@@ -271,18 +271,23 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 	}
 	var candidates []emailCandidate
 	qualifying := 0
+	sawPrimary := false
 	for _, emailSfid := range emailSfids {
 		email, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, emailSfid)
 		if err != nil {
-			// A read failure makes the qualifying count unreliable, so
-			// surface it rather than risk applying the sole-qualifying-email
-			// heuristic against an incomplete view of the user's alternate
-			// emails. The caller aborts on this user without advancing the
-			// backfill cursor, so it will be retried on the next run.
+			// A read failure makes the qualifying count unreliable, and
+			// guessing either way (sole vs. non-sole) risks a wrong link
+			// decision, so abort rather than silently proceed. This user
+			// will be retried on the next run (the cursor doesn't advance
+			// past them); a persistently-bad row requires a manual data fix
+			// to unblock, which is preferable to silently mislinking.
 			return fmt.Errorf("getting alternate email details for %s (auth0 user %s): %w", emailSfid, auth0UserID, err)
 		}
 		if isActive && (isVerified || isPrimary) {
 			qualifying++
+			if isPrimary {
+				sawPrimary = true
+			}
 		}
 		if isPrimary || !isActive || !isVerified || email == "" {
 			result.emailsSkipped++
@@ -296,6 +301,12 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 			Debug("sole qualifying alternate email, treating as de-facto primary, skipping link candidates")
 		result.emailsSkipped += len(candidates)
 		return nil
+	}
+	if !sawPrimary {
+		// More than one row qualifies but none is flagged primary: which one
+		// is the de-facto primary is genuinely ambiguous, so abort rather
+		// than linking all of them as secondary identities.
+		return fmt.Errorf("user %s (auth0 user %s) has %d qualifying alternate emails and none is flagged primary; cannot determine de-facto primary", userSfid, auth0UserID, qualifying)
 	}
 
 	for _, c := range candidates {
@@ -517,17 +528,22 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 	}
 	var candidates []emailCandidate
 	qualifying := 0
+	sawPrimary := false
 	for _, emailSfid := range emailSfids {
 		email, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, emailSfid)
 		if err != nil {
-			// A read failure makes the qualifying count unreliable, so
-			// surface it rather than risk applying the sole-qualifying-email
-			// heuristic against an incomplete view of the user's alternate
-			// emails.
+			// A read failure makes the qualifying count unreliable, and
+			// guessing either way (sole vs. non-sole) risks a wrong link
+			// decision, so abort rather than silently proceed. Re-run
+			// --sync-user for this user once the underlying read problem
+			// (or bad data) is resolved.
 			return fmt.Errorf("getting alternate email details for %s (auth0 user %s): %w", emailSfid, auth0UserID, err)
 		}
 		if isActive && (isVerified || isPrimary) {
 			qualifying++
+			if isPrimary {
+				sawPrimary = true
+			}
 		}
 		if isPrimary || !isActive {
 			continue
@@ -547,6 +563,11 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 		logger.With("user_sfid", userSfid, "auth0_user_id", auth0UserID).
 			Debug("sole qualifying alternate email, treating as de-facto primary, skipping link candidates")
 		candidates = nil
+	} else if !sawPrimary {
+		// More than one row qualifies but none is flagged primary: which one
+		// is the de-facto primary is genuinely ambiguous, so abort rather
+		// than linking all of them as secondary identities.
+		return fmt.Errorf("user %s (auth0 user %s) has %d qualifying alternate emails and none is flagged primary; cannot determine de-facto primary", userSfid, auth0UserID, qualifying)
 	}
 
 	for _, c := range candidates {

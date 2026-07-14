@@ -355,19 +355,26 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 	return email, isPrimary, isVerified, true, nil
 }
 
-// isSoleQualifyingAlternateEmail reports whether candidateEmailSfid is the
-// user's only "qualifying" alternate email — active (post .old-domain
-// override) and either verified or already flagged primary. This mirrors the
-// heuristic in auth0-sync-userdb/auth0-db-sync.js (checkPlatformEmails),
-// which promotes a lone non-primary row to primary when v1 lazy-sync hasn't
-// created/synced the primary alternate_email__c row yet. Without this check,
-// the live NATS sync path would instead link that lone email as a secondary
-// Auth0 identity, diverging from the reconciliation script (see LFXV2-2662).
+// isSoleQualifyingAlternateEmail reports whether userSfid has at most one
+// "qualifying" alternate email — active (post .old-domain override) and
+// either verified or already flagged primary — across all of their alternate
+// email rows. This mirrors the heuristic in auth0-sync-userdb/auth0-db-sync.js
+// (checkPlatformEmails), which promotes a lone non-primary row to primary
+// when v1 lazy-sync hasn't created/synced the primary alternate_email__c row
+// yet. Without this check, the live NATS sync path would instead link that
+// lone email as a secondary Auth0 identity, diverging from the reconciliation
+// script (see LFXV2-2662).
 //
 // If the mapping index has no entries yet for the user (e.g. it hasn't
 // caught up with this event), the candidate is treated as the sole
 // qualifying email since it's the only one currently known.
-func isSoleQualifyingAlternateEmail(ctx context.Context, userSfid, candidateEmailSfid string) (bool, error) {
+//
+// If more than one row qualifies and none of them is flagged primary, which
+// row is the de-facto primary is genuinely ambiguous (the heuristic only
+// covers the single-unflagged-row case), so this returns an error rather
+// than guessing; the caller treats an error the same as an inconclusive
+// determination and defers rather than linking.
+func isSoleQualifyingAlternateEmail(ctx context.Context, userSfid string) (bool, error) {
 	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
 	entry, err := mappingsKV.Get(ctx, mappingKey)
 	if err != nil {
@@ -383,6 +390,7 @@ func isSoleQualifyingAlternateEmail(ctx context.Context, userSfid, candidateEmai
 	}
 
 	qualifying := 0
+	sawPrimary := false
 	for _, sfid := range emailSfids {
 		_, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, sfid)
 		if err != nil {
@@ -394,13 +402,19 @@ func isSoleQualifyingAlternateEmail(ctx context.Context, userSfid, candidateEmai
 		}
 		if isActive && (isVerified || isPrimary) {
 			qualifying++
-			if qualifying > 1 {
-				return false, nil
+			if isPrimary {
+				sawPrimary = true
 			}
 		}
 	}
 
-	return qualifying <= 1, nil
+	if qualifying <= 1 {
+		return true, nil
+	}
+	if !sawPrimary {
+		return false, fmt.Errorf("user %s has %d qualifying alternate emails and none is flagged primary; cannot determine de-facto primary", userSfid, qualifying)
+	}
+	return false, nil
 }
 
 // ResolveV1UserSFIDByUsername looks up a v1 user SFID by username using the secondary index.
