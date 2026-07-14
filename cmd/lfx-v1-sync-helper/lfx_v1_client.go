@@ -408,8 +408,10 @@ func isSoleQualifyingAlternateEmail(ctx context.Context, userSfid string) (bool,
 		if err != nil {
 			// A read failure makes the qualifying count unreliable, so
 			// propagate it rather than risk a false "sole qualifying email"
-			// determination. The caller falls back to normal per-email link
-			// logic when this returns an error.
+			// determination. The caller (handleAlternateEmailUpdate)
+			// requests redelivery for this case rather than falling back to
+			// normal per-email link logic, since guessing sole vs. non-sole
+			// risks a wrong link decision.
 			return false, fmt.Errorf("failed to get alternate email details for %s: %w", sfid, err)
 		}
 		if isActive && (isVerified || isPrimary) {
