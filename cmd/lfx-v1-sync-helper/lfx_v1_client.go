@@ -166,15 +166,21 @@ func lookupMergedUser(ctx context.Context, platformID string) (*V1User, error) {
 		ID: platformID,
 	}
 
-	// Map username from username__c field. Values containing a space or "@"
-	// are bogus (e.g. an email address stored where a username belongs by
-	// problematic SCORM user syncing) and are treated as a non-hit rather
-	// than synced verbatim into v2 as a literal identifier (committee
-	// members, project/org FGA writer and auditor lists, etc.).
-	if username, ok := userData["username__c"].(string); ok && username != "" &&
-		!strings.ContainsAny(username, " @") {
-		user.Username = username
+	// Map username from username__c field. A username is required for Auth0
+	// mapping, so bail out early (before the alternate-email lookup below)
+	// if it's missing. Values containing a space or "@" are bogus (e.g. an
+	// email address stored where a username belongs by problematic SCORM
+	// user syncing) and are rejected rather than synced verbatim into v2 as
+	// a literal identifier (committee members, project/org FGA writer and
+	// auditor lists, etc.).
+	username, _ := userData["username__c"].(string)
+	if username == "" {
+		return nil, fmt.Errorf("user %s has no username in merged_user record", platformID)
 	}
+	if strings.ContainsAny(username, " @") {
+		return nil, fmt.Errorf("user %s has an invalid username in merged_user record", platformID)
+	}
+	user.Username = username
 
 	// Map first name
 	if firstName, ok := userData["firstname"].(string); ok {
@@ -196,11 +202,6 @@ func lookupMergedUser(ctx context.Context, platformID string) (*V1User, error) {
 		user.Email = email
 	} else if emailErr != nil {
 		logger.With("platform_id", platformID, "error", emailErr).DebugContext(ctx, "failed to lookup primary email for user")
-	}
-
-	// Validate that we have at least a username (this is required for Auth0 mapping)
-	if user.Username == "" {
-		return nil, fmt.Errorf("user %s has no username in merged_user record", platformID)
 	}
 
 	return user, nil
@@ -385,9 +386,11 @@ func isSoleQualifyingAlternateEmail(ctx context.Context, userSfid, candidateEmai
 	for _, sfid := range emailSfids {
 		_, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, sfid)
 		if err != nil {
-			logger.With("email_sfid", sfid, "error", err).
-				DebugContext(ctx, "failed to get alternate email details while counting qualifying emails")
-			continue
+			// A read failure makes the qualifying count unreliable, so
+			// propagate it rather than risk a false "sole qualifying email"
+			// determination. The caller falls back to normal per-email link
+			// logic when this returns an error.
+			return false, fmt.Errorf("failed to get alternate email details for %s: %w", sfid, err)
 		}
 		if isActive && (isVerified || isPrimary) {
 			qualifying++

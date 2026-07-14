@@ -274,10 +274,12 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 	for _, emailSfid := range emailSfids {
 		email, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, emailSfid)
 		if err != nil {
-			logger.With("error", err, "email_sfid", emailSfid, "auth0_user_id", auth0UserID).
-				Warn("failed to get alternate email details, skipping")
-			result.emailsSkipped++
-			continue
+			// A read failure makes the qualifying count unreliable, so
+			// surface it rather than risk applying the sole-qualifying-email
+			// heuristic against an incomplete view of the user's alternate
+			// emails. The caller aborts on this user without advancing the
+			// backfill cursor, so it will be retried on the next run.
+			return fmt.Errorf("getting alternate email details for %s (auth0 user %s): %w", emailSfid, auth0UserID, err)
 		}
 		if isActive && (isVerified || isPrimary) {
 			qualifying++
@@ -518,8 +520,11 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 	for _, emailSfid := range emailSfids {
 		email, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, emailSfid)
 		if err != nil {
-			logger.With("error", err, "email_sfid", emailSfid).Warn("failed to get email details, skipping")
-			continue
+			// A read failure makes the qualifying count unreliable, so
+			// surface it rather than risk applying the sole-qualifying-email
+			// heuristic against an incomplete view of the user's alternate
+			// emails.
+			return fmt.Errorf("getting alternate email details for %s (auth0 user %s): %w", emailSfid, auth0UserID, err)
 		}
 		if isActive && (isVerified || isPrimary) {
 			qualifying++
