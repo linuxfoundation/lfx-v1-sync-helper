@@ -10,6 +10,8 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+
+	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 )
 
 func TestToKVKey(t *testing.T) {
@@ -319,6 +321,411 @@ func TestExtractUsernameIndex(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleMergedUserDeleteScrub verifies that handleMergedUserDelete triggers the
+// committee scrub functions when a username is present in the payload.
+func TestHandleMergedUserDeleteScrub(t *testing.T) {
+	origLogger := logger
+	origDeleteIndex := deleteIndexKeyFn
+	origQueryTag := queryResourcesByTagFn
+	origFetchMember := fetchCommitteeMemberFn
+	origApplyMember := applyMemberUpdateFn
+	origFetchSettings := fetchCommitteeSettingsFn
+	origApplySettings := applySettingsUpdateFn
+	origCommitteeClient := committeeClient
+	t.Cleanup(func() {
+		logger = origLogger
+		deleteIndexKeyFn = origDeleteIndex
+		queryResourcesByTagFn = origQueryTag
+		fetchCommitteeMemberFn = origFetchMember
+		applyMemberUpdateFn = origApplyMember
+		fetchCommitteeSettingsFn = origFetchSettings
+		applySettingsUpdateFn = origApplySettings
+		committeeClient = origCommitteeClient
+	})
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	deleteIndexKeyFn = func(_ context.Context, _ string) error { return nil }
+	committeeClient = &committeeservice.Client{}
+
+	tests := []struct {
+		name            string
+		v1Data          map[string]any
+		wantScrubCalled bool
+	}{
+		{
+			name:   "nil v1Data (hard delete) → no scrub",
+			v1Data: nil,
+		},
+		{
+			name:   "empty username → no scrub",
+			v1Data: map[string]any{"username__c": "", "sfid": "003ABC"},
+		},
+		{
+			name:            "username present → scrub called",
+			v1Data:          map[string]any{"username__c": "alice", "sfid": "003ABC"},
+			wantScrubCalled: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var queryCalls []string
+			queryResourcesByTagFn = func(_ context.Context, resourceType, _, _ string) ([]queryResource, error) {
+				queryCalls = append(queryCalls, resourceType)
+				return nil, nil
+			}
+			fetchCommitteeMemberFn = func(_ context.Context, _, _ string) (*committeeservice.CommitteeMemberFullWithReadonlyAttributes, string, error) {
+				return nil, "", errors.New("should not be called")
+			}
+			fetchCommitteeSettingsFn = func(_ context.Context, _ string) (*committeeservice.CommitteeSettingsWithReadonlyAttributes, string, error) {
+				return nil, "", errors.New("should not be called")
+			}
+
+			handleMergedUserDelete(context.Background(), "test-key", "003ABC", tt.v1Data)
+
+			if tt.wantScrubCalled {
+				if len(queryCalls) == 0 {
+					t.Error("expected query-service calls for scrub, got none")
+				}
+			} else {
+				if len(queryCalls) != 0 {
+					t.Errorf("expected no query-service calls, got %v", queryCalls)
+				}
+			}
+		})
+	}
+}
+
+// TestScrubCommitteeMembersUsername covers the committee member username scrub logic.
+func TestScrubCommitteeMembersUsername(t *testing.T) {
+	origLogger := logger
+	origQueryTag := queryResourcesByTagFn
+	origFetchMember := fetchCommitteeMemberFn
+	origApplyMember := applyMemberUpdateFn
+	origCommitteeClient := committeeClient
+	t.Cleanup(func() {
+		logger = origLogger
+		queryResourcesByTagFn = origQueryTag
+		fetchCommitteeMemberFn = origFetchMember
+		applyMemberUpdateFn = origApplyMember
+		committeeClient = origCommitteeClient
+	})
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Use a non-nil sentinel so committeeClient != nil checks pass.
+	committeeClient = &committeeservice.Client{}
+
+	const (
+		username     = "alice"
+		committeeUID = "comm-uuid-1"
+		memberUID    = "mem-uuid-1"
+	)
+	parentUID := committeeUID
+
+	alice := username
+	bob := "bob"
+	email := "alice@example.com"
+
+	tests := []struct {
+		name            string
+		queryResources  []queryResource
+		queryErr        error
+		fetchResult     *committeeservice.CommitteeMemberFullWithReadonlyAttributes
+		fetchErr        error
+		wantUpdateCalls int
+		// wantClearedUsername is the username value the update payload should carry.
+		wantClearedUsername *string // nil = empty string pointer expected
+	}{
+		{
+			name:     "query returns empty → no updates",
+			queryErr: nil,
+		},
+		{
+			name:     "query error → no fetch, no update",
+			queryErr: errors.New("query service unavailable"),
+		},
+		{
+			name: "resource missing parent_uid → skip",
+			queryResources: []queryResource{
+				{UID: memberUID, Type: "committee_member"},
+			},
+		},
+		{
+			name: "fetch error → skip that resource",
+			queryResources: []queryResource{
+				{UID: memberUID, Type: "committee_member", ParentUID: &parentUID},
+			},
+			fetchErr: errors.New("not found"),
+		},
+		{
+			name: "member username already empty (idempotency) → no update",
+			queryResources: []queryResource{
+				{UID: memberUID, Type: "committee_member", ParentUID: &parentUID},
+			},
+			fetchResult: &committeeservice.CommitteeMemberFullWithReadonlyAttributes{
+				Username: nil,
+				Email:    &email,
+				Status:   "Active",
+			},
+		},
+		{
+			name: "member username belongs to another user (reuse guard) → no update",
+			queryResources: []queryResource{
+				{UID: memberUID, Type: "committee_member", ParentUID: &parentUID},
+			},
+			fetchResult: &committeeservice.CommitteeMemberFullWithReadonlyAttributes{
+				Username: &bob,
+				Email:    &email,
+				Status:   "Active",
+			},
+		},
+		{
+			name: "member has matching username → username cleared, other fields preserved",
+			queryResources: []queryResource{
+				{UID: memberUID, Type: "committee_member", ParentUID: &parentUID},
+			},
+			fetchResult: &committeeservice.CommitteeMemberFullWithReadonlyAttributes{
+				Username: &alice,
+				Email:    &email,
+				Status:   "Active",
+			},
+			wantUpdateCalls:     1,
+			wantClearedUsername: strPtr(""),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			queryResourcesByTagFn = func(_ context.Context, _, _, _ string) ([]queryResource, error) {
+				return tt.queryResources, tt.queryErr
+			}
+			fetchCommitteeMemberFn = func(_ context.Context, gotCommitteeUID, gotMemberUID string) (*committeeservice.CommitteeMemberFullWithReadonlyAttributes, string, error) {
+				if gotCommitteeUID != committeeUID || gotMemberUID != memberUID {
+					t.Errorf("fetchCommitteeMember called with (%q, %q), want (%q, %q)", gotCommitteeUID, gotMemberUID, committeeUID, memberUID)
+				}
+				return tt.fetchResult, "etag-1", tt.fetchErr
+			}
+
+			var updatePayloads []*committeeservice.UpdateCommitteeMemberPayload
+			applyMemberUpdateFn = func(_ context.Context, payload *committeeservice.UpdateCommitteeMemberPayload) error {
+				updatePayloads = append(updatePayloads, payload)
+				return nil
+			}
+
+			scrubCommitteeMembersUsername(context.Background(), "test-key", username)
+
+			if len(updatePayloads) != tt.wantUpdateCalls {
+				t.Errorf("applyMemberUpdate called %d times, want %d", len(updatePayloads), tt.wantUpdateCalls)
+			}
+
+			if tt.wantUpdateCalls > 0 && len(updatePayloads) > 0 {
+				p := updatePayloads[0]
+				gotUsername := stringPtrToString(p.Username)
+				if gotUsername != "" {
+					t.Errorf("update payload username = %q, want empty string", gotUsername)
+				}
+				// Verify other fields are preserved from the fetched member.
+				if p.Email != email {
+					t.Errorf("update payload email = %q, want %q", p.Email, email)
+				}
+				if p.Status != "Active" {
+					t.Errorf("update payload status = %q, want %q", p.Status, "Active")
+				}
+				if p.UID != committeeUID || p.MemberUID != memberUID {
+					t.Errorf("update payload IDs = (%q, %q), want (%q, %q)", p.UID, p.MemberUID, committeeUID, memberUID)
+				}
+			}
+		})
+	}
+}
+
+// TestScrubCommitteeSettingsUsername covers the committee settings writer/auditor username scrub.
+func TestScrubCommitteeSettingsUsername(t *testing.T) {
+	origLogger := logger
+	origQueryTag := queryResourcesByTagFn
+	origFetchSettings := fetchCommitteeSettingsFn
+	origApplySettings := applySettingsUpdateFn
+	origCommitteeClient := committeeClient
+	t.Cleanup(func() {
+		logger = origLogger
+		queryResourcesByTagFn = origQueryTag
+		fetchCommitteeSettingsFn = origFetchSettings
+		applySettingsUpdateFn = origApplySettings
+		committeeClient = origCommitteeClient
+	})
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	committeeClient = &committeeservice.Client{}
+
+	const (
+		username     = "alice"
+		committeeUID = "comm-uuid-1"
+	)
+
+	alice := username
+	bob := "bob"
+	aliceEmail := "alice@example.com"
+	bobEmail := "bob@example.com"
+
+	makeResource := func(uid string) queryResource { return queryResource{UID: uid, Type: "committee_settings"} }
+
+	tests := []struct {
+		name              string
+		writerResults     []queryResource
+		writerErr         error
+		auditorResults    []queryResource
+		auditorErr        error
+		fetchResult       *committeeservice.CommitteeSettingsWithReadonlyAttributes
+		fetchErr          error
+		wantUpdateCalls   int
+		wantWritersClear  bool
+		wantAuditorsClear bool
+	}{
+		{
+			name: "both queries return empty → no updates",
+		},
+		{
+			name:          "writer query returns result, username already empty (idempotency) → no update",
+			writerResults: []queryResource{makeResource(committeeUID)},
+			fetchResult: &committeeservice.CommitteeSettingsWithReadonlyAttributes{
+				Writers: []*committeeservice.CommitteeUser{
+					{Email: &aliceEmail, Username: nil},
+				},
+			},
+		},
+		{
+			name:          "writer query returns result with matching username → update clears writer username",
+			writerResults: []queryResource{makeResource(committeeUID)},
+			fetchResult: &committeeservice.CommitteeSettingsWithReadonlyAttributes{
+				Writers: []*committeeservice.CommitteeUser{
+					{Email: &aliceEmail, Username: &alice},
+				},
+				Auditors: []*committeeservice.CommitteeUser{
+					{Email: &bobEmail, Username: &bob},
+				},
+			},
+			wantUpdateCalls:  1,
+			wantWritersClear: true,
+		},
+		{
+			name:           "auditor query returns result with matching username → update clears auditor username",
+			auditorResults: []queryResource{makeResource(committeeUID)},
+			fetchResult: &committeeservice.CommitteeSettingsWithReadonlyAttributes{
+				Writers: []*committeeservice.CommitteeUser{
+					{Email: &bobEmail, Username: &bob},
+				},
+				Auditors: []*committeeservice.CommitteeUser{
+					{Email: &aliceEmail, Username: &alice},
+				},
+			},
+			wantUpdateCalls:   1,
+			wantAuditorsClear: true,
+		},
+		{
+			name:           "same committee UID in both writer and auditor results → fetched and updated once",
+			writerResults:  []queryResource{makeResource(committeeUID)},
+			auditorResults: []queryResource{makeResource(committeeUID)},
+			fetchResult: &committeeservice.CommitteeSettingsWithReadonlyAttributes{
+				Writers:  []*committeeservice.CommitteeUser{{Email: &aliceEmail, Username: &alice}},
+				Auditors: []*committeeservice.CommitteeUser{{Email: &aliceEmail, Username: &alice}},
+			},
+			wantUpdateCalls:   1,
+			wantWritersClear:  true,
+			wantAuditorsClear: true,
+		},
+		{
+			name:          "unrelated writer (different username) → not cleared",
+			writerResults: []queryResource{makeResource(committeeUID)},
+			fetchResult: &committeeservice.CommitteeSettingsWithReadonlyAttributes{
+				Writers: []*committeeservice.CommitteeUser{
+					{Email: &bobEmail, Username: &bob},
+				},
+			},
+		},
+		{
+			name:          "fetch error → no update",
+			writerResults: []queryResource{makeResource(committeeUID)},
+			fetchErr:      errors.New("not found"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writerCallCount := 0
+			auditorCallCount := 0
+			queryResourcesByTagFn = func(_ context.Context, _, tagKey, _ string) ([]queryResource, error) {
+				switch tagKey {
+				case "writer":
+					writerCallCount++
+					return tt.writerResults, tt.writerErr
+				case "auditor":
+					auditorCallCount++
+					return tt.auditorResults, tt.auditorErr
+				}
+				return nil, nil
+			}
+
+			fetchCalls := 0
+			fetchCommitteeSettingsFn = func(_ context.Context, gotUID string) (*committeeservice.CommitteeSettingsWithReadonlyAttributes, string, error) {
+				fetchCalls++
+				if gotUID != committeeUID {
+					t.Errorf("fetchCommitteeSettings called with uid %q, want %q", gotUID, committeeUID)
+				}
+				return tt.fetchResult, "etag-1", tt.fetchErr
+			}
+
+			var updatePayloads []*committeeservice.UpdateCommitteeSettingsPayload
+			applySettingsUpdateFn = func(_ context.Context, payload *committeeservice.UpdateCommitteeSettingsPayload) error {
+				updatePayloads = append(updatePayloads, payload)
+				return nil
+			}
+
+			scrubCommitteeSettingsUsername(context.Background(), "test-key", username)
+
+			if len(updatePayloads) != tt.wantUpdateCalls {
+				t.Errorf("applySettingsUpdate called %d times, want %d", len(updatePayloads), tt.wantUpdateCalls)
+			}
+
+			if tt.wantUpdateCalls > 0 && len(updatePayloads) > 0 {
+				p := updatePayloads[0]
+
+				if tt.wantWritersClear {
+					for _, w := range p.Writers {
+						if w != nil && w.Username != nil && *w.Username == username {
+							t.Errorf("writer username %q should have been cleared", username)
+						}
+					}
+				}
+
+				if tt.wantAuditorsClear {
+					for _, a := range p.Auditors {
+						if a != nil && a.Username != nil && *a.Username == username {
+							t.Errorf("auditor username %q should have been cleared", username)
+						}
+					}
+				}
+
+				// Verify unrelated entries are preserved.
+				for _, w := range p.Writers {
+					if w != nil && stringPtrToString(w.Username) == bob {
+						// bob's username should be unchanged
+					}
+				}
+			}
+
+			// Verify deduplication: if same UID in both results, fetch called once.
+			if len(tt.writerResults) > 0 && len(tt.auditorResults) > 0 {
+				firstWriterUID := tt.writerResults[0].UID
+				firstAuditorUID := tt.auditorResults[0].UID
+				if firstWriterUID == firstAuditorUID && fetchCalls > 1 {
+					t.Errorf("same committee UID in both results but fetchCommitteeSettings called %d times, want 1", fetchCalls)
+				}
+			}
+		})
+	}
+}
+
+// strPtr returns a pointer to the given string; used in test helpers.
+func strPtr(s string) *string { return &s }
 
 // TestExtractEmailIndex covers the field extraction for the alternate_email reindex phase.
 func TestExtractEmailIndex(t *testing.T) {

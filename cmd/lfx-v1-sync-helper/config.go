@@ -36,6 +36,7 @@ type Config struct {
 	ProjectServiceURL   *url.URL
 	CommitteeServiceURL *url.URL
 	MemberServiceURL    *url.URL // Optional; required only for --backfill-acs-org pass
+	QueryServiceURL     *url.URL // Optional; required for username scrub on user deletion
 
 	// NATS configuration
 	NATSURL string
@@ -279,6 +280,14 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("failed to parse MEMBER_SERVICE_URL: %w", err)
 		}
 		cfg.MemberServiceURL = memberServiceURL
+	}
+
+	if queryServiceURLStr := os.Getenv("QUERY_SERVICE_URL"); queryServiceURLStr != "" {
+		queryServiceURL, err := url.Parse(queryServiceURLStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse QUERY_SERVICE_URL: %w", err)
+		}
+		cfg.QueryServiceURL = queryServiceURL
 	}
 
 	return cfg, nil
