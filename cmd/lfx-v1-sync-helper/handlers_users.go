@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -195,7 +196,18 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 		return handleAlternateEmailDelete(ctx, key, emailSfid, v1Data)
 	}
 
-	shouldRetry := updateContactEmailMappingIndex(ctx, leadorcontactid, emailSfid, false)
+	if updateContactEmailMappingIndex(ctx, leadorcontactid, emailSfid, false) {
+		// The alternate-emails mapping write hit a conflict (see
+		// updateContactEmailMappingIndex) and did not apply, so the rest of
+		// this function would be working off stale mapping data (e.g. this
+		// row missing from the qualifying-email count). Bail out now rather
+		// than doing (and potentially mis-deciding) the remaining work on
+		// data we know is stale; the whole event will be redelivered and
+		// re-evaluated from scratch.
+		logger.With("key", key, "email_sfid", emailSfid, "user_sfid", leadorcontactid).
+			DebugContext(ctx, "alternate emails mapping write needs retry, deferring rest of processing")
+		return true
+	}
 
 	emailAddr, _ := v1Data["alternate_email_address__c"].(string)
 	if encodedEmail := emailToKVKey(emailAddr); encodedEmail != "" {
@@ -212,17 +224,12 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 	// Skip primary emails — the primary email is the Auth0 user's own email
 	// field, not a linked identity, so it is out of scope for this handler.
 	if isPrimary, _ := v1Data["primary_email__c"].(bool); isPrimary {
-		return shouldRetry
+		return false
 	}
 
 	// If this is the user's only qualifying alternate email, treat it as
 	// though it were flagged primary (see isSoleQualifyingAlternateEmail):
-	// v1 lazy-sync may not have created/synced the primary row yet. A read
-	// failure while determining sole status could just as easily be masking
-	// a true sole-email case as a true multi-email case, so do nothing
-	// (rather than guess non-sole and risk wrongly linking a row that
-	// should be de-facto primary) and let a later event or backfill run
-	// make the correct determination once the read succeeds.
+	// v1 lazy-sync may not have created/synced the primary row yet.
 	//
 	// Known limitation: if this row is skipped here as sole, and a second
 	// qualifying row (including a later primary-flagged row) arrives after
@@ -230,14 +237,30 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 	// revisited until a backfill run reconciles it. See LFXV2-2662.
 	sole, err := isSoleQualifyingAlternateEmail(ctx, leadorcontactid)
 	if err != nil {
+		if errors.Is(err, errAmbiguousDefactoPrimaryEmail) {
+			// Deterministic v1 data condition (multiple qualifying rows,
+			// none flagged primary) — retrying will reach the same result
+			// until the data is fixed, so drop rather than requesting
+			// redelivery. This requires a manual data fix or a backfill
+			// run once the ambiguity is resolved at the source.
+			logger.With(errKey, err, "key", key, "user_sfid", leadorcontactid).
+				ErrorContext(ctx, "cannot determine de-facto primary alternate email, dropping (requires manual data fix)")
+			return false
+		}
+		// A read failure could just as easily be masking a true sole-email
+		// case as a true multi-email case, so don't guess non-sole and risk
+		// wrongly linking a row that should be de-facto primary. Unlike the
+		// ambiguous-data case above, this may well be transient, so request
+		// redelivery instead of silently dropping the message — otherwise
+		// this valid link could go missing until a backfill happens to run.
 		logger.With(errKey, err, "key", key, "user_sfid", leadorcontactid).
-			WarnContext(ctx, "failed to determine sole-qualifying-email status, deferring link decision")
-		return shouldRetry
+			WarnContext(ctx, "failed to determine sole-qualifying-email status, requesting retry")
+		return true
 	}
 	if sole {
 		logger.With("key", key, "email_sfid", emailSfid, "user_sfid", leadorcontactid).
 			DebugContext(ctx, "treating sole qualifying alternate email as de-facto primary, skipping Auth0 link")
-		return shouldRetry
+		return false
 	}
 
 	// Only link verified, non-empty emails.
@@ -245,10 +268,10 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 	if !isVerified {
 		logger.With("key", key, "email_sfid", emailSfid).
 			DebugContext(ctx, "alternate email not verified, skipping Auth0 link")
-		return shouldRetry
+		return false
 	}
 	if emailAddr == "" {
-		return shouldRetry
+		return false
 	}
 
 	// Bound with auth0CallTimeout (< AckWait) so a stuck Auth0 request can't
@@ -259,7 +282,7 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 		return true
 	}
 
-	return shouldRetry
+	return false
 }
 
 // handleAlternateEmailDelete processes a soft delete of an alternate email
@@ -287,8 +310,15 @@ func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Da
 		return false
 	}
 
-	// Clean up the v1-mapping entry for this alternate email.
-	shouldRetry := updateContactEmailMappingIndexFn(ctx, userSfid, emailSfid, true)
+	// Clean up the v1-mapping entry for this alternate email. Bail out
+	// immediately on a conflict (see the analogous check in
+	// handleAlternateEmailUpdate) rather than continuing with cleanup steps
+	// that don't depend on it anyway; the event will be redelivered.
+	if updateContactEmailMappingIndexFn(ctx, userSfid, emailSfid, true) {
+		logger.With("key", key, "email_sfid", emailSfid, "user_sfid", userSfid).
+			DebugContext(ctx, "alternate emails mapping write needs retry, deferring rest of processing")
+		return true
+	}
 
 	if encodedEmail := emailToKVKey(emailAddr); encodedEmail != "" {
 		indexKey := kvKeyEmailPrefix + encodedEmail
@@ -301,25 +331,25 @@ func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Da
 	// Skip primary emails — the primary email is the Auth0 user's own email
 	// field, not a linked identity, so it is out of scope for this handler.
 	if isPrimary, _ := v1Data["primary_email__c"].(bool); isPrimary {
-		return shouldRetry
+		return false
 	}
 
 	if emailAddr == "" {
 		logger.With("key", key, "email_sfid", emailSfid).
 			WarnContext(ctx, "alternate email delete missing address, cannot unlink Auth0 identity")
-		return shouldRetry
+		return false
 	}
 
 	v1User, err := lookupMergedUserFn(ctx, userSfid)
 	if err != nil {
 		logger.With(errKey, err, "key", key, "user_sfid", userSfid).
 			WarnContext(ctx, "failed to resolve v1 user for Auth0 email unlink")
-		return shouldRetry
+		return false
 	}
 	if v1User.Username == "" {
 		logger.With("key", key, "user_sfid", userSfid).
 			WarnContext(ctx, "v1 user has no username, cannot resolve Auth0 ID for unlink")
-		return shouldRetry
+		return false
 	}
 	auth0UserID := mapUsernameToAuthSub(v1User.Username)
 
@@ -334,7 +364,7 @@ func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Da
 		logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", emailAddr).
 			ErrorContext(syncCtx, "failed to unlink email identity from Auth0, dropping non-retryable error")
 	}
-	return shouldRetry
+	return false
 }
 
 // linkAlternateEmailToAuth0 links an alternate email as an Auth0 identity on

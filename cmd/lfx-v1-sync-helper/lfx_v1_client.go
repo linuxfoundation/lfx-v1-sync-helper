@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -355,6 +356,16 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 	return email, isPrimary, isVerified, true, nil
 }
 
+// errAmbiguousDefactoPrimaryEmail indicates that more than one of a user's
+// alternate email rows qualifies (active and verified) and none is flagged
+// primary, so which row (if any) should be treated as the de-facto primary
+// is genuinely ambiguous. This is a deterministic v1 data condition, not a
+// transient failure: retrying the same read will reach the same result
+// until the underlying data is fixed, so callers should not request
+// redelivery/retry for it, unlike other errors from
+// isSoleQualifyingAlternateEmail.
+var errAmbiguousDefactoPrimaryEmail = errors.New("ambiguous de-facto primary alternate email")
+
 // isSoleQualifyingAlternateEmail reports whether userSfid has at most one
 // "qualifying" alternate email — active (post .old-domain override) and
 // either verified or already flagged primary — across all of their alternate
@@ -371,9 +382,10 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 //
 // If more than one row qualifies and none of them is flagged primary, which
 // row is the de-facto primary is genuinely ambiguous (the heuristic only
-// covers the single-unflagged-row case), so this returns an error rather
-// than guessing; the caller treats an error the same as an inconclusive
-// determination and defers rather than linking.
+// covers the single-unflagged-row case), so this returns an error wrapping
+// errAmbiguousDefactoPrimaryEmail rather than guessing. Callers should treat
+// that case as deterministic (do not retry) and any other error as
+// potentially transient (safe to retry).
 func isSoleQualifyingAlternateEmail(ctx context.Context, userSfid string) (bool, error) {
 	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
 	entry, err := mappingsKV.Get(ctx, mappingKey)
@@ -412,7 +424,7 @@ func isSoleQualifyingAlternateEmail(ctx context.Context, userSfid string) (bool,
 		return true, nil
 	}
 	if !sawPrimary {
-		return false, fmt.Errorf("user %s has %d qualifying alternate emails and none is flagged primary; cannot determine de-facto primary", userSfid, qualifying)
+		return false, fmt.Errorf("user %s has %d qualifying alternate emails and none is flagged primary: %w", userSfid, qualifying, errAmbiguousDefactoPrimaryEmail)
 	}
 	return false, nil
 }
