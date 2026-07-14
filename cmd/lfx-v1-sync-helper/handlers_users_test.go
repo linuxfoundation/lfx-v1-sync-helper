@@ -433,8 +433,6 @@ func TestScrubCommitteeMembersUsername(t *testing.T) {
 		fetchResult     *committeeservice.CommitteeMemberFullWithReadonlyAttributes
 		fetchErr        error
 		wantUpdateCalls int
-		// wantClearedUsername is the username value the update payload should carry.
-		wantClearedUsername *string // nil = empty string pointer expected
 	}{
 		{
 			name:     "query returns empty → no updates",
@@ -489,8 +487,7 @@ func TestScrubCommitteeMembersUsername(t *testing.T) {
 				Email:    &email,
 				Status:   "Active",
 			},
-			wantUpdateCalls:     1,
-			wantClearedUsername: strPtr(""),
+			wantUpdateCalls: 1,
 		},
 	}
 
