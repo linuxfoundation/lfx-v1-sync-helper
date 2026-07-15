@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -166,10 +167,21 @@ func lookupMergedUser(ctx context.Context, platformID string) (*V1User, error) {
 		ID: platformID,
 	}
 
-	// Map username from username__c field
-	if username, ok := userData["username__c"].(string); ok && username != "" {
-		user.Username = username
+	// Map username from username__c field. A username is required for Auth0
+	// mapping, so bail out early (before the alternate-email lookup below)
+	// if it's missing. Values containing a space or "@" are bogus (e.g. an
+	// email address stored where a username belongs by problematic SCORM
+	// user syncing) and are rejected rather than synced verbatim into v2 as
+	// a literal identifier (committee members, project/org FGA writer and
+	// auditor lists, etc.).
+	username, _ := userData["username__c"].(string)
+	if username == "" {
+		return nil, fmt.Errorf("user %s has no username in merged_user record", platformID)
 	}
+	if strings.ContainsAny(username, " @") {
+		return nil, fmt.Errorf("user %s has an invalid username in merged_user record", platformID)
+	}
+	user.Username = username
 
 	// Map first name
 	if firstName, ok := userData["firstname"].(string); ok {
@@ -191,11 +203,6 @@ func lookupMergedUser(ctx context.Context, platformID string) (*V1User, error) {
 		user.Email = email
 	} else if emailErr != nil {
 		logger.With("platform_id", platformID, "error", emailErr).DebugContext(ctx, "failed to lookup primary email for user")
-	}
-
-	// Validate that we have at least a username (this is required for Auth0 mapping)
-	if user.Username == "" {
-		return nil, fmt.Errorf("user %s has no username in merged_user record", platformID)
 	}
 
 	return user, nil
@@ -329,6 +336,13 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 		return email, isPrimary, false, false, nil
 	}
 
+	// Emails with a domain ending in ".old" (e.g. "user@example.com.old") are
+	// a v1 convention for soft-deactivating a stale address without flipping
+	// active__c. Treat these the same as active__c=false.
+	if strings.HasSuffix(strings.ToLower(email), ".old") {
+		return email, isPrimary, false, false, nil
+	}
+
 	if email == "" {
 		return "", false, false, false, fmt.Errorf("email record %s has no email address", emailSfid)
 	}
@@ -340,6 +354,81 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 	}
 
 	return email, isPrimary, isVerified, true, nil
+}
+
+// errAmbiguousDefactoPrimaryEmail indicates that more than one of a user's
+// alternate email rows qualifies (active and verified) and none is flagged
+// primary, so which row (if any) should be treated as the de-facto primary
+// is genuinely ambiguous. This is a deterministic v1 data condition, not a
+// transient failure: retrying the same read will reach the same result
+// until the underlying data is fixed, so callers should not request
+// redelivery/retry for it, unlike other errors from
+// isSoleQualifyingAlternateEmail.
+var errAmbiguousDefactoPrimaryEmail = errors.New("ambiguous de-facto primary alternate email")
+
+// isSoleQualifyingAlternateEmail reports whether userSfid has at most one
+// "qualifying" alternate email — active (post .old-domain override) and
+// either verified or already flagged primary — across all of their alternate
+// email rows. This mirrors the heuristic in auth0-sync-userdb/auth0-db-sync.js
+// (checkPlatformEmails), which promotes a lone non-primary row to primary
+// when v1 lazy-sync hasn't created/synced the primary alternate_email__c row
+// yet. Without this check, the live NATS sync path would instead link that
+// lone email as a secondary Auth0 identity, diverging from the reconciliation
+// script (see LFXV2-2662).
+//
+// If the mapping index has no entries yet for the user (e.g. it hasn't
+// caught up with this event), the candidate is treated as the sole
+// qualifying email since it's the only one currently known.
+//
+// If more than one row qualifies and none of them is flagged primary, which
+// row is the de-facto primary is genuinely ambiguous (the heuristic only
+// covers the single-unflagged-row case), so this returns an error wrapping
+// errAmbiguousDefactoPrimaryEmail rather than guessing. Callers should treat
+// that case as deterministic (do not retry) and any other error as
+// potentially transient (safe to retry).
+func isSoleQualifyingAlternateEmail(ctx context.Context, userSfid string) (bool, error) {
+	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
+	entry, err := mappingsKV.Get(ctx, mappingKey)
+	if err != nil {
+		if err == jetstream.ErrKeyNotFound {
+			return true, nil
+		}
+		return false, fmt.Errorf("failed to get alternate emails mapping: %w", err)
+	}
+
+	var emailSfids []string
+	if err := json.Unmarshal(entry.Value(), &emailSfids); err != nil {
+		return false, fmt.Errorf("failed to unmarshal email SFIDs: %w", err)
+	}
+
+	qualifying := 0
+	sawPrimary := false
+	for _, sfid := range emailSfids {
+		_, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, sfid)
+		if err != nil {
+			// A read failure makes the qualifying count unreliable, so
+			// propagate it rather than risk a false "sole qualifying email"
+			// determination. The caller (handleAlternateEmailUpdate)
+			// requests redelivery for this case rather than falling back to
+			// normal per-email link logic, since guessing sole vs. non-sole
+			// risks a wrong link decision.
+			return false, fmt.Errorf("failed to get alternate email details for %s: %w", sfid, err)
+		}
+		if isActive && (isVerified || isPrimary) {
+			qualifying++
+			if isPrimary {
+				sawPrimary = true
+			}
+		}
+	}
+
+	if qualifying <= 1 {
+		return true, nil
+	}
+	if !sawPrimary {
+		return false, fmt.Errorf("user %s has %d qualifying alternate emails and none is flagged primary: %w", userSfid, qualifying, errAmbiguousDefactoPrimaryEmail)
+	}
+	return false, nil
 }
 
 // ResolveV1UserSFIDByUsername looks up a v1 user SFID by username using the secondary index.
