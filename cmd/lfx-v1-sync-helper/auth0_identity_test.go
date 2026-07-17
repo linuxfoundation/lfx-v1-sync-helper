@@ -186,6 +186,54 @@ func TestLinkEmailIdentity(t *testing.T) {
 		}
 	})
 
+	t.Run("email matches primary account's own email is skipped", func(t *testing.T) {
+		fake := &fakeAuth0Users{
+			users: map[string]*management.User{
+				"auth0|primary": {
+					ID:    auth0.String("auth0|primary"),
+					Email: auth0.String("alt@example.com"),
+				},
+			},
+		}
+		cleanup := setupLinkTest(t, fake)
+		defer cleanup()
+
+		err := linkEmailIdentity(context.Background(), "auth0|primary", "alt@example.com")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(fake.created) != 0 {
+			t.Errorf("expected no create calls, got %d", len(fake.created))
+		}
+		if len(fake.linked) != 0 {
+			t.Errorf("expected no link calls, got %d", len(fake.linked))
+		}
+	})
+
+	t.Run("email matches primary account's own email case-insensitive is skipped", func(t *testing.T) {
+		fake := &fakeAuth0Users{
+			users: map[string]*management.User{
+				"auth0|primary": {
+					ID:    auth0.String("auth0|primary"),
+					Email: auth0.String("Alt@Example.COM"),
+				},
+			},
+		}
+		cleanup := setupLinkTest(t, fake)
+		defer cleanup()
+
+		err := linkEmailIdentity(context.Background(), "auth0|primary", "alt@example.com")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(fake.created) != 0 {
+			t.Errorf("expected no create calls, got %d", len(fake.created))
+		}
+		if len(fake.linked) != 0 {
+			t.Errorf("expected no link calls, got %d", len(fake.linked))
+		}
+	})
+
 	t.Run("already linked case-insensitive", func(t *testing.T) {
 		fake := &fakeAuth0Users{
 			users: map[string]*management.User{

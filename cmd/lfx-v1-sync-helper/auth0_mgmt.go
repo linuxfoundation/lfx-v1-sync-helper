@@ -225,6 +225,17 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 	if err != nil {
 		return fmt.Errorf("failed to read primary user %s: %w", primaryAuth0ID, err)
 	}
+
+	// If the email matches the primary account's own login email, there is
+	// nothing to link: the account already has this email as its top-level
+	// identity. Linking it as a secondary "email" identity would just create
+	// a redundant duplicate.
+	if strings.EqualFold(primaryUser.GetEmail(), email) {
+		logger.With("auth0_user_id", primaryAuth0ID, "email", email).
+			WarnContext(ctx, "email matches primary account's own email, skipping link")
+		return nil
+	}
+
 	for _, identity := range primaryUser.Identities {
 		if identity.GetProvider() == "email" && identity.GetConnection() == "email" {
 			if profileEmail, _ := identity.GetProfileData()["email"].(string); strings.EqualFold(profileEmail, email) {
