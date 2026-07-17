@@ -66,6 +66,7 @@ func main() {
 	var doBackfillProfiles = flag.Bool("backfill-profiles", false, "backfill v1 profile fields to Auth0 user_metadata, then exit")
 	var doBackfillWorkspaces = flag.Bool("backfill-workspaces", false, "backfill legacy workspaces into v2 member-service, then exit")
 	var doBackfillCommitteeMemberMappings = flag.Bool("backfill-committee-member-mappings", false, "repair committee-member reverse mappings that store the record sfid instead of the contact SFID, then exit")
+	var doBackfillCommitteeMemberForwardMappings = flag.Bool("backfill-committee-member-forward-mappings", false, "migrate committee-member forward mappings from the v2->v1 create path to committee-scoped keys, then exit")
 	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
 	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-* and --sync-user)")
 	var backfillLimit = flag.Int("limit", 1000, "maximum number of users to process per backfill run (applicable with --backfill-alternate-emails and --backfill-profiles)")
@@ -78,13 +79,13 @@ func main() {
 
 	// Enforce mutual exclusion across all one-shot flags.
 	oneShotCount := 0
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doRebuildUserIndexes, *doBackfillCommitteeMemberMappings} {
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doRebuildUserIndexes, *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberForwardMappings} {
 		if b {
 			oneShotCount++
 		}
 	}
 	if oneShotCount > 1 {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --sync-user, and --rebuild-user-secondary-indexes are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --backfill-committee-member-forward-mappings, --sync-user, and --rebuild-user-secondary-indexes are mutually exclusive")
 		os.Exit(2)
 	}
 
@@ -92,11 +93,12 @@ func main() {
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}))
 	slog.SetDefault(logger)
 
-	// --rebuild-user-secondary-indexes and --backfill-committee-member-mappings
-	// only need NATS KV; skip full config and API client init.
+	// --rebuild-user-secondary-indexes, --backfill-committee-member-mappings, and
+	// --backfill-committee-member-forward-mappings only need NATS KV; skip full config
+	// and API client init.
 	// --backfill-acs-project and --backfill-acs-org require full config and API client init.
 	var err error
-	if *doRebuildUserIndexes || *doBackfillCommitteeMemberMappings {
+	if *doRebuildUserIndexes || *doBackfillCommitteeMemberMappings || *doBackfillCommitteeMemberForwardMappings {
 		cfg = LoadReindexConfig()
 	} else {
 		cfg, err = LoadConfig()
@@ -362,6 +364,28 @@ func main() {
 			"tombstoned", res.tombstoned,
 			"conflicted", res.conflicted,
 		).Info("committee-member reverse-mapping backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --backfill-committee-member-forward-mappings flag: migrate committee-member
+	// forward mappings written by the v2->v1 create path to committee-scoped keys
+	// (LFXV2-2709), then exit.
+	if *doBackfillCommitteeMemberForwardMappings {
+		logger.With("dry_run", *dryRun).Info("starting committee-member forward-mapping backfill")
+		res, err := backfillCommitteeMemberForwardMappings(ctx, *dryRun)
+		if err != nil {
+			logger.With(errKey, err).Error("error during committee-member forward-mapping backfill")
+			os.Exit(1)
+		}
+		logger.With(
+			"inspected", res.inspected,
+			"migrated", res.migrated,
+			"skipped_record_key", res.skippedRecordKey,
+			"malformed", res.malformed,
+			"tombstoned", res.tombstoned,
+			"unresolved", res.unresolved,
+			"conflicted", res.conflicted,
+		).Info("committee-member forward-mapping backfill completed successfully")
 		os.Exit(0)
 	}
 

@@ -1,0 +1,89 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+#
+# One-shot Job to migrate committee-member forward mappings in the v1-mappings
+# NATS KV bucket that were written by the v2->v1 create path under the flat key
+# "committee_member.sfid.<memberSFID>" — memberSFID there is the v1 API
+# "MemberID" (the contact SFID), which the same contact reuses across every
+# committee it belongs to, so the unscoped key let a second-committee create
+# silently overwrite an earlier committee's mapping (LFXV2-2709). Migrates each
+# resolvable entry to the committee-scoped key
+# "committee_member.sfid.<committeeSFID>.<memberSFID>" and tombstones the old
+# flat key. Leaves v1-ingest forward keys (record sfid, a UUID) untouched.
+#
+# One-shot: this manifest is applied manually via kubectl apply — it is NOT
+# managed by argocd and runs on demand only, after the fix in this same
+# release has been deployed (to migrate already-affected mappings).
+#
+# Known limitation: mappings already collapsed by the collision (two
+# committees' entries overwritten down to one surviving key) can only migrate
+# the surviving entry — this is cleanup, not recovery of data already lost to
+# the bug.
+#
+# Dry run: to preview changes without writing, add "--dry-run" to args below
+# before applying. Remove it for the live run.
+#
+# Credentials: --backfill-committee-member-forward-mappings uses
+# LoadReindexConfig (main.go), which only reads NATS_URL / NATS_FETCH_MAX_WAIT
+# and never initializes the Heimdall or Auth0 clients — those clients are
+# simply skipped for this one-shot path, not because the process exits before
+# anything starts (the HTTP health server still starts normally). So this
+# manifest intentionally carries no secretKeyRef entries; do not add
+# Heimdall/Auth0 credentials here, this job cannot use them.
+#
+# Deploy with:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-committee-member-forward-mappings-job.yaml
+#
+# Monitor:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper logs -f --timestamps=true job/backfill-committee-member-forward-mappings
+#
+# Cancel:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-committee-member-forward-mappings
+#
+# Clean up (auto-cleans after 1h via ttlSecondsAfterFinished):
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-committee-member-forward-mappings
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: backfill-committee-member-forward-mappings
+  namespace: v1-sync-helper
+  labels:
+    app.kubernetes.io/name: lfx-v1-sync-helper
+    app.kubernetes.io/component: backfill
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lfx-v1-sync-helper
+        app.kubernetes.io/component: backfill
+    spec:
+      restartPolicy: Never
+      serviceAccountName: v1-sync-helper-sa
+      containers:
+        - name: backfill
+          # XXX: Replace with the image SHA for the release you want to run against.
+          # Find the current prod image with:
+          #   kubectl --context lfx-v2-prod -n v1-sync-helper get deployment \
+          #     -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'
+          image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:latest
+          imagePullPolicy: IfNotPresent
+          args: ["--backfill-committee-member-forward-mappings"]
+          env:
+            - name: NATS_URL
+              value: "nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
+            # Optional: raise if logs show scan-timeout warnings. Defaults to 2m
+            # (defaultNATSFetchMaxWait) if unset.
+            # - name: NATS_FETCH_MAX_WAIT
+            #   value: "2m"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "10m"
+            limits:
+              memory: "512Mi"
+              cpu: "200m"
+          securityContext:
+            allowPrivilegeEscalation: false

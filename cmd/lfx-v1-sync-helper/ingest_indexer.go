@@ -12,6 +12,7 @@ import (
 
 	"github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
 	nats "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // indexingEvent mirrors the IndexingEvent published by the indexer service after a
@@ -192,6 +193,15 @@ func committeeMemberIndexerEventHandler(msg *nats.Msg) {
 		syncCommitteeMemberUpdateToV1(ctx, event.ObjectID, projectSFID, committeeSFID, memberSFID, body.Data)
 
 	case "deleted":
+		// Known limitation: if handleCommitteeMemberDelete (handlers_committees.go, the
+		// v1-WAL-triggered delete path) already tombstoned this same reverse mapping
+		// before this v2 delete event arrives, parseCommitteeMemberReverseMapping below
+		// fails on the tombstone marker and this handler bails without ever calling
+		// syncCommitteeMemberDeleteToV1 — silently skipping the committee-scoped
+		// forward-key tombstone. This is a pre-existing gap between the two
+		// independent delete paths (not introduced by the committee-scoped key itself),
+		// but the new scoped key is now exposed to it same as every other mapping this
+		// handler is responsible for cleaning up.
 		reverseMappingKey := "committee_member.uid." + event.ObjectID
 		entry, err := mappingsKV.Get(ctx, reverseMappingKey)
 		if err != nil {
@@ -420,9 +430,12 @@ func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID,
 	}
 
 	// Store forward mapping (v1 SFID -> committeeUID:memberUID) and reverse mapping (v2 UID -> projectSFID:committeeSFID:memberSFID).
+	// The forward mapping is scoped by committee SFID (see committeeMemberForwardKey) because
+	// memberSFID is the v1 API "MemberID" (contact SFID), which the same contact reuses across
+	// every committee it belongs to — an unscoped key would collide across committees (LFXV2-2709).
 	memberSFID := result.MemberID
 	forwardMappingValue := committeeUID + ":" + memberUID
-	if _, err := mappingsKV.Put(ctx, "committee_member.sfid."+memberSFID, []byte(forwardMappingValue)); err != nil {
+	if _, err := mappingsKV.Put(ctx, committeeMemberForwardKey(committeeSFID, memberSFID), []byte(forwardMappingValue)); err != nil {
 		log.With(errKey, err, "member_sfid", memberSFID).
 			WarnContext(ctx, "failed to store committee member forward mapping after v1 create")
 	}
@@ -495,14 +508,33 @@ func syncCommitteeMemberUpdateToV1(ctx context.Context, memberUID, projectSFID, 
 // already-removed v2 member.
 //
 // recordSFID is empty both for members created via the v2->v1 create path
-// (syncCommitteeMemberCreateToV1 — those key their forward mapping on the contact
-// SFID itself, there being no distinct record sfid) and for v1-originated members
-// whose record-sfid companion key is missing or unreadable. Since those two cases
-// are indistinguishable from recordSFID alone, memberSFID is only used as the
-// forward-tombstone key when the "committee_member.sfid.<memberSFID>" mapping
-// actually exists and its value points back at this same memberUID — otherwise the
-// forward tombstone is skipped rather than risk tombstoning an unrelated mapping
-// (or a no-op) while the real v1-originated forward mapping stays live.
+// (syncCommitteeMemberCreateToV1 — those key their forward mapping on
+// committeeMemberForwardKey(committeeSFID, memberSFID), scoped by committee since the
+// contact SFID alone is reused across every committee a contact belongs to) and for
+// v1-originated members whose record-sfid companion key is missing or unreadable.
+//
+// The record-sfid key and the committee-scoped key are checked and tombstoned
+// independently, not as alternatives: a member created via the v2->v1 path can later
+// gain a recordSFID companion once its v1 WAL record is ingested, without its original
+// scoped forward mapping ever being removed — leaving both live would leak the scoped
+// key. The scoped key is only tombstoned when it actually exists and its value points
+// back at this same memberUID, to avoid tombstoning an unrelated mapping.
+//
+// The reverse mapping "committee_member.uid.<memberUID>" is tombstoned before the
+// scoped-key check runs (rather than after, as in the forward-key case) so that the
+// backfillCommitteeMemberForwardMappings migration — which re-checks that same reverse
+// mapping before creating a scoped key, and re-checks it again afterward to catch a
+// concurrent delete — observes a consistent ordering: this delete's reverse tombstone
+// either lands before the migration's first check (migration skips entirely) or after
+// its final recheck (migration undoes the scoped key it just created). See that
+// function's doc comment for the other half of this handshake.
+//
+// This ordering guarantee holds only if the reverse-mapping tombstone write below
+// actually succeeds; like every other KV write in this function it is fire-and-forget
+// (logged on failure, not retried), since this indexer has no message-level retry or
+// nack mechanism. A failed reverse tombstone can still leave a live scoped mapping for
+// a deleted membership — a pre-existing limitation of this event-driven pipeline, not
+// specific to this handshake.
 func syncCommitteeMemberDeleteToV1(ctx context.Context, memberUID, projectSFID, committeeSFID, memberSFID, recordSFID string) {
 	log := logger.With("member_uid", memberUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID, "member_sfid", memberSFID, "record_sfid", recordSFID)
 
@@ -511,26 +543,55 @@ func syncCommitteeMemberDeleteToV1(ctx context.Context, memberUID, projectSFID, 
 		return
 	}
 
-	forwardSFID := recordSFID
-	if forwardSFID == "" {
-		if entry, err := mappingsKV.Get(ctx, "committee_member.sfid."+memberSFID); err == nil && !isTombstonedMapping(entry.Value()) {
-			if _, ownerUID, ok := splitTwoParts(string(entry.Value())); ok && ownerUID == memberUID {
-				forwardSFID = memberSFID
-			}
+	if err := tombstoneMapping(ctx, "committee_member.uid."+memberUID); err != nil {
+		log.With(errKey, err).WarnContext(ctx, "failed to tombstone committee member reverse mapping after v1 delete")
+	}
+
+	// The two forward-mapping keys are not mutually exclusive: a member created via the
+	// v2->v1 create path (committee-scoped key) can later gain a recordSFID companion
+	// once its v1 WAL record is ingested, without the original scoped key ever being
+	// removed. Both are checked and tombstoned independently so neither is leaked.
+	tombstonedAny := false
+	if recordSFID != "" {
+		if err := tombstoneMapping(ctx, "committee_member.sfid."+recordSFID); err != nil {
+			log.With(errKey, err).WarnContext(ctx, "failed to tombstone committee member forward mapping after v1 delete")
+		} else {
+			tombstonedAny = true
 		}
 	}
-	if forwardSFID == "" {
+	scopedKey := committeeMemberForwardKey(committeeSFID, memberSFID)
+	entry, err := mappingsKV.Get(ctx, scopedKey)
+	switch {
+	case err == nil && !isTombstonedMapping(entry.Value()):
+		if _, ownerUID, ok := splitTwoParts(string(entry.Value())); ok && ownerUID == memberUID {
+			// Revision-guarded: the ownership check above (Get, then compare ownerUID)
+			// is not atomic with this write, so a concurrent re-add of the same contact
+			// to the same committee could replace this key in between. Update against
+			// entry.Revision() turns that into a conflict instead of tombstoning the
+			// new mapping out from under the re-add.
+			if _, err := mappingsKV.Update(ctx, scopedKey, []byte(tombstoneMarker), entry.Revision()); err != nil {
+				if isRevisionMismatchError(err) {
+					log.WarnContext(ctx, "committee member scoped forward mapping changed since it was read, leaving the newer write in place")
+				} else {
+					log.With(errKey, err).WarnContext(ctx, "failed to tombstone committee member scoped forward mapping after v1 delete")
+				}
+			} else {
+				tombstonedAny = true
+			}
+		}
+	case err != nil && err != jetstream.ErrKeyNotFound && err != jetstream.ErrKeyDeleted:
+		// A transient read failure is not the same as the key genuinely being absent —
+		// log it distinctly so it's visible that the scoped key's fate is unknown,
+		// rather than silently treating it the same as "nothing to tombstone".
+		log.With(errKey, err).WarnContext(ctx, "failed to read committee member scoped forward mapping while attempting tombstone after v1 delete")
+	}
+	if !tombstonedAny {
 		log.WarnContext(ctx, "cannot determine committee member forward mapping key, skipping forward tombstone")
-	} else if err := tombstoneMapping(ctx, "committee_member.sfid."+forwardSFID); err != nil {
-		log.With(errKey, err).WarnContext(ctx, "failed to tombstone committee member forward mapping after v1 delete")
 	}
 	if recordSFID != "" {
 		if err := tombstoneMapping(ctx, committeeMemberRecordSFIDKey(memberUID)); err != nil {
 			log.With(errKey, err).WarnContext(ctx, "failed to tombstone committee member record sfid mapping after v1 delete")
 		}
-	}
-	if err := tombstoneMapping(ctx, "committee_member.uid."+memberUID); err != nil {
-		log.With(errKey, err).WarnContext(ctx, "failed to tombstone committee member reverse mapping after v1 delete")
 	}
 
 	log.InfoContext(ctx, "successfully deleted committee member in v1 from indexer event")
@@ -623,6 +684,17 @@ func parseCommitteeMemberReverseMapping(s string) (projectSFID, committeeSFID, r
 		return "", "", "", "", false
 	}
 	return projectSFID, committeeSFID, "", third, true
+}
+
+// committeeMemberForwardKey returns the forward-mapping key for a committee member
+// created via the v2->v1 create path (syncCommitteeMemberCreateToV1). It is scoped by
+// committee SFID because memberSFID is the v1 API "MemberID" (the contact SFID), which
+// the same contact reuses across every committee it belongs to — an unscoped
+// "committee_member.sfid.<memberSFID>" key would collide across committees (LFXV2-2709).
+// Distinct from the v1-ingest forward key (handlers_committees.go), which keys on the
+// globally unique platform-community__c record sfid and stays flat.
+func committeeMemberForwardKey(committeeSFID, memberSFID string) string {
+	return "committee_member.sfid." + committeeSFID + "." + memberSFID
 }
 
 // committeeMemberRecordSFIDKey returns the mapping key that stores the
