@@ -65,6 +65,7 @@ func main() {
 	var doBackfillAltEmails = flag.Bool("backfill-alternate-emails", false, "backfill v1 alternate emails to Auth0 linked identities, then exit")
 	var doBackfillProfiles = flag.Bool("backfill-profiles", false, "backfill v1 profile fields to Auth0 user_metadata, then exit")
 	var doBackfillWorkspaces = flag.Bool("backfill-workspaces", false, "backfill legacy workspaces into v2 member-service, then exit")
+	var doBackfillCommitteeMemberMappings = flag.Bool("backfill-committee-member-mappings", false, "repair committee-member reverse mappings that store the record sfid instead of the contact SFID, then exit")
 	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
 	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-* and --sync-user)")
 	var backfillLimit = flag.Int("limit", 1000, "maximum number of users to process per backfill run (applicable with --backfill-alternate-emails and --backfill-profiles)")
@@ -77,13 +78,13 @@ func main() {
 
 	// Enforce mutual exclusion across all one-shot flags.
 	oneShotCount := 0
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doRebuildUserIndexes} {
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doRebuildUserIndexes, *doBackfillCommitteeMemberMappings} {
 		if b {
 			oneShotCount++
 		}
 	}
 	if oneShotCount > 1 {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --sync-user, and --rebuild-user-secondary-indexes are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --sync-user, and --rebuild-user-secondary-indexes are mutually exclusive")
 		os.Exit(2)
 	}
 
@@ -91,10 +92,11 @@ func main() {
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}))
 	slog.SetDefault(logger)
 
-	// --rebuild-user-secondary-indexes only needs NATS KV; skip full config and API client init.
+	// --rebuild-user-secondary-indexes and --backfill-committee-member-mappings
+	// only need NATS KV; skip full config and API client init.
 	// --backfill-acs-project and --backfill-acs-org require full config and API client init.
 	var err error
-	if *doRebuildUserIndexes {
+	if *doRebuildUserIndexes || *doBackfillCommitteeMemberMappings {
 		cfg = LoadReindexConfig()
 	} else {
 		cfg, err = LoadConfig()
@@ -337,6 +339,29 @@ func main() {
 			os.Exit(1)
 		}
 		logger.Info("workspace backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --backfill-committee-member-mappings flag: repair committee-member
+	// reverse mappings that store the record sfid instead of the contact SFID
+	// (LFXV2-2673), then exit.
+	if *doBackfillCommitteeMemberMappings {
+		logger.With("dry_run", *dryRun).Info("starting committee-member reverse-mapping backfill")
+		res, err := backfillCommitteeMemberMappings(ctx, *dryRun)
+		if err != nil {
+			logger.With(errKey, err).Error("error during committee-member reverse-mapping backfill")
+			os.Exit(1)
+		}
+		logger.With(
+			"inspected", res.inspected,
+			"poisoned", res.poisoned,
+			"fixed", res.fixed,
+			"already_ok", res.alreadyOK,
+			"unresolved", res.unresolved,
+			"malformed", res.malformed,
+			"tombstoned", res.tombstoned,
+			"conflicted", res.conflicted,
+		).Info("committee-member reverse-mapping backfill completed successfully")
 		os.Exit(0)
 	}
 
