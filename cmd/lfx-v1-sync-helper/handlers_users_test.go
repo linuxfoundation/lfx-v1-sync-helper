@@ -701,12 +701,7 @@ func TestScrubCommitteeSettingsUsername(t *testing.T) {
 					}
 				}
 
-				// Verify unrelated entries are preserved.
-				for _, w := range p.Writers {
-					if w != nil && stringPtrToString(w.Username) == bob {
-						// bob's username should be unchanged
-					}
-				}
+
 			}
 
 			// Verify deduplication: if same UID in both results, fetch called once.
