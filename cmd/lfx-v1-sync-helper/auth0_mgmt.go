@@ -173,6 +173,14 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[stri
 		return fmt.Errorf("failed to read Auth0 user %s: %w", auth0UserID, err)
 	}
 
+	// Blocked accounts are treated as inactive/deprovisioned: don't push new
+	// profile data to them. This is a no-op skip, not an error.
+	if existing.GetBlocked() {
+		logger.With("auth0_user_id", auth0UserID).
+			WarnContext(ctx, "Auth0 user is blocked, skipping profile sync")
+		return nil
+	}
+
 	// Start from existing user_metadata (or empty map) for diffing.
 	existingMetadata := make(map[string]interface{})
 	if existing.UserMetadata != nil {
@@ -224,6 +232,14 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 	primaryUser, err := auth0Users.Read(ctx, primaryAuth0ID)
 	if err != nil {
 		return fmt.Errorf("failed to read primary user %s: %w", primaryAuth0ID, err)
+	}
+
+	// Blocked accounts are treated as inactive/deprovisioned: don't link new
+	// secondary identities to them. This is a no-op skip, not an error.
+	if primaryUser.GetBlocked() {
+		logger.With("auth0_user_id", primaryAuth0ID, "email", email).
+			WarnContext(ctx, "Auth0 user is blocked, skipping email link")
+		return nil
 	}
 
 	// If the email matches the primary account's own login email, there is

@@ -49,6 +49,11 @@ type fakeAuth0Users struct {
 	// created tracks users passed to Create.
 	created []*management.User
 
+	// updateErr is returned by Update.
+	updateErr error
+	// updated tracks (id, user) pairs passed to Update.
+	updated []*management.User
+
 	// linkErr is returned by Link.
 	linkErr error
 	// linked tracks (primaryID, provider, userID) tuples.
@@ -94,7 +99,11 @@ func (f *fakeAuth0Users) Create(_ context.Context, u *management.User, _ ...mana
 	return nil
 }
 
-func (f *fakeAuth0Users) Update(_ context.Context, _ string, _ *management.User, _ ...management.RequestOption) error {
+func (f *fakeAuth0Users) Update(_ context.Context, _ string, u *management.User, _ ...management.RequestOption) error {
+	if f.updateErr != nil {
+		return f.updateErr
+	}
+	f.updated = append(f.updated, u)
 	return nil
 }
 
@@ -216,6 +225,30 @@ func TestLinkEmailIdentity(t *testing.T) {
 				"auth0|primary": {
 					ID:    auth0.String("auth0|primary"),
 					Email: auth0.String("Alt@Example.COM"),
+				},
+			},
+		}
+		cleanup := setupLinkTest(t, fake)
+		defer cleanup()
+
+		err := linkEmailIdentity(context.Background(), "auth0|primary", "alt@example.com")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(fake.created) != 0 {
+			t.Errorf("expected no create calls, got %d", len(fake.created))
+		}
+		if len(fake.linked) != 0 {
+			t.Errorf("expected no link calls, got %d", len(fake.linked))
+		}
+	})
+
+	t.Run("blocked primary account is skipped", func(t *testing.T) {
+		fake := &fakeAuth0Users{
+			users: map[string]*management.User{
+				"auth0|primary": {
+					ID:      auth0.String("auth0|primary"),
+					Blocked: auth0.Bool(true),
 				},
 			},
 		}

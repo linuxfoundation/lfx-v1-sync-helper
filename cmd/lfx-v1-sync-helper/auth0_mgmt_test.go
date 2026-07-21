@@ -9,7 +9,31 @@ import (
 	"fmt"
 	"net"
 	"testing"
+
+	"github.com/auth0/go-auth0"
+	"github.com/auth0/go-auth0/management"
 )
+
+func TestSyncProfileToAuth0Blocked(t *testing.T) {
+	fake := &fakeAuth0Users{
+		users: map[string]*management.User{
+			"auth0|blocked": {
+				ID:      auth0.String("auth0|blocked"),
+				Blocked: auth0.Bool(true),
+			},
+		},
+	}
+	cleanup := setupLinkTest(t, fake)
+	defer cleanup()
+
+	err := syncProfileToAuth0(context.Background(), "auth0|blocked", map[string]any{"title": "Engineer"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.updated) != 0 {
+		t.Errorf("expected no update calls, got %d", len(fake.updated))
+	}
+}
 
 func TestBuildAuth0Metadata(t *testing.T) {
 	tests := []struct {
