@@ -230,61 +230,6 @@ func deleteCommitteeMember(ctx context.Context, committeeUID, memberUID string, 
 	return nil
 }
 
-// fetchCommitteeSettings fetches the current settings for a committee and returns
-// the settings object and its ETag.
-func fetchCommitteeSettings(ctx context.Context, committeeUID string) (*committeeservice.CommitteeSettingsWithReadonlyAttributes, string, error) {
-	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, "")
-	if err != nil {
-		return nil, "", err
-	}
-
-	result, err := committeeClient.GetCommitteeSettings(ctx, &committeeservice.GetCommitteeSettingsPayload{
-		BearerToken: &token,
-		UID:         stringToStringPtr(committeeUID),
-		Version:     stringToStringPtr("1"),
-	})
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to get committee settings: %w", err)
-	}
-
-	etag := ""
-	if result.Etag != nil {
-		etag = *result.Etag
-	}
-
-	return result.CommitteeSettings, etag, nil
-}
-
-// applyCommitteeSettingsUpdate calls UpdateCommitteeSettings on the committee client.
-// The caller is responsible for populating all required fields (including UID and
-// the current ETag in IfMatch) and for setting only the fields that should change.
-func applyCommitteeSettingsUpdate(ctx context.Context, payload *committeeservice.UpdateCommitteeSettingsPayload) error {
-	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, "")
-	if err != nil {
-		return err
-	}
-	payload.BearerToken = &token
-	if _, err := committeeClient.UpdateCommitteeSettings(ctx, payload); err != nil {
-		return fmt.Errorf("failed to update committee settings: %w", err)
-	}
-	return nil
-}
-
-// applyCommitteeMemberUpdate calls UpdateCommitteeMember on the committee client
-// directly, bypassing the fetch-compare cycle in updateCommitteeMember. The caller
-// must provide a current ETag in payload.IfMatch and a fully-populated payload.
-func applyCommitteeMemberUpdate(ctx context.Context, payload *committeeservice.UpdateCommitteeMemberPayload) error {
-	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, "")
-	if err != nil {
-		return err
-	}
-	payload.BearerToken = &token
-	if _, err := committeeClient.UpdateCommitteeMember(ctx, payload); err != nil {
-		return fmt.Errorf("failed to update committee member: %w", err)
-	}
-	return nil
-}
-
 // committeeMembersEqual compares a committee member with an update payload for equality.
 func committeeMembersEqual(current *committeeservice.CommitteeMemberFullWithReadonlyAttributes, update *committeeservice.UpdateCommitteeMemberPayload) bool {
 	// Compare basic fields.

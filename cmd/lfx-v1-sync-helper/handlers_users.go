@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/vmihailenco/msgpack/v5"
 	"golang.org/x/text/unicode/norm"
@@ -52,15 +51,6 @@ var (
 	unlinkEmailIdentityFn            = unlinkEmailIdentity
 	updateContactEmailMappingIndexFn = updateContactEmailMappingIndex
 	deleteIndexKeyFn                 = deleteIndexKey
-)
-
-// Committee username scrub dependencies — injected in tests to avoid live HTTP.
-var (
-	queryResourcesByTagFn    = queryResourcesByTag
-	fetchCommitteeMemberFn   = fetchCommitteeMember
-	applyMemberUpdateFn      = applyCommitteeMemberUpdate
-	fetchCommitteeSettingsFn = fetchCommitteeSettings
-	applySettingsUpdateFn    = applyCommitteeSettingsUpdate
 )
 
 // toKVKey normalizes a user-provided string and encodes it as a URL-safe base64
@@ -157,187 +147,44 @@ func handleMergedUserDelete(ctx context.Context, key, userSfid string, v1Data ma
 	// without its alternate emails being deleted first, those entries will be orphaned.
 
 	if username != "" {
-		scrubCommitteeMembersUsername(ctx, key, username)
-		scrubCommitteeSettingsUsername(ctx, key, username)
+		email, emailErr := getPrimaryEmailForUser(ctx, userSfid)
+		if emailErr != nil {
+			logger.With(errKey, emailErr, "key", key, "user_sfid", userSfid).
+				WarnContext(ctx, "failed to look up primary email for deleted user; committee username scrub skipped")
+		} else {
+			publishUserDeletedEvent(ctx, key, username, email)
+		}
 	}
 
 	return false
 }
 
-// scrubCommitteeMembersUsername clears the username field from all v2 committee_member
-// records that still carry the given username. It is idempotent: records whose username
-// has already been cleared or reassigned to another user are left untouched.
-func scrubCommitteeMembersUsername(ctx context.Context, key, username string) {
-	if committeeClient == nil {
-		logger.With("key", key, "username", username).
-			WarnContext(ctx, "committee client not configured; skipping committee member username scrub")
-		return
-	}
+// userDeletedEvent is the payload published to "lfx.v1-sync-helper.user.deleted" when a
+// merged user is soft-deleted. The committee service subscribes to this subject and scrubs
+// the username from committee members and settings writers/auditors.
+type userDeletedEvent struct {
+	Username string `json:"username"`
+	Email    string `json:"email"`
+}
 
-	members, err := queryResourcesByTagFn(ctx, "committee_member", "username", username)
+const v1SyncHelperUserDeletedSubject = "lfx.v1-sync-helper.user.deleted"
+
+// publishUserDeletedEvent publishes a user-deleted NATS event. Best-effort: publish
+// errors are logged and do not affect the delete handler's return value.
+func publishUserDeletedEvent(ctx context.Context, key, username, email string) {
+	payload, err := json.Marshal(userDeletedEvent{Username: username, Email: email})
 	if err != nil {
-		logger.With(errKey, err, "key", key, "username", username).
-			ErrorContext(ctx, "failed to query committee members by username tag; member scrub incomplete")
+		logger.With(errKey, err, "key", key).
+			ErrorContext(ctx, "failed to marshal user-deleted event; committee username scrub skipped")
 		return
 	}
-
-	logger.With("key", key, "username", username, "count", len(members)).
-		InfoContext(ctx, "scrubbing username from committee members")
-
-	for _, res := range members {
-		if res.ParentUID == nil || *res.ParentUID == "" {
-			logger.With("key", key, "member_uid", res.UID).
-				WarnContext(ctx, "committee_member resource missing parent_uid; skipping")
-			continue
-		}
-		committeeUID := *res.ParentUID
-		memberUID := res.UID
-
-		current, etag, err := fetchCommitteeMemberFn(ctx, committeeUID, memberUID)
-		if err != nil {
-			logger.With(errKey, err, "key", key, "committee_uid", committeeUID, "member_uid", memberUID).
-				ErrorContext(ctx, "failed to fetch committee member for username scrub; skipping")
-			continue
-		}
-
-		// Reuse guard + idempotency: only clear if the record still carries this exact username.
-		if stringPtrToString(current.Username) != username {
-			logger.With("key", key, "committee_uid", committeeUID, "member_uid", memberUID).
-				DebugContext(ctx, "committee member username already cleared or reassigned; skipping")
-			continue
-		}
-
-		emptyUsername := ""
-		payload := memberToUpdatePayload(committeeUID, memberUID, etag, current)
-		payload.Username = &emptyUsername
-
-		if err := applyMemberUpdateFn(ctx, payload); err != nil {
-			logger.With(errKey, err, "key", key, "committee_uid", committeeUID, "member_uid", memberUID).
-				ErrorContext(ctx, "failed to clear username from committee member")
-		} else {
-			logger.With("key", key, "committee_uid", committeeUID, "member_uid", memberUID, "username", username).
-				InfoContext(ctx, "cleared username from committee member")
-		}
-	}
-}
-
-// memberToUpdatePayload builds an UpdateCommitteeMemberPayload that mirrors all
-// current fields of a CommitteeMemberFullWithReadonlyAttributes. The caller adjusts
-// specific fields (e.g. Username) before submitting the update.
-func memberToUpdatePayload(committeeUID, memberUID, etag string, m *committeeservice.CommitteeMemberFullWithReadonlyAttributes) *committeeservice.UpdateCommitteeMemberPayload {
-	return &committeeservice.UpdateCommitteeMemberPayload{
-		UID:             committeeUID,
-		MemberUID:       memberUID,
-		IfMatch:         &etag,
-		Version:         "1",
-		Email:           stringPtrToString(m.Email),
-		Username:        m.Username,
-		FirstName:       m.FirstName,
-		LastName:        m.LastName,
-		JobTitle:        m.JobTitle,
-		LinkedinProfile: m.LinkedinProfile,
-		AppointedBy:     m.AppointedBy,
-		Status:          m.Status,
-		Role:            m.Role,
-		Voting:          m.Voting,
-		Organization:    m.Organization,
-	}
-}
-
-// scrubCommitteeSettingsUsername clears the username field from all committee_settings
-// writers and auditors entries that carry the given username. The entries themselves are
-// retained; only the username field is cleared. Idempotent; guarded against reuse.
-func scrubCommitteeSettingsUsername(ctx context.Context, key, username string) {
-	if committeeClient == nil {
-		logger.With("key", key, "username", username).
-			WarnContext(ctx, "committee client not configured; skipping committee settings username scrub")
+	if err := natsConn.Publish(v1SyncHelperUserDeletedSubject, payload); err != nil {
+		logger.With(errKey, err, "key", key).
+			ErrorContext(ctx, "failed to publish user-deleted event; committee username scrub skipped")
 		return
 	}
-
-	writerResults, writerErr := queryResourcesByTagFn(ctx, "committee_settings", "writer", username)
-	if writerErr != nil {
-		logger.With(errKey, writerErr, "key", key, "username", username).
-			ErrorContext(ctx, "failed to query committee_settings by writer tag; settings writer scrub may be incomplete")
-	}
-
-	auditorResults, auditorErr := queryResourcesByTagFn(ctx, "committee_settings", "auditor", username)
-	if auditorErr != nil {
-		logger.With(errKey, auditorErr, "key", key, "username", username).
-			ErrorContext(ctx, "failed to query committee_settings by auditor tag; settings auditor scrub may be incomplete")
-	}
-
-	// Deduplicate by committee UID — the same committee may appear in both writer and auditor results.
-	seen := make(map[string]struct{})
-	var committeeUIDs []string
-	for _, res := range append(writerResults, auditorResults...) {
-		if _, ok := seen[res.UID]; !ok {
-			seen[res.UID] = struct{}{}
-			committeeUIDs = append(committeeUIDs, res.UID)
-		}
-	}
-
-	logger.With("key", key, "username", username, "count", len(committeeUIDs)).
-		InfoContext(ctx, "scrubbing username from committee settings")
-
-	for _, committeeUID := range committeeUIDs {
-		if err := scrubOneCommitteeSettingsUsername(ctx, key, committeeUID, username); err != nil {
-			logger.With(errKey, err, "key", key, "committee_uid", committeeUID, "username", username).
-				ErrorContext(ctx, "failed to scrub username from committee settings")
-		}
-	}
-}
-
-// scrubOneCommitteeSettingsUsername fetches settings for a single committee, clears
-// the username on any matching writer/auditor entries, and updates the settings if changed.
-func scrubOneCommitteeSettingsUsername(ctx context.Context, key, committeeUID, username string) error {
-	settings, etag, err := fetchCommitteeSettingsFn(ctx, committeeUID)
-	if err != nil {
-		return fmt.Errorf("fetching committee settings: %w", err)
-	}
-	if settings == nil {
-		return nil
-	}
-
-	changed := false
-	for _, w := range settings.Writers {
-		if w != nil && stringPtrToString(w.Username) == username {
-			w.Username = nil
-			changed = true
-		}
-	}
-	for _, a := range settings.Auditors {
-		if a != nil && stringPtrToString(a.Username) == username {
-			a.Username = nil
-			changed = true
-		}
-	}
-
-	if !changed {
-		logger.With("key", key, "committee_uid", committeeUID, "username", username).
-			DebugContext(ctx, "no matching username in committee settings writers/auditors; skipping update")
-		return nil
-	}
-
-	payload := &committeeservice.UpdateCommitteeSettingsPayload{
-		UID:                   stringToStringPtr(committeeUID),
-		Version:               stringToStringPtr("1"),
-		IfMatch:               &etag,
-		BusinessEmailRequired: settings.BusinessEmailRequired,
-		LastReviewedAt:        settings.LastReviewedAt,
-		LastReviewedBy:        settings.LastReviewedBy,
-		MemberVisibility:      settings.MemberVisibility,
-		ShowMeetingAttendees:  settings.ShowMeetingAttendees,
-		Writers:               settings.Writers,
-		Auditors:              settings.Auditors,
-	}
-
-	if err := applySettingsUpdateFn(ctx, payload); err != nil {
-		return fmt.Errorf("updating committee settings: %w", err)
-	}
-
-	logger.With("key", key, "committee_uid", committeeUID, "username", username).
-		InfoContext(ctx, "cleared username from committee settings writers/auditors")
-	return nil
+	logger.With("key", key, "username", username).
+		InfoContext(ctx, "published user-deleted event for committee username scrub")
 }
 
 // syncMergedUserProfile calls syncProfileToAuth0Fn synchronously and returns
