@@ -54,6 +54,10 @@ var (
 	deleteIndexKeyFn                 = deleteIndexKey
 )
 
+// handleMergedUserDelete dependencies, split out so tests can inject fakes
+// without needing a live NATS connection.
+var publishUserDeletedEventFn = publishUserDeletedEvent
+
 // toKVKey normalizes a user-provided string and encodes it as a URL-safe base64
 // key segment safe for NATS KV. Order: TrimSpace → ToLower → NFC → RawURLEncoding.
 // NFC unifies decomposed/precomposed Unicode (e.g. n\u0303 ≡ ñ) without semantic
@@ -117,8 +121,9 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 
 // handleMergedUserDelete processes deletion of a merged user record: deletes
 // the username -> SFID secondary index so future lookups do not resolve a
-// deleted user. Soft deletes and hard KV deletes both arrive here; v1Data is
-// nil for a hard KV delete.
+// deleted user, then publishes a NATS event so downstream v2 services can
+// scrub the username from project and committee settings.
+// Soft deletes and hard KV deletes both arrive here; v1Data is nil for a hard KV delete.
 // Returns true if the operation should be retried, false otherwise.
 func handleMergedUserDelete(ctx context.Context, key, userSfid string, v1Data map[string]any) bool {
 	if v1Data == nil {
@@ -146,7 +151,39 @@ func handleMergedUserDelete(ctx context.Context, key, userSfid string, v1Data ma
 	// In practice the alternate email rows are deleted before or alongside the user row, so
 	// handleAlternateEmailDelete cleans those up individually — but if the user is deleted
 	// without its alternate emails being deleted first, those entries will be orphaned.
+
+	if username != "" {
+		publishUserDeletedEventFn(ctx, key, username)
+	}
+
 	return false
+}
+
+// userDeletedEvent is the payload published to "lfx.v1-sync-helper.user.deleted" when a
+// merged user is soft-deleted. The committee and project services subscribe to this
+// subject and scrub the username from settings writers/auditors (and committee members).
+type userDeletedEvent struct {
+	Username string `json:"username"`
+}
+
+const v1SyncHelperUserDeletedSubject = "lfx.v1-sync-helper.user.deleted"
+
+// publishUserDeletedEvent publishes a user-deleted NATS event. Best-effort: publish
+// errors are logged and do not affect the delete handler's return value.
+func publishUserDeletedEvent(ctx context.Context, key, username string) {
+	payload, err := json.Marshal(userDeletedEvent{Username: username})
+	if err != nil {
+		logger.With(errKey, err, "key", key).
+			ErrorContext(ctx, "failed to marshal user-deleted event; username scrub skipped")
+		return
+	}
+	if err := natsConn.Publish(v1SyncHelperUserDeletedSubject, payload); err != nil {
+		logger.With(errKey, err, "key", key).
+			ErrorContext(ctx, "failed to publish user-deleted event; username scrub skipped")
+		return
+	}
+	logger.With("key", key, "username", username).
+		InfoContext(ctx, "published user-deleted event for v2 username scrub")
 }
 
 // syncMergedUserProfile calls syncProfileToAuth0Fn synchronously and returns

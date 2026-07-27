@@ -320,6 +320,79 @@ func TestExtractUsernameIndex(t *testing.T) {
 	}
 }
 
+// TestHandleMergedUserDeleteScrub verifies that handleMergedUserDelete triggers the
+// username scrub (NATS publish) when a username is present in the payload.
+func TestHandleMergedUserDeleteScrub(t *testing.T) {
+	origLogger := logger
+	origDeleteIndex := deleteIndexKeyFn
+	origPublish := publishUserDeletedEventFn
+	t.Cleanup(func() {
+		logger = origLogger
+		deleteIndexKeyFn = origDeleteIndex
+		publishUserDeletedEventFn = origPublish
+	})
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	deleteIndexKeyFn = func(_ context.Context, _ string) error { return nil }
+
+	const (
+		userSfid = "003ABC"
+		username = "alice"
+	)
+
+	tests := []struct {
+		name          string
+		v1Data        map[string]any
+		wantPublished bool
+		wantUsername  string
+	}{
+		{
+			name: "username present → publish event",
+			v1Data: map[string]any{
+				"sfid":        userSfid,
+				"username__c": username,
+			},
+			wantPublished: true,
+			wantUsername:  username,
+		},
+		{
+			name: "no username → no publish",
+			v1Data: map[string]any{
+				"sfid": userSfid,
+			},
+			wantPublished: false,
+		},
+		{
+			name:          "nil v1Data (hard KV delete) → no publish",
+			v1Data:        nil,
+			wantPublished: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var publishedUsername string
+			var publishCalled bool
+
+			publishUserDeletedEventFn = func(_ context.Context, _, u string) {
+				publishCalled = true
+				publishedUsername = u
+			}
+
+			got := handleMergedUserDelete(context.Background(), "test-key", userSfid, tc.v1Data)
+
+			if got {
+				t.Errorf("handleMergedUserDelete() = true, want false")
+			}
+			if publishCalled != tc.wantPublished {
+				t.Errorf("publishCalled = %v, want %v", publishCalled, tc.wantPublished)
+			}
+			if tc.wantPublished && publishedUsername != tc.wantUsername {
+				t.Errorf("published username = %q, want %q", publishedUsername, tc.wantUsername)
+			}
+		})
+	}
+}
+
 // TestExtractEmailIndex covers the field extraction for the alternate_email reindex phase.
 func TestExtractEmailIndex(t *testing.T) {
 	tests := []struct {
