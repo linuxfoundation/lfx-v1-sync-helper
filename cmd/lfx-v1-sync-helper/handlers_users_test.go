@@ -327,13 +327,18 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 	origLogger := logger
 	origDeleteIndex := deleteIndexKeyFn
 	origPublish := publishUserDeletedEventFn
+	origEmail := getPrimaryEmailForUserFn
 	t.Cleanup(func() {
 		logger = origLogger
 		deleteIndexKeyFn = origDeleteIndex
 		publishUserDeletedEventFn = origPublish
+		getPrimaryEmailForUserFn = origEmail
 	})
 	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	deleteIndexKeyFn = func(_ context.Context, _ string) error { return nil }
+	getPrimaryEmailForUserFn = func(_ context.Context, _ string) (string, error) {
+		return "deleted@example.com", nil
+	}
 
 	const (
 		userSfid = "003ABC"
@@ -345,6 +350,7 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 		v1Data        map[string]any
 		wantPublished bool
 		wantUsername  string
+		wantEmail     string
 	}{
 		{
 			name: "username present → publish normalized event",
@@ -354,6 +360,7 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 			},
 			wantPublished: true,
 			wantUsername:  "alice",
+			wantEmail:     "deleted@example.com",
 		},
 		{
 			name: "username present → publish event",
@@ -363,6 +370,15 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 			},
 			wantPublished: true,
 			wantUsername:  username,
+			wantEmail:     "deleted@example.com",
+		},
+		{
+			name: "whitespace-only username → no publish",
+			v1Data: map[string]any{
+				"sfid":        userSfid,
+				"username__c": "   ",
+			},
+			wantPublished: false,
 		},
 		{
 			name: "no username → no publish",
@@ -381,11 +397,13 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var publishedUsername string
+			var publishedEmail string
 			var publishCalled bool
 
-			publishUserDeletedEventFn = func(_ context.Context, _, u string) {
+			publishUserDeletedEventFn = func(_ context.Context, _, u, e string) {
 				publishCalled = true
 				publishedUsername = u
+				publishedEmail = e
 			}
 
 			got := handleMergedUserDelete(context.Background(), "test-key", userSfid, tc.v1Data)
@@ -398,6 +416,9 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 			}
 			if tc.wantPublished && publishedUsername != tc.wantUsername {
 				t.Errorf("published username = %q, want %q", publishedUsername, tc.wantUsername)
+			}
+			if tc.wantPublished && publishedEmail != tc.wantEmail {
+				t.Errorf("published email = %q, want %q", publishedEmail, tc.wantEmail)
 			}
 		})
 	}
@@ -423,7 +444,7 @@ func TestPublishUserDeletedEvent(t *testing.T) {
 			return nil
 		}
 
-		publishUserDeletedEvent(context.Background(), "test-key", "alice")
+		publishUserDeletedEvent(context.Background(), "test-key", "alice", "alice@example.com")
 
 		if gotSubject != v1SyncHelperUserDeletedSubject {
 			t.Fatalf("subject = %q, want %q", gotSubject, v1SyncHelperUserDeletedSubject)
@@ -431,13 +452,16 @@ func TestPublishUserDeletedEvent(t *testing.T) {
 		if gotPayload.Username != "alice" {
 			t.Fatalf("username = %q, want alice", gotPayload.Username)
 		}
+		if gotPayload.Email != "alice@example.com" {
+			t.Fatalf("email = %q, want alice@example.com", gotPayload.Email)
+		}
 	})
 
 	t.Run("publish error is swallowed", func(_ *testing.T) {
 		natsPublishBytesFn = func(_ string, _ []byte) error {
 			return errors.New("nats unavailable")
 		}
-		publishUserDeletedEvent(context.Background(), "test-key", "alice")
+		publishUserDeletedEvent(context.Background(), "test-key", "alice", "")
 	})
 }
 

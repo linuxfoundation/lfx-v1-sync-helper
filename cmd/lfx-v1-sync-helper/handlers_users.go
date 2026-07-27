@@ -56,7 +56,10 @@ var (
 
 // handleMergedUserDelete dependencies, split out so tests can inject fakes
 // without needing a live NATS connection.
-var publishUserDeletedEventFn = publishUserDeletedEvent
+var (
+	publishUserDeletedEventFn = publishUserDeletedEvent
+	getPrimaryEmailForUserFn  = getPrimaryEmailForUser
+)
 
 // toKVKey normalizes a user-provided string and encodes it as a URL-safe base64
 // key segment safe for NATS KV. Order: TrimSpace → ToLower → NFC → RawURLEncoding.
@@ -156,17 +159,19 @@ func handleMergedUserDelete(ctx context.Context, key, userSfid string, v1Data ma
 	// without its alternate emails being deleted first, those entries will be orphaned.
 
 	if normalizedUsername := normalizeKVSegment(username); normalizedUsername != "" {
-		publishUserDeletedEventFn(ctx, key, normalizedUsername)
+		email, _ := getPrimaryEmailForUserFn(ctx, userSfid)
+		publishUserDeletedEventFn(ctx, key, normalizedUsername, email)
 	}
 
 	return false
 }
 
 // userDeletedEvent is the payload published to "lfx.v1-sync-helper.user.deleted" when a
-// merged user is soft-deleted. The committee service subscribes to this subject and scrubs
-// the username from committee members and settings writers/auditors.
+// merged user is soft-deleted. Username is the normalized LFID; Email is the deleted
+// account's primary email when available so downstream scrubbers can distinguish LFID reuse.
 type userDeletedEvent struct {
 	Username string `json:"username"`
+	Email    string `json:"email,omitempty"`
 }
 
 const v1SyncHelperUserDeletedSubject = "lfx.v1-sync-helper.user.deleted"
@@ -179,8 +184,8 @@ var natsPublishBytesFn = func(subject string, data []byte) error {
 	return natsConn.Publish(subject, data)
 }
 
-func publishUserDeletedEvent(ctx context.Context, key, username string) {
-	payload, err := json.Marshal(userDeletedEvent{Username: username})
+func publishUserDeletedEvent(ctx context.Context, key, username, email string) {
+	payload, err := json.Marshal(userDeletedEvent{Username: username, Email: email})
 	if err != nil {
 		logger.With(errKey, err, "key", key).
 			ErrorContext(ctx, "failed to marshal user-deleted event; committee username scrub skipped")
