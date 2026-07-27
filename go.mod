@@ -56,6 +56,6 @@ require (
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.devnw.com/structs v1.0.0 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
+	golang.org/x/crypto v0.54.0 // indirect; go mod tidy — GO-2026-5932 has no upstream fix yet
 	golang.org/x/sys v0.47.0 // indirect
 )

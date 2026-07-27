@@ -62,8 +62,12 @@ var publishUserDeletedEventFn = publishUserDeletedEvent
 // key segment safe for NATS KV. Order: TrimSpace → ToLower → NFC → RawURLEncoding.
 // NFC unifies decomposed/precomposed Unicode (e.g. n\u0303 ≡ ñ) without semantic
 // transposition. RawURLEncoding (no padding) keeps keys opaque and short.
+func normalizeKVSegment(s string) string {
+	return norm.NFC.String(strings.ToLower(strings.TrimSpace(s)))
+}
+
 func toKVKey(s string) string {
-	s = norm.NFC.String(strings.ToLower(strings.TrimSpace(s)))
+	s = normalizeKVSegment(s)
 	if s == "" {
 		return ""
 	}
@@ -151,8 +155,8 @@ func handleMergedUserDelete(ctx context.Context, key, userSfid string, v1Data ma
 	// handleAlternateEmailDelete cleans those up individually — but if the user is deleted
 	// without its alternate emails being deleted first, those entries will be orphaned.
 
-	if username != "" {
-		publishUserDeletedEventFn(ctx, key, username)
+	if normalizedUsername := normalizeKVSegment(username); normalizedUsername != "" {
+		publishUserDeletedEventFn(ctx, key, normalizedUsername)
 	}
 
 	return false
@@ -168,7 +172,13 @@ type userDeletedEvent struct {
 const v1SyncHelperUserDeletedSubject = "lfx.v1-sync-helper.user.deleted"
 
 // publishUserDeletedEvent publishes a user-deleted NATS event. Best-effort: publish
-// errors are logged and do not affect the delete handler's return value.
+// errors are logged and do not affect the delete handler's return value (the JetStream
+// KV delete is already ACKed). A failed publish can leave username PII in v2 settings
+// until a manual re-sync; scrub subscribers treat the event as idempotent.
+var natsPublishBytesFn = func(subject string, data []byte) error {
+	return natsConn.Publish(subject, data)
+}
+
 func publishUserDeletedEvent(ctx context.Context, key, username string) {
 	payload, err := json.Marshal(userDeletedEvent{Username: username})
 	if err != nil {
@@ -176,7 +186,7 @@ func publishUserDeletedEvent(ctx context.Context, key, username string) {
 			ErrorContext(ctx, "failed to marshal user-deleted event; committee username scrub skipped")
 		return
 	}
-	if err := natsConn.Publish(v1SyncHelperUserDeletedSubject, payload); err != nil {
+	if err := natsPublishBytesFn(v1SyncHelperUserDeletedSubject, payload); err != nil {
 		logger.With(errKey, err, "key", key).
 			ErrorContext(ctx, "failed to publish user-deleted event; committee username scrub skipped")
 		return

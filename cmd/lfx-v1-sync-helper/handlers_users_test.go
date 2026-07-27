@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -346,6 +347,15 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 		wantUsername  string
 	}{
 		{
+			name: "username present → publish normalized event",
+			v1Data: map[string]any{
+				"sfid":        userSfid,
+				"username__c": " Alice ",
+			},
+			wantPublished: true,
+			wantUsername:  "alice",
+		},
+		{
 			name: "username present → publish event",
 			v1Data: map[string]any{
 				"sfid":        userSfid,
@@ -391,6 +401,44 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPublishUserDeletedEvent(t *testing.T) {
+	origLogger := logger
+	origPublish := natsPublishBytesFn
+	t.Cleanup(func() {
+		logger = origLogger
+		natsPublishBytesFn = origPublish
+	})
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("publishes normalized payload on subject", func(t *testing.T) {
+		var gotSubject string
+		var gotPayload userDeletedEvent
+		natsPublishBytesFn = func(subject string, data []byte) error {
+			gotSubject = subject
+			if err := json.Unmarshal(data, &gotPayload); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			return nil
+		}
+
+		publishUserDeletedEvent(context.Background(), "test-key", "alice")
+
+		if gotSubject != v1SyncHelperUserDeletedSubject {
+			t.Fatalf("subject = %q, want %q", gotSubject, v1SyncHelperUserDeletedSubject)
+		}
+		if gotPayload.Username != "alice" {
+			t.Fatalf("username = %q, want alice", gotPayload.Username)
+		}
+	})
+
+	t.Run("publish error is swallowed", func(_ *testing.T) {
+		natsPublishBytesFn = func(_ string, _ []byte) error {
+			return errors.New("nats unavailable")
+		}
+		publishUserDeletedEvent(context.Background(), "test-key", "alice")
+	})
 }
 
 // TestExtractEmailIndex covers the field extraction for the alternate_email reindex phase.
