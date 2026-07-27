@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -252,14 +253,32 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 	}
 
 	// active__c=false means the user-service deactivated the email without
-	// deleting the row. Treat this the same as a soft delete.
-	if isActive, ok := v1Data["active__c"].(bool); ok && !isActive {
-		logger.With("key", key, "email_sfid", emailSfid).
-			DebugContext(ctx, "alternate email inactive (active__c=false), routing to delete handler")
+	// deleting the row. A ".old" domain suffix is a v1 convention for the
+	// same intent without flipping active__c. Treat both the same as a soft delete.
+	emailAddrForActiveCheck, _ := v1Data["alternate_email_address__c"].(string)
+	isOld := strings.HasSuffix(strings.ToLower(emailAddrForActiveCheck), ".old")
+	if isActive, ok := v1Data["active__c"].(bool); (ok && !isActive) || isOld {
+		logger.With("key", key, "email_sfid", emailSfid, "old_domain", isOld).
+			DebugContext(ctx, "alternate email inactive (active__c=false or .old domain), routing to delete handler")
 		return handleAlternateEmailDelete(ctx, key, emailSfid, v1Data)
 	}
 
-	shouldRetry := updateContactEmailMappingIndex(ctx, leadorcontactid, emailSfid, false)
+	if err := updateContactEmailMappingIndex(ctx, leadorcontactid, emailSfid, false); err != nil {
+		// The rest of this function would be working off stale mapping
+		// data (e.g. this row missing from the qualifying-email count) if
+		// we proceeded here, so bail out now rather than doing (and
+		// potentially mis-deciding) the remaining work on data we know
+		// didn't get updated. See updateContactEmailMappingIndex for the
+		// retryable-vs-not distinction.
+		if errors.Is(err, errCorruptAlternateEmailsMapping) {
+			logger.With(errKey, err, "key", key, "email_sfid", emailSfid, "user_sfid", leadorcontactid).
+				ErrorContext(ctx, "alternate emails mapping record is corrupt, dropping (requires manual data fix)")
+			return false
+		}
+		logger.With(errKey, err, "key", key, "email_sfid", emailSfid, "user_sfid", leadorcontactid).
+			WarnContext(ctx, "alternate emails mapping write did not apply, requesting retry")
+		return true
+	}
 
 	emailAddr, _ := v1Data["alternate_email_address__c"].(string)
 	if encodedEmail := emailToKVKey(emailAddr); encodedEmail != "" {
@@ -285,7 +304,43 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 					WarnContext(ctx, "failed to cache primary email for user deletion scrub")
 			}
 		}
-		return shouldRetry
+		return false
+	}
+
+	// If this is the user's only qualifying alternate email, treat it as
+	// though it were flagged primary (see isSoleQualifyingAlternateEmail):
+	// v1 lazy-sync may not have created/synced the primary row yet.
+	//
+	// Known limitation: if this row is skipped here as sole, and a second
+	// qualifying row (including a later primary-flagged row) arrives after
+	// it, only the new row is considered by its own event — this row is not
+	// revisited until a backfill run reconciles it. See LFXV2-2662.
+	sole, err := isSoleQualifyingAlternateEmail(ctx, leadorcontactid)
+	if err != nil {
+		if errors.Is(err, errAmbiguousDefactoPrimaryEmail) {
+			// Deterministic v1 data condition (multiple qualifying rows,
+			// none flagged primary) — retrying will reach the same result
+			// until the data is fixed, so drop rather than requesting
+			// redelivery. This requires a manual data fix or a backfill
+			// run once the ambiguity is resolved at the source.
+			logger.With(errKey, err, "key", key, "user_sfid", leadorcontactid).
+				ErrorContext(ctx, "cannot determine de-facto primary alternate email, dropping (requires manual data fix)")
+			return false
+		}
+		// A read failure could just as easily be masking a true sole-email
+		// case as a true multi-email case, so don't guess non-sole and risk
+		// wrongly linking a row that should be de-facto primary. Unlike the
+		// ambiguous-data case above, this may well be transient, so request
+		// redelivery instead of silently dropping the message — otherwise
+		// this valid link could go missing until a backfill happens to run.
+		logger.With(errKey, err, "key", key, "user_sfid", leadorcontactid).
+			WarnContext(ctx, "failed to determine sole-qualifying-email status, requesting retry")
+		return true
+	}
+	if sole {
+		logger.With("key", key, "email_sfid", emailSfid, "user_sfid", leadorcontactid).
+			DebugContext(ctx, "treating sole qualifying alternate email as de-facto primary, skipping Auth0 link")
+		return false
 	}
 
 	// Only link verified, non-empty emails.
@@ -293,10 +348,10 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 	if !isVerified {
 		logger.With("key", key, "email_sfid", emailSfid).
 			DebugContext(ctx, "alternate email not verified, skipping Auth0 link")
-		return shouldRetry
+		return false
 	}
 	if emailAddr == "" {
-		return shouldRetry
+		return false
 	}
 
 	// Bound with auth0CallTimeout (< AckWait) so a stuck Auth0 request can't
@@ -307,7 +362,7 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 		return true
 	}
 
-	return shouldRetry
+	return false
 }
 
 // handleAlternateEmailDelete processes a soft delete of an alternate email
@@ -335,8 +390,20 @@ func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Da
 		return false
 	}
 
-	// Clean up the v1-mapping entry for this alternate email.
-	shouldRetry := updateContactEmailMappingIndexFn(ctx, userSfid, emailSfid, true)
+	// Clean up the v1-mapping entry for this alternate email. Bail out
+	// immediately if the write didn't apply (see the analogous check in
+	// handleAlternateEmailUpdate) rather than continuing with cleanup steps;
+	// the event will be redelivered unless the failure is deterministic.
+	if err := updateContactEmailMappingIndexFn(ctx, userSfid, emailSfid, true); err != nil {
+		if errors.Is(err, errCorruptAlternateEmailsMapping) {
+			logger.With(errKey, err, "key", key, "email_sfid", emailSfid, "user_sfid", userSfid).
+				ErrorContext(ctx, "alternate emails mapping record is corrupt, dropping (requires manual data fix)")
+			return false
+		}
+		logger.With(errKey, err, "key", key, "email_sfid", emailSfid, "user_sfid", userSfid).
+			WarnContext(ctx, "alternate emails mapping write did not apply, requesting retry")
+		return true
+	}
 
 	if encodedEmail := emailToKVKey(emailAddr); encodedEmail != "" {
 		indexKey := kvKeyEmailPrefix + encodedEmail
@@ -349,25 +416,25 @@ func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Da
 	// Skip primary emails — the primary email is the Auth0 user's own email
 	// field, not a linked identity, so it is out of scope for this handler.
 	if isPrimary, _ := v1Data["primary_email__c"].(bool); isPrimary {
-		return shouldRetry
+		return false
 	}
 
 	if emailAddr == "" {
 		logger.With("key", key, "email_sfid", emailSfid).
 			WarnContext(ctx, "alternate email delete missing address, cannot unlink Auth0 identity")
-		return shouldRetry
+		return false
 	}
 
 	v1User, err := lookupMergedUserFn(ctx, userSfid)
 	if err != nil {
 		logger.With(errKey, err, "key", key, "user_sfid", userSfid).
 			WarnContext(ctx, "failed to resolve v1 user for Auth0 email unlink")
-		return shouldRetry
+		return false
 	}
 	if v1User.Username == "" {
 		logger.With("key", key, "user_sfid", userSfid).
 			WarnContext(ctx, "v1 user has no username, cannot resolve Auth0 ID for unlink")
-		return shouldRetry
+		return false
 	}
 	auth0UserID := mapUsernameToAuthSub(v1User.Username)
 
@@ -382,7 +449,7 @@ func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Da
 		logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", emailAddr).
 			ErrorContext(syncCtx, "failed to unlink email identity from Auth0, dropping non-retryable error")
 	}
-	return shouldRetry
+	return false
 }
 
 // linkAlternateEmailToAuth0 links an alternate email as an Auth0 identity on
@@ -415,10 +482,28 @@ func linkAlternateEmailToAuth0(ctx context.Context, key, userSfid, email string)
 	return false
 }
 
-// updateContactEmailMappingIndex updates the v1-mapping record for a user's alternate emails
-// with concurrency control using atomic KV operations.
-// Returns true if the operation should be retried, false otherwise.
-func updateContactEmailMappingIndex(ctx context.Context, userSfid, emailSfid string, isDeleted bool) bool {
+// errCorruptAlternateEmailsMapping indicates the existing v1-mappings
+// alternate-emails record for a user could not be parsed, or the updated
+// list built from it could not be re-encoded. This is a deterministic data
+// problem, not a transient one: retrying the same read/write will reach the
+// same result until the record is fixed (e.g. by a corrective write) or the
+// code bug is fixed, so callers should not request retry/redelivery for it,
+// unlike other errors from updateContactEmailMappingIndex.
+var errCorruptAlternateEmailsMapping = errors.New("corrupt or unencodable v1-mappings alternate-emails record")
+
+// updateContactEmailMappingIndex updates the v1-mapping record for a user's
+// alternate emails with concurrency control using atomic KV operations.
+// Returns nil only if the write actually applied. A caller must not treat a
+// non-nil return as good enough to proceed as if the array now reflects
+// this change — e.g. reading it immediately afterward to make a
+// sole-qualifying-email determination would be working off stale data.
+// Most errors here (KV read/write failures, and revision conflicts, which
+// resolve themselves once the conflicting writer's change lands) are
+// potentially transient, so callers should request retry/redelivery for
+// them. An error wrapping errCorruptAlternateEmailsMapping is a
+// deterministic data problem instead, where retrying reaches the same
+// result until the data is fixed, so callers should not retry for it.
+func updateContactEmailMappingIndex(ctx context.Context, userSfid, emailSfid string, isDeleted bool) error {
 	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
 
 	entry, err := mappingsKV.Get(ctx, mappingKey)
@@ -433,14 +518,14 @@ func updateContactEmailMappingIndex(ctx context.Context, userSfid, emailSfid str
 		} else {
 			logger.With("error", err, "key", mappingKey).
 				ErrorContext(ctx, "failed to get mapping record")
-			return false
+			return fmt.Errorf("failed to get mapping record %s: %w", mappingKey, err)
 		}
 	} else {
 		revision = entry.Revision()
 		if err := json.Unmarshal(entry.Value(), &currentEmails); err != nil {
 			logger.With("error", err, "key", mappingKey).
 				ErrorContext(ctx, "failed to unmarshal existing emails list")
-			return false
+			return fmt.Errorf("failed to unmarshal mapping record %s: %w: %w", mappingKey, err, errCorruptAlternateEmailsMapping)
 		}
 	}
 
@@ -450,7 +535,7 @@ func updateContactEmailMappingIndex(ctx context.Context, userSfid, emailSfid str
 	if err != nil {
 		logger.With("error", err, "key", mappingKey).
 			ErrorContext(ctx, "failed to marshal updated emails list")
-		return false
+		return fmt.Errorf("failed to marshal updated emails list for %s: %w: %w", mappingKey, err, errCorruptAlternateEmailsMapping)
 	}
 
 	if revision == 0 {
@@ -458,28 +543,28 @@ func updateContactEmailMappingIndex(ctx context.Context, userSfid, emailSfid str
 			if isRevisionMismatchError(err) || err == jetstream.ErrKeyExists {
 				logger.With("error", err, "key", mappingKey).
 					WarnContext(ctx, "key created by another process during create attempt, will retry")
-				return true
+			} else {
+				logger.With("error", err, "key", mappingKey).
+					ErrorContext(ctx, "failed to create mapping record")
 			}
-			logger.With("error", err, "key", mappingKey).
-				ErrorContext(ctx, "failed to create mapping record")
-			return false
+			return fmt.Errorf("failed to create mapping record %s: %w", mappingKey, err)
 		}
 	} else {
 		if _, err := mappingsKV.Update(ctx, mappingKey, updatedData, revision); err != nil {
 			if isRevisionMismatchError(err) {
 				logger.With("error", err, "key", mappingKey, "revision", revision).
 					WarnContext(ctx, "mapping record revision mismatch, will retry")
-				return true
+			} else {
+				logger.With("error", err, "key", mappingKey).
+					ErrorContext(ctx, "failed to update mapping record")
 			}
-			logger.With("error", err, "key", mappingKey).
-				ErrorContext(ctx, "failed to update mapping record")
-			return false
+			return fmt.Errorf("failed to update mapping record %s: %w", mappingKey, err)
 		}
 	}
 
 	logger.With("key", mappingKey, "emailSfid", emailSfid, "isDeleted", isDeleted).
 		DebugContext(ctx, "successfully updated alternate emails mapping")
-	return false
+	return nil
 }
 
 // updateEmailsList adds or removes an email sfid from the list based on deletion status.

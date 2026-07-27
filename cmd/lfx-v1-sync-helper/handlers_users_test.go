@@ -486,7 +486,9 @@ func TestHandleAlternateEmailDelete(t *testing.T) {
 	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Stub out the KV-touching helpers so the tests don't need a live NATS bucket.
-	updateContactEmailMappingIndexFn = func(_ context.Context, _, _ string, _ bool) bool { return false }
+	// updateContactEmailMappingIndexFn returns nil only if the write applied,
+	// so return nil to simulate the normal successful case.
+	updateContactEmailMappingIndexFn = func(_ context.Context, _, _ string, _ bool) error { return nil }
 	deleteIndexKeyFn = func(_ context.Context, _ string) error { return nil }
 
 	const (

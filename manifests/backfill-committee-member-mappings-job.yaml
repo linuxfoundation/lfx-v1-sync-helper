@@ -1,0 +1,79 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+#
+# One-shot Job to repair committee-member reverse mappings in the v1-mappings
+# NATS KV bucket that store the platform-community__c record sfid instead of
+# the contact SFID (v1 API "MemberID") in their third field. Poisoned mappings
+# cause v1 committee-member deletes to 404, leaving members on the committee /
+# meeting invites (LFXV2-2673). Resolves the contact SFID from the v1-objects
+# NATS KV bucket; makes no calls to any other service.
+#
+# One-shot: this manifest is applied manually via kubectl apply — it is NOT
+# managed by argocd and runs on demand only, after the fix in this same
+# release has been deployed (to fix already-affected committees).
+#
+# Dry run: to preview changes without writing, add "--dry-run" to args below
+# before applying. Remove it for the live run.
+#
+# Credentials: --backfill-committee-member-mappings uses LoadReindexConfig
+# (main.go), which only reads NATS_URL / NATS_FETCH_MAX_WAIT — it never
+# initializes the Heimdall or Auth0 clients, and the process exits before the
+# HTTP server starts. So this manifest intentionally carries no secretKeyRef
+# entries; do not add Heimdall/Auth0 credentials here, this job cannot use them.
+#
+# Deploy with:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-committee-member-mappings-job.yaml
+#
+# Monitor:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper logs -f --timestamps=true job/backfill-committee-member-mappings
+#
+# Cancel:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-committee-member-mappings
+#
+# Clean up (auto-cleans after 1h via ttlSecondsAfterFinished):
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-committee-member-mappings
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: backfill-committee-member-mappings
+  namespace: v1-sync-helper
+  labels:
+    app.kubernetes.io/name: lfx-v1-sync-helper
+    app.kubernetes.io/component: backfill
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lfx-v1-sync-helper
+        app.kubernetes.io/component: backfill
+    spec:
+      restartPolicy: Never
+      serviceAccountName: v1-sync-helper-sa
+      containers:
+        - name: backfill
+          # XXX: Replace with the image SHA for the release you want to run against.
+          # Find the current prod image with:
+          #   kubectl --context lfx-v2-prod -n v1-sync-helper get deployment \
+          #     -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'
+          image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:latest
+          imagePullPolicy: IfNotPresent
+          args: ["--backfill-committee-member-mappings"]
+          env:
+            - name: NATS_URL
+              value: "nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
+            # Optional: raise if logs show scan-timeout warnings. Defaults to 2m
+            # (defaultNATSFetchMaxWait) if unset.
+            # - name: NATS_FETCH_MAX_WAIT
+            #   value: "2m"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "10m"
+            limits:
+              memory: "512Mi"
+              cpu: "200m"
+          securityContext:
+            allowPrivilegeEscalation: false

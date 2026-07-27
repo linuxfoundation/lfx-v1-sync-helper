@@ -175,11 +175,17 @@ func committeeMemberIndexerEventHandler(msg *nats.Msg) {
 				WarnContext(ctx, "no reverse mapping for committee member UID, cannot sync to v1")
 			return
 		}
-		projectSFID, committeeSFID, memberSFID, ok := splitThreeParts(string(entry.Value()))
+		projectSFID, committeeSFID, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(entry.Value()))
 		if !ok {
 			logger.With("mapping_value", string(entry.Value()), "member_uid", event.ObjectID).
 				WarnContext(ctx, "committee member reverse mapping has unexpected format, skipping")
 			return
+		}
+		// Prefer the contact SFID (v1 API "MemberID"); fall back to the record SFID
+		// for mappings written before this field existed.
+		memberSFID := contactSFID
+		if memberSFID == "" {
+			memberSFID = recordSFID
 		}
 		logger.With("member_uid", event.ObjectID, "member_sfid", memberSFID, "committee_sfid", committeeSFID, "project_sfid", projectSFID).
 			InfoContext(ctx, "committee member updated in v2 — syncing to v1")
@@ -193,15 +199,28 @@ func committeeMemberIndexerEventHandler(msg *nats.Msg) {
 				WarnContext(ctx, "no reverse mapping for committee member UID, cannot sync to v1")
 			return
 		}
-		projectSFID, committeeSFID, memberSFID, ok := splitThreeParts(string(entry.Value()))
+		projectSFID, committeeSFID, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(entry.Value()))
 		if !ok {
 			logger.With("mapping_value", string(entry.Value()), "member_uid", event.ObjectID).
 				WarnContext(ctx, "committee member reverse mapping has unexpected format, skipping")
 			return
 		}
-		logger.With("member_uid", event.ObjectID, "member_sfid", memberSFID, "committee_sfid", committeeSFID, "project_sfid", projectSFID).
+		// Prefer the contact SFID (v1 API "MemberID"); fall back to the record SFID
+		// for mappings not yet backfilled to carry a contact SFID.
+		apiMemberSFID := contactSFID
+		if apiMemberSFID == "" {
+			apiMemberSFID = recordSFID
+		}
+		// The record sfid needed to tombstone the v1 forward mapping is not part of
+		// the reverse mapping value itself (see parseCommitteeMemberReverseMapping);
+		// resolve it from the auxiliary key when the reverse mapping's own third
+		// field wasn't a record sfid.
+		if recordSFID == "" {
+			recordSFID = resolveCommitteeMemberRecordSFID(ctx, event.ObjectID)
+		}
+		logger.With("member_uid", event.ObjectID, "member_sfid", apiMemberSFID, "record_sfid", recordSFID, "committee_sfid", committeeSFID, "project_sfid", projectSFID).
 			InfoContext(ctx, "committee member deleted in v2 — syncing deletion to v1")
-		syncCommitteeMemberDeleteToV1(ctx, event.ObjectID, projectSFID, committeeSFID, memberSFID)
+		syncCommitteeMemberDeleteToV1(ctx, event.ObjectID, projectSFID, committeeSFID, apiMemberSFID, recordSFID)
 
 	default:
 		logger.With("action", event.Action, "subject", msg.Subject).
@@ -468,16 +487,47 @@ func syncCommitteeMemberUpdateToV1(ctx context.Context, memberUID, projectSFID, 
 }
 
 // syncCommitteeMemberDeleteToV1 deletes a v1 committee member that was deleted in v2.
-func syncCommitteeMemberDeleteToV1(ctx context.Context, memberUID, projectSFID, committeeSFID, memberSFID string) {
-	log := logger.With("member_uid", memberUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID, "member_sfid", memberSFID)
+// memberSFID is the contact SFID (v1 API "MemberID") used for the delete call itself.
+// recordSFID is the platform-community__c record sfid that the forward mapping
+// "committee_member.sfid.<sfid>" (handlers_committees.go) is keyed on for
+// v1-originated members. It is tombstoned separately so a later v1-originated delete
+// for the same record does not find a stale mapping and retry deleting the
+// already-removed v2 member.
+//
+// recordSFID is empty both for members created via the v2->v1 create path
+// (syncCommitteeMemberCreateToV1 — those key their forward mapping on the contact
+// SFID itself, there being no distinct record sfid) and for v1-originated members
+// whose record-sfid companion key is missing or unreadable. Since those two cases
+// are indistinguishable from recordSFID alone, memberSFID is only used as the
+// forward-tombstone key when the "committee_member.sfid.<memberSFID>" mapping
+// actually exists and its value points back at this same memberUID — otherwise the
+// forward tombstone is skipped rather than risk tombstoning an unrelated mapping
+// (or a no-op) while the real v1-originated forward mapping stays live.
+func syncCommitteeMemberDeleteToV1(ctx context.Context, memberUID, projectSFID, committeeSFID, memberSFID, recordSFID string) {
+	log := logger.With("member_uid", memberUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID, "member_sfid", memberSFID, "record_sfid", recordSFID)
 
 	if err := deleteV1CommitteeMember(ctx, projectSFID, committeeSFID, memberSFID); err != nil {
 		log.With(errKey, err).ErrorContext(ctx, "failed to delete committee member in v1")
 		return
 	}
 
-	if err := tombstoneMapping(ctx, "committee_member.sfid."+memberSFID); err != nil {
+	forwardSFID := recordSFID
+	if forwardSFID == "" {
+		if entry, err := mappingsKV.Get(ctx, "committee_member.sfid."+memberSFID); err == nil && !isTombstonedMapping(entry.Value()) {
+			if _, ownerUID, ok := splitTwoParts(string(entry.Value())); ok && ownerUID == memberUID {
+				forwardSFID = memberSFID
+			}
+		}
+	}
+	if forwardSFID == "" {
+		log.WarnContext(ctx, "cannot determine committee member forward mapping key, skipping forward tombstone")
+	} else if err := tombstoneMapping(ctx, "committee_member.sfid."+forwardSFID); err != nil {
 		log.With(errKey, err).WarnContext(ctx, "failed to tombstone committee member forward mapping after v1 delete")
+	}
+	if recordSFID != "" {
+		if err := tombstoneMapping(ctx, committeeMemberRecordSFIDKey(memberUID)); err != nil {
+			log.With(errKey, err).WarnContext(ctx, "failed to tombstone committee member record sfid mapping after v1 delete")
+		}
 	}
 	if err := tombstoneMapping(ctx, "committee_member.uid."+memberUID); err != nil {
 		log.With(errKey, err).WarnContext(ctx, "failed to tombstone committee member reverse mapping after v1 delete")
@@ -534,6 +584,65 @@ func splitThreeParts(s string) (string, string, string, bool) {
 		}
 	}
 	return "", "", "", false
+}
+
+// parseCommitteeMemberReverseMapping parses a "committee_member.uid.<v2-member-uid>"
+// reverse-mapping value into its constituent SFIDs.
+//
+// The value is always three colon-separated fields — projectSFID:committeeSFID:X —
+// deliberately kept at the same field count as before LFXV2-2673 so a rolling deploy
+// never has an old pod (still running this exact splitThreeParts-based parser) misparse
+// a value written by a new pod, or vice versa. Only the meaning of X has changed over
+// time:
+//   - projectSFID:committeeSFID:recordSFID  (pre-fix; X is the platform-community__c
+//     record sfid, a UUID; this is the poisoned form that causes v1 deletes to 404)
+//   - projectSFID:committeeSFID:contactSFID (post-fix; X is contact_name__c, the v1 API
+//     "MemberID" that DELETE/PATCH .../committees/{c}/members/{MemberID} matches on)
+//
+// The two forms are disambiguated by isUUID(X): a UUID third field is treated as
+// recordSFID (contactSFID unknown); anything else must be a valid contact SFID (checked
+// with sfid.IsValid) or the value is rejected as malformed. recordSFID needed for the
+// forward-mapping tombstone on delete is instead looked up from the separate
+// "committee_member.record_sfid.<uid>" key (see resolveCommitteeMemberRecordSFID) — kept
+// out of this value entirely for the same rollout-compatibility reason.
+//
+// recordSFID and/or contactSFID may come back empty when unknown; ok is false when the
+// value cannot be parsed into exactly three colon-separated fields, or when the third
+// field is neither a UUID nor a valid SFID — e.g. a legacy 4-field
+// "recordSFID:contactSFID" value whose extra colon splitThreeParts folds into the third
+// field, which must not be misclassified as a usable contact SFID.
+func parseCommitteeMemberReverseMapping(s string) (projectSFID, committeeSFID, recordSFID, contactSFID string, ok bool) {
+	projectSFID, committeeSFID, third, ok := splitThreeParts(s)
+	if !ok {
+		return "", "", "", "", false
+	}
+	if isUUID(third) {
+		return projectSFID, committeeSFID, third, "", true
+	}
+	if !sfid.IsValid(third) {
+		return "", "", "", "", false
+	}
+	return projectSFID, committeeSFID, "", third, true
+}
+
+// committeeMemberRecordSFIDKey returns the mapping key that stores the
+// platform-community__c record sfid for a v2 committee member UID. Kept as a
+// separate key (rather than a fourth field on the reverse mapping) so the reverse
+// mapping's wire format never changes field count — see parseCommitteeMemberReverseMapping.
+func committeeMemberRecordSFIDKey(memberUID string) string {
+	return "committee_member.record_sfid." + memberUID
+}
+
+// resolveCommitteeMemberRecordSFID looks up the platform-community__c record sfid for
+// a v2 committee member UID from its auxiliary mapping key. Returns "" if the key is
+// absent, tombstoned, or unreadable — all treated as "unknown", since this value is
+// only used to tombstone the forward mapping as a best effort on delete.
+func resolveCommitteeMemberRecordSFID(ctx context.Context, memberUID string) string {
+	entry, err := mappingsKV.Get(ctx, committeeMemberRecordSFIDKey(memberUID))
+	if err != nil || isTombstonedMapping(entry.Value()) {
+		return ""
+	}
+	return string(entry.Value())
 }
 
 // mapV2CategoryToV1 converts a v2 committee category to the equivalent v1 API value.

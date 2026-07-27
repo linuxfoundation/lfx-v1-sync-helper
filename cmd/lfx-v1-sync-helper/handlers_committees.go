@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	sfidvalidator "github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -291,6 +292,14 @@ func handleCommitteeMemberDelete(ctx context.Context, key string, sfid string, v
 		logger.With(errKey, err, "committee_uid", committeeUID, "member_uid", memberUID).WarnContext(ctx, "failed to tombstone committee member UID mapping")
 	}
 
+	// Tombstone the record-sfid companion too, or it is left as a permanent live key:
+	// the v2-side delete indexer event that would otherwise clean it up either finds
+	// the reverse mapping already tombstoned above, or its own v1 delete call 404s
+	// since this v1-originated deletion already removed the member.
+	if err := tombstoneMapping(ctx, committeeMemberRecordSFIDKey(memberUID)); err != nil {
+		logger.With(errKey, err, "committee_uid", committeeUID, "member_uid", memberUID).WarnContext(ctx, "failed to tombstone committee member record sfid mapping")
+	}
+
 	logger.With("committee_uid", committeeUID, "member_uid", memberUID, "sfid", sfid, "key", key).InfoContext(ctx, "successfully deleted committee member")
 	return false
 }
@@ -520,6 +529,26 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 		return
 	}
 
+	// Extract the contact SFID (contact_name__c). This is the identifier the v1
+	// project-service DELETE/PATCH .../committees/{c}/members/{MemberID} endpoints
+	// match on (SQL: WHERE contact_name__c = :memberID) — it is the v1 API's
+	// "MemberID", NOT the platform-community__c record sfid (the v1 API's "ID").
+	// Storing the record sfid in the reverse mapping causes v1 member deletes to
+	// 404 and leaves members on the committee / meeting invites (LFXV2-2673).
+	contactSFID, _ := v1Data["contact_name__c"].(string)
+	contactSFID = strings.TrimSpace(contactSFID)
+	if contactSFID == "" {
+		logger.With("sfid", sfid).WarnContext(ctx, "missing contact_name__c on committee member; not storing reverse mapping, v1 delete/update sync will not resolve the member")
+	} else if !sfidvalidator.IsValid(contactSFID) {
+		// parseCommitteeMemberReverseMapping rejects a non-UUID, non-SFID third field
+		// as malformed, so a mapping written with an invalid contactSFID here would
+		// immediately be treated as unusable by every reader. Drop it instead of
+		// publishing a value the readers will reject anyway.
+		logger.With("sfid", sfid, "contact_sfid", contactSFID).
+			WarnContext(ctx, "invalid contact_name__c on committee member; not storing reverse mapping, v1 delete/update sync will not resolve the member")
+		contactSFID = ""
+	}
+
 	// Check for blank email and skip with warning.
 	email := ""
 	if contactEmail, ok := v1Data["contactemail__c"].(string); ok && contactEmail != "" {
@@ -633,10 +662,38 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 			projectSFID = projSFID
 		}
 
-		reverseMappingKey := fmt.Sprintf("committee_member.uid.%s", memberUID)
-		reverseMappingValue := fmt.Sprintf("%s:%s:%s", projectSFID, collaborationNameV1, sfid)
-		if _, err := mappingsKV.Put(ctx, reverseMappingKey, []byte(reverseMappingValue)); err != nil {
-			logger.With(errKey, err, "committee_uid", committeeUID, "member_uid", memberUID).WarnContext(ctx, "failed to store committee member reverse mapping")
+		// The third field must be the contact SFID (v1 API "MemberID"), which the v1
+		// delete/update endpoints match on — not the record sfid (LFXV2-2673). Without a
+		// contact SFID the mapping cannot drive a v1 delete/update at all, and would
+		// otherwise overwrite any existing usable mapping, so skip the write entirely.
+		//
+		// The reverse mapping is kept to exactly three fields (same field count as
+		// before this fix) so a rolling deploy never has an old pod (parsing this same
+		// key with the previous release's splitThreeParts-based reader) misparse a
+		// value written by a new pod. The record sfid needed to tombstone the forward
+		// mapping "committee_member.sfid.<sfid>" on delete is instead stored in the
+		// separate committeeMemberRecordSFIDKey — see parseCommitteeMemberReverseMapping
+		// in ingest_indexer.go.
+		if contactSFID == "" {
+			logger.With("sfid", sfid, "member_uid", memberUID).
+				WarnContext(ctx, "not storing committee member reverse mapping: missing contact_name__c")
+		} else {
+			// Write the record-sfid companion before the reverse mapping itself: once
+			// the reverse mapping is published with a contact SFID, the backfill
+			// classifies it as already OK and never revisits it, so a companion that
+			// failed to write here would never get repaired. If this write fails,
+			// skip the reverse mapping write too so it isn't left inconsistent —
+			// the next update event for this v1 record will retry both.
+			if _, err := mappingsKV.Put(ctx, committeeMemberRecordSFIDKey(memberUID), []byte(sfid)); err != nil {
+				logger.With(errKey, err, "committee_uid", committeeUID, "member_uid", memberUID).
+					WarnContext(ctx, "failed to store committee member record sfid mapping, skipping reverse mapping write to avoid publishing it without a companion")
+			} else {
+				reverseMappingKey := fmt.Sprintf("committee_member.uid.%s", memberUID)
+				reverseMappingValue := fmt.Sprintf("%s:%s:%s", projectSFID, collaborationNameV1, contactSFID)
+				if _, err := mappingsKV.Put(ctx, reverseMappingKey, []byte(reverseMappingValue)); err != nil {
+					logger.With(errKey, err, "committee_uid", committeeUID, "member_uid", memberUID).WarnContext(ctx, "failed to store committee member reverse mapping")
+				}
+			}
 		}
 	}
 
