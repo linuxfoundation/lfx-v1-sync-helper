@@ -325,12 +325,10 @@ func TestExtractUsernameIndex(t *testing.T) {
 func TestHandleMergedUserDeleteScrub(t *testing.T) {
 	origLogger := logger
 	origDeleteIndex := deleteIndexKeyFn
-	origGetEmail := getPrimaryEmailForUserFn
 	origPublish := publishUserDeletedEventFn
 	t.Cleanup(func() {
 		logger = origLogger
 		deleteIndexKeyFn = origDeleteIndex
-		getPrimaryEmailForUserFn = origGetEmail
 		publishUserDeletedEventFn = origPublish
 	})
 	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -339,41 +337,28 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 	const (
 		userSfid = "003ABC"
 		username = "alice"
-		email    = "alice@example.com"
 	)
 
 	tests := []struct {
 		name          string
 		v1Data        map[string]any
-		emailErr      error
 		wantPublished bool
 		wantUsername  string
-		wantEmail     string
 	}{
 		{
-			name: "username present, email resolved → publish event",
+			name: "username present → publish event",
 			v1Data: map[string]any{
-				"sfid":       userSfid,
+				"sfid":        userSfid,
 				"username__c": username,
 			},
 			wantPublished: true,
 			wantUsername:  username,
-			wantEmail:     email,
 		},
 		{
 			name: "no username → no publish",
 			v1Data: map[string]any{
 				"sfid": userSfid,
 			},
-			wantPublished: false,
-		},
-		{
-			name: "email lookup fails → no publish",
-			v1Data: map[string]any{
-				"sfid":       userSfid,
-				"username__c": username,
-			},
-			emailErr:      errors.New("email lookup failed"),
 			wantPublished: false,
 		},
 		{
@@ -385,19 +370,12 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var publishedUsername, publishedEmail string
+			var publishedUsername string
 			var publishCalled bool
 
-			getPrimaryEmailForUserFn = func(_ context.Context, _ string) (string, error) {
-				if tc.emailErr != nil {
-					return "", tc.emailErr
-				}
-				return email, nil
-			}
-			publishUserDeletedEventFn = func(_ context.Context, _, u, e string) {
+			publishUserDeletedEventFn = func(_ context.Context, _, u string) {
 				publishCalled = true
 				publishedUsername = u
-				publishedEmail = e
 			}
 
 			got := handleMergedUserDelete(context.Background(), "test-key", userSfid, tc.v1Data)
@@ -408,13 +386,8 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 			if publishCalled != tc.wantPublished {
 				t.Errorf("publishCalled = %v, want %v", publishCalled, tc.wantPublished)
 			}
-			if tc.wantPublished {
-				if publishedUsername != tc.wantUsername {
-					t.Errorf("published username = %q, want %q", publishedUsername, tc.wantUsername)
-				}
-				if publishedEmail != tc.wantEmail {
-					t.Errorf("published email = %q, want %q", publishedEmail, tc.wantEmail)
-				}
+			if tc.wantPublished && publishedUsername != tc.wantUsername {
+				t.Errorf("published username = %q, want %q", publishedUsername, tc.wantUsername)
 			}
 		})
 	}
