@@ -321,7 +321,105 @@ func TestExtractUsernameIndex(t *testing.T) {
 }
 
 // TestHandleMergedUserDeleteScrub verifies that handleMergedUserDelete triggers the
-// committee scrub functions when a username is present in the payload.
+// committee username scrub (NATS publish) when a username is present in the payload.
+func TestHandleMergedUserDeleteScrub(t *testing.T) {
+	origLogger := logger
+	origDeleteIndex := deleteIndexKeyFn
+	origGetEmail := getPrimaryEmailForUserFn
+	origPublish := publishUserDeletedEventFn
+	t.Cleanup(func() {
+		logger = origLogger
+		deleteIndexKeyFn = origDeleteIndex
+		getPrimaryEmailForUserFn = origGetEmail
+		publishUserDeletedEventFn = origPublish
+	})
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	deleteIndexKeyFn = func(_ context.Context, _ string) error { return nil }
+
+	const (
+		userSfid = "003ABC"
+		username = "alice"
+		email    = "alice@example.com"
+	)
+
+	tests := []struct {
+		name          string
+		v1Data        map[string]any
+		emailErr      error
+		wantPublished bool
+		wantUsername  string
+		wantEmail     string
+	}{
+		{
+			name: "username present, email resolved → publish event",
+			v1Data: map[string]any{
+				"sfid":       userSfid,
+				"username__c": username,
+			},
+			wantPublished: true,
+			wantUsername:  username,
+			wantEmail:     email,
+		},
+		{
+			name: "no username → no publish",
+			v1Data: map[string]any{
+				"sfid": userSfid,
+			},
+			wantPublished: false,
+		},
+		{
+			name: "email lookup fails → no publish",
+			v1Data: map[string]any{
+				"sfid":       userSfid,
+				"username__c": username,
+			},
+			emailErr:      errors.New("email lookup failed"),
+			wantPublished: false,
+		},
+		{
+			name:          "nil v1Data (hard KV delete) → no publish",
+			v1Data:        nil,
+			wantPublished: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var publishedUsername, publishedEmail string
+			var publishCalled bool
+
+			getPrimaryEmailForUserFn = func(_ context.Context, _ string) (string, error) {
+				if tc.emailErr != nil {
+					return "", tc.emailErr
+				}
+				return email, nil
+			}
+			publishUserDeletedEventFn = func(_ context.Context, _, u, e string) {
+				publishCalled = true
+				publishedUsername = u
+				publishedEmail = e
+			}
+
+			got := handleMergedUserDelete(context.Background(), "test-key", userSfid, tc.v1Data)
+
+			if got {
+				t.Errorf("handleMergedUserDelete() = true, want false")
+			}
+			if publishCalled != tc.wantPublished {
+				t.Errorf("publishCalled = %v, want %v", publishCalled, tc.wantPublished)
+			}
+			if tc.wantPublished {
+				if publishedUsername != tc.wantUsername {
+					t.Errorf("published username = %q, want %q", publishedUsername, tc.wantUsername)
+				}
+				if publishedEmail != tc.wantEmail {
+					t.Errorf("published email = %q, want %q", publishedEmail, tc.wantEmail)
+				}
+			}
+		})
+	}
+}
+
 // TestExtractEmailIndex covers the field extraction for the alternate_email reindex phase.
 func TestExtractEmailIndex(t *testing.T) {
 	tests := []struct {

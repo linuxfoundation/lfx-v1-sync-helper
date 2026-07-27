@@ -53,6 +53,13 @@ var (
 	deleteIndexKeyFn                 = deleteIndexKey
 )
 
+// handleMergedUserDelete dependencies, split out so tests can inject fakes
+// without needing a live NATS connection.
+var (
+	getPrimaryEmailForUserFn = getPrimaryEmailForUser
+	publishUserDeletedEventFn = publishUserDeletedEvent
+)
+
 // toKVKey normalizes a user-provided string and encodes it as a URL-safe base64
 // key segment safe for NATS KV. Order: TrimSpace → ToLower → NFC → RawURLEncoding.
 // NFC unifies decomposed/precomposed Unicode (e.g. n\u0303 ≡ ñ) without semantic
@@ -147,12 +154,12 @@ func handleMergedUserDelete(ctx context.Context, key, userSfid string, v1Data ma
 	// without its alternate emails being deleted first, those entries will be orphaned.
 
 	if username != "" {
-		email, emailErr := getPrimaryEmailForUser(ctx, userSfid)
+		email, emailErr := getPrimaryEmailForUserFn(ctx, userSfid)
 		if emailErr != nil {
 			logger.With(errKey, emailErr, "key", key, "user_sfid", userSfid).
 				WarnContext(ctx, "failed to look up primary email for deleted user; committee username scrub skipped")
 		} else {
-			publishUserDeletedEvent(ctx, key, username, email)
+			publishUserDeletedEventFn(ctx, key, username, email)
 		}
 	}
 
