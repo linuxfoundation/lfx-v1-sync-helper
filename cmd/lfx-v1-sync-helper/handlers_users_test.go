@@ -613,12 +613,14 @@ func TestHandleAlternateEmailDelete(t *testing.T) {
 	origUnlink := unlinkEmailIdentityFn
 	origUpdateEmails := updateContactEmailMappingIndexFn
 	origDeleteIndex := deleteIndexKeyFn
+	origReadCache := readMappingsKVValueFn
 	t.Cleanup(func() {
 		logger = origLogger
 		lookupMergedUserFn = origLookup
 		unlinkEmailIdentityFn = origUnlink
 		updateContactEmailMappingIndexFn = origUpdateEmails
 		deleteIndexKeyFn = origDeleteIndex
+		readMappingsKVValueFn = origReadCache
 	})
 	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -627,6 +629,9 @@ func TestHandleAlternateEmailDelete(t *testing.T) {
 	// so return nil to simulate the normal successful case.
 	updateContactEmailMappingIndexFn = func(_ context.Context, _, _ string, _ bool) error { return nil }
 	deleteIndexKeyFn = func(_ context.Context, _ string) error { return nil }
+	readMappingsKVValueFn = func(_ context.Context, _ string) ([]byte, error) {
+		return nil, errors.New("cache miss")
+	}
 
 	const (
 		userSfid  = "003DEF"
