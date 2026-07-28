@@ -23,7 +23,7 @@ const (
 	kvKeyUsernamePrefix         = "v1-user.username."
 	kvKeyEmailPrefix            = "v1-user.email."
 	kvKeyAlternateEmailsPrefix  = "v1-merged-user.alternate-emails."
-	kvKeyPrimaryEmailByUserSfid = "v1-user.primary-email."
+	kvKeyPrimaryEmailPrefix      = "v1-user.primary-email."
 
 	// v1-objects KV key prefixes as replicated by Meltano.
 	v1MergedUserKVPrefix     = "salesforce-merged_user."
@@ -183,11 +183,12 @@ func handleMergedUserDelete(ctx context.Context, key, userSfid string, v1Data ma
 				DebugContext(ctx, "no primary email found for deleted user; publishing user-deleted event without email")
 		}
 		publishUserDeletedEventFn(ctx, key, normalizedUsername, email)
-		// Best-effort cleanup of the cached primary-email key.
-		if err := deleteIndexKeyFn(ctx, kvKeyPrimaryEmailByUserSfid+userSfid); err != nil {
-			logger.With(errKey, err, "key", key, "user_sfid", userSfid).
-				WarnContext(ctx, "failed to delete cached primary email after user-deleted event")
-		}
+	}
+
+	// Best-effort cleanup of the cached primary-email key (even when username is blank).
+	if err := deleteIndexKeyFn(ctx, kvKeyPrimaryEmailPrefix+userSfid); err != nil {
+		logger.With(errKey, err, "key", key, "user_sfid", userSfid).
+			WarnContext(ctx, "failed to delete cached primary email after user delete")
 	}
 
 	return false
@@ -199,13 +200,33 @@ func handleMergedUserDelete(ctx context.Context, key, userSfid string, v1Data ma
 // lookup. The cache avoids an ordering problem where alternate-email rows are
 // cleaned up before the merged-user deletion event is processed.
 func getCachedPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error) {
-	cacheKey := kvKeyPrimaryEmailByUserSfid + userSfid
+	cacheKey := kvKeyPrimaryEmailPrefix + userSfid
 	if raw, err := readMappingsKVValueFn(ctx, cacheKey); err == nil {
 		if email := strings.TrimSpace(string(raw)); email != "" {
 			return email, nil
 		}
 	}
 	return lookupPrimaryEmailForUserFn(ctx, userSfid)
+}
+
+// clearPrimaryEmailCacheIfMatched deletes the cached primary email when it still
+// points at emailAddr (e.g. after a primary row is demoted or deleted).
+func clearPrimaryEmailCacheIfMatched(ctx context.Context, key, userSfid, emailAddr string) {
+	if emailAddr == "" || userSfid == "" {
+		return
+	}
+	cacheKey := kvKeyPrimaryEmailPrefix + userSfid
+	raw, err := readMappingsKVValueFn(ctx, cacheKey)
+	if err != nil {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(string(raw)), strings.TrimSpace(emailAddr)) {
+		return
+	}
+	if err := deleteIndexKeyFn(ctx, cacheKey); err != nil {
+		logger.With(errKey, err, "key", key, "user_sfid", userSfid).
+			WarnContext(ctx, "failed to delete stale primary email cache")
+	}
 }
 
 // userDeletedEvent is the payload published to "lfx.v1-sync-helper.user.deleted" when a
@@ -324,7 +345,7 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 	// merged-user row.
 	if isPrimary, _ := v1Data["primary_email__c"].(bool); isPrimary {
 		if emailAddr != "" {
-			cacheKey := kvKeyPrimaryEmailByUserSfid + leadorcontactid
+			cacheKey := kvKeyPrimaryEmailPrefix + leadorcontactid
 			if _, err := mappingsKV.Put(ctx, cacheKey, []byte(emailAddr)); err != nil {
 				logger.With(errKey, err, "key", key, "user_sfid", leadorcontactid).
 					WarnContext(ctx, "failed to cache primary email for user deletion scrub")
@@ -332,6 +353,8 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 		}
 		return false
 	}
+
+	clearPrimaryEmailCacheIfMatched(ctx, key, leadorcontactid, emailAddr)
 
 	// If this is the user's only qualifying alternate email, treat it as
 	// though it were flagged primary (see isSoleQualifyingAlternateEmail):
@@ -442,6 +465,7 @@ func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Da
 	// Skip primary emails — the primary email is the Auth0 user's own email
 	// field, not a linked identity, so it is out of scope for this handler.
 	if isPrimary, _ := v1Data["primary_email__c"].(bool); isPrimary {
+		clearPrimaryEmailCacheIfMatched(ctx, key, userSfid, emailAddr)
 		return false
 	}
 

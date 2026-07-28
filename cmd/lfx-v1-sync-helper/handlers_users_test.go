@@ -363,7 +363,7 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 			wantEmail:     "deleted@example.com",
 			wantDeleted: []string{
 				kvKeyUsernamePrefix + usernameToKVKey(" Alice "),
-				kvKeyPrimaryEmailByUserSfid + userSfid,
+				kvKeyPrimaryEmailPrefix + userSfid,
 			},
 		},
 		{
@@ -378,23 +378,29 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 			wantEmail:     "",
 			wantDeleted: []string{
 				kvKeyUsernamePrefix + usernameToKVKey(username),
-				kvKeyPrimaryEmailByUserSfid + userSfid,
+				kvKeyPrimaryEmailPrefix + userSfid,
 			},
 		},
 		{
-			name: "whitespace-only username → no publish",
+			name: "whitespace-only username → no publish but clear primary-email cache",
 			v1Data: map[string]any{
 				"sfid":        userSfid,
 				"username__c": "   ",
 			},
 			wantPublished: false,
+			wantDeleted: []string{
+				kvKeyPrimaryEmailPrefix + userSfid,
+			},
 		},
 		{
-			name: "no username → no publish",
+			name: "no username → no publish but still clear primary-email cache",
 			v1Data: map[string]any{
 				"sfid": userSfid,
 			},
 			wantPublished: false,
+			wantDeleted: []string{
+				kvKeyPrimaryEmailPrefix + userSfid,
+			},
 		},
 		{
 			name:          "nil v1Data (hard KV delete) → no publish",
@@ -470,7 +476,7 @@ func TestGetCachedPrimaryEmailForUser(t *testing.T) {
 
 	t.Run("cache hit → no live lookup", func(t *testing.T) {
 		readMappingsKVValueFn = func(_ context.Context, key string) ([]byte, error) {
-			if key == kvKeyPrimaryEmailByUserSfid+userSfid {
+			if key == kvKeyPrimaryEmailPrefix+userSfid {
 				return []byte("cached@example.com"), nil
 			}
 			return nil, errors.New("unexpected key")
