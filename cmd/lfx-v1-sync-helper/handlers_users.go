@@ -20,9 +20,10 @@ import (
 
 const (
 	// KV key prefixes for secondary indexes written to v1-mappings.
-	kvKeyUsernamePrefix        = "v1-user.username."
-	kvKeyEmailPrefix           = "v1-user.email."
-	kvKeyAlternateEmailsPrefix = "v1-merged-user.alternate-emails."
+	kvKeyUsernamePrefix         = "v1-user.username."
+	kvKeyEmailPrefix            = "v1-user.email."
+	kvKeyAlternateEmailsPrefix  = "v1-merged-user.alternate-emails."
+	kvKeyPrimaryEmailByUserSfid = "v1-user.primary-email."
 
 	// v1-objects KV key prefixes as replicated by Meltano.
 	v1MergedUserKVPrefix     = "salesforce-merged_user."
@@ -58,17 +59,31 @@ var (
 // without needing a live NATS connection.
 var (
 	publishUserDeletedEventFn = publishUserDeletedEvent
-	getPrimaryEmailForUserFn  = getPrimaryEmailForUser
+	getPrimaryEmailForUserFn  = getCachedPrimaryEmailForUser
 )
 
-// toKVKey normalizes a user-provided string and encodes it as a URL-safe base64
-// key segment safe for NATS KV. Order: TrimSpace → ToLower → NFC → RawURLEncoding.
-// NFC unifies decomposed/precomposed Unicode (e.g. n\u0303 ≡ ñ) without semantic
-// transposition. RawURLEncoding (no padding) keeps keys opaque and short.
+// readMappingsKVValueFn reads a raw value from v1-mappings. Swappable in tests.
+var readMappingsKVValueFn = func(ctx context.Context, key string) ([]byte, error) {
+	entry, err := mappingsKV.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	return entry.Value(), nil
+}
+
+// lookupPrimaryEmailForUserFn is the live alternate-email lookup used when the
+// primary-email cache misses. Swappable in tests.
+var lookupPrimaryEmailForUserFn = getPrimaryEmailForUser
+
+// normalizeKVSegment normalizes a user-provided string for NATS KV key segments:
+// TrimSpace → ToLower → NFC. NFC unifies decomposed/precomposed Unicode
+// (e.g. n\u0303 ≡ ñ) without semantic transposition.
 func normalizeKVSegment(s string) string {
 	return norm.NFC.String(strings.ToLower(strings.TrimSpace(s)))
 }
 
+// toKVKey encodes a normalized string as a URL-safe base64 key segment
+// (RawURLEncoding, no padding) safe for NATS KV.
 func toKVKey(s string) string {
 	s = normalizeKVSegment(s)
 	if s == "" {
@@ -159,11 +174,38 @@ func handleMergedUserDelete(ctx context.Context, key, userSfid string, v1Data ma
 	// without its alternate emails being deleted first, those entries will be orphaned.
 
 	if normalizedUsername := normalizeKVSegment(username); normalizedUsername != "" {
-		email, _ := getPrimaryEmailForUserFn(ctx, userSfid)
+		email, emailErr := getPrimaryEmailForUserFn(ctx, userSfid)
+		if emailErr != nil {
+			logger.With(errKey, emailErr, "key", key, "user_sfid", userSfid).
+				DebugContext(ctx, "failed to look up primary email for deleted user; publishing user-deleted event without email")
+		} else if email == "" {
+			logger.With("key", key, "user_sfid", userSfid).
+				DebugContext(ctx, "no primary email found for deleted user; publishing user-deleted event without email")
+		}
 		publishUserDeletedEventFn(ctx, key, normalizedUsername, email)
+		// Best-effort cleanup of the cached primary-email key.
+		if err := deleteIndexKeyFn(ctx, kvKeyPrimaryEmailByUserSfid+userSfid); err != nil {
+			logger.With(errKey, err, "key", key, "user_sfid", userSfid).
+				WarnContext(ctx, "failed to delete cached primary email after user-deleted event")
+		}
 	}
 
 	return false
+}
+
+// getCachedPrimaryEmailForUser returns the primary email for a user. It first
+// checks the v1-mappings cache written by handleAlternateEmailUpdate (which
+// survives alternate-email row deletion), then falls back to the live KV
+// lookup. The cache avoids an ordering problem where alternate-email rows are
+// cleaned up before the merged-user deletion event is processed.
+func getCachedPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error) {
+	cacheKey := kvKeyPrimaryEmailByUserSfid + userSfid
+	if raw, err := readMappingsKVValueFn(ctx, cacheKey); err == nil {
+		if email := strings.TrimSpace(string(raw)); email != "" {
+			return email, nil
+		}
+	}
+	return lookupPrimaryEmailForUserFn(ctx, userSfid)
 }
 
 // userDeletedEvent is the payload published to "lfx.v1-sync-helper.user.deleted" when a
@@ -277,7 +319,17 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 	}
 
 	// Primary emails are not linked as Auth0 identities (they are the Auth0 user's own email).
+	// Cache the address in mappings so handleMergedUserDelete can supply it to downstream
+	// scrubbers even after the alternate-email rows have been cleaned up ahead of the
+	// merged-user row.
 	if isPrimary, _ := v1Data["primary_email__c"].(bool); isPrimary {
+		if emailAddr != "" {
+			cacheKey := kvKeyPrimaryEmailByUserSfid + leadorcontactid
+			if _, err := mappingsKV.Put(ctx, cacheKey, []byte(emailAddr)); err != nil {
+				logger.With(errKey, err, "key", key, "user_sfid", leadorcontactid).
+					WarnContext(ctx, "failed to cache primary email for user deletion scrub")
+			}
+		}
 		return false
 	}
 

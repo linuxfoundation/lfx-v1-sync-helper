@@ -335,10 +335,6 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 		getPrimaryEmailForUserFn = origEmail
 	})
 	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-	deleteIndexKeyFn = func(_ context.Context, _ string) error { return nil }
-	getPrimaryEmailForUserFn = func(_ context.Context, _ string) (string, error) {
-		return "deleted@example.com", nil
-	}
 
 	const (
 		userSfid = "003ABC"
@@ -348,29 +344,42 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 	tests := []struct {
 		name          string
 		v1Data        map[string]any
+		emailResult   string
+		emailErr      error
 		wantPublished bool
 		wantUsername  string
 		wantEmail     string
+		wantDeleted   []string
 	}{
 		{
-			name: "username present → publish normalized event",
+			name: "username present → publish normalized event and clear primary-email cache",
 			v1Data: map[string]any{
 				"sfid":        userSfid,
 				"username__c": " Alice ",
 			},
+			emailResult:   "deleted@example.com",
 			wantPublished: true,
 			wantUsername:  "alice",
 			wantEmail:     "deleted@example.com",
+			wantDeleted: []string{
+				kvKeyUsernamePrefix + usernameToKVKey(" Alice "),
+				kvKeyPrimaryEmailByUserSfid + userSfid,
+			},
 		},
 		{
-			name: "username present → publish event",
+			name: "email lookup error → still publish without email",
 			v1Data: map[string]any{
 				"sfid":        userSfid,
 				"username__c": username,
 			},
+			emailErr:      errors.New("alternate emails mapping gone"),
 			wantPublished: true,
 			wantUsername:  username,
-			wantEmail:     "deleted@example.com",
+			wantEmail:     "",
+			wantDeleted: []string{
+				kvKeyUsernamePrefix + usernameToKVKey(username),
+				kvKeyPrimaryEmailByUserSfid + userSfid,
+			},
 		},
 		{
 			name: "whitespace-only username → no publish",
@@ -396,6 +405,18 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			var deletedKeys []string
+			deleteIndexKeyFn = func(_ context.Context, key string) error {
+				deletedKeys = append(deletedKeys, key)
+				return nil
+			}
+			getPrimaryEmailForUserFn = func(_ context.Context, gotSfid string) (string, error) {
+				if gotSfid != userSfid {
+					t.Errorf("getPrimaryEmailForUserFn called with sfid %q, want %q", gotSfid, userSfid)
+				}
+				return tc.emailResult, tc.emailErr
+			}
+
 			var publishedUsername string
 			var publishedEmail string
 			var publishCalled bool
@@ -420,8 +441,73 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 			if tc.wantPublished && publishedEmail != tc.wantEmail {
 				t.Errorf("published email = %q, want %q", publishedEmail, tc.wantEmail)
 			}
+			if tc.wantDeleted != nil {
+				if len(deletedKeys) != len(tc.wantDeleted) {
+					t.Fatalf("deletedKeys = %v, want %v", deletedKeys, tc.wantDeleted)
+				}
+				for i, want := range tc.wantDeleted {
+					if deletedKeys[i] != want {
+						t.Errorf("deletedKeys[%d] = %q, want %q", i, deletedKeys[i], want)
+					}
+				}
+			} else if len(deletedKeys) != 0 {
+				t.Errorf("expected no index deletes, got %v", deletedKeys)
+			}
 		})
 	}
+}
+
+// TestGetCachedPrimaryEmailForUser verifies cache-first lookup with live fallback.
+func TestGetCachedPrimaryEmailForUser(t *testing.T) {
+	origRead := readMappingsKVValueFn
+	origLive := lookupPrimaryEmailForUserFn
+	t.Cleanup(func() {
+		readMappingsKVValueFn = origRead
+		lookupPrimaryEmailForUserFn = origLive
+	})
+
+	const userSfid = "003ABC"
+
+	t.Run("cache hit → no live lookup", func(t *testing.T) {
+		readMappingsKVValueFn = func(_ context.Context, key string) ([]byte, error) {
+			if key == kvKeyPrimaryEmailByUserSfid+userSfid {
+				return []byte("cached@example.com"), nil
+			}
+			return nil, errors.New("unexpected key")
+		}
+		lookupPrimaryEmailForUserFn = func(_ context.Context, _ string) (string, error) {
+			t.Fatal("live lookup should not run on cache hit")
+			return "", nil
+		}
+
+		email, err := getCachedPrimaryEmailForUser(context.Background(), userSfid)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if email != "cached@example.com" {
+			t.Fatalf("email = %q, want cached@example.com", email)
+		}
+	})
+
+	t.Run("cache miss → live lookup", func(t *testing.T) {
+		readMappingsKVValueFn = func(_ context.Context, _ string) ([]byte, error) {
+			return nil, errors.New("cache miss")
+		}
+		lookupPrimaryEmailForUserFn = func(_ context.Context, gotSfid string) (string, error) {
+			if gotSfid != userSfid {
+				t.Errorf("lookupPrimaryEmailForUserFn sfid = %q, want %q", gotSfid, userSfid)
+			}
+			return "live@example.com", nil
+		}
+
+		email, err := getCachedPrimaryEmailForUser(context.Background(), userSfid)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if email != "live@example.com" {
+			t.Fatalf("email = %q, want live@example.com", email)
+		}
+	})
 }
 
 func TestPublishUserDeletedEvent(t *testing.T) {
