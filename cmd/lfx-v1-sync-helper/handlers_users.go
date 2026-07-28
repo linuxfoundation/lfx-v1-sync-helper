@@ -20,10 +20,10 @@ import (
 
 const (
 	// KV key prefixes for secondary indexes written to v1-mappings.
-	kvKeyUsernamePrefix         = "v1-user.username."
-	kvKeyEmailPrefix            = "v1-user.email."
-	kvKeyAlternateEmailsPrefix  = "v1-merged-user.alternate-emails."
-	kvKeyPrimaryEmailPrefix      = "v1-user.primary-email."
+	kvKeyUsernamePrefix        = "v1-user.username."
+	kvKeyEmailPrefix           = "v1-user.email."
+	kvKeyAlternateEmailsPrefix = "v1-merged-user.alternate-emails."
+	kvKeyPrimaryEmailPrefix    = "v1-user.primary-email."
 
 	// v1-objects KV key prefixes as replicated by Meltano.
 	v1MergedUserKVPrefix     = "salesforce-merged_user."
@@ -153,6 +153,10 @@ func handleMergedUserDelete(ctx context.Context, key, userSfid string, v1Data ma
 		// always carry a payload, so log a warning if we see this.
 		logger.With("key", key, "user_sfid", userSfid).
 			WarnContext(ctx, "merged_user hard-deleted with no payload; cannot clean up username index")
+		if err := deleteIndexKeyFn(ctx, kvKeyPrimaryEmailPrefix+userSfid); err != nil {
+			logger.With(errKey, err, "key", key, "user_sfid", userSfid).
+				WarnContext(ctx, "failed to delete cached primary email after hard user delete")
+		}
 		return false
 	}
 
@@ -259,7 +263,7 @@ func publishUserDeletedEvent(ctx context.Context, key, username, email string) {
 			ErrorContext(ctx, "failed to publish user-deleted event; committee username scrub skipped")
 		return
 	}
-	logger.With("key", key, "username", username).
+	logger.With("key", key).
 		InfoContext(ctx, "published user-deleted event for committee username scrub")
 }
 

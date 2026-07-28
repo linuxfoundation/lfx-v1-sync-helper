@@ -403,9 +403,12 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 			},
 		},
 		{
-			name:          "nil v1Data (hard KV delete) → no publish",
+			name:          "nil v1Data (hard KV delete) → no publish but clear primary-email cache",
 			v1Data:        nil,
 			wantPublished: false,
+			wantDeleted: []string{
+				kvKeyPrimaryEmailPrefix + userSfid,
+			},
 		},
 	}
 
@@ -555,6 +558,110 @@ func TestPublishUserDeletedEvent(t *testing.T) {
 		}
 		publishUserDeletedEvent(context.Background(), "test-key", "alice", "")
 	})
+}
+
+// TestClearPrimaryEmailCacheIfMatched verifies conditional cache cleanup on demote/delete paths.
+func TestClearPrimaryEmailCacheIfMatched(t *testing.T) {
+	origLogger := logger
+	origRead := readMappingsKVValueFn
+	origDelete := deleteIndexKeyFn
+	t.Cleanup(func() {
+		logger = origLogger
+		readMappingsKVValueFn = origRead
+		deleteIndexKeyFn = origDelete
+	})
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	const (
+		key      = "test-key"
+		userSfid = "003ABC"
+	)
+	cacheKey := kvKeyPrimaryEmailPrefix + userSfid
+
+	tests := []struct {
+		name       string
+		sfid       string
+		emailAddr  string
+		readResult []byte
+		readErr    error
+		wantDelete bool
+	}{
+		{
+			name:       "match → delete",
+			sfid:       userSfid,
+			emailAddr:  "a@example.com",
+			readResult: []byte("a@example.com"),
+			wantDelete: true,
+		},
+		{
+			name:       "case-insensitive match → delete",
+			sfid:       userSfid,
+			emailAddr:  "A@Example.COM",
+			readResult: []byte("a@example.com"),
+			wantDelete: true,
+		},
+		{
+			name:       "no match → skip",
+			sfid:       userSfid,
+			emailAddr:  "a@example.com",
+			readResult: []byte("b@example.com"),
+			wantDelete: false,
+		},
+		{
+			name:       "empty email → skip",
+			sfid:       userSfid,
+			emailAddr:  "",
+			readResult: []byte("a@example.com"),
+			wantDelete: false,
+		},
+		{
+			name:       "empty user sfid → skip",
+			sfid:       "",
+			emailAddr:  "a@example.com",
+			readResult: []byte("a@example.com"),
+			wantDelete: false,
+		},
+		{
+			name:       "read error → skip",
+			sfid:       userSfid,
+			emailAddr:  "a@example.com",
+			readErr:    errors.New("cache miss"),
+			wantDelete: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			readMappingsKVValueFn = func(_ context.Context, gotKey string) ([]byte, error) {
+				if tt.sfid == "" {
+					t.Fatal("read should not run when user sfid is empty")
+				}
+				if gotKey != cacheKey {
+					t.Fatalf("read key = %q, want %q", gotKey, cacheKey)
+				}
+				return tt.readResult, tt.readErr
+			}
+
+			var deletedKeys []string
+			deleteIndexKeyFn = func(_ context.Context, gotKey string) error {
+				deletedKeys = append(deletedKeys, gotKey)
+				return nil
+			}
+
+			clearPrimaryEmailCacheIfMatched(context.Background(), key, tt.sfid, tt.emailAddr)
+
+			if tt.wantDelete {
+				if len(deletedKeys) != 1 {
+					t.Fatalf("deletedKeys = %v, want one delete", deletedKeys)
+				}
+				if deletedKeys[0] != cacheKey {
+					t.Fatalf("deleted key = %q, want %q", deletedKeys[0], cacheKey)
+				}
+			} else if len(deletedKeys) != 0 {
+				t.Fatalf("expected no delete, got %v", deletedKeys)
+			}
+		})
+	}
 }
 
 // TestExtractEmailIndex covers the field extraction for the alternate_email reindex phase.
