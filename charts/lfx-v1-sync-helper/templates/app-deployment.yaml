@@ -20,6 +20,10 @@ spec:
       component: app
   template:
     metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
         app: {{ .Chart.Name }}
         app.kubernetes.io/name: {{ .Chart.Name }}

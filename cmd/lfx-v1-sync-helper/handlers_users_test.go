@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -320,6 +321,349 @@ func TestExtractUsernameIndex(t *testing.T) {
 	}
 }
 
+// TestHandleMergedUserDeleteScrub verifies that handleMergedUserDelete triggers the
+// committee username scrub (NATS publish) when a username is present in the payload.
+func TestHandleMergedUserDeleteScrub(t *testing.T) {
+	origLogger := logger
+	origDeleteIndex := deleteIndexKeyFn
+	origPublish := publishUserDeletedEventFn
+	origEmail := getPrimaryEmailForUserFn
+	t.Cleanup(func() {
+		logger = origLogger
+		deleteIndexKeyFn = origDeleteIndex
+		publishUserDeletedEventFn = origPublish
+		getPrimaryEmailForUserFn = origEmail
+	})
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	const (
+		userSfid = "003ABC"
+		username = "alice"
+	)
+
+	tests := []struct {
+		name          string
+		v1Data        map[string]any
+		emailResult   string
+		emailErr      error
+		wantPublished bool
+		wantUsername  string
+		wantEmail     string
+		wantDeleted   []string
+	}{
+		{
+			name: "username present → publish normalized event and clear primary-email cache",
+			v1Data: map[string]any{
+				"sfid":        userSfid,
+				"username__c": " Alice ",
+			},
+			emailResult:   "deleted@example.com",
+			wantPublished: true,
+			wantUsername:  "alice",
+			wantEmail:     "deleted@example.com",
+			wantDeleted: []string{
+				kvKeyUsernamePrefix + usernameToKVKey(" Alice "),
+				kvKeyPrimaryEmailPrefix + userSfid,
+			},
+		},
+		{
+			name: "email lookup error → still publish without email",
+			v1Data: map[string]any{
+				"sfid":        userSfid,
+				"username__c": username,
+			},
+			emailErr:      errors.New("alternate emails mapping gone"),
+			wantPublished: true,
+			wantUsername:  username,
+			wantEmail:     "",
+			wantDeleted: []string{
+				kvKeyUsernamePrefix + usernameToKVKey(username),
+				kvKeyPrimaryEmailPrefix + userSfid,
+			},
+		},
+		{
+			name: "whitespace-only username → no publish but clear primary-email cache",
+			v1Data: map[string]any{
+				"sfid":        userSfid,
+				"username__c": "   ",
+			},
+			wantPublished: false,
+			wantDeleted: []string{
+				kvKeyPrimaryEmailPrefix + userSfid,
+			},
+		},
+		{
+			name: "no username → no publish but still clear primary-email cache",
+			v1Data: map[string]any{
+				"sfid": userSfid,
+			},
+			wantPublished: false,
+			wantDeleted: []string{
+				kvKeyPrimaryEmailPrefix + userSfid,
+			},
+		},
+		{
+			name:          "nil v1Data (hard KV delete) → no publish but clear primary-email cache",
+			v1Data:        nil,
+			wantPublished: false,
+			wantDeleted: []string{
+				kvKeyPrimaryEmailPrefix + userSfid,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var deletedKeys []string
+			deleteIndexKeyFn = func(_ context.Context, key string) error {
+				deletedKeys = append(deletedKeys, key)
+				return nil
+			}
+			getPrimaryEmailForUserFn = func(_ context.Context, gotSfid string) (string, error) {
+				if gotSfid != userSfid {
+					t.Errorf("getPrimaryEmailForUserFn called with sfid %q, want %q", gotSfid, userSfid)
+				}
+				return tc.emailResult, tc.emailErr
+			}
+
+			var publishedUsername string
+			var publishedEmail string
+			var publishCalled bool
+
+			publishUserDeletedEventFn = func(_ context.Context, _, u, e string) {
+				publishCalled = true
+				publishedUsername = u
+				publishedEmail = e
+			}
+
+			got := handleMergedUserDelete(context.Background(), "test-key", userSfid, tc.v1Data)
+
+			if got {
+				t.Errorf("handleMergedUserDelete() = true, want false")
+			}
+			if publishCalled != tc.wantPublished {
+				t.Errorf("publishCalled = %v, want %v", publishCalled, tc.wantPublished)
+			}
+			if tc.wantPublished && publishedUsername != tc.wantUsername {
+				t.Errorf("published username = %q, want %q", publishedUsername, tc.wantUsername)
+			}
+			if tc.wantPublished && publishedEmail != tc.wantEmail {
+				t.Errorf("published email = %q, want %q", publishedEmail, tc.wantEmail)
+			}
+			if tc.wantDeleted != nil {
+				if len(deletedKeys) != len(tc.wantDeleted) {
+					t.Fatalf("deletedKeys = %v, want %v", deletedKeys, tc.wantDeleted)
+				}
+				for i, want := range tc.wantDeleted {
+					if deletedKeys[i] != want {
+						t.Errorf("deletedKeys[%d] = %q, want %q", i, deletedKeys[i], want)
+					}
+				}
+			} else if len(deletedKeys) != 0 {
+				t.Errorf("expected no index deletes, got %v", deletedKeys)
+			}
+		})
+	}
+}
+
+// TestGetCachedPrimaryEmailForUser verifies cache-first lookup with live fallback.
+func TestGetCachedPrimaryEmailForUser(t *testing.T) {
+	origRead := readMappingsKVValueFn
+	origLive := lookupPrimaryEmailForUserFn
+	t.Cleanup(func() {
+		readMappingsKVValueFn = origRead
+		lookupPrimaryEmailForUserFn = origLive
+	})
+
+	const userSfid = "003ABC"
+
+	t.Run("cache hit → no live lookup", func(t *testing.T) {
+		readMappingsKVValueFn = func(_ context.Context, key string) ([]byte, error) {
+			if key == kvKeyPrimaryEmailPrefix+userSfid {
+				return []byte("cached@example.com"), nil
+			}
+			return nil, errors.New("unexpected key")
+		}
+		lookupPrimaryEmailForUserFn = func(_ context.Context, _ string) (string, error) {
+			t.Fatal("live lookup should not run on cache hit")
+			return "", nil
+		}
+
+		email, err := getCachedPrimaryEmailForUser(context.Background(), userSfid)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if email != "cached@example.com" {
+			t.Fatalf("email = %q, want cached@example.com", email)
+		}
+	})
+
+	t.Run("cache miss → live lookup", func(t *testing.T) {
+		readMappingsKVValueFn = func(_ context.Context, _ string) ([]byte, error) {
+			return nil, errors.New("cache miss")
+		}
+		lookupPrimaryEmailForUserFn = func(_ context.Context, gotSfid string) (string, error) {
+			if gotSfid != userSfid {
+				t.Errorf("lookupPrimaryEmailForUserFn sfid = %q, want %q", gotSfid, userSfid)
+			}
+			return "live@example.com", nil
+		}
+
+		email, err := getCachedPrimaryEmailForUser(context.Background(), userSfid)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if email != "live@example.com" {
+			t.Fatalf("email = %q, want live@example.com", email)
+		}
+	})
+}
+
+func TestPublishUserDeletedEvent(t *testing.T) {
+	origLogger := logger
+	origPublish := natsPublishBytesFn
+	t.Cleanup(func() {
+		logger = origLogger
+		natsPublishBytesFn = origPublish
+	})
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("publishes normalized payload on subject", func(t *testing.T) {
+		var gotSubject string
+		var gotPayload userDeletedEvent
+		natsPublishBytesFn = func(subject string, data []byte) error {
+			gotSubject = subject
+			if err := json.Unmarshal(data, &gotPayload); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			return nil
+		}
+
+		publishUserDeletedEvent(context.Background(), "test-key", "alice", "alice@example.com")
+
+		if gotSubject != v1SyncHelperUserDeletedSubject {
+			t.Fatalf("subject = %q, want %q", gotSubject, v1SyncHelperUserDeletedSubject)
+		}
+		if gotPayload.Username != "alice" {
+			t.Fatalf("username = %q, want alice", gotPayload.Username)
+		}
+		if gotPayload.Email != "alice@example.com" {
+			t.Fatalf("email = %q, want alice@example.com", gotPayload.Email)
+		}
+	})
+
+	t.Run("publish error is swallowed", func(_ *testing.T) {
+		natsPublishBytesFn = func(_ string, _ []byte) error {
+			return errors.New("nats unavailable")
+		}
+		publishUserDeletedEvent(context.Background(), "test-key", "alice", "")
+	})
+}
+
+// TestClearPrimaryEmailCacheIfMatched verifies conditional cache cleanup on demote/delete paths.
+func TestClearPrimaryEmailCacheIfMatched(t *testing.T) {
+	origLogger := logger
+	origRead := readMappingsKVValueFn
+	origDelete := deleteIndexKeyFn
+	t.Cleanup(func() {
+		logger = origLogger
+		readMappingsKVValueFn = origRead
+		deleteIndexKeyFn = origDelete
+	})
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	const (
+		key      = "test-key"
+		userSfid = "003ABC"
+	)
+	cacheKey := kvKeyPrimaryEmailPrefix + userSfid
+
+	tests := []struct {
+		name       string
+		sfid       string
+		emailAddr  string
+		readResult []byte
+		readErr    error
+		wantDelete bool
+	}{
+		{
+			name:       "match → delete",
+			sfid:       userSfid,
+			emailAddr:  "a@example.com",
+			readResult: []byte("a@example.com"),
+			wantDelete: true,
+		},
+		{
+			name:       "case-insensitive match → delete",
+			sfid:       userSfid,
+			emailAddr:  "A@Example.COM",
+			readResult: []byte("a@example.com"),
+			wantDelete: true,
+		},
+		{
+			name:       "no match → skip",
+			sfid:       userSfid,
+			emailAddr:  "a@example.com",
+			readResult: []byte("b@example.com"),
+			wantDelete: false,
+		},
+		{
+			name:       "empty email → skip",
+			sfid:       userSfid,
+			emailAddr:  "",
+			readResult: []byte("a@example.com"),
+			wantDelete: false,
+		},
+		{
+			name:       "empty user sfid → skip",
+			sfid:       "",
+			emailAddr:  "a@example.com",
+			readResult: []byte("a@example.com"),
+			wantDelete: false,
+		},
+		{
+			name:       "read error → skip",
+			sfid:       userSfid,
+			emailAddr:  "a@example.com",
+			readErr:    errors.New("cache miss"),
+			wantDelete: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			readMappingsKVValueFn = func(_ context.Context, gotKey string) ([]byte, error) {
+				if tt.sfid == "" {
+					t.Fatal("read should not run when user sfid is empty")
+				}
+				if gotKey != cacheKey {
+					t.Fatalf("read key = %q, want %q", gotKey, cacheKey)
+				}
+				return tt.readResult, tt.readErr
+			}
+
+			var deletedKeys []string
+			deleteIndexKeyFn = func(_ context.Context, gotKey string) error {
+				deletedKeys = append(deletedKeys, gotKey)
+				return nil
+			}
+
+			clearPrimaryEmailCacheIfMatched(context.Background(), key, tt.sfid, tt.emailAddr)
+
+			if tt.wantDelete {
+				if len(deletedKeys) != 1 {
+					t.Fatalf("deletedKeys = %v, want one delete", deletedKeys)
+				}
+				if deletedKeys[0] != cacheKey {
+					t.Fatalf("deleted key = %q, want %q", deletedKeys[0], cacheKey)
+				}
+			} else if len(deletedKeys) != 0 {
+				t.Fatalf("expected no delete, got %v", deletedKeys)
+			}
+		})
+	}
+}
+
 // TestExtractEmailIndex covers the field extraction for the alternate_email reindex phase.
 func TestExtractEmailIndex(t *testing.T) {
 	tests := []struct {
@@ -376,12 +720,14 @@ func TestHandleAlternateEmailDelete(t *testing.T) {
 	origUnlink := unlinkEmailIdentityFn
 	origUpdateEmails := updateContactEmailMappingIndexFn
 	origDeleteIndex := deleteIndexKeyFn
+	origReadCache := readMappingsKVValueFn
 	t.Cleanup(func() {
 		logger = origLogger
 		lookupMergedUserFn = origLookup
 		unlinkEmailIdentityFn = origUnlink
 		updateContactEmailMappingIndexFn = origUpdateEmails
 		deleteIndexKeyFn = origDeleteIndex
+		readMappingsKVValueFn = origReadCache
 	})
 	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -390,6 +736,9 @@ func TestHandleAlternateEmailDelete(t *testing.T) {
 	// so return nil to simulate the normal successful case.
 	updateContactEmailMappingIndexFn = func(_ context.Context, _, _ string, _ bool) error { return nil }
 	deleteIndexKeyFn = func(_ context.Context, _ string) error { return nil }
+	readMappingsKVValueFn = func(_ context.Context, _ string) ([]byte, error) {
+		return nil, errors.New("cache miss")
+	}
 
 	const (
 		userSfid  = "003DEF"
