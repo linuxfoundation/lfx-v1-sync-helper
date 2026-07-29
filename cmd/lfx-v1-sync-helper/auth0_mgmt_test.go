@@ -26,7 +26,7 @@ func TestSyncProfileToAuth0Blocked(t *testing.T) {
 	cleanup := setupLinkTest(t, fake)
 	defer cleanup()
 
-	err := syncProfileToAuth0(context.Background(), "auth0|blocked", map[string]any{"title": "Engineer"})
+	_, err := syncProfileToAuth0(context.Background(), "auth0|blocked", map[string]any{"title": "Engineer"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -311,6 +311,14 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 
 	for _, c := range candidates {
 		if dryRun {
+			eligible, err := emailLinkEligibility(ctx, auth0UserID, c.email)
+			if err != nil {
+				return fmt.Errorf("checking link eligibility for %s: %w", c.email, err)
+			}
+			if !eligible {
+				result.emailsSkipped++
+				continue
+			}
 			logger.With(
 				"auth0_user_id", auth0UserID,
 				"email", c.email,
@@ -320,10 +328,15 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 			continue
 		}
 
-		if err := linkEmailIdentityFn(ctx, auth0UserID, c.email); err != nil {
+		linked, err := linkEmailIdentityFn(ctx, auth0UserID, c.email)
+		if err != nil {
 			return fmt.Errorf("linking email %s: %w", c.email, err)
 		}
-		result.emailsLinked++
+		if linked {
+			result.emailsLinked++
+		} else {
+			result.emailsSkipped++
+		}
 	}
 
 	return nil
@@ -446,16 +459,29 @@ func backfillProfileForUser(ctx context.Context, auth0UserID, username string, d
 	}
 
 	if dryRun {
+		blocked, err := isAuth0UserBlocked(ctx, auth0UserID)
+		if err != nil {
+			return fmt.Errorf("checking blocked status for %s: %w", auth0UserID, err)
+		}
+		if blocked {
+			result.usersSkipped++
+			return nil
+		}
 		logger.With("auth0_user_id", auth0UserID, "user_sfid", userSfid).
 			Info("[dry-run] would sync profile to Auth0 user_metadata")
 		result.usersUpdated++
 		return nil
 	}
 
-	if err := syncProfileToAuth0Fn(ctx, auth0UserID, v1Data); err != nil {
+	updated, err := syncProfileToAuth0Fn(ctx, auth0UserID, v1Data)
+	if err != nil {
 		return fmt.Errorf("syncing profile for %s: %w", auth0UserID, err)
 	}
-	result.usersUpdated++
+	if updated {
+		result.usersUpdated++
+	} else {
+		result.usersSkipped++
+	}
 	return nil
 }
 
@@ -487,14 +513,25 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 	if !exists {
 		logger.With("user_sfid", userSfid).Warn("v1 merged_user record not found, skipping profile sync")
 	} else if dryRun {
-		logger.With("auth0_user_id", auth0UserID, "user_sfid", userSfid).
-			Info("[dry-run] would sync profile to Auth0 user_metadata")
+		blocked, err := isAuth0UserBlocked(ctx, auth0UserID)
+		if err != nil {
+			return fmt.Errorf("checking blocked status for %s: %w", auth0UserID, err)
+		}
+		if blocked {
+			logger.With("auth0_user_id", auth0UserID).
+				Info("[dry-run] Auth0 user is blocked, would skip profile sync")
+		} else {
+			logger.With("auth0_user_id", auth0UserID, "user_sfid", userSfid).
+				Info("[dry-run] would sync profile to Auth0 user_metadata")
+		}
 	} else {
-		if err := syncProfileToAuth0Fn(ctx, auth0UserID, v1Data); err != nil {
+		if updated, err := syncProfileToAuth0Fn(ctx, auth0UserID, v1Data); err != nil {
 			logger.With("error", err, "auth0_user_id", auth0UserID).
 				Warn("profile sync failed")
-		} else {
+		} else if updated {
 			logger.With("auth0_user_id", auth0UserID).Info("profile synced")
+		} else {
+			logger.With("auth0_user_id", auth0UserID).Info("profile sync skipped (no-op)")
 		}
 	}
 
@@ -572,17 +609,31 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 
 	for _, c := range candidates {
 		if dryRun {
+			eligible, err := emailLinkEligibility(ctx, auth0UserID, c.email)
+			if err != nil {
+				logger.With("error", err, "auth0_user_id", auth0UserID, "email", c.email).
+					Warn("failed to check link eligibility, skipping")
+				continue
+			}
+			if !eligible {
+				logger.With("auth0_user_id", auth0UserID, "email", c.email).
+					Info("[dry-run] email link not eligible, would skip")
+				continue
+			}
 			logger.With("auth0_user_id", auth0UserID, "email", c.email).
 				Info("[dry-run] would link alternate email to Auth0 user")
 			continue
 		}
 
-		if err := linkEmailIdentityFn(ctx, auth0UserID, c.email); err != nil {
+		if linked, err := linkEmailIdentityFn(ctx, auth0UserID, c.email); err != nil {
 			logger.With("error", err, "auth0_user_id", auth0UserID, "email", c.email).
 				Warn("failed to link email, skipping")
-		} else {
+		} else if linked {
 			logger.With("auth0_user_id", auth0UserID, "email", c.email).
 				Info("linked email identity")
+		} else {
+			logger.With("auth0_user_id", auth0UserID, "email", c.email).
+				Info("email link skipped (no-op)")
 		}
 	}
 

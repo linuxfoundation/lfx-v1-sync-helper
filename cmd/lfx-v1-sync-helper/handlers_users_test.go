@@ -138,9 +138,9 @@ func TestSyncMergedUserProfile(t *testing.T) {
 			cfg = &Config{}
 
 			var called bool
-			syncProfileToAuth0Fn = func(_ context.Context, _ string, _ map[string]any) error {
+			syncProfileToAuth0Fn = func(_ context.Context, _ string, _ map[string]any) (bool, error) {
 				called = true
-				return tt.syncErr
+				return tt.syncErr == nil, tt.syncErr
 			}
 
 			gotNack := syncMergedUserProfile(context.Background(), "salesforce-merged_user.sfid123", "auth0|alice", map[string]any{"firstname": "Alice"})
@@ -243,12 +243,12 @@ func TestLinkAlternateEmailToAuth0(t *testing.T) {
 			}
 
 			var linkCalls []string
-			linkEmailIdentityFn = func(_ context.Context, gotAuth0ID, gotEmail string) error {
+			linkEmailIdentityFn = func(_ context.Context, gotAuth0ID, gotEmail string) (bool, error) {
 				if gotAuth0ID != expectedAuth0ID {
 					t.Errorf("linkEmailIdentity called with auth0 id %q, want %q", gotAuth0ID, expectedAuth0ID)
 				}
 				linkCalls = append(linkCalls, gotEmail)
-				return tt.linkErr
+				return tt.linkErr == nil, tt.linkErr
 			}
 
 			gotRetry := linkAlternateEmailToAuth0(context.Background(), "test-key", userSfid, email)

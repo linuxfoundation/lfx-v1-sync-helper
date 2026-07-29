@@ -163,14 +163,28 @@ func luceneQuoteEscape(s string) string {
 	return s
 }
 
+// isAuth0UserBlocked reads the given Auth0 user and reports whether the
+// account is blocked. It is shared by syncProfileToAuth0/linkEmailIdentity
+// and their dry-run backfill counterparts, so that dry-run previews classify
+// blocked accounts as skipped exactly like the real write path does.
+func isAuth0UserBlocked(ctx context.Context, auth0UserID string) (bool, error) {
+	user, err := auth0Users.Read(ctx, auth0UserID)
+	if err != nil {
+		return false, fmt.Errorf("failed to read Auth0 user %s: %w", auth0UserID, err)
+	}
+	return user.GetBlocked(), nil
+}
+
 // syncProfileToAuth0 maps v1 merged_user fields to Auth0 user_metadata and
 // pushes the update via the Management API. It reads current user_metadata first
-// so that no-op updates can be detected and skipped.
-func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[string]any) error {
+// so that no-op updates can be detected and skipped. The returned bool is true
+// only when user_metadata was actually written, so callers (in particular
+// backfill summaries) can distinguish an update from a no-op skip.
+func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[string]any) (bool, error) {
 	// Read the current Auth0 user to get existing user_metadata.
 	existing, err := auth0Users.Read(ctx, auth0UserID)
 	if err != nil {
-		return fmt.Errorf("failed to read Auth0 user %s: %w", auth0UserID, err)
+		return false, fmt.Errorf("failed to read Auth0 user %s: %w", auth0UserID, err)
 	}
 
 	// Blocked accounts are treated as inactive/deprovisioned: don't push new
@@ -178,7 +192,7 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[stri
 	if existing.GetBlocked() {
 		logger.With("auth0_user_id", auth0UserID).
 			WarnContext(ctx, "Auth0 user is blocked, skipping profile sync")
-		return nil
+		return false, nil
 	}
 
 	// Start from existing user_metadata (or empty map) for diffing.
@@ -196,7 +210,7 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[stri
 	if accountID, ok := v1Data["accountid"].(string); ok && accountID != "" {
 		org, orgErr := lookupV1Org(ctx, accountID)
 		if orgErr != nil {
-			return fmt.Errorf("failed to resolve v1 org %s: %w", accountID, orgErr)
+			return false, fmt.Errorf("failed to resolve v1 org %s: %w", accountID, orgErr)
 		}
 		if org != nil && org.Name != "" {
 			orgName = org.Name
@@ -208,7 +222,7 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[stri
 	if len(metadata) == 0 {
 		logger.With("auth0_user_id", auth0UserID).
 			DebugContext(ctx, "no profile field changes detected, skipping Auth0 update")
-		return nil
+		return false, nil
 	}
 
 	// Push the updated user_metadata to Auth0.
@@ -216,22 +230,25 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[stri
 		UserMetadata: &metadata,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to update Auth0 user %s: %w", auth0UserID, err)
+		return false, fmt.Errorf("failed to update Auth0 user %s: %w", auth0UserID, err)
 	}
 
 	logger.With("auth0_user_id", auth0UserID).
 		InfoContext(ctx, "synced v1 profile to Auth0 user_metadata")
-	return nil
+	return true, nil
 }
 
-// linkEmailIdentity creates an email connection user in Auth0 and links it to the
-// primary account. This is the two-step M2M flow: create secondary user, then link.
-// It is idempotent: if the email is already linked to this user, it returns nil.
-func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error {
-	// Check if the email is already linked to this user.
+// emailLinkEligibility reads the primary Auth0 user and reports whether
+// linkEmailIdentity would actually attempt to link the given email: it is
+// false when the account is blocked or when the email matches the primary
+// account's own top-level email (redundant link). It is shared by
+// linkEmailIdentity and its dry-run backfill callers, so that dry-run
+// previews classify these no-op cases as skipped exactly like the real write
+// path does.
+func emailLinkEligibility(ctx context.Context, primaryAuth0ID, email string) (eligible bool, err error) {
 	primaryUser, err := auth0Users.Read(ctx, primaryAuth0ID)
 	if err != nil {
-		return fmt.Errorf("failed to read primary user %s: %w", primaryAuth0ID, err)
+		return false, fmt.Errorf("failed to read primary user %s: %w", primaryAuth0ID, err)
 	}
 
 	// Blocked accounts are treated as inactive/deprovisioned: don't link new
@@ -239,7 +256,7 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 	if primaryUser.GetBlocked() {
 		logger.With("auth0_user_id", primaryAuth0ID, "email", email).
 			WarnContext(ctx, "Auth0 user is blocked, skipping email link")
-		return nil
+		return false, nil
 	}
 
 	// If the email matches the primary account's own login email, there is
@@ -249,7 +266,30 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 	if strings.EqualFold(primaryUser.GetEmail(), email) {
 		logger.With("auth0_user_id", primaryAuth0ID, "email", email).
 			WarnContext(ctx, "email matches primary account's own email, skipping link")
-		return nil
+		return false, nil
+	}
+
+	return true, nil
+}
+
+// linkEmailIdentity creates an email connection user in Auth0 and links it to the
+// primary account. This is the two-step M2M flow: create secondary user, then link.
+// It is idempotent: if the email is already linked to this user, it returns
+// (true, nil). The returned bool is false only for the no-op skip cases
+// (blocked account, or email matching the primary account's own email).
+func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) (bool, error) {
+	eligible, err := emailLinkEligibility(ctx, primaryAuth0ID, email)
+	if err != nil {
+		return false, err
+	}
+	if !eligible {
+		return false, nil
+	}
+
+	// Check if the email is already linked to this user.
+	primaryUser, err := auth0Users.Read(ctx, primaryAuth0ID)
+	if err != nil {
+		return false, fmt.Errorf("failed to read primary user %s: %w", primaryAuth0ID, err)
 	}
 
 	for _, identity := range primaryUser.Identities {
@@ -257,7 +297,7 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 			if profileEmail, _ := identity.GetProfileData()["email"].(string); strings.EqualFold(profileEmail, email) {
 				logger.With("auth0_user_id", primaryAuth0ID, "email", email).
 					DebugContext(ctx, "email already linked to user, skipping")
-				return nil
+				return true, nil
 			}
 		}
 	}
@@ -272,7 +312,7 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 	query := fmt.Sprintf(`identities.profileData.email:"%s" AND identities.provider:"email"`, luceneQuoteEscape(email))
 	searchResult, err := auth0Users.Search(ctx, management.Query(query))
 	if err != nil {
-		return fmt.Errorf("failed to search Auth0 users by linked email %s: %w", email, err)
+		return false, fmt.Errorf("failed to search Auth0 users by linked email %s: %w", email, err)
 	}
 	for _, u := range searchResult.Users {
 		// The Lucene query is loose (matches any identity with this email OR
@@ -291,7 +331,7 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 			// idempotency is satisfied either way.
 			logger.With("auth0_user_id", primaryAuth0ID, "email", email, "other_user", u.GetID()).
 				WarnContext(ctx, "email already linked as a secondary identity, aborting link")
-			return nil
+			return true, nil
 		}
 	}
 
@@ -310,7 +350,7 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 			// Find the existing email user to get its ID for linking.
 			users, listErr := auth0Users.ListByEmail(ctx, email)
 			if listErr != nil {
-				return fmt.Errorf("failed to find existing email user for %s: %w", email, listErr)
+				return false, fmt.Errorf("failed to find existing email user for %s: %w", email, listErr)
 			}
 			var found bool
 			for _, u := range users {
@@ -321,10 +361,10 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 				}
 			}
 			if !found {
-				return fmt.Errorf("email user conflict for %s but could not find existing email| user", email)
+				return false, fmt.Errorf("email user conflict for %s but could not find existing email| user", email)
 			}
 		} else {
-			return fmt.Errorf("failed to create email user for %s: %w", email, err)
+			return false, fmt.Errorf("failed to create email user for %s: %w", email, err)
 		}
 	}
 
@@ -345,14 +385,14 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error 
 		if errors.As(err, &mgmtErr) && mgmtErr.Status() == http.StatusConflict {
 			logger.With("auth0_user_id", primaryAuth0ID, "email", email).
 				WarnContext(ctx, "email identity already linked (conflict on link call)")
-			return nil
+			return true, nil
 		}
-		return fmt.Errorf("failed to link email %s to user %s: %w", email, primaryAuth0ID, err)
+		return false, fmt.Errorf("failed to link email %s to user %s: %w", email, primaryAuth0ID, err)
 	}
 
 	logger.With("auth0_user_id", primaryAuth0ID, "email", email).
 		InfoContext(ctx, "linked email identity to Auth0 user")
-	return nil
+	return true, nil
 }
 
 // unlinkEmailIdentity removes a linked email identity from the primary Auth0 account.

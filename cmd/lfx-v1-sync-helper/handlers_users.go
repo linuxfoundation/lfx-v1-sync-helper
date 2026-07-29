@@ -272,7 +272,7 @@ func publishUserDeletedEvent(ctx context.Context, key, username, email string) {
 func syncMergedUserProfile(ctx context.Context, key, auth0UserID string, v1Data map[string]any) bool {
 	syncCtx, cancel := context.WithTimeout(ctx, auth0CallTimeout)
 	defer cancel()
-	if err := syncProfileToAuth0Fn(syncCtx, auth0UserID, v1Data); err != nil {
+	if _, err := syncProfileToAuth0Fn(syncCtx, auth0UserID, v1Data); err != nil {
 		if isRetryableAuth0Error(err) {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
 				WarnContext(ctx, "retryable Auth0 error during profile sync, NACKing for redelivery")
@@ -524,7 +524,7 @@ func linkAlternateEmailToAuth0(ctx context.Context, key, userSfid, email string)
 	}
 	auth0UserID := mapUsernameToAuthSub(v1User.Username)
 
-	if err := linkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
+	if _, err := linkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
 		if isRetryableAuth0Error(err) {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
 				WarnContext(ctx, "retryable Auth0 error during link, NACKing for redelivery")
