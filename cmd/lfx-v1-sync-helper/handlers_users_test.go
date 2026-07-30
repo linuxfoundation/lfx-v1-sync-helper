@@ -150,7 +150,7 @@ func TestSyncMergedUserProfile(t *testing.T) {
 			cfg = &Config{}
 
 			var called bool
-			syncProfileToAuth0Fn = func(_ context.Context, _ string, _ *management.User, _ map[string]any) (bool, error) {
+			syncProfileToAuth0Fn = func(_ context.Context, _ string, _ *management.User, _ map[string]any, _ bool) (bool, error) {
 				called = true
 				return tt.syncErr == nil, tt.syncErr
 			}

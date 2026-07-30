@@ -473,18 +473,7 @@ func backfillProfileForUser(ctx context.Context, auth0UserID, username string, d
 		return fmt.Errorf("fetching Auth0 user %s: %w", auth0UserID, err)
 	}
 
-	if dryRun {
-		if auth0User.GetBlocked() {
-			result.usersSkipped++
-			return nil
-		}
-		logger.With("auth0_user_id", auth0UserID, "user_sfid", userSfid).
-			Info("[dry-run] would sync profile to Auth0 user_metadata")
-		result.usersUpdated++
-		return nil
-	}
-
-	updated, err := syncProfileToAuth0Fn(ctx, auth0UserID, auth0User, v1Data)
+	updated, err := syncProfileToAuth0Fn(ctx, auth0UserID, auth0User, v1Data, dryRun)
 	if err != nil {
 		return fmt.Errorf("syncing profile for %s: %w", auth0UserID, err)
 	}
@@ -529,20 +518,18 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 	}
 	if !exists {
 		logger.With("user_sfid", userSfid).Warn("v1 merged_user record not found, skipping profile sync")
-	} else if dryRun {
-		if auth0User.GetBlocked() {
-			logger.With("auth0_user_id", auth0UserID).
-				Info("[dry-run] Auth0 user is blocked, would skip profile sync")
+	} else if updated, err := syncProfileToAuth0Fn(ctx, auth0UserID, auth0User, v1Data, dryRun); err != nil {
+		logger.With("error", err, "auth0_user_id", auth0UserID).
+			Warn("profile sync failed")
+	} else if updated {
+		if dryRun {
+			logger.With("auth0_user_id", auth0UserID).Info("[dry-run] would sync profile")
 		} else {
-			logger.With("auth0_user_id", auth0UserID, "user_sfid", userSfid).
-				Info("[dry-run] would sync profile to Auth0 user_metadata")
+			logger.With("auth0_user_id", auth0UserID).Info("profile synced")
 		}
 	} else {
-		if updated, err := syncProfileToAuth0Fn(ctx, auth0UserID, auth0User, v1Data); err != nil {
-			logger.With("error", err, "auth0_user_id", auth0UserID).
-				Warn("profile sync failed")
-		} else if updated {
-			logger.With("auth0_user_id", auth0UserID).Info("profile synced")
+		if dryRun {
+			logger.With("auth0_user_id", auth0UserID).Info("[dry-run] profile sync would be skipped (no-op)")
 		} else {
 			logger.With("auth0_user_id", auth0UserID).Info("profile sync skipped (no-op)")
 		}

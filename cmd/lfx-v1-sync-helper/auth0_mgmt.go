@@ -178,12 +178,14 @@ func fetchAuth0User(ctx context.Context, auth0UserID string) (*management.User, 
 // pushes the update via the Management API. The caller must pass the
 // pre-fetched Auth0 user so that multiple operations on the same user share a
 // single Management API read. The returned bool is true only when
-// user_metadata was actually written, so callers (in particular backfill
-// summaries) can distinguish an update from a no-op skip.
-func syncProfileToAuth0(ctx context.Context, auth0UserID string, existing *management.User, v1Data map[string]any) (bool, error) {
+// user_metadata was actually written (or, in dry-run mode, would have been
+// written), so callers (in particular backfill summaries) can distinguish an
+// update from a no-op skip. When dryRun is true, all eligibility and diff
+// checks still run but the Management API write is skipped.
+func syncProfileToAuth0(ctx context.Context, auth0UserID string, primaryUser *management.User, v1Data map[string]any, dryRun bool) (bool, error) {
 	// Blocked accounts are treated as inactive/deprovisioned: don't push new
 	// profile data to them. This is a no-op skip, not an error.
-	if existing.GetBlocked() {
+	if primaryUser.GetBlocked() {
 		logger.With("auth0_user_id", auth0UserID).
 			WarnContext(ctx, "Auth0 user is blocked, skipping profile sync")
 		return false, nil
@@ -191,8 +193,8 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, existing *manag
 
 	// Start from existing user_metadata (or empty map) for diffing.
 	existingMetadata := make(map[string]interface{})
-	if existing.UserMetadata != nil {
-		for k, v := range *existing.UserMetadata {
+	if primaryUser.UserMetadata != nil {
+		for k, v := range *primaryUser.UserMetadata {
 			existingMetadata[k] = v
 		}
 	}
@@ -217,6 +219,12 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, existing *manag
 		logger.With("auth0_user_id", auth0UserID).
 			DebugContext(ctx, "no profile field changes detected, skipping Auth0 update")
 		return false, nil
+	}
+
+	if dryRun {
+		logger.With("auth0_user_id", auth0UserID).
+			InfoContext(ctx, "[dry-run] would sync profile to Auth0 user_metadata")
+		return true, nil
 	}
 
 	// Push the updated user_metadata to Auth0.

@@ -285,7 +285,7 @@ func syncMergedUserProfile(ctx context.Context, key, auth0UserID string, v1Data 
 		return false
 	}
 
-	if _, err := syncProfileToAuth0Fn(syncCtx, auth0UserID, auth0User, v1Data); err != nil {
+	if _, err := syncProfileToAuth0Fn(syncCtx, auth0UserID, auth0User, v1Data, false); err != nil {
 		if isRetryableAuth0Error(err) {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
 				WarnContext(ctx, "retryable Auth0 error during profile sync, NACKing for redelivery")
