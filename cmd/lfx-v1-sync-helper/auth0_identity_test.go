@@ -154,9 +154,12 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
+		linked, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if !linked {
+			t.Error("expected linked=true for happy path")
 		}
 		if len(fake.created) != 1 {
 			t.Fatalf("expected 1 create call, got %d", len(fake.created))
@@ -183,9 +186,12 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
+		linked, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if !linked {
+			t.Error("expected linked=true for already-linked idempotent case")
 		}
 		if len(fake.created) != 0 {
 			t.Errorf("expected no create calls, got %d", len(fake.created))
@@ -207,9 +213,12 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
+		linked, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if linked {
+			t.Error("expected linked=false when email matches primary")
 		}
 		if len(fake.created) != 0 {
 			t.Errorf("expected no create calls, got %d", len(fake.created))
@@ -231,9 +240,12 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
+		linked, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if linked {
+			t.Error("expected linked=false when email matches primary (case-insensitive)")
 		}
 		if len(fake.created) != 0 {
 			t.Errorf("expected no create calls, got %d", len(fake.created))
@@ -255,9 +267,12 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
+		linked, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if linked {
+			t.Error("expected linked=false for blocked account")
 		}
 		if len(fake.created) != 0 {
 			t.Errorf("expected no create calls, got %d", len(fake.created))
@@ -281,9 +296,12 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
+		linked, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if !linked {
+			t.Error("expected linked=true for already-linked case-insensitive match")
 		}
 		if len(fake.created) != 0 {
 			t.Errorf("expected no create calls for case-insensitive match")
@@ -309,9 +327,12 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
+		linked, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if !linked {
+			t.Error("expected linked=true when email is already linked (idempotent)")
 		}
 		if len(fake.created) != 0 {
 			t.Errorf("should not create when email is linked to another user")
@@ -346,9 +367,12 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
+		linked, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if !linked {
+			t.Error("expected linked=true when only non-email identities match")
 		}
 		if len(fake.created) != 1 {
 			t.Errorf("should proceed to create when only non-email identities match, got %d creates", len(fake.created))
@@ -372,9 +396,12 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
+		linked, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if !linked {
+			t.Error("expected linked=true for case-insensitive collision (idempotent)")
 		}
 		if len(fake.created) != 0 {
 			t.Errorf("case-insensitive collision should still abort the link")
@@ -391,8 +418,7 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
-		if err == nil {
+		if _, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com"); err == nil {
 			t.Fatal("expected Lucene search error to propagate")
 		}
 	})
@@ -412,9 +438,12 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
+		linked, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if !linked {
+			t.Error("expected linked=true for 409+resolve path")
 		}
 		if len(fake.linked) != 1 {
 			t.Fatalf("expected 1 link call, got %d", len(fake.linked))
@@ -437,8 +466,7 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
-		if err == nil {
+		if _, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com"); err == nil {
 			t.Fatal("expected error when 409 but no email| user found")
 		}
 	})
@@ -454,9 +482,12 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
+		linked, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
 		if err != nil {
 			t.Fatalf("link 409 should be treated as success, got: %v", err)
+		}
+		if !linked {
+			t.Error("expected linked=true for link 409 idempotent case")
 		}
 	})
 
@@ -471,9 +502,12 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
+		linked, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
 		if err != nil {
 			t.Fatalf("wrapped 409 should unwrap and be treated as success, got: %v", err)
+		}
+		if !linked {
+			t.Error("expected linked=true for wrapped link 409 idempotent case")
 		}
 	})
 
@@ -492,9 +526,12 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
+		linked, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
 		if err != nil {
 			t.Fatalf("wrapped create 409 should unwrap and proceed to link, got: %v", err)
+		}
+		if !linked {
+			t.Error("expected linked=true for wrapped create 409 path")
 		}
 		if len(fake.linked) != 1 {
 			t.Fatalf("expected 1 link call, got %d", len(fake.linked))
@@ -512,8 +549,7 @@ func TestLinkEmailIdentity(t *testing.T) {
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
-		_, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com")
-		if err == nil {
+		if _, err := linkEmailIdentity(context.Background(), fake.users["auth0|primary"], "alt@example.com"); err == nil {
 			t.Fatal("expected error to propagate")
 		}
 	})

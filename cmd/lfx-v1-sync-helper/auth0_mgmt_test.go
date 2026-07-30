@@ -26,9 +26,12 @@ func TestSyncProfileToAuth0Blocked(t *testing.T) {
 	cleanup := setupLinkTest(t, fake)
 	defer cleanup()
 
-	_, err := syncProfileToAuth0(context.Background(), "auth0|blocked", fake.users["auth0|blocked"], map[string]any{"title": "Engineer"})
+	updated, err := syncProfileToAuth0(context.Background(), "auth0|blocked", fake.users["auth0|blocked"], map[string]any{"title": "Engineer"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if updated {
+		t.Error("expected updated=false for blocked user")
 	}
 	if len(fake.updated) != 0 {
 		t.Errorf("expected no update calls, got %d", len(fake.updated))
