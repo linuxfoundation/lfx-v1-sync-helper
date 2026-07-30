@@ -270,6 +270,12 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 		email     string
 	}
 	var candidates []emailCandidate
+	// Deduplicate candidates by email address (case-insensitive). v1
+	// enforces email uniqueness per user, so duplicates are not expected,
+	// but deduplicating here avoids a wasted Auth0 Search call if two
+	// SFIDs somehow resolve to the same address — the pre-fetched user's
+	// identity list would be stale after the first successful link.
+	seenEmails := make(map[string]bool)
 	qualifying := 0
 	sawPrimary := false
 	for _, emailSfid := range emailSfids {
@@ -287,6 +293,12 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 			result.emailsSkipped++
 			continue
 		}
+		lower := strings.ToLower(email)
+		if seenEmails[lower] {
+			result.emailsSkipped++
+			continue
+		}
+		seenEmails[lower] = true
 		candidates = append(candidates, emailCandidate{emailSfid: emailSfid, email: email})
 	}
 
@@ -313,11 +325,7 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 
 	for _, c := range candidates {
 		if dryRun {
-			eligible, err := emailLinkEligibility(ctx, auth0User, c.email)
-			if err != nil {
-				return fmt.Errorf("checking link eligibility for %s: %w", c.email, err)
-			}
-			if !eligible {
+			if !emailLinkEligibility(ctx, auth0User, c.email) {
 				result.emailsSkipped++
 				continue
 			}
@@ -569,6 +577,12 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 		email     string
 	}
 	var candidates []emailCandidate
+	// Deduplicate candidates by email address (case-insensitive). v1
+	// enforces email uniqueness per user, so duplicates are not expected,
+	// but deduplicating here avoids a wasted Auth0 Search call if two
+	// SFIDs somehow resolve to the same address — the pre-fetched user's
+	// identity list would be stale after the first successful link.
+	seenEmails := make(map[string]bool)
 	qualifying := 0
 	sawPrimary := false
 	for _, emailSfid := range emailSfids {
@@ -598,6 +612,11 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 		if email == "" {
 			continue
 		}
+		lower := strings.ToLower(email)
+		if seenEmails[lower] {
+			continue
+		}
+		seenEmails[lower] = true
 		candidates = append(candidates, emailCandidate{emailSfid: emailSfid, email: email})
 	}
 
@@ -614,13 +633,7 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 
 	for _, c := range candidates {
 		if dryRun {
-			eligible, err := emailLinkEligibility(ctx, auth0User, c.email)
-			if err != nil {
-				logger.With("error", err, "auth0_user_id", auth0UserID, "email", c.email).
-					Warn("failed to check link eligibility, skipping")
-				continue
-			}
-			if !eligible {
+			if !emailLinkEligibility(ctx, auth0User, c.email) {
 				logger.With("auth0_user_id", auth0UserID, "email", c.email).
 					Info("[dry-run] email link not eligible, would skip")
 				continue

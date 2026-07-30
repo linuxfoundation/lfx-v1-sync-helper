@@ -235,7 +235,7 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, existing *manag
 // to link the given email to the pre-fetched primary Auth0 user: it returns
 // false when the account is blocked or when the email matches the primary
 // account's own top-level email (redundant link).
-func emailLinkEligibility(ctx context.Context, primaryUser *management.User, email string) (eligible bool, err error) {
+func emailLinkEligibility(ctx context.Context, primaryUser *management.User, email string) bool {
 	primaryAuth0ID := primaryUser.GetID()
 
 	// Blocked accounts are treated as inactive/deprovisioned: don't link new
@@ -243,7 +243,7 @@ func emailLinkEligibility(ctx context.Context, primaryUser *management.User, ema
 	if primaryUser.GetBlocked() {
 		logger.With("auth0_user_id", primaryAuth0ID, "email", email).
 			WarnContext(ctx, "Auth0 user is blocked, skipping email link")
-		return false, nil
+		return false
 	}
 
 	// If the email matches the primary account's own login email, there is
@@ -253,10 +253,10 @@ func emailLinkEligibility(ctx context.Context, primaryUser *management.User, ema
 	if strings.EqualFold(primaryUser.GetEmail(), email) {
 		logger.With("auth0_user_id", primaryAuth0ID, "email", email).
 			WarnContext(ctx, "email matches primary account's own email, skipping link")
-		return false, nil
+		return false
 	}
 
-	return true, nil
+	return true
 }
 
 // linkEmailIdentity creates an email connection user in Auth0 and links it to the
@@ -269,10 +269,7 @@ func emailLinkEligibility(ctx context.Context, primaryUser *management.User, ema
 func linkEmailIdentity(ctx context.Context, primaryUser *management.User, email string) (bool, error) {
 	primaryAuth0ID := primaryUser.GetID()
 
-	eligible, err := emailLinkEligibility(ctx, primaryUser, email)
-	if err != nil {
-		return false, err
-	}
+	eligible := emailLinkEligibility(ctx, primaryUser, email)
 	if !eligible {
 		return false, nil
 	}
