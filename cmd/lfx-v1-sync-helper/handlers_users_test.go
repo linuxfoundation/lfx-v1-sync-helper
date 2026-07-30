@@ -11,6 +11,9 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+
+	"github.com/auth0/go-auth0"
+	"github.com/auth0/go-auth0/management"
 )
 
 func TestToKVKey(t *testing.T) {
@@ -99,13 +102,22 @@ func TestSyncMergedUserProfile(t *testing.T) {
 	origLogger := logger
 	origCfg := cfg
 	origSync := syncProfileToAuth0Fn
+	origAuth0Users := auth0Users
 	t.Cleanup(func() {
 		logger = origLogger
 		cfg = origCfg
 		syncProfileToAuth0Fn = origSync
+		auth0Users = origAuth0Users
 	})
 
 	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Set up a fake auth0Users so fetchAuth0User succeeds.
+	auth0Users = &fakeAuth0Users{
+		users: map[string]*management.User{
+			"auth0|alice": {ID: auth0.String("auth0|alice")},
+		},
+	}
 
 	tests := []struct {
 		name       string
@@ -138,7 +150,7 @@ func TestSyncMergedUserProfile(t *testing.T) {
 			cfg = &Config{}
 
 			var called bool
-			syncProfileToAuth0Fn = func(_ context.Context, _ string, _ map[string]any) (bool, error) {
+			syncProfileToAuth0Fn = func(_ context.Context, _ string, _ *management.User, _ map[string]any) (bool, error) {
 				called = true
 				return tt.syncErr == nil, tt.syncErr
 			}
@@ -164,10 +176,12 @@ func TestLinkAlternateEmailToAuth0(t *testing.T) {
 	origLogger := logger
 	origLookup := lookupMergedUserFn
 	origLink := linkEmailIdentityFn
+	origAuth0Users := auth0Users
 	t.Cleanup(func() {
 		logger = origLogger
 		lookupMergedUserFn = origLookup
 		linkEmailIdentityFn = origLink
+		auth0Users = origAuth0Users
 	})
 	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -180,6 +194,13 @@ func TestLinkAlternateEmailToAuth0(t *testing.T) {
 	retryable429 := &fakeMgmtErr{status: 429, msg: "rate limited"}
 	retryable503 := &fakeMgmtErr{status: 503, msg: "unavailable"}
 	permanent400 := &fakeMgmtErr{status: 400, msg: "bad request"}
+
+	// Set up a fake auth0Users so fetchAuth0User succeeds.
+	auth0Users = &fakeAuth0Users{
+		users: map[string]*management.User{
+			expectedAuth0ID: {ID: auth0.String(expectedAuth0ID)},
+		},
+	}
 
 	tests := []struct {
 		name       string
@@ -243,9 +264,9 @@ func TestLinkAlternateEmailToAuth0(t *testing.T) {
 			}
 
 			var linkCalls []string
-			linkEmailIdentityFn = func(_ context.Context, gotAuth0ID, gotEmail string) (bool, error) {
-				if gotAuth0ID != expectedAuth0ID {
-					t.Errorf("linkEmailIdentity called with auth0 id %q, want %q", gotAuth0ID, expectedAuth0ID)
+			linkEmailIdentityFn = func(_ context.Context, gotUser *management.User, gotEmail string) (bool, error) {
+				if gotUser.GetID() != expectedAuth0ID {
+					t.Errorf("linkEmailIdentity called with auth0 id %q, want %q", gotUser.GetID(), expectedAuth0ID)
 				}
 				linkCalls = append(linkCalls, gotEmail)
 				return tt.linkErr == nil, tt.linkErr
@@ -721,6 +742,7 @@ func TestHandleAlternateEmailDelete(t *testing.T) {
 	origUpdateEmails := updateContactEmailMappingIndexFn
 	origDeleteIndex := deleteIndexKeyFn
 	origReadCache := readMappingsKVValueFn
+	origAuth0Users := auth0Users
 	t.Cleanup(func() {
 		logger = origLogger
 		lookupMergedUserFn = origLookup
@@ -728,6 +750,7 @@ func TestHandleAlternateEmailDelete(t *testing.T) {
 		updateContactEmailMappingIndexFn = origUpdateEmails
 		deleteIndexKeyFn = origDeleteIndex
 		readMappingsKVValueFn = origReadCache
+		auth0Users = origAuth0Users
 	})
 	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -749,6 +772,13 @@ func TestHandleAlternateEmailDelete(t *testing.T) {
 	expectedAuth0ID := mapUsernameToAuthSub(username)
 	retryable429 := &fakeMgmtErr{status: 429, msg: "rate limited"}
 	permanent400 := &fakeMgmtErr{status: 400, msg: "bad request"}
+
+	// Set up a fake auth0Users so fetchAuth0User succeeds.
+	auth0Users = &fakeAuth0Users{
+		users: map[string]*management.User{
+			expectedAuth0ID: {ID: auth0.String(expectedAuth0ID)},
+		},
+	}
 
 	type tcase struct {
 		name       string
@@ -843,9 +873,9 @@ func TestHandleAlternateEmailDelete(t *testing.T) {
 				return tt.userResult, tt.userErr
 			}
 			var unlinkCalls []string
-			unlinkEmailIdentityFn = func(_ context.Context, gotAuth0ID, gotEmail string) error {
-				if gotAuth0ID != expectedAuth0ID {
-					t.Errorf("unlinkEmailIdentity called with auth0 id %q, want %q", gotAuth0ID, expectedAuth0ID)
+			unlinkEmailIdentityFn = func(_ context.Context, gotUser *management.User, gotEmail string) error {
+				if gotUser.GetID() != expectedAuth0ID {
+					t.Errorf("unlinkEmailIdentity called with auth0 id %q, want %q", gotUser.GetID(), expectedAuth0ID)
 				}
 				unlinkCalls = append(unlinkCalls, gotEmail)
 				return tt.unlinkErr

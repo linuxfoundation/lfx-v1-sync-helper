@@ -163,30 +163,24 @@ func luceneQuoteEscape(s string) string {
 	return s
 }
 
-// isAuth0UserBlocked reads the given Auth0 user and reports whether the
-// account is blocked. It is shared by syncProfileToAuth0/linkEmailIdentity
-// and their dry-run backfill counterparts, so that dry-run previews classify
-// blocked accounts as skipped exactly like the real write path does.
-func isAuth0UserBlocked(ctx context.Context, auth0UserID string) (bool, error) {
+// fetchAuth0User reads a single Auth0 user by ID. Callers that need multiple
+// checks on the same user (blocked, identities, metadata) should call this
+// once and pass the result through, avoiding redundant Management API reads.
+func fetchAuth0User(ctx context.Context, auth0UserID string) (*management.User, error) {
 	user, err := auth0Users.Read(ctx, auth0UserID)
 	if err != nil {
-		return false, fmt.Errorf("failed to read Auth0 user %s: %w", auth0UserID, err)
+		return nil, fmt.Errorf("failed to read Auth0 user %s: %w", auth0UserID, err)
 	}
-	return user.GetBlocked(), nil
+	return user, nil
 }
 
 // syncProfileToAuth0 maps v1 merged_user fields to Auth0 user_metadata and
-// pushes the update via the Management API. It reads current user_metadata first
-// so that no-op updates can be detected and skipped. The returned bool is true
-// only when user_metadata was actually written, so callers (in particular
-// backfill summaries) can distinguish an update from a no-op skip.
-func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[string]any) (bool, error) {
-	// Read the current Auth0 user to get existing user_metadata.
-	existing, err := auth0Users.Read(ctx, auth0UserID)
-	if err != nil {
-		return false, fmt.Errorf("failed to read Auth0 user %s: %w", auth0UserID, err)
-	}
-
+// pushes the update via the Management API. The caller must pass the
+// pre-fetched Auth0 user so that multiple operations on the same user share a
+// single Management API read. The returned bool is true only when
+// user_metadata was actually written, so callers (in particular backfill
+// summaries) can distinguish an update from a no-op skip.
+func syncProfileToAuth0(ctx context.Context, auth0UserID string, existing *management.User, v1Data map[string]any) (bool, error) {
 	// Blocked accounts are treated as inactive/deprovisioned: don't push new
 	// profile data to them. This is a no-op skip, not an error.
 	if existing.GetBlocked() {
@@ -226,10 +220,9 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[stri
 	}
 
 	// Push the updated user_metadata to Auth0.
-	err = auth0Users.Update(ctx, auth0UserID, &management.User{
+	if err := auth0Users.Update(ctx, auth0UserID, &management.User{
 		UserMetadata: &metadata,
-	})
-	if err != nil {
+	}); err != nil {
 		return false, fmt.Errorf("failed to update Auth0 user %s: %w", auth0UserID, err)
 	}
 
@@ -238,18 +231,12 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, v1Data map[stri
 	return true, nil
 }
 
-// emailLinkEligibility reads the primary Auth0 user and reports whether
-// linkEmailIdentity would actually attempt to link the given email: it is
+// emailLinkEligibility checks whether linkEmailIdentity would actually attempt
+// to link the given email to the pre-fetched primary Auth0 user: it returns
 // false when the account is blocked or when the email matches the primary
-// account's own top-level email (redundant link). It is shared by
-// linkEmailIdentity and its dry-run backfill callers, so that dry-run
-// previews classify these no-op cases as skipped exactly like the real write
-// path does.
-func emailLinkEligibility(ctx context.Context, primaryAuth0ID, email string) (eligible bool, err error) {
-	primaryUser, err := auth0Users.Read(ctx, primaryAuth0ID)
-	if err != nil {
-		return false, fmt.Errorf("failed to read primary user %s: %w", primaryAuth0ID, err)
-	}
+// account's own top-level email (redundant link).
+func emailLinkEligibility(ctx context.Context, primaryUser *management.User, email string) (eligible bool, err error) {
+	primaryAuth0ID := primaryUser.GetID()
 
 	// Blocked accounts are treated as inactive/deprovisioned: don't link new
 	// secondary identities to them. This is a no-op skip, not an error.
@@ -275,10 +262,14 @@ func emailLinkEligibility(ctx context.Context, primaryAuth0ID, email string) (el
 // linkEmailIdentity creates an email connection user in Auth0 and links it to the
 // primary account. This is the two-step M2M flow: create secondary user, then link.
 // It is idempotent: if the email is already linked to this user, it returns
-// (true, nil). The returned bool is false only for the no-op skip cases
-// (blocked account, or email matching the primary account's own email).
-func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) (bool, error) {
-	eligible, err := emailLinkEligibility(ctx, primaryAuth0ID, email)
+// (true, nil). The caller must pass the pre-fetched primary Auth0 user so that
+// multiple link operations on the same user share a single Management API read.
+// The returned bool is false only for the no-op skip cases (blocked account,
+// or email matching the primary account's own email).
+func linkEmailIdentity(ctx context.Context, primaryUser *management.User, email string) (bool, error) {
+	primaryAuth0ID := primaryUser.GetID()
+
+	eligible, err := emailLinkEligibility(ctx, primaryUser, email)
 	if err != nil {
 		return false, err
 	}
@@ -287,11 +278,6 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) (bool,
 	}
 
 	// Check if the email is already linked to this user.
-	primaryUser, err := auth0Users.Read(ctx, primaryAuth0ID)
-	if err != nil {
-		return false, fmt.Errorf("failed to read primary user %s: %w", primaryAuth0ID, err)
-	}
-
 	for _, identity := range primaryUser.Identities {
 		if identity.GetProvider() == "email" && identity.GetConnection() == "email" {
 			if profileEmail, _ := identity.GetProfileData()["email"].(string); strings.EqualFold(profileEmail, email) {
@@ -396,13 +382,10 @@ func linkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) (bool,
 }
 
 // unlinkEmailIdentity removes a linked email identity from the primary Auth0 account.
-// It is idempotent: if the email is not linked, it returns nil.
-func unlinkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) error {
-	// Read the primary user to find the linked email identity.
-	primaryUser, err := auth0Users.Read(ctx, primaryAuth0ID)
-	if err != nil {
-		return fmt.Errorf("failed to read primary user %s: %w", primaryAuth0ID, err)
-	}
+// It is idempotent: if the email is not linked, it returns nil. The caller must
+// pass the pre-fetched primary Auth0 user to avoid a redundant Management API read.
+func unlinkEmailIdentity(ctx context.Context, primaryUser *management.User, email string) error {
+	primaryAuth0ID := primaryUser.GetID()
 
 	// Find the email identity matching this email address.
 	var secondaryUserID string
@@ -425,7 +408,7 @@ func unlinkEmailIdentity(ctx context.Context, primaryAuth0ID, email string) erro
 	}
 
 	// Unlink the identity.
-	_, err = auth0Users.Unlink(ctx, primaryAuth0ID, "email", secondaryUserID)
+	_, err := auth0Users.Unlink(ctx, primaryAuth0ID, "email", secondaryUserID)
 	if err != nil {
 		// 404 means already unlinked (idempotent).
 		var mgmtErr management.Error
