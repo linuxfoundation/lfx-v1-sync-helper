@@ -272,7 +272,20 @@ func publishUserDeletedEvent(ctx context.Context, key, username, email string) {
 func syncMergedUserProfile(ctx context.Context, key, auth0UserID string, v1Data map[string]any) bool {
 	syncCtx, cancel := context.WithTimeout(ctx, auth0CallTimeout)
 	defer cancel()
-	if _, err := syncProfileToAuth0Fn(syncCtx, auth0UserID, v1Data); err != nil {
+
+	auth0User, err := fetchAuth0User(syncCtx, auth0UserID)
+	if err != nil {
+		if isRetryableAuth0Error(err) {
+			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
+				WarnContext(ctx, "retryable Auth0 error fetching user for profile sync, NACKing for redelivery")
+			return true
+		}
+		logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
+			ErrorContext(ctx, "failed to fetch Auth0 user for profile sync, dropping non-retryable error")
+		return false
+	}
+
+	if _, err := syncProfileToAuth0Fn(syncCtx, auth0UserID, auth0User, v1Data); err != nil {
 		if isRetryableAuth0Error(err) {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
 				WarnContext(ctx, "retryable Auth0 error during profile sync, NACKing for redelivery")
@@ -494,7 +507,20 @@ func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Da
 
 	syncCtx, cancel := context.WithTimeout(ctx, auth0CallTimeout)
 	defer cancel()
-	if err := unlinkEmailIdentityFn(syncCtx, auth0UserID, emailAddr); err != nil {
+
+	auth0User, err := fetchAuth0User(syncCtx, auth0UserID)
+	if err != nil {
+		if isRetryableAuth0Error(err) {
+			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", emailAddr).
+				WarnContext(syncCtx, "retryable Auth0 error fetching user for unlink, NACKing for redelivery")
+			return true
+		}
+		logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", emailAddr).
+			ErrorContext(syncCtx, "failed to fetch Auth0 user for email unlink, dropping non-retryable error")
+		return false
+	}
+
+	if err := unlinkEmailIdentityFn(syncCtx, auth0User, emailAddr); err != nil {
 		if isRetryableAuth0Error(err) {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", emailAddr).
 				WarnContext(syncCtx, "retryable Auth0 error during unlink, NACKing for redelivery")
@@ -524,7 +550,19 @@ func linkAlternateEmailToAuth0(ctx context.Context, key, userSfid, email string)
 	}
 	auth0UserID := mapUsernameToAuthSub(v1User.Username)
 
-	if _, err := linkEmailIdentityFn(ctx, auth0UserID, email); err != nil {
+	auth0User, err := fetchAuth0User(ctx, auth0UserID)
+	if err != nil {
+		if isRetryableAuth0Error(err) {
+			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
+				WarnContext(ctx, "retryable Auth0 error fetching user for link, NACKing for redelivery")
+			return true
+		}
+		logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
+			ErrorContext(ctx, "failed to fetch Auth0 user for email link, dropping non-retryable error")
+		return false
+	}
+
+	if _, err := linkEmailIdentityFn(ctx, auth0User, email); err != nil {
 		if isRetryableAuth0Error(err) {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID, "email", email).
 				WarnContext(ctx, "retryable Auth0 error during link, NACKing for redelivery")
