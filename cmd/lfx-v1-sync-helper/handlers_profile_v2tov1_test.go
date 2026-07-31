@@ -175,6 +175,7 @@ func TestMapMetadataToV1Payload(t *testing.T) {
 			"phone_number":   "+15551234567",
 			"t_shirt_size":   "M",
 			"picture":        "https://example.com/a.png",
+			"bio":            "About me text",
 			"zoneinfo":       "America/Los_Angeles", // unsupported upstream, must be dropped
 		}
 		got := mapMetadataToV1Payload(metadata)
@@ -186,6 +187,7 @@ func TestMapMetadataToV1Payload(t *testing.T) {
 			"Phone":      "+15551234567",
 			"TShirtSize": "M",
 			"LogoURL":    "https://example.com/a.png",
+			"Bio":        "About me text",
 		}
 		for k, v := range wantTop {
 			if got[k] != v {

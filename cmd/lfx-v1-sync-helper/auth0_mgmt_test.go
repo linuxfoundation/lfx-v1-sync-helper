@@ -64,6 +64,7 @@ func TestBuildAuth0Metadata(t *testing.T) {
 				"tshirt_size__c":    "L",
 				"photo_url__c":      "https://example.com/photo.jpg",
 				"timezone__c":       "America/Los_Angeles",
+				"bio__c":            "About me text",
 			},
 			wantFieldChecks: map[string]string{
 				"job_title":      "Engineer",
@@ -76,6 +77,7 @@ func TestBuildAuth0Metadata(t *testing.T) {
 				"t_shirt_size":   "L",
 				"picture":        "https://example.com/photo.jpg",
 				"zoneinfo":       "America/Los_Angeles",
+				"bio":            "About me text",
 			},
 			// Name fields are NOT written by v1-sync-helper; owned by auth service.
 			wantAbsent: []string{"given_name", "family_name", "name"},
