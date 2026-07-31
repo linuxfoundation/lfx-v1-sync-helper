@@ -38,6 +38,7 @@ var auth0ToV1Fields = map[string]string{
 	"phone_number": "Phone",
 	"t_shirt_size": "TShirtSize",
 	"picture":      "LogoURL",
+	"bio":          "Bio",
 }
 
 // auth0ToV1AddressFields maps Auth0 user_metadata keys to fields on the nested
