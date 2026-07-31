@@ -270,17 +270,17 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 		email     string
 	}
 	var candidates []emailCandidate
+	// Deduplicate candidates by email address (case-insensitive). v1
+	// enforces email uniqueness per user, so duplicates are not expected,
+	// but deduplicating here avoids a wasted Auth0 Search call if two
+	// SFIDs somehow resolve to the same address — the pre-fetched user's
+	// identity list would be stale after the first successful link.
+	seenEmails := make(map[string]bool)
 	qualifying := 0
 	sawPrimary := false
 	for _, emailSfid := range emailSfids {
 		email, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, emailSfid)
 		if err != nil {
-			// A read failure makes the qualifying count unreliable, and
-			// guessing either way (sole vs. non-sole) risks a wrong link
-			// decision, so abort rather than silently proceed. This user
-			// will be retried on the next run (the cursor doesn't advance
-			// past them); a persistently-bad row requires a manual data fix
-			// to unblock, which is preferable to silently mislinking.
 			return fmt.Errorf("getting alternate email details for %s (auth0 user %s): %w", emailSfid, auth0UserID, err)
 		}
 		if isActive && (isVerified || isPrimary) {
@@ -293,6 +293,12 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 			result.emailsSkipped++
 			continue
 		}
+		lower := strings.ToLower(email)
+		if seenEmails[lower] {
+			result.emailsSkipped++
+			continue
+		}
+		seenEmails[lower] = true
 		candidates = append(candidates, emailCandidate{emailSfid: emailSfid, email: email})
 	}
 
@@ -303,14 +309,26 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 		return nil
 	}
 	if !sawPrimary {
-		// More than one row qualifies but none is flagged primary: which one
-		// is the de-facto primary is genuinely ambiguous, so abort rather
-		// than linking all of them as secondary identities.
 		return fmt.Errorf("user %s (auth0 user %s) has %d qualifying alternate emails and none is flagged primary; cannot determine de-facto primary", userSfid, auth0UserID, qualifying)
+	}
+
+	// No candidates to link — skip the Auth0 read entirely.
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// Fetch the Auth0 user once for all candidate emails.
+	auth0User, err := fetchAuth0User(ctx, auth0UserID)
+	if err != nil {
+		return fmt.Errorf("fetching Auth0 user %s: %w", auth0UserID, err)
 	}
 
 	for _, c := range candidates {
 		if dryRun {
+			if !emailLinkEligibility(ctx, auth0User, c.email) {
+				result.emailsSkipped++
+				continue
+			}
 			logger.With(
 				"auth0_user_id", auth0UserID,
 				"email", c.email,
@@ -320,10 +338,15 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 			continue
 		}
 
-		if err := linkEmailIdentityFn(ctx, auth0UserID, c.email); err != nil {
+		linked, err := linkEmailIdentityFn(ctx, auth0User, c.email)
+		if err != nil {
 			return fmt.Errorf("linking email %s: %w", c.email, err)
 		}
-		result.emailsLinked++
+		if linked {
+			result.emailsLinked++
+		} else {
+			result.emailsSkipped++
+		}
 	}
 
 	return nil
@@ -445,17 +468,20 @@ func backfillProfileForUser(ctx context.Context, auth0UserID, username string, d
 		return nil
 	}
 
-	if dryRun {
-		logger.With("auth0_user_id", auth0UserID, "user_sfid", userSfid).
-			Info("[dry-run] would sync profile to Auth0 user_metadata")
-		result.usersUpdated++
-		return nil
+	auth0User, err := fetchAuth0User(ctx, auth0UserID)
+	if err != nil {
+		return fmt.Errorf("fetching Auth0 user %s: %w", auth0UserID, err)
 	}
 
-	if err := syncProfileToAuth0Fn(ctx, auth0UserID, v1Data); err != nil {
+	updated, err := syncProfileToAuth0Fn(ctx, auth0UserID, auth0User, v1Data, dryRun)
+	if err != nil {
 		return fmt.Errorf("syncing profile for %s: %w", auth0UserID, err)
 	}
-	result.usersUpdated++
+	if updated {
+		result.usersUpdated++
+	} else {
+		result.usersSkipped++
+	}
 	return nil
 }
 
@@ -479,6 +505,12 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 
 	logger.With("username", username, "user_sfid", userSfid).Info("resolved v1 SFID")
 
+	// Fetch the Auth0 user once for both profile sync and email linking.
+	auth0User, err := fetchAuth0User(ctx, auth0UserID)
+	if err != nil {
+		return fmt.Errorf("fetching Auth0 user: %w", err)
+	}
+
 	// Sync profile.
 	v1Data, exists, err := getV1ObjectData(ctx, v1MergedUserKVPrefix+userSfid)
 	if err != nil {
@@ -486,15 +518,20 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 	}
 	if !exists {
 		logger.With("user_sfid", userSfid).Warn("v1 merged_user record not found, skipping profile sync")
-	} else if dryRun {
-		logger.With("auth0_user_id", auth0UserID, "user_sfid", userSfid).
-			Info("[dry-run] would sync profile to Auth0 user_metadata")
-	} else {
-		if err := syncProfileToAuth0Fn(ctx, auth0UserID, v1Data); err != nil {
-			logger.With("error", err, "auth0_user_id", auth0UserID).
-				Warn("profile sync failed")
+	} else if updated, err := syncProfileToAuth0Fn(ctx, auth0UserID, auth0User, v1Data, dryRun); err != nil {
+		logger.With("error", err, "auth0_user_id", auth0UserID).
+			Warn("profile sync failed")
+	} else if updated {
+		if dryRun {
+			logger.With("auth0_user_id", auth0UserID).Info("[dry-run] would sync profile")
 		} else {
 			logger.With("auth0_user_id", auth0UserID).Info("profile synced")
+		}
+	} else {
+		if dryRun {
+			logger.With("auth0_user_id", auth0UserID).Info("[dry-run] profile sync would be skipped (no-op)")
+		} else {
+			logger.With("auth0_user_id", auth0UserID).Info("profile sync skipped (no-op)")
 		}
 	}
 
@@ -527,6 +564,12 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 		email     string
 	}
 	var candidates []emailCandidate
+	// Deduplicate candidates by email address (case-insensitive). v1
+	// enforces email uniqueness per user, so duplicates are not expected,
+	// but deduplicating here avoids a wasted Auth0 Search call if two
+	// SFIDs somehow resolve to the same address — the pre-fetched user's
+	// identity list would be stale after the first successful link.
+	seenEmails := make(map[string]bool)
 	qualifying := 0
 	sawPrimary := false
 	for _, emailSfid := range emailSfids {
@@ -556,6 +599,11 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 		if email == "" {
 			continue
 		}
+		lower := strings.ToLower(email)
+		if seenEmails[lower] {
+			continue
+		}
+		seenEmails[lower] = true
 		candidates = append(candidates, emailCandidate{emailSfid: emailSfid, email: email})
 	}
 
@@ -572,17 +620,25 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 
 	for _, c := range candidates {
 		if dryRun {
+			if !emailLinkEligibility(ctx, auth0User, c.email) {
+				logger.With("auth0_user_id", auth0UserID, "email", c.email).
+					Info("[dry-run] email link not eligible, would skip")
+				continue
+			}
 			logger.With("auth0_user_id", auth0UserID, "email", c.email).
 				Info("[dry-run] would link alternate email to Auth0 user")
 			continue
 		}
 
-		if err := linkEmailIdentityFn(ctx, auth0UserID, c.email); err != nil {
+		if linked, err := linkEmailIdentityFn(ctx, auth0User, c.email); err != nil {
 			logger.With("error", err, "auth0_user_id", auth0UserID, "email", c.email).
 				Warn("failed to link email, skipping")
-		} else {
+		} else if linked {
 			logger.With("auth0_user_id", auth0UserID, "email", c.email).
 				Info("linked email identity")
+		} else {
+			logger.With("auth0_user_id", auth0UserID, "email", c.email).
+				Info("email link skipped (no-op)")
 		}
 	}
 
