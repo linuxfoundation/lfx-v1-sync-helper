@@ -81,7 +81,7 @@ jobs:
       packages: write
       id-token: write
     outputs:
-      image_name: ${{ steps.build.outputs.image_name }}
+      image_name: ${{ steps.prepare.outputs.image_name }}
       digest: ${{ steps.build.outputs.digest }}
       app_version: ${{ steps.prepare.outputs.app_version }}
     steps:
@@ -93,7 +93,10 @@ jobs:
         run: |
           set -euo pipefail
           APP_VERSION=$(echo ${{ github.ref_name }} | sed 's/v//g')
-          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+          {
+            echo "app_version=$APP_VERSION"
+            echo "image_name=${DOCKER_REGISTRY}/meltano"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
