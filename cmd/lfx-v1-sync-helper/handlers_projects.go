@@ -14,6 +14,20 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+// Heroku Connect (salesforce.project__c) field names — all lowercase.
+const (
+	hcFieldExecutiveDirector = "executive_director__c"
+	hcFieldProgramManager    = "program_manager__c"
+	hcFieldOpportunityOwner  = "opportunity_owner__c"
+)
+
+// B2B (salesforce_b2b."Project__c") field names — preserve Salesforce mixed-case API names.
+const (
+	b2bFieldExecutiveDirector = "Executive_Director__c"
+	b2bFieldProgramManager    = "Program_Manager__c"
+	b2bFieldOpportunityOwner  = "Opportunity_Owner__c"
+)
+
 // isValidURL checks if a URL value is non-empty and not "nil".
 func isValidURL(url string) bool {
 	trimmed := strings.TrimSpace(url)
@@ -407,10 +421,10 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any)
 	b2bProjectData := loadB2BProjectData(ctx, v1Data)
 
 	// Map executive director from v1 Salesforce contact SFID.
-	payload.ExecutiveDirector = lookupExecutiveDirector(ctx, v1Data, getB2BProjectField(b2bProjectData, "Executive_Director__c"))
+	payload.ExecutiveDirector = lookupExecutiveDirector(ctx, v1Data, getB2BProjectField(b2bProjectData, b2bFieldExecutiveDirector))
 	// Map program manager and opportunity owner from v1 Salesforce contact/user SFIDs.
-	payload.ProgramManager = lookupProgramManager(ctx, v1Data, getB2BProjectField(b2bProjectData, "Program_Manager__c"))
-	payload.OpportunityOwner = lookupOpportunityOwner(ctx, v1Data, getB2BProjectField(b2bProjectData, "Opportunity_Owner__c"))
+	payload.ProgramManager = lookupProgramManager(ctx, v1Data, getB2BProjectField(b2bProjectData, b2bFieldProgramManager))
+	payload.OpportunityOwner = lookupOpportunityOwner(ctx, v1Data, getB2BProjectField(b2bProjectData, b2bFieldOpportunityOwner))
 
 	// Handle parent project logic.
 	parentProjectID := ""
@@ -654,10 +668,10 @@ func mapV1DataToProjectUpdateSettingsPayload(ctx context.Context, projectUID str
 	b2bProjectData := loadB2BProjectData(ctx, v1Data)
 
 	// Map executive director from v1 Salesforce contact SFID.
-	payload.ExecutiveDirector = lookupExecutiveDirector(ctx, v1Data, getB2BProjectField(b2bProjectData, "Executive_Director__c"))
+	payload.ExecutiveDirector = lookupExecutiveDirector(ctx, v1Data, getB2BProjectField(b2bProjectData, b2bFieldExecutiveDirector))
 	// Map program manager and opportunity owner from v1 Salesforce contact/user SFIDs.
-	payload.ProgramManager = lookupProgramManager(ctx, v1Data, getB2BProjectField(b2bProjectData, "Program_Manager__c"))
-	payload.OpportunityOwner = lookupOpportunityOwner(ctx, v1Data, getB2BProjectField(b2bProjectData, "Opportunity_Owner__c"))
+	payload.ProgramManager = lookupProgramManager(ctx, v1Data, getB2BProjectField(b2bProjectData, b2bFieldProgramManager))
+	payload.OpportunityOwner = lookupOpportunityOwner(ctx, v1Data, getB2BProjectField(b2bProjectData, b2bFieldOpportunityOwner))
 
 	return payload, nil
 }
@@ -684,9 +698,9 @@ func loadB2BProjectData(ctx context.Context, v1Data map[string]any) map[string]a
 // getB2BProjectField returns the trimmed string value of field from b2bData, or "" if
 // b2bData is nil or the field is absent/non-string.
 //
-// Note: B2B Project__c fields preserve Salesforce's original mixed-case API names (e.g.
-// "Executive_Director__c"), unlike Heroku Connect which lowercases all column names (e.g.
-// "executive_director__c"). Always use the Salesforce API casing when calling this function.
+// Always pass a b2bField* constant — B2B Project__c fields preserve Salesforce's original
+// mixed-case API names (e.g. b2bFieldExecutiveDirector), unlike Heroku Connect which
+// lowercases all column names (e.g. hcFieldExecutiveDirector).
 func getB2BProjectField(b2bData map[string]any, field string) string {
 	if b2bData == nil {
 		return ""
@@ -741,17 +755,17 @@ func lookupStaffUser(ctx context.Context, v1Data map[string]any, v1Field, sfidKe
 }
 
 func lookupExecutiveDirector(ctx context.Context, v1Data map[string]any, b2bFallbackSFID string) *projectservice.UserInfo {
-	return lookupStaffUser(ctx, v1Data, "executive_director__c", "ed_sfid", "failed to lookup executive director user from v1, leaving field unset", b2bFallbackSFID)
+	return lookupStaffUser(ctx, v1Data, hcFieldExecutiveDirector, "ed_sfid", "failed to lookup executive director user from v1, leaving field unset", b2bFallbackSFID)
 }
 
 func lookupProgramManager(ctx context.Context, v1Data map[string]any, b2bFallbackSFID string) *projectservice.UserInfo {
-	return lookupStaffUser(ctx, v1Data, "program_manager__c", "pm_sfid", "failed to lookup program manager user from v1, leaving field unset", b2bFallbackSFID)
+	return lookupStaffUser(ctx, v1Data, hcFieldProgramManager, "pm_sfid", "failed to lookup program manager user from v1, leaving field unset", b2bFallbackSFID)
 }
 
 // lookupOpportunityOwner resolves a Salesforce User SFID for the opportunity owner.
 // b2bFallbackSFID is used when the Heroku Connect value is empty.
 func lookupOpportunityOwner(ctx context.Context, v1Data map[string]any, b2bFallbackSFID string) *projectservice.UserInfo {
-	sfid := resolveSFID(v1Data, "opportunity_owner__c", b2bFallbackSFID)
+	sfid := resolveSFID(v1Data, hcFieldOpportunityOwner, b2bFallbackSFID)
 	if sfid == "" {
 		return nil
 	}
