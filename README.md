@@ -71,7 +71,12 @@ Payload: <mapping_key>
 
 ### Available Lookup Patterns
 
-**Note**: While called "sfid", v1 committees and committee members actually store UUIDs in their "sfid" column, so references to `{*_sfid}` for these entities will contain UUIDs.
+**Note**: While called "sfid", the v1 committee and committee-member *record* identifiers — used
+in the single-token `committee.sfid.{v1_sfid}` and `committee_member.sfid.{v1_sfid}` keys below —
+are actually UUIDs, not Salesforce-style IDs; the "sfid" naming is historical. This does **not**
+apply to the committee-scoped committee-member key further down: its two tokens
+(`{committee_sfid}`, `{member_sfid}`) are genuine v1 API Salesforce-style identifiers (the
+committee's own SFID and the contact "MemberID"), not UUIDs — see LFXV2-2709.
 
 The following table shows the supported mapping key patterns and their expected response formats:
 
@@ -84,7 +89,8 @@ The following table shows the supported mapping key patterns and their expected 
 | v1→v2 | `committee.sfid.{v1_sfid}` | `committee.sfid.123e4567-e89b-12d3-a456-426614174003` | `{v2_uuid}` | Committee SFID to UUID |
 | v2→v1 | `committee.uid.{v2_uuid}` | `committee.uid.123e4567-e89b-12d3-a456-426614174001` | `{project_sfid}:{committee_sfid}` | Committee UUID to compound SFID |
 | **Committee Members** |
-| v1→v2 | `committee_member.sfid.{v1_sfid}` | `committee_member.sfid.123e4567-e89b-12d3-a456-426614174004` | `{committee_uuid}:{member_uuid}` | Member SFID to compound UUID |
+| v1→v2 | `committee_member.sfid.{v1_sfid}` | `committee_member.sfid.123e4567-e89b-12d3-a456-426614174004` | `{committee_uuid}:{member_uuid}` | Member record SFID to compound UUID |
+| v1→v2 | `committee_member.sfid.{committee_sfid}.{member_sfid}` | `committee_member.sfid.a0941000002wBjEAAU.0034100000abcDEAAY` | `{committee_uuid}:{member_uuid}` | Member SFID to compound UUID, scoped by committee since the v1 API MemberID (contact SFID) is reused across committees for the same contact (LFXV2-2709) |
 | v2→v1 | `committee_member.uid.{v2_member_uuid}` | `committee_member.uid.123e4567-e89b-12d3-a456-426614174002` | `{project_sfid}:{committee_sfid}:{member_sfid}` | Member UUID to compound SFID |
 
 ### User SFID Lookup API
@@ -192,6 +198,62 @@ Locally (with NATS port-forwarded):
 
 ```sh
 lfx-v1-sync-helper --backfill-committee-member-mappings [--dry-run]
+```
+
+**Committee-member forward-mapping migration (`--backfill-committee-member-forward-mappings`):**
+
+Migrates committee-member forward mappings written by the v2→v1 create path
+(`committee_member.sfid.{v1_sfid}`, keyed only on the contact SFID) to the committee-scoped
+format `committee_member.sfid.{committee_sfid}.{member_sfid}` — the fix for LFXV2-2709, where an
+unscoped key let MemberID reuse across committees silently overwrite an earlier committee's
+mapping. Skips v1-ingest forward keys (record sfid, a UUID) untouched. Because the collision
+already collapsed colliding committees' entries into a single flat key before this fix shipped,
+only the surviving (last-write) entry per contact can be migrated — this is cleanup, not data
+recovery. Writes are optimistic-concurrency guarded against the live sync-helper, idempotent, and
+safe to re-run.
+
+**Rollout note:** this release has two competing rollout hazards, and the operator must pick
+which to trade against the other:
+
+- With the default single-replica `RollingUpdate` strategy, a new pod (writing the committee-
+  scoped key) can briefly run alongside an old pod (whose delete handling only checks the pre-
+  fix flat key), which can orphan a scoped mapping that this backfill's flat-key scan cannot
+  find.
+- Temporarily switching the Deployment's `spec.strategy.type` to `Recreate` avoids that
+  overlap, but creates a short window with no subscriber. Indexer events
+  (`lfx.committee.*` / `lfx.committee_member.*`) are consumed via plain Core NATS
+  `QueueSubscribe` (fire-and-forget, no replay), so any event published during that gap is
+  silently dropped — a subsequent v2→v1 create/update/delete could be lost.
+
+Neither option is strictly safer than the other; pick based on current traffic and how much
+each failure mode matters for the environment. The `Recreate` cutover is the recommended
+default when it can be performed during a low-traffic maintenance window, since dropping a
+handful of events during a short gap is easier to reconcile (via a follow-up sync or manual
+touch) than silently orphaned scoped mappings that no existing backfill can detect. In a
+non-quiescent environment, prefer the default `RollingUpdate` and accept the (narrow) overlap
+window instead. A durable JetStream consumer for these indexer subjects would close both
+hazards but is outside the scope of this change.
+
+Run once after deploying the fix, to migrate already-affected mappings. A dry-run pass is
+recommended first:
+
+```sh
+kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-committee-member-forward-mappings-job.yaml
+```
+
+Add `--dry-run` to the manifest args, apply, inspect logs
+(`inspected`/`migrated`/`skipped_record_key`/`malformed`/`tombstoned`/`unresolved`/`conflicted`
+counts). A Job's pod template is immutable, so delete the dry-run Job before removing
+`--dry-run` and re-applying for the live run:
+
+```sh
+kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-committee-member-forward-mappings
+```
+
+Locally (with NATS port-forwarded):
+
+```sh
+lfx-v1-sync-helper --backfill-committee-member-forward-mappings [--dry-run]
 ```
 
 ## Architecture Diagrams
