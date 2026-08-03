@@ -683,6 +683,10 @@ func loadB2BProjectData(ctx context.Context, v1Data map[string]any) map[string]a
 
 // getB2BProjectField returns the trimmed string value of field from b2bData, or "" if
 // b2bData is nil or the field is absent/non-string.
+//
+// Note: B2B Project__c fields preserve Salesforce's original mixed-case API names (e.g.
+// "Executive_Director__c"), unlike Heroku Connect which lowercases all column names (e.g.
+// "executive_director__c"). Always use the Salesforce API casing when calling this function.
 func getB2BProjectField(b2bData map[string]any, field string) string {
 	if b2bData == nil {
 		return ""
@@ -693,17 +697,24 @@ func getB2BProjectField(b2bData map[string]any, field string) string {
 	return ""
 }
 
+// resolveSFID extracts and trims the SFID value from v1Data[field]. If the result is
+// empty and b2bFallback is non-empty, b2bFallback is returned instead.
+func resolveSFID(v1Data map[string]any, field, b2bFallback string) string {
+	sfid, _ := v1Data[field].(string)
+	sfid = strings.TrimSpace(sfid)
+	if sfid == "" {
+		return b2bFallback
+	}
+	return sfid
+}
+
 // lookupStaffUser resolves a Salesforce contact SFID stored under v1Field in v1Data to a
 // UserInfo. sfidKey is used as the log field name for the SFID value. b2bFallbackSFID is
 // used when the Heroku Connect value is empty (e.g. when the field is not replicated from
 // Heroku Connect but is available from the B2B Project__c record). Returns nil if the
 // field is absent, empty, or the user lookup fails.
 func lookupStaffUser(ctx context.Context, v1Data map[string]any, v1Field, sfidKey, warnMsg, b2bFallbackSFID string) *projectservice.UserInfo {
-	sfid, ok := v1Data[v1Field].(string)
-	sfid = strings.TrimSpace(sfid)
-	if (!ok || sfid == "") && b2bFallbackSFID != "" {
-		sfid = b2bFallbackSFID
-	}
+	sfid := resolveSFID(v1Data, v1Field, b2bFallbackSFID)
 	if sfid == "" {
 		return nil
 	}
@@ -740,11 +751,7 @@ func lookupProgramManager(ctx context.Context, v1Data map[string]any, b2bFallbac
 // lookupOpportunityOwner resolves a Salesforce User SFID for the opportunity owner.
 // b2bFallbackSFID is used when the Heroku Connect value is empty.
 func lookupOpportunityOwner(ctx context.Context, v1Data map[string]any, b2bFallbackSFID string) *projectservice.UserInfo {
-	sfid, ok := v1Data["opportunity_owner__c"].(string)
-	sfid = strings.TrimSpace(sfid)
-	if (!ok || sfid == "") && b2bFallbackSFID != "" {
-		sfid = b2bFallbackSFID
-	}
+	sfid := resolveSFID(v1Data, "opportunity_owner__c", b2bFallbackSFID)
 	if sfid == "" {
 		return nil
 	}
