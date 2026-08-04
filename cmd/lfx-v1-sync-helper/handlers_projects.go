@@ -680,6 +680,7 @@ func mapV1DataToProjectUpdateSettingsPayload(ctx context.Context, projectUID str
 // identified by the "sfid" field in v1Data. Returns nil if not found or on error.
 func loadB2BProjectData(ctx context.Context, v1Data map[string]any) map[string]any {
 	projectSFID, _ := v1Data["sfid"].(string)
+	projectSFID = strings.TrimSpace(projectSFID)
 	if projectSFID == "" {
 		return nil
 	}
@@ -712,7 +713,7 @@ func getB2BProjectField(b2bData map[string]any, field string) string {
 }
 
 // resolveSFID extracts and trims the SFID value from v1Data[field]. If the result is
-// empty and b2bFallback is non-empty, b2bFallback is returned instead.
+// empty, b2bFallback is returned instead (which may itself be empty).
 func resolveSFID(v1Data map[string]any, field, b2bFallback string) string {
 	sfid, _ := v1Data[field].(string)
 	sfid = strings.TrimSpace(sfid)
