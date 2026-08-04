@@ -66,6 +66,7 @@ func main() {
 	var doBackfillProfiles = flag.Bool("backfill-profiles", false, "backfill v1 profile fields to Auth0 user_metadata, then exit")
 	var doBackfillWorkspaces = flag.Bool("backfill-workspaces", false, "backfill legacy workspaces into v2 member-service, then exit")
 	var doBackfillCommitteeMemberMappings = flag.Bool("backfill-committee-member-mappings", false, "repair committee-member reverse mappings that store the record sfid instead of the contact SFID, then exit")
+	var doBackfillV1MappingsToPG = flag.Bool("backfill-v1-mappings-to-postgres", false, "copy the v1-mappings NATS KV bucket into the Postgres v1_mappings table, then exit (LFXV2-2985)")
 	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
 	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-* and --sync-user)")
 	var backfillLimit = flag.Int("limit", 1000, "maximum number of users to process per backfill run (applicable with --backfill-alternate-emails and --backfill-profiles)")
@@ -78,13 +79,13 @@ func main() {
 
 	// Enforce mutual exclusion across all one-shot flags.
 	oneShotCount := 0
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doRebuildUserIndexes, *doBackfillCommitteeMemberMappings} {
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doRebuildUserIndexes, *doBackfillCommitteeMemberMappings, *doBackfillV1MappingsToPG} {
 		if b {
 			oneShotCount++
 		}
 	}
 	if oneShotCount > 1 {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --sync-user, and --rebuild-user-secondary-indexes are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --backfill-v1-mappings-to-postgres, --sync-user, and --rebuild-user-secondary-indexes are mutually exclusive")
 		os.Exit(2)
 	}
 
@@ -94,9 +95,10 @@ func main() {
 
 	// --rebuild-user-secondary-indexes and --backfill-committee-member-mappings
 	// only need NATS KV; skip full config and API client init.
+	// --backfill-v1-mappings-to-postgres needs NATS KV + Postgres, no v1/v2 API clients.
 	// --backfill-acs-project and --backfill-acs-org require full config and API client init.
 	var err error
-	if *doRebuildUserIndexes || *doBackfillCommitteeMemberMappings {
+	if *doRebuildUserIndexes || *doBackfillCommitteeMemberMappings || *doBackfillV1MappingsToPG {
 		cfg = LoadReindexConfig()
 	} else {
 		cfg, err = LoadConfig()
@@ -362,6 +364,39 @@ func main() {
 			"tombstoned", res.tombstoned,
 			"conflicted", res.conflicted,
 		).Info("committee-member reverse-mapping backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --backfill-v1-mappings-to-postgres flag: copy the v1-mappings NATS
+	// KV bucket into the Postgres v1_mappings table, then exit (LFXV2-2985).
+	if *doBackfillV1MappingsToPG {
+		logger.With("dry_run", *dryRun).Info("starting v1-mappings Postgres backfill")
+		pool, err := initPGPool(ctx, cfg)
+		if err != nil {
+			logger.With(errKey, err).Error("error initializing Postgres pool for v1-mappings backfill")
+			os.Exit(1)
+		}
+		defer pool.Close()
+		res, err := backfillV1MappingsToPostgres(ctx, pool, *dryRun)
+		fields := []any{
+			"visits", res.visits,
+			"live", res.live,
+			"tombstoned", res.tombstoned,
+			"empty", res.empty,
+			"native_del", res.nativeDel,
+			"staged", res.staged,
+			"inserted_rows", res.insertedRows,
+			"batches", res.batches,
+			"workers", res.workers,
+			"max_seq", res.maxSeq,
+			"elapsed", res.elapsed.String(),
+			"dry_run", res.dryRun,
+		}
+		if err != nil {
+			logger.With(append(fields, errKey, err)...).Error("error during v1-mappings Postgres backfill")
+			os.Exit(1)
+		}
+		logger.With(fields...).Info("v1-mappings Postgres backfill completed successfully")
 		os.Exit(0)
 	}
 

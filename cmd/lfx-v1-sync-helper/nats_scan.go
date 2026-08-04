@@ -102,3 +102,111 @@ func ScanSubjectData(ctx context.Context, js jetstream.JetStream, streamName, su
 
 	return result, nil
 }
+
+// SubjectDataCallback is invoked by ScanSubjectDataStreamRange for every
+// message visited during the scan (PUT, DEL, or PURGE). Callers use it to sink
+// visits into a downstream buffer (e.g. a Postgres staging table). LWW is not
+// resolved in the scanner; the sink must accept multiple visits per subject and
+// select the winner (typically DISTINCT ON at INSERT time using the passed seq).
+//
+// Callback arguments:
+//   - subject: full JetStream subject (e.g. "$KV.v1-mappings.project.sfid.abc").
+//   - data: message payload (empty for NATS DEL/PURGE — see 'deleted').
+//   - seq: JetStream sequence number of this visit; monotonically increasing
+//     within a single worker, arbitrary interleaving across workers.
+//   - deleted: true when the message is a native NATS KV-Operation DEL or PURGE
+//     (as opposed to an app-level "!del" sentinel PUT, which is a normal PUT
+//     with deleted=false and data="!del").
+//
+// Returning a non-nil error aborts the scan and propagates through
+// ScanSubjectDataStreamRange to the caller.
+type SubjectDataCallback func(subject string, data []byte, seq uint64, deleted bool) error
+
+// ScanSubjectDataStreamRange is the streaming, sequence-bounded variant of
+// ScanSubjectData designed for very large KV buckets whose full snapshot does
+// not fit in memory (KV_v1-mappings ~5.8 GiB / ~38M subjects). It uses the
+// same next_by_subj request-reply pattern as ScanSubjectData — no consumer, no
+// heartbeat — but delivers every visit through cb instead of accumulating a
+// result map.
+//
+// Semantics vs. ScanSubjectData:
+//   - No LWW resolved in-scanner. Every visit is delivered including DEL/PURGE,
+//     with the JetStream seq and a 'deleted' flag so the sink can implement
+//     LWW+DELETE correctly (e.g. DISTINCT ON (subject) ORDER BY seq DESC,
+//     then filter WHERE NOT deleted).
+//   - Sequence range is [startSeq, endSeq): the endSeq is exclusive. Pass
+//     endSeq=0 to scan until end-of-stream. This lets callers partition a
+//     large stream across concurrent workers by disjoint seq ranges.
+//   - Memory footprint is O(1) per scanner (one msg in flight); callers own
+//     any buffering downstream of cb.
+//
+// Parallelism: partition [1, maxSeq] across N workers and run
+// ScanSubjectDataStreamRange concurrently. Each worker is independent — no
+// shared state. The NATS server absorbs concurrent load as parallel disk
+// reads; tune N to trade wall-clock against server CPU. In prod today the
+// non-parallel scan of KV_v1-mappings would take ~10–30 hours; N=8 typically
+// lands the run at 15–40 min, dominated by NATS RTT.
+//
+// Returns the per-worker visit and tombstoned (DEL/PURGE) counts so callers
+// can accumulate them across workers and log a final summary.
+func ScanSubjectDataStreamRange(ctx context.Context, js jetstream.JetStream, streamName, subjectFilter string, startSeq, endSeq uint64, opTimeout time.Duration, cb SubjectDataCallback) (int, int, error) {
+	if opTimeout <= 0 {
+		opTimeout = defaultNATSFetchMaxWait
+	}
+	if startSeq == 0 {
+		startSeq = 1
+	}
+	if cb == nil {
+		return 0, 0, fmt.Errorf("ScanSubjectDataStreamRange: nil callback")
+	}
+
+	getCtx, cancelGet := context.WithTimeout(ctx, opTimeout)
+	stream, err := js.Stream(getCtx, streamName)
+	cancelGet()
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to get stream %s: %w", streamName, err)
+	}
+
+	var (
+		visits     int
+		tombstoned int
+		seq        = startSeq
+	)
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return visits, tombstoned, fmt.Errorf("scan context cancelled after %d visits on %s [%d,%d): %w", visits, streamName, startSeq, endSeq, err)
+		}
+
+		callCtx, cancelCall := context.WithTimeout(ctx, opTimeout)
+		msg, getErr := stream.GetMsg(callCtx, seq, jetstream.WithGetMsgSubject(subjectFilter))
+		cancelCall()
+
+		if getErr != nil {
+			if errors.Is(getErr, jetstream.ErrMsgNotFound) {
+				// End-of-stream for this filter — clean exit.
+				break
+			}
+			return visits, tombstoned, fmt.Errorf("GetMsg error on %s at seq %d (filter %s): %w", streamName, seq, subjectFilter, getErr)
+		}
+
+		// Range is half-open [startSeq, endSeq). endSeq=0 means unbounded.
+		if endSeq != 0 && msg.Sequence >= endSeq {
+			break
+		}
+
+		seq = msg.Sequence + 1
+
+		kvOp := msg.Header.Get("KV-Operation")
+		deleted := kvOp == "DEL" || kvOp == "PURGE"
+		if deleted {
+			tombstoned++
+		}
+		visits++
+		if cbErr := cb(msg.Subject, msg.Data, msg.Sequence, deleted); cbErr != nil {
+			return visits, tombstoned, fmt.Errorf("callback error at seq %d on %s: %w", msg.Sequence, streamName, cbErr)
+		}
+	}
+
+	return visits, tombstoned, nil
+}

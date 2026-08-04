@@ -284,6 +284,15 @@ Key design decisions:
 - **Per-call deadline** — each `GetMsg` call uses `context.WithTimeout(ctx, opTimeout)`. Pass the appropriate per-call timeout: `cfg.NATSFetchMaxWait` (default 120s) for backfill scans, `cfg.ReindexNATSOpTimeout` (default 30s) for reindex scans. Avoid the SDK's 5s default — it is too short for in-cluster use.
 - **Wildcard subjects** — the `next_by_subj` NATS server API accepts NATS subject wildcards.
 
+**Streaming variant — `ScanSubjectDataStreamRange(ctx, js, streamName, subjectFilter, startSeq, endSeq, opTimeout, cb) (visits int, tombstoned int, err error)`**
+
+Used only for jobs whose full result set is too large to fit in memory as a `map[string][]byte` (currently just `--backfill-v1-mappings-to-postgres`; the KV_v1-mappings bucket is ~5.8 GiB / ~38M subjects in prod). Key differences from `ScanSubjectData`:
+
+- **Callback-based** — visits are delivered to `cb(subject, data, seq, deleted)` as they are read; nothing is retained in-scanner. Memory is O(1) per scanner.
+- **No LWW resolved in-scanner** — the sink receives every visit including DEL/PURGE, tagged with the JetStream seq and a `deleted` flag. Callers implement LWW via `DISTINCT ON (subject) ORDER BY seq DESC` (or equivalent).
+- **Half-open [startSeq, endSeq) range** — lets callers partition [1, `maxSeq`] across N concurrent workers for wall-clock parallelism. `endSeq=0` means unbounded (scan to end).
+- Use `ScanSubjectData` when the result set fits comfortably in memory; use `ScanSubjectDataStreamRange` when it does not or when you want to parallelise across the sequence space.
+
 ### Auth0 Management API enumeration — pattern for user-centric backfills (`backfill_email_profile.go`)
 
 Backfills whose outer loop is over **Auth0 users** (rather than NATS KV keys) use the Auth0 Management API `Search()` call with a Lucene query instead of `EnumerateLiveSubjects`. Use this pattern when the canonical source of iteration is the Auth0 user set, not a NATS KV bucket.
@@ -342,6 +351,23 @@ Iterates Auth0 users (same connection filter and sort), syncs v1 profile fields 
 ### `--sync-user <username> [--dry-run]` (`backfill_email_profile.go`)
 
 Performs a full sync (profile + alternate emails) for a single user identified by their Auth0 username (the part after `auth0|`). Useful for debugging or targeted re-sync without a full backfill run.
+
+### `--backfill-v1-mappings-to-postgres [--dry-run]` (`backfill_v1_mappings_pg.go`)
+
+One-shot copy of the entire `v1-mappings` NATS KV bucket into the Postgres `v1_mappings` table. First step of the LFXV2-2985 migration off NATS KV; runs before the online dual-write / cutover paths land.
+
+Designed for the prod scale (~5.8 GiB / ~38M subjects). Streaming scan + parallel scanners + `COPY` into a staging table + single DISTINCT ON upsert. Wall-clock is dominated by NATS `next_by_subj` round-trip time and scales roughly with `maxSeq / workers`; measure on a representative snapshot before sizing job timeouts. The `elapsed` field in the summary log records actuals.
+
+- **Config**: uses `LoadReindexConfig()` (NATS + timeouts only) plus Postgres env: `DATABASE_URL` OR the composed set (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`). Password composition uses `url.UserPassword` to percent-encode special characters and to avoid embedding the CNPG-generated password as a literal substring in the pod spec.
+- **Tuning env**: `BACKFILL_V1_MAPPINGS_WORKERS` (default 8, clamped [1, 64]) sets scanner concurrency; `BACKFILL_V1_MAPPINGS_BATCH_SIZE` (default 50000) sets rows-per-COPY-flush. Higher worker counts trade wall-clock for NATS server CPU — the prod incident that motivated this ticket showed the server saturates around 350% CPU with consumer-based enumeration, so leave headroom.
+- **Schema**: `internal/schema/schema.sql` is embedded and applied at pool-init time via `schema.Apply` — pods bootstrap the table idempotently under a `pg_advisory_xact_lock` + `SET LOCAL statement_timeout='60s'` guard, mirroring lfx-v2-newsletter-service.
+- **KV scan**: `ScanSubjectDataStreamRange` on `KV_v1-mappings` with filter `$KV.v1-mappings.>` and per-op timeout `cfg.NATSFetchMaxWait` (default 120s). The stream's [1, `maxSeq`] sequence space is partitioned into N disjoint half-open ranges; each worker drives an independent `next_by_subj` scan and streams visits through a shared channel to the writer goroutine. LWW is resolved in Postgres, not in-scanner, so no `map[string][]byte` snapshot is ever built in memory.
+- **Tombstones**: app-level `!del` sentinel PUTs → written as `tombstoned=true, mapping_value=''`; native NATS DEL/PURGE → carried through as `deleted=true` rows in staging and excluded from the final table via `WHERE NOT deleted` on the DISTINCT ON winner.
+- **Postgres load**: staging table `v1_mappings_staging` is `UNLOGGED` (no WAL) and dropped-and-recreated per run. Writer streams batches through `pgx.CopyFrom` (a single wire round-trip per batch instead of per-row parse+plan; typically materially faster than batched INSERTs, but the exact ratio is workload-dependent). After scanners finish, one `INSERT ... SELECT DISTINCT ON (mapping_key) ... FROM staging WHERE NOT deleted ORDER BY mapping_key, seq DESC ON CONFLICT DO UPDATE` resolves LWW into `v1_mappings`.
+- **Dry-run**: `--dry-run` skips staging creation, `CopyFrom`, and the final upsert but preserves all scan/classification counters so operators can validate row counts before writing.
+- **Summary log fields**: `visits`, `live`, `tombstoned`, `empty`, `native_del`, `staged`, `inserted_rows`, `batches`, `workers`, `max_seq`, `elapsed`, `dry_run`.
+- **Idempotency caveat**: on re-runs against an already-populated `v1_mappings`, subjects whose latest KV revision is a native NATS DEL/PURGE will NOT be removed from Postgres (the WHERE NOT deleted filter excludes them from the INSERT but does not issue a DELETE). This is safe for the initial cutover (empty target) and for the pending online mutation path (LFXV2-2985 follow-ups) where the online DELETE handler owns removals.
+- **Manifest**: TBD (dual-write / online cutover jobs land in follow-up work under LFXV2-2985).
 
 ### 4. `cmd/lfx-v1-sync-helper/handlers.go` — suppress unknown-object warnings (optional)
 
