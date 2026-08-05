@@ -697,6 +697,9 @@ func loadB2BProjectData(ctx context.Context, v1Data map[string]any) map[string]a
 	if !exists {
 		return nil
 	}
+	if deleted, ok := data["IsDeleted"].(bool); ok && deleted {
+		return nil
+	}
 	return data
 }
 

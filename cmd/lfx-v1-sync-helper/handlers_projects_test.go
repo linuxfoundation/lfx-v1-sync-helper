@@ -181,6 +181,13 @@ func TestLoadB2BProjectData(t *testing.T) {
 			kvErr:   kvErr,
 			wantNil: true,
 		},
+		{
+			name:     "soft-deleted B2B record filtered",
+			v1Data:   map[string]any{"sfid": "SF001"},
+			kvData:   map[string]any{"IsDeleted": true, "Executive_Director__c": "SF001"},
+			kvExists: true,
+			wantNil:  true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
