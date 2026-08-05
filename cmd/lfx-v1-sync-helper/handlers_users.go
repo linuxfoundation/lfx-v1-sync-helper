@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/vmihailenco/msgpack/v5"
 	"golang.org/x/text/unicode/norm"
 )
@@ -64,11 +63,11 @@ var (
 
 // readMappingsKVValueFn reads a raw value from v1-mappings. Swappable in tests.
 var readMappingsKVValueFn = func(ctx context.Context, key string) ([]byte, error) {
-	entry, err := mappingsKV.Get(ctx, key)
+	entry, err := mappingStore.Get(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	return entry.Value(), nil
+	return entry.Value, nil
 }
 
 // lookupPrimaryEmailForUserFn is the live alternate-email lookup used when the
@@ -128,7 +127,7 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 	indexKey := kvKeyUsernamePrefix + encodedUsername
 
 	// Uses simple Put() since this is a single-value overwrite, not a JSON array.
-	if _, err := mappingsKV.Put(ctx, indexKey, []byte(sfid)); err != nil {
+	if _, err := mappingStore.Put(ctx, indexKey, []byte(sfid)); err != nil {
 		logger.With("error", err, "key", key, "indexKey", indexKey).
 			ErrorContext(ctx, "failed to write username index")
 		return false
@@ -347,7 +346,7 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 	emailAddr, _ := v1Data["alternate_email_address__c"].(string)
 	if encodedEmail := emailToKVKey(emailAddr); encodedEmail != "" {
 		indexKey := kvKeyEmailPrefix + encodedEmail
-		if _, err := mappingsKV.Put(ctx, indexKey, []byte(leadorcontactid)); err != nil {
+		if _, err := mappingStore.Put(ctx, indexKey, []byte(leadorcontactid)); err != nil {
 			logger.With("error", err, "key", key, "indexKey", indexKey).
 				ErrorContext(ctx, "failed to write email index")
 		} else {
@@ -363,7 +362,7 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 	if isPrimary, _ := v1Data["primary_email__c"].(bool); isPrimary {
 		if emailAddr != "" {
 			cacheKey := kvKeyPrimaryEmailPrefix + leadorcontactid
-			if _, err := mappingsKV.Put(ctx, cacheKey, []byte(emailAddr)); err != nil {
+			if _, err := mappingStore.Put(ctx, cacheKey, []byte(emailAddr)); err != nil {
 				logger.With(errKey, err, "key", key, "user_sfid", leadorcontactid).
 					WarnContext(ctx, "failed to cache primary email for user deletion scrub")
 			}
@@ -598,13 +597,13 @@ var errCorruptAlternateEmailsMapping = errors.New("corrupt or unencodable v1-map
 func updateContactEmailMappingIndex(ctx context.Context, userSfid, emailSfid string, isDeleted bool) error {
 	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
 
-	entry, err := mappingsKV.Get(ctx, mappingKey)
+	entry, err := mappingStore.Get(ctx, mappingKey)
 
 	var currentEmails []string
 	var revision uint64
 
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, ErrKeyNotFound) {
 			currentEmails = []string{}
 			revision = 0
 		} else {
@@ -613,8 +612,8 @@ func updateContactEmailMappingIndex(ctx context.Context, userSfid, emailSfid str
 			return fmt.Errorf("failed to get mapping record %s: %w", mappingKey, err)
 		}
 	} else {
-		revision = entry.Revision()
-		if err := json.Unmarshal(entry.Value(), &currentEmails); err != nil {
+		revision = entry.Revision
+		if err := json.Unmarshal(entry.Value, &currentEmails); err != nil {
 			logger.With("error", err, "key", mappingKey).
 				ErrorContext(ctx, "failed to unmarshal existing emails list")
 			return fmt.Errorf("failed to unmarshal mapping record %s: %w: %w", mappingKey, err, errCorruptAlternateEmailsMapping)
@@ -631,8 +630,8 @@ func updateContactEmailMappingIndex(ctx context.Context, userSfid, emailSfid str
 	}
 
 	if revision == 0 {
-		if _, err := mappingsKV.Create(ctx, mappingKey, updatedData); err != nil {
-			if isRevisionMismatchError(err) || err == jetstream.ErrKeyExists {
+		if _, err := mappingStore.Create(ctx, mappingKey, updatedData); err != nil {
+			if errors.Is(err, ErrRevisionMismatch) || errors.Is(err, ErrKeyExists) {
 				logger.With("error", err, "key", mappingKey).
 					WarnContext(ctx, "key created by another process during create attempt, will retry")
 			} else {
@@ -642,8 +641,8 @@ func updateContactEmailMappingIndex(ctx context.Context, userSfid, emailSfid str
 			return fmt.Errorf("failed to create mapping record %s: %w", mappingKey, err)
 		}
 	} else {
-		if _, err := mappingsKV.Update(ctx, mappingKey, updatedData, revision); err != nil {
-			if isRevisionMismatchError(err) {
+		if _, err := mappingStore.Update(ctx, mappingKey, updatedData, revision); err != nil {
+			if errors.Is(err, ErrRevisionMismatch) {
 				logger.With("error", err, "key", mappingKey, "revision", revision).
 					WarnContext(ctx, "mapping record revision mismatch, will retry")
 			} else {
@@ -782,7 +781,7 @@ func streamUserSecondaryIndex(
 		}
 
 		putCtx, cancelPut := context.WithTimeout(ctx, cfg.ReindexNATSOpTimeout)
-		_, putErr := mappingsKV.Put(putCtx, indexKey, []byte(value))
+		_, putErr := mappingStore.Put(putCtx, indexKey, []byte(value))
 		cancelPut()
 		if putErr != nil {
 			logger.With("error", putErr, "subject", subject, "indexKey", indexKey, "phase", phaseName).Warn("failed to write index during reindex")

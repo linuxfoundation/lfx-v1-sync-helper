@@ -248,9 +248,9 @@ func lookupB2BUser(ctx context.Context, b2bUserID string) (*V1User, error) {
 func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error) {
 	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
 
-	entry, err := mappingsKV.Get(ctx, mappingKey)
+	entry, err := mappingStore.Get(ctx, mappingKey)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, ErrKeyNotFound) {
 			return "", fmt.Errorf("no alternate emails found for user %s", userSfid)
 		}
 		return "", fmt.Errorf("failed to get alternate emails mapping: %w", err)
@@ -258,7 +258,7 @@ func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error
 
 	// Parse the list of email SFIDs
 	var emailSfids []string
-	if err := json.Unmarshal(entry.Value(), &emailSfids); err != nil {
+	if err := json.Unmarshal(entry.Value, &emailSfids); err != nil {
 		return "", fmt.Errorf("failed to unmarshal email SFIDs: %w", err)
 	}
 
@@ -388,16 +388,16 @@ var errAmbiguousDefactoPrimaryEmail = errors.New("ambiguous de-facto primary alt
 // potentially transient (safe to retry).
 func isSoleQualifyingAlternateEmail(ctx context.Context, userSfid string) (bool, error) {
 	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
-	entry, err := mappingsKV.Get(ctx, mappingKey)
+	entry, err := mappingStore.Get(ctx, mappingKey)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, ErrKeyNotFound) {
 			return true, nil
 		}
 		return false, fmt.Errorf("failed to get alternate emails mapping: %w", err)
 	}
 
 	var emailSfids []string
-	if err := json.Unmarshal(entry.Value(), &emailSfids); err != nil {
+	if err := json.Unmarshal(entry.Value, &emailSfids); err != nil {
 		return false, fmt.Errorf("failed to unmarshal email SFIDs: %w", err)
 	}
 
@@ -441,20 +441,20 @@ func ResolveV1UserSFIDByUsername(ctx context.Context, username string) (string, 
 		return "", nil
 	}
 	indexKey := kvKeyUsernamePrefix + encodedUsername
-	entry, err := mappingsKV.Get(ctx, indexKey)
+	entry, err := mappingStore.Get(ctx, indexKey)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, ErrKeyNotFound) {
 			return "", nil // Miss
 		}
 		return "", fmt.Errorf("failed to get username index: %w", err)
 	}
 
 	// Check if tombstoned.
-	if isTombstonedMapping(entry.Value()) {
+	if isTombstonedMapping(entry.Value) {
 		return "", nil // Tombstoned, treat as miss
 	}
 
-	candidateSFID := string(entry.Value())
+	candidateSFID := string(entry.Value)
 
 	// Validate by fetching the user record.
 	user, err := lookupMergedUser(ctx, candidateSFID)
@@ -487,19 +487,19 @@ func lookupUserByUsername(ctx context.Context, username string) (*V1User, string
 		return nil, ""
 	}
 	indexKey := kvKeyUsernamePrefix + encodedUsername
-	entry, err := mappingsKV.Get(ctx, indexKey)
+	entry, err := mappingStore.Get(ctx, indexKey)
 	if err != nil {
-		if err != jetstream.ErrKeyNotFound {
+		if !errors.Is(err, ErrKeyNotFound) {
 			logger.With(errKey, err, "username", username).
 				WarnContext(ctx, "failed to get username index for user enrichment")
 		}
 		return nil, ""
 	}
-	if isTombstonedMapping(entry.Value()) {
+	if isTombstonedMapping(entry.Value) {
 		return nil, ""
 	}
 
-	sfid := string(entry.Value())
+	sfid := string(entry.Value)
 	user, err := lookupMergedUser(ctx, sfid)
 	if err != nil {
 		logger.With(errKey, err, "username", username, "sfid", sfid).
@@ -531,27 +531,27 @@ func ResolveV1UserSFIDByEmail(ctx context.Context, email string) (string, error)
 		return "", nil
 	}
 	indexKey := kvKeyEmailPrefix + encodedEmail
-	entry, err := mappingsKV.Get(ctx, indexKey)
+	entry, err := mappingStore.Get(ctx, indexKey)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, ErrKeyNotFound) {
 			return "", nil // Miss
 		}
 		return "", fmt.Errorf("failed to get email index: %w", err)
 	}
 
 	// Check if tombstoned.
-	if isTombstonedMapping(entry.Value()) {
+	if isTombstonedMapping(entry.Value) {
 		return "", nil // Tombstoned, treat as miss
 	}
 
-	candidateSFID := string(entry.Value())
+	candidateSFID := string(entry.Value)
 
 	// Get the list of alternate email SFIDs for this user to validate.
 	// merged_user has NO email field - all emails are in alternate_email records.
 	mappingKey := kvKeyAlternateEmailsPrefix + candidateSFID
-	emailListEntry, err := mappingsKV.Get(ctx, mappingKey)
+	emailListEntry, err := mappingStore.Get(ctx, mappingKey)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, ErrKeyNotFound) {
 			// Per ticket: "silently treat missing emails as a miss"
 			logger.With("candidate_sfid", candidateSFID).
 				DebugContext(ctx, "no alternate emails found for user, treating as miss")
@@ -562,7 +562,7 @@ func ResolveV1UserSFIDByEmail(ctx context.Context, email string) (string, error)
 
 	// Parse the list of email SFIDs.
 	var emailSfids []string
-	if err := json.Unmarshal(emailListEntry.Value(), &emailSfids); err != nil {
+	if err := json.Unmarshal(emailListEntry.Value, &emailSfids); err != nil {
 		return "", fmt.Errorf("failed to unmarshal email SFIDs: %w", err)
 	}
 
@@ -777,13 +777,13 @@ func resolveV1OrgID(ctx context.Context, name, website string) (string, error) {
 func getCachedV1Org(ctx context.Context, sfid string) (*V1Organization, error) {
 	cacheKey := orgCacheKeyPrefix + sfid
 
-	entry, err := mappingsKV.Get(ctx, cacheKey)
+	entry, err := mappingStore.Get(ctx, cacheKey)
 	if err != nil {
 		return nil, err // No cached entry
 	}
 
 	var org V1Organization
-	if err := json.Unmarshal(entry.Value(), &org); err != nil {
+	if err := json.Unmarshal(entry.Value, &org); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal cached organization: %w", err)
 	}
 
@@ -799,7 +799,7 @@ func setCachedV1Org(ctx context.Context, sfid string, org *V1Organization) error
 		return fmt.Errorf("failed to marshal organization for cache: %w", err)
 	}
 
-	_, err = mappingsKV.Put(ctx, cacheKey, data)
+	_, err = mappingStore.Put(ctx, cacheKey, data)
 	return err
 }
 
@@ -813,18 +813,18 @@ func acquireV1OrgLock(ctx context.Context, sfid string, maxRetries int) (bool, b
 		lockValue := strconv.FormatInt(time.Now().Unix(), 10)
 
 		// Try to create the lock (will fail if it already exists)
-		_, err := mappingsKV.Create(ctx, lockKey, []byte(lockValue))
+		_, err := mappingStore.Create(ctx, lockKey, []byte(lockValue))
 		if err == nil {
 			return true, waited // Successfully acquired lock
 		}
 
 		// Check if lock already exists and if it's stale
-		if entry, getErr := mappingsKV.Get(ctx, lockKey); getErr == nil {
-			if lockTimestamp, parseErr := strconv.ParseInt(string(entry.Value()), 10, 64); parseErr == nil {
+		if entry, getErr := mappingStore.Get(ctx, lockKey); getErr == nil {
+			if lockTimestamp, parseErr := strconv.ParseInt(string(entry.Value), 10, 64); parseErr == nil {
 				lockTime := time.Unix(lockTimestamp, 0)
 				if time.Since(lockTime) > orgLockTimeout {
 					// Lock is stale, try to update it
-					if _, updateErr := mappingsKV.Put(ctx, lockKey, []byte(lockValue)); updateErr == nil {
+					if _, updateErr := mappingStore.Put(ctx, lockKey, []byte(lockValue)); updateErr == nil {
 						return true, waited
 					}
 				}
@@ -844,7 +844,7 @@ func acquireV1OrgLock(ctx context.Context, sfid string, maxRetries int) (bool, b
 // releaseOrgLock releases an organization refresh lock
 func releaseV1OrgLock(ctx context.Context, sfid string) error {
 	lockKey := orgLockKeyPrefix + sfid
-	return mappingsKV.Delete(ctx, lockKey)
+	return mappingStore.Delete(ctx, lockKey)
 }
 
 // refreshOrgInBackground refreshes organization data in the background

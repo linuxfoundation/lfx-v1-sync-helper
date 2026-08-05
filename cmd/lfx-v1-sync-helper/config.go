@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -105,6 +106,58 @@ type Config struct {
 	// Set COMMITTEE_SKIP_MEMBER_NOTIFICATIONS=false to allow emails from V1-sync
 	// (e.g. when enabling notifications more broadly at GA).
 	CommitteeSkipMemberNotifications bool
+
+	// Postgres connection settings — used by the v1-mappings Postgres store
+	// introduced in LFXV2-2985 and its backfill/migration job. DatabaseURL
+	// takes precedence; when empty, one is composed in-process from the
+	// PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE fields to avoid embedding
+	// the CloudNativePG-generated password as a literal substring in the pod
+	// spec (env-var interpolation would resolve it and expose it via
+	// `kubectl describe pod`). Not required for handlers/watchers, so
+	// LoadConfig does not validate it — only paths that actually need
+	// Postgres (currently the --backfill-v1-mappings-to-postgres one-shot)
+	// re-validate via ResolveDatabaseURL.
+	DatabaseURL string
+	PGHost      string
+	PGPort      string
+	PGUser      string
+	PGPassword  string
+	PGDatabase  string
+
+	// BackfillV1MappingsWorkers is the number of concurrent scanner
+	// goroutines that partition the KV_v1-mappings sequence space during
+	// --backfill-v1-mappings-to-postgres. Each worker owns a disjoint
+	// [startSeq, endSeq) range and drives an independent next_by_subj scan.
+	// Wall-clock is roughly (single-worker time) / workers, capped by
+	// per-connection NATS RTT and server CPU headroom.
+	//
+	// Range: [1, 64]. Default 8 keeps concurrent load on the NATS server
+	// well below the ~357% CPU saturation point observed with ephemeral
+	// consumer-based enumeration (see nats_scan.go). Set via
+	// BACKFILL_V1_MAPPINGS_WORKERS.
+	BackfillV1MappingsWorkers int
+
+	// BackfillV1MappingsBatchSize is the number of visits accumulated in
+	// memory before flushing to the Postgres staging table via CopyFrom.
+	// Trades peak memory (~ batch_size * ~120 bytes) against COPY frequency.
+	// 50000 gives ~6 MiB of buffered rows per flush, keeping the pod's
+	// memory footprint well under a normal K8s job request.
+	// Set via BACKFILL_V1_MAPPINGS_BATCH_SIZE. Default 50000.
+	BackfillV1MappingsBatchSize int
+
+	// V1MappingsStoreMode selects the MappingStore backend used at
+	// runtime for the v1-mappings bucket. Values:
+	//   - "kv":       read+write only the jetstream.KeyValue bucket
+	//                 (pre-migration behaviour; safest rollback target).
+	//   - "dual":     read Postgres with a KV fallback on miss, write
+	//                 both — the safe steady state during rollout, and
+	//                 the default so a deployment with the CNPG chart
+	//                 wiring in place gets dual-write semantics without
+	//                 an extra env-var change.
+	//   - "postgres": read+write only Postgres (final state, once the
+	//                 KV bucket is ready to be decommissioned).
+	// Set via V1_MAPPINGS_STORE_MODE. Default: "dual".
+	V1MappingsStoreMode V1MappingsStoreMode
 }
 
 const (
@@ -112,6 +165,19 @@ const (
 	defaultReindexPhaseTimeout  = 45 * time.Minute
 	defaultReindexNATSOpTimeout = 30 * time.Second
 	defaultReindexOpDelay       = 0
+
+	// Backfill defaults for --backfill-v1-mappings-to-postgres.
+	defaultBackfillV1MappingsWorkers   = 8
+	defaultBackfillV1MappingsBatchSize = 50000
+	maxBackfillV1MappingsWorkers       = 64
+
+	// defaultV1MappingsStoreMode is the online MappingStore backend
+	// used when V1_MAPPINGS_STORE_MODE is unset. "dual" is intentional:
+	// the migration story assumes CNPG chart wiring lands in the same
+	// release as this code, so any deployment picking up this binary
+	// should already have Postgres available and benefit from the
+	// dual-write safety net.
+	defaultV1MappingsStoreMode = V1MappingsStoreModeDual
 )
 
 // LoadReindexConfig returns a config for --rebuild-user-secondary-indexes mode.
@@ -124,11 +190,20 @@ func LoadReindexConfig() *Config {
 		natsURL = defaultNATSURL
 	}
 	return &Config{
-		NATSURL:              natsURL,
-		NATSFetchMaxWait:     parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
-		ReindexPhaseTimeout:  parseDurationEnv("REINDEX_PHASE_TIMEOUT", defaultReindexPhaseTimeout),
-		ReindexNATSOpTimeout: parseDurationEnv("REINDEX_NATS_OP_TIMEOUT", defaultReindexNATSOpTimeout),
-		ReindexOpDelay:       parseDurationEnv("REINDEX_OP_DELAY", defaultReindexOpDelay),
+		NATSURL:                     natsURL,
+		NATSFetchMaxWait:            parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
+		ReindexPhaseTimeout:         parseDurationEnv("REINDEX_PHASE_TIMEOUT", defaultReindexPhaseTimeout),
+		ReindexNATSOpTimeout:        parseDurationEnv("REINDEX_NATS_OP_TIMEOUT", defaultReindexNATSOpTimeout),
+		ReindexOpDelay:              parseDurationEnv("REINDEX_OP_DELAY", defaultReindexOpDelay),
+		DatabaseURL:                 os.Getenv("DATABASE_URL"),
+		PGHost:                      os.Getenv("PGHOST"),
+		PGPort:                      os.Getenv("PGPORT"),
+		PGUser:                      os.Getenv("PGUSER"),
+		PGPassword:                  os.Getenv("PGPASSWORD"),
+		PGDatabase:                  os.Getenv("PGDATABASE"),
+		BackfillV1MappingsWorkers:   parseIntEnvClamped("BACKFILL_V1_MAPPINGS_WORKERS", defaultBackfillV1MappingsWorkers, 1, maxBackfillV1MappingsWorkers),
+		BackfillV1MappingsBatchSize: parseIntEnvClamped("BACKFILL_V1_MAPPINGS_BATCH_SIZE", defaultBackfillV1MappingsBatchSize, 1, 1_000_000),
+		V1MappingsStoreMode:         parseV1MappingsStoreModeEnv(),
 	}
 }
 
@@ -147,6 +222,32 @@ func parseDurationEnv(name string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// parseIntEnvClamped reads a non-negative integer from the named env var,
+// falls back to def on empty/invalid input (logging a warning on invalid),
+// and clamps the result to [minV, maxV] so operator misconfiguration cannot
+// spawn thousands of concurrent NATS scanners or allocate a batch buffer
+// large enough to OOM the pod.
+func parseIntEnvClamped(name string, def, minV, maxV int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		slog.Warn("invalid integer env var, using default", "env", name, "value", raw, "default", def)
+		return def
+	}
+	if v < minV {
+		slog.Warn("integer env var below minimum, clamping", "env", name, "value", v, "min", minV)
+		return minV
+	}
+	if v > maxV {
+		slog.Warn("integer env var above maximum, clamping", "env", name, "value", v, "max", maxV)
+		return maxV
+	}
+	return v
 }
 
 // LoadConfig loads configuration from environment variables
@@ -179,6 +280,15 @@ func LoadConfig() (*Config, error) {
 		NATSFetchMaxWait:                 parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
 		ProjectAllowlistFile:             os.Getenv("PROJECT_ALLOWLIST_FILE"),
 		ProjectFamilyAllowlistFile:       os.Getenv("PROJECT_FAMILY_ALLOWLIST_FILE"),
+		DatabaseURL:                      os.Getenv("DATABASE_URL"),
+		PGHost:                           os.Getenv("PGHOST"),
+		PGPort:                           os.Getenv("PGPORT"),
+		PGUser:                           os.Getenv("PGUSER"),
+		PGPassword:                       os.Getenv("PGPASSWORD"),
+		PGDatabase:                       os.Getenv("PGDATABASE"),
+		BackfillV1MappingsWorkers:        parseIntEnvClamped("BACKFILL_V1_MAPPINGS_WORKERS", defaultBackfillV1MappingsWorkers, 1, maxBackfillV1MappingsWorkers),
+		BackfillV1MappingsBatchSize:      parseIntEnvClamped("BACKFILL_V1_MAPPINGS_BATCH_SIZE", defaultBackfillV1MappingsBatchSize, 1, 1_000_000),
+		V1MappingsStoreMode:              parseV1MappingsStoreModeEnv(),
 	}
 
 	// Project allowlists — file path overrides env var overrides built-in defaults.
@@ -351,4 +461,71 @@ func parseBooleanEnvWithDefault(envVar string, def bool) bool {
 	}
 	truthyValues := []string{"true", "yes", "t", "y", "1"}
 	return slices.Contains(truthyValues, value)
+}
+
+// ResolveDatabaseURL returns the effective Postgres DSN for the process,
+// preferring DATABASE_URL when set and otherwise composing one from
+// PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE. Composition uses
+// url.UserPassword so passwords containing '@', ':', '/', '#', etc. are
+// percent-encoded correctly, and it avoids embedding the password as a
+// literal substring in the pod spec — the deployment forwards the raw
+// PG* secret keys and the DSN is only ever assembled inside the process.
+//
+// Returns an error listing the missing PG* fields when neither
+// DATABASE_URL nor a full PG* set is available; callers that don't need
+// Postgres (e.g. the main NATS-only paths) should not call this.
+func (c *Config) ResolveDatabaseURL() (string, error) {
+	if strings.TrimSpace(c.DatabaseURL) != "" {
+		return c.DatabaseURL, nil
+	}
+	host := strings.TrimSpace(c.PGHost)
+	user := strings.TrimSpace(c.PGUser)
+	password := c.PGPassword
+	database := strings.TrimSpace(c.PGDatabase)
+
+	var missing []string
+	if host == "" {
+		missing = append(missing, "PGHOST")
+	}
+	if user == "" {
+		missing = append(missing, "PGUSER")
+	}
+	if password == "" {
+		missing = append(missing, "PGPASSWORD")
+	}
+	if database == "" {
+		missing = append(missing, "PGDATABASE")
+	}
+	if len(missing) > 0 {
+		return "", fmt.Errorf("DATABASE_URL is empty and cannot compose Postgres DSN; missing: %s", strings.Join(missing, ", "))
+	}
+
+	port := strings.TrimSpace(c.PGPort)
+	if port == "" {
+		port = "5432"
+	}
+	u := &url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(user, password),
+		Host:   host + ":" + port,
+		Path:   "/" + database,
+	}
+	return u.String(), nil
+}
+
+// parseV1MappingsStoreModeEnv reads V1_MAPPINGS_STORE_MODE, defaulting
+// to defaultV1MappingsStoreMode when unset. Unknown values fall back
+// to the default with a warning so a typo does not silently disable
+// dual-write during rollout.
+func parseV1MappingsStoreModeEnv() V1MappingsStoreMode {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("V1_MAPPINGS_STORE_MODE")))
+	if raw == "" {
+		return defaultV1MappingsStoreMode
+	}
+	m := V1MappingsStoreMode(raw)
+	if !isValidV1MappingsStoreMode(m) {
+		slog.Warn("invalid V1_MAPPINGS_STORE_MODE, falling back to default", "value", raw, "default", string(defaultV1MappingsStoreMode))
+		return defaultV1MappingsStoreMode
+	}
+	return m
 }

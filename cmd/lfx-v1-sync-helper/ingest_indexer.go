@@ -66,13 +66,13 @@ func committeeIndexerEventHandler(msg *nats.Msg) {
 				WarnContext(ctx, "no project_uid in committee event body, skipping")
 			return
 		}
-		projectEntry, err := mappingsKV.Get(ctx, "project.uid."+projectUID)
-		if err != nil || isTombstonedMapping(projectEntry.Value()) {
+		projectEntry, err := mappingStore.Get(ctx, "project.uid."+projectUID)
+		if err != nil || isTombstonedMapping(projectEntry.Value) {
 			logger.With(errKey, err, "project_uid", projectUID, "committee_uid", event.ObjectID).
 				WarnContext(ctx, "could not resolve project SFID from project UID, skipping")
 			return
 		}
-		projectSFID := string(projectEntry.Value())
+		projectSFID := string(projectEntry.Value)
 		if projectSFID == "" {
 			logger.With("committee_uid", event.ObjectID).
 				WarnContext(ctx, "no project SFID found, skipping")
@@ -85,8 +85,8 @@ func committeeIndexerEventHandler(msg *nats.Msg) {
 	case "updated":
 		projectSFID := ""
 		committeeSFID := ""
-		if entry, err := mappingsKV.Get(ctx, "committee.uid."+event.ObjectID); err == nil {
-			projectSFID, committeeSFID, _ = splitTwoParts(string(entry.Value()))
+		if entry, err := mappingStore.Get(ctx, "committee.uid."+event.ObjectID); err == nil {
+			projectSFID, committeeSFID, _ = splitTwoParts(string(entry.Value))
 		}
 		if projectSFID == "" || committeeSFID == "" {
 			logger.With("committee_uid", event.ObjectID).
@@ -100,8 +100,8 @@ func committeeIndexerEventHandler(msg *nats.Msg) {
 	case "deleted":
 		projectSFID := ""
 		committeeSFID := ""
-		if entry, err := mappingsKV.Get(ctx, "committee.uid."+event.ObjectID); err == nil {
-			projectSFID, committeeSFID, _ = splitTwoParts(string(entry.Value()))
+		if entry, err := mappingStore.Get(ctx, "committee.uid."+event.ObjectID); err == nil {
+			projectSFID, committeeSFID, _ = splitTwoParts(string(entry.Value))
 		}
 		if projectSFID == "" || committeeSFID == "" {
 			logger.With("committee_uid", event.ObjectID).
@@ -151,13 +151,13 @@ func committeeMemberIndexerEventHandler(msg *nats.Msg) {
 				WarnContext(ctx, "no committee_uid in committee member event body, skipping")
 			return
 		}
-		committeeEntry, err := mappingsKV.Get(ctx, "committee.uid."+committeeUID)
-		if err != nil || isTombstonedMapping(committeeEntry.Value()) {
+		committeeEntry, err := mappingStore.Get(ctx, "committee.uid."+committeeUID)
+		if err != nil || isTombstonedMapping(committeeEntry.Value) {
 			logger.With(errKey, err, "committee_uid", committeeUID, "member_uid", event.ObjectID).
 				WarnContext(ctx, "could not resolve project SFID from committee UID, skipping")
 			return
 		}
-		projectSFID, committeeSFID, ok := splitTwoParts(string(committeeEntry.Value()))
+		projectSFID, committeeSFID, ok := splitTwoParts(string(committeeEntry.Value))
 		if !ok || projectSFID == "" || committeeSFID == "" {
 			logger.With("committee_uid", committeeUID, "member_uid", event.ObjectID).
 				WarnContext(ctx, "committee reverse mapping has unexpected format, skipping")
@@ -169,15 +169,15 @@ func committeeMemberIndexerEventHandler(msg *nats.Msg) {
 
 	case "updated":
 		reverseMappingKey := "committee_member.uid." + event.ObjectID
-		entry, err := mappingsKV.Get(ctx, reverseMappingKey)
+		entry, err := mappingStore.Get(ctx, reverseMappingKey)
 		if err != nil {
 			logger.With(errKey, err, "member_uid", event.ObjectID, "subject", msg.Subject).
 				WarnContext(ctx, "no reverse mapping for committee member UID, cannot sync to v1")
 			return
 		}
-		projectSFID, committeeSFID, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(entry.Value()))
+		projectSFID, committeeSFID, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(entry.Value))
 		if !ok {
-			logger.With("mapping_value", string(entry.Value()), "member_uid", event.ObjectID).
+			logger.With("mapping_value", string(entry.Value), "member_uid", event.ObjectID).
 				WarnContext(ctx, "committee member reverse mapping has unexpected format, skipping")
 			return
 		}
@@ -193,15 +193,15 @@ func committeeMemberIndexerEventHandler(msg *nats.Msg) {
 
 	case "deleted":
 		reverseMappingKey := "committee_member.uid." + event.ObjectID
-		entry, err := mappingsKV.Get(ctx, reverseMappingKey)
+		entry, err := mappingStore.Get(ctx, reverseMappingKey)
 		if err != nil {
 			logger.With(errKey, err, "member_uid", event.ObjectID, "subject", msg.Subject).
 				WarnContext(ctx, "no reverse mapping for committee member UID, cannot sync to v1")
 			return
 		}
-		projectSFID, committeeSFID, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(entry.Value()))
+		projectSFID, committeeSFID, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(entry.Value))
 		if !ok {
-			logger.With("mapping_value", string(entry.Value()), "member_uid", event.ObjectID).
+			logger.With("mapping_value", string(entry.Value), "member_uid", event.ObjectID).
 				WarnContext(ctx, "committee member reverse mapping has unexpected format, skipping")
 			return
 		}
@@ -235,7 +235,7 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 
 	// A non-tombstoned reverse mapping means this was created from v1; skip.
 	reverseKey := "committee.uid." + committeeUID
-	if entry, err := mappingsKV.Get(ctx, reverseKey); err == nil && !isTombstonedMapping(entry.Value()) {
+	if entry, err := mappingStore.Get(ctx, reverseKey); err == nil && !isTombstonedMapping(entry.Value) {
 		log.DebugContext(ctx, "committee originated from v1 — skipping reverse sync")
 		return
 	}
@@ -277,12 +277,12 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 
 	// Store forward mapping (v1 SFID -> v2 UID) and reverse mapping (v2 UID -> projectSFID:committeeSFID).
 	committeeSFID := result.ID
-	if _, err := mappingsKV.Put(ctx, "committee.sfid."+committeeSFID, []byte(committeeUID)); err != nil {
+	if _, err := mappingStore.Put(ctx, "committee.sfid."+committeeSFID, []byte(committeeUID)); err != nil {
 		log.With(errKey, err, "committee_sfid", committeeSFID).
 			WarnContext(ctx, "failed to store committee forward mapping after v1 create")
 	}
 	reverseMappingValue := projectSFID + ":" + committeeSFID
-	if _, err := mappingsKV.Put(ctx, "committee.uid."+committeeUID, []byte(reverseMappingValue)); err != nil {
+	if _, err := mappingStore.Put(ctx, "committee.uid."+committeeUID, []byte(reverseMappingValue)); err != nil {
 		log.With(errKey, err, "committee_sfid", committeeSFID).
 			WarnContext(ctx, "failed to store committee reverse mapping after v1 create")
 	}
@@ -351,7 +351,7 @@ func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID,
 
 	// A non-tombstoned reverse mapping means this was created from v1; skip.
 	reverseKey := "committee_member.uid." + memberUID
-	if entry, err := mappingsKV.Get(ctx, reverseKey); err == nil && !isTombstonedMapping(entry.Value()) {
+	if entry, err := mappingStore.Get(ctx, reverseKey); err == nil && !isTombstonedMapping(entry.Value) {
 		log.DebugContext(ctx, "committee member originated from v1 — skipping reverse sync")
 		return
 	}
@@ -422,12 +422,12 @@ func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID,
 	// Store forward mapping (v1 SFID -> committeeUID:memberUID) and reverse mapping (v2 UID -> projectSFID:committeeSFID:memberSFID).
 	memberSFID := result.MemberID
 	forwardMappingValue := committeeUID + ":" + memberUID
-	if _, err := mappingsKV.Put(ctx, "committee_member.sfid."+memberSFID, []byte(forwardMappingValue)); err != nil {
+	if _, err := mappingStore.Put(ctx, "committee_member.sfid."+memberSFID, []byte(forwardMappingValue)); err != nil {
 		log.With(errKey, err, "member_sfid", memberSFID).
 			WarnContext(ctx, "failed to store committee member forward mapping after v1 create")
 	}
 	reverseMappingValue := projectSFID + ":" + committeeSFID + ":" + memberSFID
-	if _, err := mappingsKV.Put(ctx, "committee_member.uid."+memberUID, []byte(reverseMappingValue)); err != nil {
+	if _, err := mappingStore.Put(ctx, "committee_member.uid."+memberUID, []byte(reverseMappingValue)); err != nil {
 		log.With(errKey, err, "member_sfid", memberSFID).
 			WarnContext(ctx, "failed to store committee member reverse mapping after v1 create")
 	}
@@ -513,8 +513,8 @@ func syncCommitteeMemberDeleteToV1(ctx context.Context, memberUID, projectSFID, 
 
 	forwardSFID := recordSFID
 	if forwardSFID == "" {
-		if entry, err := mappingsKV.Get(ctx, "committee_member.sfid."+memberSFID); err == nil && !isTombstonedMapping(entry.Value()) {
-			if _, ownerUID, ok := splitTwoParts(string(entry.Value())); ok && ownerUID == memberUID {
+		if entry, err := mappingStore.Get(ctx, "committee_member.sfid."+memberSFID); err == nil && !isTombstonedMapping(entry.Value) {
+			if _, ownerUID, ok := splitTwoParts(string(entry.Value)); ok && ownerUID == memberUID {
 				forwardSFID = memberSFID
 			}
 		}
@@ -638,11 +638,11 @@ func committeeMemberRecordSFIDKey(memberUID string) string {
 // absent, tombstoned, or unreadable — all treated as "unknown", since this value is
 // only used to tombstone the forward mapping as a best effort on delete.
 func resolveCommitteeMemberRecordSFID(ctx context.Context, memberUID string) string {
-	entry, err := mappingsKV.Get(ctx, committeeMemberRecordSFIDKey(memberUID))
-	if err != nil || isTombstonedMapping(entry.Value()) {
+	entry, err := mappingStore.Get(ctx, committeeMemberRecordSFIDKey(memberUID))
+	if err != nil || isTombstonedMapping(entry.Value) {
 		return ""
 	}
-	return string(entry.Value())
+	return string(entry.Value)
 }
 
 // mapV2CategoryToV1 converts a v2 committee category to the equivalent v1 API value.

@@ -282,20 +282,22 @@ func handleResourceDelete(ctx context.Context, key string, v1Data map[string]any
 	}
 }
 
-// tombstoneMapping stores a tombstone marker in the mapping KV store.
+// tombstoneMapping stores a tombstone marker in the mapping store.
+// Routes through the process-wide mappingStore so the write goes to the
+// backend selected by V1_MAPPINGS_STORE_MODE (kv / dual / postgres).
 func tombstoneMapping(ctx context.Context, mappingKey string) error {
-	if _, err := mappingsKV.Put(ctx, mappingKey, []byte(tombstoneMarker)); err != nil {
+	if _, err := mappingStore.Put(ctx, mappingKey, []byte(tombstoneMarker)); err != nil {
 		return fmt.Errorf("failed to tombstone mapping %s: %w", mappingKey, err)
 	}
 	return nil
 }
 
-// deleteIndexKey removes a secondary-index key from the mappings KV store.
+// deleteIndexKey removes a secondary-index key from the mapping store.
 // Unlike tombstoneMapping, this does not leave a "!del" marker — secondary
-// indexes have no resurrection-prevention requirement, so a native KV delete
-// is sufficient.
+// indexes have no resurrection-prevention requirement, so a native delete
+// is sufficient. Routes through mappingStore for backend selection.
 func deleteIndexKey(ctx context.Context, mappingKey string) error {
-	if err := mappingsKV.Delete(ctx, mappingKey); err != nil {
+	if err := mappingStore.Delete(ctx, mappingKey); err != nil {
 		return fmt.Errorf("failed to delete index key %s: %w", mappingKey, err)
 	}
 	return nil

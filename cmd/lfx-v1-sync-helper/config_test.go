@@ -431,3 +431,89 @@ func TestCommitteeSkipMemberNotificationsConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestParseIntEnvClamped(t *testing.T) {
+	tests := []struct {
+		name    string
+		envVal  string
+		def     int
+		minV    int
+		maxV    int
+		want    int
+		wantEnv bool // when true, set env var; when false, unset
+	}{
+		{name: "unset returns default", def: 8, minV: 1, maxV: 64, want: 8, wantEnv: false},
+		{name: "valid within range", envVal: "16", def: 8, minV: 1, maxV: 64, want: 16, wantEnv: true},
+		{name: "clamp low", envVal: "-5", def: 8, minV: 1, maxV: 64, want: 1, wantEnv: true},
+		{name: "clamp high", envVal: "99999", def: 8, minV: 1, maxV: 64, want: 64, wantEnv: true},
+		{name: "invalid falls back to default", envVal: "abc", def: 8, minV: 1, maxV: 64, want: 8, wantEnv: true},
+		{name: "empty falls back to default", envVal: "", def: 8, minV: 1, maxV: 64, want: 8, wantEnv: false},
+		{name: "whitespace-only falls back to default", envVal: "   ", def: 8, minV: 1, maxV: 64, want: 8, wantEnv: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const name = "TEST_PARSE_INT_ENV_CLAMPED"
+			if err := os.Unsetenv(name); err != nil {
+				t.Fatalf("Unsetenv: %v", err)
+			}
+			if tt.wantEnv {
+				t.Setenv(name, tt.envVal)
+			}
+			got := parseIntEnvClamped(name, tt.def, tt.minV, tt.maxV)
+			if got != tt.want {
+				t.Errorf("parseIntEnvClamped(%q, %d, %d, %d) = %d, want %d", tt.envVal, tt.def, tt.minV, tt.maxV, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveDatabaseURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "explicit DATABASE_URL wins",
+			cfg:  Config{DatabaseURL: "postgres://u:p@h:5432/d?sslmode=disable", PGHost: "ignored", PGUser: "ignored", PGPassword: "ignored", PGDatabase: "ignored"},
+			want: "postgres://u:p@h:5432/d?sslmode=disable",
+		},
+		{
+			name: "compose from PG* fields",
+			cfg:  Config{PGHost: "pg.local", PGUser: "app", PGPassword: "secret", PGDatabase: "mydb"},
+			want: "postgres://app:secret@pg.local:5432/mydb",
+		},
+		{
+			name: "compose with custom port",
+			cfg:  Config{PGHost: "pg.local", PGPort: "5433", PGUser: "app", PGPassword: "secret", PGDatabase: "mydb"},
+			want: "postgres://app:secret@pg.local:5433/mydb",
+		},
+		{
+			name: "password with special chars is percent-encoded",
+			cfg:  Config{PGHost: "pg.local", PGUser: "app", PGPassword: "p@ss:word/#!", PGDatabase: "mydb"},
+			want: "postgres://app:p%40ss%3Aword%2F%23%21@pg.local:5432/mydb",
+		},
+		{
+			name:    "no DATABASE_URL and no PG* fields errors",
+			cfg:     Config{},
+			wantErr: true,
+		},
+		{
+			name:    "missing PGPASSWORD errors",
+			cfg:     Config{PGHost: "pg.local", PGUser: "app", PGDatabase: "mydb"},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.cfg.ResolveDatabaseURL()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ResolveDatabaseURL() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("ResolveDatabaseURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

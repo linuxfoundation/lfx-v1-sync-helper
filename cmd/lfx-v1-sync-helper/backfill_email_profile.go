@@ -34,12 +34,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/auth0/go-auth0/management"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 const (
@@ -83,19 +83,19 @@ var getAlternateEmailDetailsFn = getAlternateEmailDetails
 // loadBackfillCursor reads the cursor value from the v1-mappings KV bucket.
 // Returns ("", nil) when the key does not exist (first run).
 func loadBackfillCursor(ctx context.Context, cursorKey string) (string, error) {
-	entry, err := mappingsKV.Get(ctx, cursorKey)
+	entry, err := mappingStore.Get(ctx, cursorKey)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, ErrKeyNotFound) {
 			return "", nil
 		}
 		return "", fmt.Errorf("failed to read cursor %s: %w", cursorKey, err)
 	}
-	return strings.TrimSpace(string(entry.Value())), nil
+	return strings.TrimSpace(string(entry.Value)), nil
 }
 
 // saveBackfillCursor writes the cursor value to the v1-mappings KV bucket.
 func saveBackfillCursor(ctx context.Context, cursorKey, value string) error {
-	if _, err := mappingsKV.Put(ctx, cursorKey, []byte(value)); err != nil {
+	if _, err := mappingStore.Put(ctx, cursorKey, []byte(value)); err != nil {
 		return fmt.Errorf("failed to save cursor %s: %w", cursorKey, err)
 	}
 	return nil
@@ -242,9 +242,9 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 
 	// Fetch the list of alternate email SFIDs from the v1-mappings KV bucket.
 	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
-	entry, err := mappingsKV.Get(ctx, mappingKey)
+	entry, err := mappingStore.Get(ctx, mappingKey)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, ErrKeyNotFound) {
 			// No alternate emails registered for this user.
 			result.emailsSkipped++
 			return nil
@@ -253,7 +253,7 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 	}
 
 	var emailSfids []string
-	if err := json.Unmarshal(entry.Value(), &emailSfids); err != nil {
+	if err := json.Unmarshal(entry.Value, &emailSfids); err != nil {
 		return fmt.Errorf("parsing email SFIDs for %s: %w", userSfid, err)
 	}
 
@@ -537,9 +537,9 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 
 	// Sync alternate emails.
 	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
-	entry, err := mappingsKV.Get(ctx, mappingKey)
+	entry, err := mappingStore.Get(ctx, mappingKey)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, ErrKeyNotFound) {
 			logger.With("user_sfid", userSfid).Info("no alternate email SFIDs found in v1-mappings, skipping email sync")
 			return nil
 		}
@@ -547,7 +547,7 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 	}
 
 	var emailSfids []string
-	if err := json.Unmarshal(entry.Value(), &emailSfids); err != nil {
+	if err := json.Unmarshal(entry.Value, &emailSfids); err != nil {
 		return fmt.Errorf("parsing email SFIDs: %w", err)
 	}
 
