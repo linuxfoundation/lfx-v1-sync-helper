@@ -9,11 +9,11 @@ import (
 
 func TestResolveSFID(t *testing.T) {
 	tests := []struct {
-		name       string
-		v1Data     map[string]any
-		field      string
+		name        string
+		v1Data      map[string]any
+		field       string
 		b2bFallback string
-		want       string
+		want        string
 	}{
 		{
 			name:        "HC value present, fallback ignored",
@@ -77,10 +77,10 @@ func TestResolveSFID(t *testing.T) {
 
 func TestGetB2BProjectField(t *testing.T) {
 	tests := []struct {
-		name   string
+		name    string
 		b2bData map[string]any
-		field  string
-		want   string
+		field   string
+		want    string
 	}{
 		{
 			name:    "nil map returns empty",
