@@ -6,12 +6,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // isValidURL checks if a URL value is non-empty and not "nil".
@@ -80,12 +80,12 @@ func isProjectAllowed(ctx context.Context, v1Data map[string]any) (bool, string)
 
 	// Parent SFID is not blank - resolve it to v2 UID.
 	mappingKey := fmt.Sprintf("project.sfid.%s", parentProjectID)
-	entry, err := mappingsKV.Get(ctx, mappingKey)
+	entry, err := mappingStore.Get(ctx, mappingKey)
 	if err != nil {
 		return false, fmt.Sprintf("parent SFID %s not mapped to v2 UID", parentProjectID)
 	}
 
-	parentUID := string(entry.Value())
+	parentUID := string(entry.Value)
 	if parentUID == "" {
 		return false, fmt.Sprintf("empty parent UID for SFID %s", parentProjectID)
 	}
@@ -148,12 +148,12 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 	mappingKey := fmt.Sprintf("project.sfid.%s", sfid)
 	existingUID := ""
 
-	if entry, err := mappingsKV.Get(ctx, mappingKey); err == nil {
-		if isTombstonedMapping(entry.Value()) {
+	if entry, err := mappingStore.Get(ctx, mappingKey); err == nil {
+		if isTombstonedMapping(entry.Value) {
 			logger.With("sfid", sfid, "slug", slug).WarnContext(ctx, "skipping project upsert - mapping is tombstoned (previously deleted)")
 			return
 		}
-		existingUID = string(entry.Value())
+		existingUID = string(entry.Value)
 	}
 
 	var uid string
@@ -214,13 +214,13 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 
 	// Store the SFID mapping and reverse mapping.
 	if uid != "" {
-		if _, err := mappingsKV.Put(ctx, mappingKey, []byte(uid)); err != nil {
+		if _, err := mappingStore.Put(ctx, mappingKey, []byte(uid)); err != nil {
 			logger.With(errKey, err, "sfid", sfid, "uid", uid).WarnContext(ctx, "failed to store project mapping")
 		}
 
 		// Store reverse mapping (v2 UID -> v1 SFID).
 		reverseMappingKey := fmt.Sprintf("project.uid.%s", uid)
-		if _, err := mappingsKV.Put(ctx, reverseMappingKey, []byte(sfid)); err != nil {
+		if _, err := mappingStore.Put(ctx, reverseMappingKey, []byte(sfid)); err != nil {
 			logger.With(errKey, err, "project_uid", uid, "sfid", sfid).WarnContext(ctx, "failed to store project reverse mapping")
 		}
 	}
@@ -233,9 +233,9 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 func handleProjectDelete(ctx context.Context, key string, sfid string, v1Principal string) bool {
 	// Check if we have an existing mapping using SFID.
 	mappingKey := fmt.Sprintf("project.sfid.%s", sfid)
-	entry, err := mappingsKV.Get(ctx, mappingKey)
+	entry, err := mappingStore.Get(ctx, mappingKey)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, ErrKeyNotFound) {
 			logger.With("sfid", sfid, "key", key).InfoContext(ctx, "project mapping not found, nothing to delete")
 			return false
 		}
@@ -243,8 +243,8 @@ func handleProjectDelete(ctx context.Context, key string, sfid string, v1Princip
 		return true // Retry on error.
 	}
 
-	existingUID := string(entry.Value())
-	if existingUID == "" || isTombstonedMapping(entry.Value()) {
+	existingUID := string(entry.Value)
+	if existingUID == "" || isTombstonedMapping(entry.Value) {
 		logger.With("sfid", sfid, "key", key).InfoContext(ctx, "project mapping empty or tombstoned, nothing to delete")
 		return false
 	}
@@ -375,8 +375,8 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any)
 		parentEntityID = strings.TrimSpace(parentEntityID)
 		// Look up the parent entity's V2 UID from SFID mappings.
 		parentEntityMappingKey := fmt.Sprintf("project.sfid.%s", parentEntityID)
-		if entry, err := mappingsKV.Get(ctx, parentEntityMappingKey); err == nil {
-			legalParentUID := string(entry.Value())
+		if entry, err := mappingStore.Get(ctx, parentEntityMappingKey); err == nil {
+			legalParentUID := string(entry.Value)
 			payload.LegalParentUID = &legalParentUID
 			logger.With("parent_entity_sfid", parentEntityID, "legal_parent_uid", legalParentUID).DebugContext(ctx, "found legal parent UID from SFID mapping")
 		} else {
@@ -419,8 +419,8 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any)
 	if parentProjectID != "" {
 		// Project has a parent in v1, look up the parent's V2 UID from SFID mappings.
 		parentMappingKey := fmt.Sprintf("project.sfid.%s", parentProjectID)
-		if entry, err := mappingsKV.Get(ctx, parentMappingKey); err == nil {
-			payload.ParentUID = string(entry.Value())
+		if entry, err := mappingStore.Get(ctx, parentMappingKey); err == nil {
+			payload.ParentUID = string(entry.Value)
 			checkPublicParentUID = payload.ParentUID
 			logger.With("parent_project_sfid", parentProjectID, "parent_uid", payload.ParentUID).DebugContext(ctx, "found parent project UID from SFID mapping")
 		} else {
@@ -559,8 +559,8 @@ func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string,
 		parentEntityID = strings.TrimSpace(parentEntityID)
 		// Look up the parent entity's V2 UID from SFID mappings.
 		parentEntityMappingKey := fmt.Sprintf("project.sfid.%s", parentEntityID)
-		if entry, err := mappingsKV.Get(ctx, parentEntityMappingKey); err == nil {
-			legalParentUID := string(entry.Value())
+		if entry, err := mappingStore.Get(ctx, parentEntityMappingKey); err == nil {
+			legalParentUID := string(entry.Value)
 			payload.LegalParentUID = &legalParentUID
 			logger.With("parent_entity_sfid", parentEntityID, "legal_parent_uid", legalParentUID).DebugContext(ctx, "found legal parent UID from SFID mapping")
 		} else {
@@ -586,8 +586,8 @@ func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string,
 	if parentProjectID != "" {
 		// Project has a parent in v1, look up the parent's V2 UID from SFID mappings.
 		parentMappingKey := fmt.Sprintf("project.sfid.%s", parentProjectID)
-		if entry, err := mappingsKV.Get(ctx, parentMappingKey); err == nil {
-			payload.ParentUID = string(entry.Value())
+		if entry, err := mappingStore.Get(ctx, parentMappingKey); err == nil {
+			payload.ParentUID = string(entry.Value)
 			checkPublicParentUID = payload.ParentUID
 			logger.With("parent_project_sfid", parentProjectID, "parent_uid", payload.ParentUID).DebugContext(ctx, "found parent project UID from SFID mapping")
 		} else {

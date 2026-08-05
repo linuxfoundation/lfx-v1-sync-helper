@@ -32,12 +32,13 @@ func newKVMappingStore(kv jetstream.KeyValue) *kvMappingStore {
 }
 
 // Get returns the current entry for key. Translates
-// jetstream.ErrKeyNotFound to ErrKeyNotFound so callers can keep using
-// errors.Is on a single sentinel across backends.
+// jetstream.ErrKeyNotFound (and the rarely-surfaced ErrKeyDeleted) to
+// ErrKeyNotFound so callers can keep using errors.Is on a single
+// sentinel across backends.
 func (s *kvMappingStore) Get(ctx context.Context, key string) (MappingEntry, error) {
 	entry, err := s.kv.Get(ctx, key)
 	if err != nil {
-		if errors.Is(err, jetstream.ErrKeyNotFound) {
+		if errors.Is(err, jetstream.ErrKeyNotFound) || errors.Is(err, jetstream.ErrKeyDeleted) {
 			return MappingEntry{}, ErrKeyNotFound
 		}
 		return MappingEntry{}, err
