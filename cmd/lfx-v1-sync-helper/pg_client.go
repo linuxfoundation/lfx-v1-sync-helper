@@ -9,9 +9,15 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/linuxfoundation/lfx-v1-sync-helper/internal/schema"
 )
+
+// pgPool is the process-wide pgxpool used by the online MappingStore
+// (dual and postgres modes). Nil in kv-only mode. main.go owns the
+// lifecycle: opened by initMappingStore and closed in graceful shutdown.
+var pgPool *pgxpool.Pool
 
 // initPGPool opens a pgx connection pool from the effective DATABASE_URL
 // (see Config.ResolveDatabaseURL) and applies the embedded schema idempotently
@@ -41,4 +47,40 @@ func initPGPool(ctx context.Context, cfg *Config) (*pgxpool.Pool, error) {
 	}
 
 	return pool, nil
+}
+
+// initMappingStore constructs the online MappingStore selected by
+// cfg.V1MappingsStoreMode. In kv mode no Postgres pool is opened — the
+// returned store is a straight adapter over kv. In dual and postgres
+// mode a pgxpool is opened via initPGPool (which also applies the
+// embedded schema) and stored in the process-wide pgPool for graceful
+// shutdown by main.
+//
+// Boot-time contract:
+//   - Any mode requiring Postgres (dual, postgres) validates the DSN
+//     eagerly and fails fast on any pgxpool.New / schema.Apply error.
+//     The store is never returned in a half-initialised state.
+//   - kv is the only mode that can run without Postgres available.
+func initMappingStore(ctx context.Context, cfg *Config, kv jetstream.KeyValue) (MappingStore, error) {
+	kvStore := newKVMappingStore(kv)
+	switch cfg.V1MappingsStoreMode {
+	case V1MappingsStoreModeKV:
+		return kvStore, nil
+	case V1MappingsStoreModePostgres, V1MappingsStoreModeDual:
+		pool, err := initPGPool(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("v1-mappings store (%s): %w", cfg.V1MappingsStoreMode, err)
+		}
+		pgPool = pool
+		pgStore := newPGMappingStore(pool)
+		if cfg.V1MappingsStoreMode == V1MappingsStoreModePostgres {
+			return pgStore, nil
+		}
+		return newDualMappingStore(pgStore, kvStore, nil), nil
+	default:
+		// parseV1MappingsStoreModeEnv guards against this on boot, but
+		// keep the fallback defensive so an out-of-band field mutation
+		// cannot silently disable dual-write.
+		return nil, fmt.Errorf("invalid v1-mappings store mode %q", cfg.V1MappingsStoreMode)
+	}
 }

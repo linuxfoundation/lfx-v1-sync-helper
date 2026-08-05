@@ -130,6 +130,26 @@ lfx-v1-sync-helper/
 - **Backward Compatible**: Can read both JSON and MessagePack encoded data
 - **Format Agnostic**: Processing logic unchanged regardless of encoding format
 
+#### v1-mappings Store (`mapping_store*.go`) — LFXV2-2985
+
+The v1-mappings backing store is behind a `MappingStore` port so callers stay identical across the KV → Postgres migration. The store surface mirrors `jetstream.KeyValue` (Get / Put / Update / Create / Delete with revision-based optimistic concurrency), and every online call site that previously used `mappingsKV.<op>` will be routed through the package-global `mappingStore` variable.
+
+Backends:
+
+- **`kvMappingStore`** (`mapping_store_kv.go`) — thin adapter over the existing `jetstream.KeyValue` bucket. Translates jetstream sentinel errors (`ErrKeyNotFound`, `ErrKeyExists`, JS API code 10071 "wrong last sequence") to the port-level sentinels (`ErrKeyNotFound`, `ErrKeyExists`, `ErrRevisionMismatch`). Uses the existing `isRevisionMismatchError` helper for CAS mismatch detection.
+- **`pgMappingStore`** (`mapping_store_pg.go`) — pgx over the `v1_mappings` table. Translates the KV tombstone sentinel (`[]byte("!del")`) to the `tombstoned` boolean column on write and re-materialises it on read, so `isTombstonedMapping(entry.Value)` fires identically across backends. Update uses `UPDATE ... WHERE version=$expected RETURNING version` (zero rows → `ErrRevisionMismatch`); Create uses `INSERT ... ON CONFLICT DO NOTHING RETURNING version` (zero rows → `ErrKeyExists`); Put unconditionally upserts and bumps `version` on conflict.
+- **`dualMappingStore`** (`mapping_store_dual.go`) — the safe steady state during rollout. Reads Postgres, falls back to KV on `ErrKeyNotFound` (logs a warn-level `dual-store read served from KV fallback` event so operators can measure drift). Writes go KV-first, PG-second: if KV fails the whole op fails and PG is untouched (so a rollback to `V1MappingsStoreModeKV` sees a consistent state); if PG fails after KV succeeded the op is still reported successful and drift is logged at error level.
+
+Mode selection (`V1_MAPPINGS_STORE_MODE`, default `dual`):
+
+- **`kv`**: adapter only, no pgxpool opened. Pre-migration behaviour bit-for-bit; used as a rollback target.
+- **`dual`**: opens the pgxpool, applies `internal/schema/schema.sql`, wraps both backends in `dualMappingStore`. Default.
+- **`postgres`**: opens the pgxpool and returns `pgMappingStore` directly. Used once the KV bucket is ready to be decommissioned.
+
+Boot ordering (`main.go`): NATS + KV bucket handles → `initMappingStore(ctx, cfg, mappingsKV)` (which may open pgxpool + `schema.Apply`) → subscriptions. `pgPool` is a package-global closed in graceful shutdown; nil in `kv` mode.
+
+**Adding a new caller.** Import the sentinel errors from mapping_store.go, use `mappingStore.<op>` in place of `mappingsKV.<op>`, and switch `err == jetstream.ErrKeyNotFound` checks to `errors.Is(err, ErrKeyNotFound)`. The `entry.Value()` method call becomes the `entry.Value` field access. The `lookup_handler.go` migration is the reference example.
+
 ### Python ETL (Meltano)
 
 #### Configuration Structure

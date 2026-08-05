@@ -434,16 +434,22 @@ func (s *mappingRecordCopySource) Err() error { return nil }
 // whose final revision is a native NATS DEL/PURGE (an app-level "!del"
 // tombstone has deleted=false and IS retained with tombstoned=true).
 //
+// On ON CONFLICT the row's `version` is incremented (mirroring the
+// MappingStore Update semantics used by the online path), so a re-run
+// against a live-dual-write table still preserves the monotonic version
+// counter that CAS-based Update relies on.
+//
 // Returns the CommandTag row count. On an initial cutover this equals
 // COUNT(DISTINCT mapping_key) FROM staging minus the DEL/PURGE-tail
 // subjects; on re-runs it equals the number of live subjects.
 func upsertV1MappingsFromStaging(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
 	const upsertSQL = `
-		INSERT INTO v1_mappings (mapping_key, mapping_value, tombstoned, updated_at)
+		INSERT INTO v1_mappings (mapping_key, mapping_value, tombstoned, version, updated_at)
 		SELECT DISTINCT ON (mapping_key)
 			mapping_key,
 			mapping_value,
 			tombstoned,
+			1,
 			now()
 		FROM ` + stagingTableName + `
 		WHERE NOT deleted
@@ -451,6 +457,7 @@ func upsertV1MappingsFromStaging(ctx context.Context, pool *pgxpool.Pool) (int64
 		ON CONFLICT (mapping_key) DO UPDATE
 			SET mapping_value = EXCLUDED.mapping_value,
 				tombstoned    = EXCLUDED.tombstoned,
+				version       = v1_mappings.version + 1,
 				updated_at    = now()
 	`
 	tag, err := pool.Exec(ctx, upsertSQL)

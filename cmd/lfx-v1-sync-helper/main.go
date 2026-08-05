@@ -43,6 +43,13 @@ var (
 	v1KV       jetstream.KeyValue
 	mappingsKV jetstream.KeyValue
 
+	// mappingStore is the abstract v1-mappings backing store used by
+	// online (non-backfill) code paths. Selected at boot via
+	// V1_MAPPINGS_STORE_MODE (kv | dual | postgres); see mapping_store.go.
+	// The one-shot backfill/reindex flags exit before this global is
+	// wired up and continue to talk to the concrete backends directly.
+	mappingStore MappingStore
+
 	// distributedSync is the singleton mappingLocker used to serialise
 	// concurrent read-modify-write operations on shared mapping state.
 	// Callers pass fully-qualified lock keys (including any namespace prefix).
@@ -407,6 +414,20 @@ func main() {
 		withLockerOptionTimeout(mappingLockTimeout),
 	)
 
+	// Wire the online MappingStore based on V1_MAPPINGS_STORE_MODE.
+	// This is the runtime port that all non-backfill callers use to
+	// read/write v1-mappings state. In "kv" mode the store is a thin
+	// adapter over mappingsKV so behaviour is unchanged; in "dual" or
+	// "postgres" mode a pgxpool is opened and the embedded schema is
+	// applied idempotently before the store is exposed. See
+	// mapping_store.go for the interface and semantic contract.
+	mappingStore, err = initMappingStore(ctx, cfg, mappingsKV)
+	if err != nil {
+		logger.With(errKey, err, "mode", string(cfg.V1MappingsStoreMode)).Error("error initializing v1-mappings store")
+		os.Exit(1)
+	}
+	logger.With("mode", string(cfg.V1MappingsStoreMode)).Info("v1-mappings store initialized")
+
 	// Create or get the JetStream pull consumer for v1 objects KV bucket
 	// This replaces the KV Watch() method to enable horizontal scaling
 	consumerName := "v1-sync-helper-kv-consumer"
@@ -579,6 +600,14 @@ func main() {
 	logger.Debug("waiting for graceful shutdown steps to complete")
 	gracefulCloseWG.Wait()
 	logger.Debug("graceful shutdown steps completed")
+
+	// Close the Postgres pool if the online MappingStore backend
+	// opened one (dual or postgres mode). Kv-only mode never allocates
+	// pgPool so this is a no-op.
+	if pgPool != nil {
+		logger.Debug("closing Postgres pool")
+		pgPool.Close()
+	}
 
 	// Immediately close the HTTP server after graceful shutdown has finished.
 	if err = httpServer.Close(); err != nil {

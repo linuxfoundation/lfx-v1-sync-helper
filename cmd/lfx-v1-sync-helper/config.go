@@ -144,6 +144,20 @@ type Config struct {
 	// memory footprint well under a normal K8s job request.
 	// Set via BACKFILL_V1_MAPPINGS_BATCH_SIZE. Default 50000.
 	BackfillV1MappingsBatchSize int
+
+	// V1MappingsStoreMode selects the MappingStore backend used at
+	// runtime for the v1-mappings bucket. Values:
+	//   - "kv":       read+write only the jetstream.KeyValue bucket
+	//                 (pre-migration behaviour; safest rollback target).
+	//   - "dual":     read Postgres with a KV fallback on miss, write
+	//                 both — the safe steady state during rollout, and
+	//                 the default so a deployment with the CNPG chart
+	//                 wiring in place gets dual-write semantics without
+	//                 an extra env-var change.
+	//   - "postgres": read+write only Postgres (final state, once the
+	//                 KV bucket is ready to be decommissioned).
+	// Set via V1_MAPPINGS_STORE_MODE. Default: "dual".
+	V1MappingsStoreMode V1MappingsStoreMode
 }
 
 const (
@@ -156,6 +170,14 @@ const (
 	defaultBackfillV1MappingsWorkers   = 8
 	defaultBackfillV1MappingsBatchSize = 50000
 	maxBackfillV1MappingsWorkers       = 64
+
+	// defaultV1MappingsStoreMode is the online MappingStore backend
+	// used when V1_MAPPINGS_STORE_MODE is unset. "dual" is intentional:
+	// the migration story assumes CNPG chart wiring lands in the same
+	// release as this code, so any deployment picking up this binary
+	// should already have Postgres available and benefit from the
+	// dual-write safety net.
+	defaultV1MappingsStoreMode = V1MappingsStoreModeDual
 )
 
 // LoadReindexConfig returns a config for --rebuild-user-secondary-indexes mode.
@@ -181,6 +203,7 @@ func LoadReindexConfig() *Config {
 		PGDatabase:                  os.Getenv("PGDATABASE"),
 		BackfillV1MappingsWorkers:   parseIntEnvClamped("BACKFILL_V1_MAPPINGS_WORKERS", defaultBackfillV1MappingsWorkers, 1, maxBackfillV1MappingsWorkers),
 		BackfillV1MappingsBatchSize: parseIntEnvClamped("BACKFILL_V1_MAPPINGS_BATCH_SIZE", defaultBackfillV1MappingsBatchSize, 1, 1_000_000),
+		V1MappingsStoreMode:         parseV1MappingsStoreModeEnv(),
 	}
 }
 
@@ -265,6 +288,7 @@ func LoadConfig() (*Config, error) {
 		PGDatabase:                       os.Getenv("PGDATABASE"),
 		BackfillV1MappingsWorkers:        parseIntEnvClamped("BACKFILL_V1_MAPPINGS_WORKERS", defaultBackfillV1MappingsWorkers, 1, maxBackfillV1MappingsWorkers),
 		BackfillV1MappingsBatchSize:      parseIntEnvClamped("BACKFILL_V1_MAPPINGS_BATCH_SIZE", defaultBackfillV1MappingsBatchSize, 1, 1_000_000),
+		V1MappingsStoreMode:              parseV1MappingsStoreModeEnv(),
 	}
 
 	// Project allowlists — file path overrides env var overrides built-in defaults.
@@ -487,4 +511,21 @@ func (c *Config) ResolveDatabaseURL() (string, error) {
 		Path:   "/" + database,
 	}
 	return u.String(), nil
+}
+
+// parseV1MappingsStoreModeEnv reads V1_MAPPINGS_STORE_MODE, defaulting
+// to defaultV1MappingsStoreMode when unset. Unknown values fall back
+// to the default with a warning so a typo does not silently disable
+// dual-write during rollout.
+func parseV1MappingsStoreModeEnv() V1MappingsStoreMode {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("V1_MAPPINGS_STORE_MODE")))
+	if raw == "" {
+		return defaultV1MappingsStoreMode
+	}
+	m := V1MappingsStoreMode(raw)
+	if !isValidV1MappingsStoreMode(m) {
+		slog.Warn("invalid V1_MAPPINGS_STORE_MODE, falling back to default", "value", raw, "default", string(defaultV1MappingsStoreMode))
+		return defaultV1MappingsStoreMode
+	}
+	return m
 }

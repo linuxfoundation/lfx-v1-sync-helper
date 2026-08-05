@@ -30,9 +30,20 @@
 -- lookupHandler tombstone-vs-miss semantics in lookup_handler.go). The
 -- value column is preserved on tombstone (may be empty) so the source
 -- KV state is faithfully round-tripped.
+--
+-- `version` mirrors the NATS KV Revision counter and drives
+-- optimistic-concurrency Update/Create semantics. Callers that used
+-- KeyValue.Update(ctx, key, value, revision) or KeyValue.Create(...)
+-- pass the same integer through MappingStore; the Postgres backend
+-- runs `UPDATE ... WHERE version = $expected RETURNING version` (CAS)
+-- and `INSERT ... ON CONFLICT DO NOTHING RETURNING version`
+-- (insert-only) respectively. New rows start at version 1 and each
+-- successful write increments it, so the on-wire semantics stay
+-- backwards-compatible when the store swaps from KV to Postgres.
 CREATE TABLE IF NOT EXISTS v1_mappings (
     mapping_key   TEXT        PRIMARY KEY,
     mapping_value TEXT        NOT NULL DEFAULT '',
     tombstoned    BOOLEAN     NOT NULL DEFAULT false,
+    version       BIGINT      NOT NULL DEFAULT 1,
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
