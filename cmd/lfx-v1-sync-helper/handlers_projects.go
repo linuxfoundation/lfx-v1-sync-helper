@@ -676,6 +676,10 @@ func mapV1DataToProjectUpdateSettingsPayload(ctx context.Context, projectUID str
 	return payload, nil
 }
 
+// getV1ObjectDataFn is the injectable function for fetching v1-objects KV data.
+// Replaced in tests to avoid a live NATS connection.
+var getV1ObjectDataFn = getV1ObjectData
+
 // loadB2BProjectData fetches the salesforce_b2b-Project__c KV entry for the project
 // identified by the "sfid" field in v1Data. Returns nil if not found or on error.
 func loadB2BProjectData(ctx context.Context, v1Data map[string]any) map[string]any {
@@ -685,7 +689,7 @@ func loadB2BProjectData(ctx context.Context, v1Data map[string]any) map[string]a
 		return nil
 	}
 	b2bKey := fmt.Sprintf("salesforce_b2b-Project__c.%s", projectSFID)
-	data, exists, err := getV1ObjectData(ctx, b2bKey)
+	data, exists, err := getV1ObjectDataFn(ctx, b2bKey)
 	if err != nil {
 		logger.With(errKey, err, "b2b_key", b2bKey).WarnContext(ctx, "failed to lookup B2B project for staff field fallback")
 		return nil
