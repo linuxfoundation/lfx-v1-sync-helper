@@ -70,6 +70,85 @@ spec:
             value: {{ .Values.allowlist.configMap.mountPath }}/project_allowlist
           - name: PROJECT_FAMILY_ALLOWLIST_FILE
             value: {{ .Values.allowlist.configMap.mountPath }}/project_family_allowlist
+          {{- if or (eq .Values.database.mode "database") (eq .Values.database.mode "cluster+database") }}
+          # Forward the CloudNativePG app-secret fields and the per-service
+          # database name; the app composes DATABASE_URL in-process via
+          # Config.ResolveDatabaseURL. This avoids embedding the cluster-app
+          # password as a literal substring of an env-var value in the pod
+          # spec — env-var interpolation would resolve $(PGPASSWORD) and make
+          # the password visible via `kubectl describe pod` even though the
+          # source is a Secret. See LFXV2-2985.
+          - name: PGHOST
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "lfx-v1-sync-helper.cloudNativePGAppSecret" . }}
+                key: host
+          - name: PGPORT
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "lfx-v1-sync-helper.cloudNativePGAppSecret" . }}
+                key: port
+          - name: PGUSER
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "lfx-v1-sync-helper.cloudNativePGAppSecret" . }}
+                key: username
+          - name: PGPASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "lfx-v1-sync-helper.cloudNativePGAppSecret" . }}
+                key: password
+          - name: PGDATABASE
+            value: {{ .Values.database.cloudNativePG.databaseName | quote }}
+          {{- else if eq (default "url" .Values.database.external.shape) "fields" }}
+          # External Postgres referenced by a multi-key Secret (e.g. an
+          # ExternalSecret pulling /cloudops/rds-managed/lfx-v2/<service> from
+          # AWS Secrets Manager and exposing each JSON field as its own Secret
+          # key). Same rationale as the CNPG path: compose DATABASE_URL
+          # in-process from Secret-typed env vars.
+          - name: PGHOST
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.database.external.secretName }}
+                key: {{ default "host" .Values.database.external.keys.host }}
+          - name: PGPORT
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.database.external.secretName }}
+                key: {{ default "port" .Values.database.external.keys.port }}
+          - name: PGUSER
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.database.external.secretName }}
+                key: {{ default "username" .Values.database.external.keys.username }}
+          - name: PGPASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.database.external.secretName }}
+                key: {{ default "password" .Values.database.external.keys.password }}
+          - name: PGDATABASE
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.database.external.secretName }}
+                key: {{ default "dbname" .Values.database.external.keys.dbname }}
+          {{- else if .Values.database.external.secretName }}
+          # External Postgres referenced by a single-key Secret whose value is
+          # a libpq URL (shape: url, the default).
+          - name: DATABASE_URL
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.database.external.secretName }}
+                key: {{ .Values.database.external.secretKey }}
+          {{- else if not (hasKey (default dict .Values.app.environment) "V1_MAPPINGS_STORE_MODE") }}
+          # Safety fallback: no Postgres wiring was rendered (external mode
+          # with no secretName), so force V1_MAPPINGS_STORE_MODE=kv to
+          # prevent the app from crashing on boot with a DSN-resolution
+          # error. Operators wire this explicitly via app.environment when
+          # they want a different mode; otherwise this keeps the chart
+          # installable on clusters that haven't yet provisioned Postgres.
+          - name: V1_MAPPINGS_STORE_MODE
+            value: "kv"
+          {{- end }}
           ports:
             - containerPort: 8080
               name: web

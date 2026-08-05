@@ -150,6 +150,8 @@ Boot ordering (`main.go`): NATS + KV bucket handles → `initMappingStore(ctx, c
 
 **Adding a new caller.** Import the sentinel errors from mapping_store.go, use `mappingStore.<op>` in place of `mappingsKV.<op>`, and switch `err == jetstream.ErrKeyNotFound` checks to `errors.Is(err, ErrKeyNotFound)`. The `entry.Value()` method call becomes the `entry.Value` field access. The `lookup_handler.go` migration is the reference example.
 
+**Chart wiring.** The Postgres cluster is provisioned by `charts/lfx-v1-sync-helper/templates/database.yaml`, selected via `.Values.database.mode` (`external` | `database` | `cluster+database`). The app deployment forwards CNPG operator-managed `<clusterName>-app` Secret keys (or external Secret keys, or a single-key `DATABASE_URL`) as env vars and the service composes the libpq DSN in-process via `Config.ResolveDatabaseURL` — never as a literal env-var value, to avoid leaking the password through `kubectl describe pod`. When `database.mode=external` with no `secretName`, the deployment injects `V1_MAPPINGS_STORE_MODE=kv` automatically so a chart install without Postgres wiring still boots. Setting `.Values.app.environment.V1_MAPPINGS_STORE_MODE.value` overrides that safety fallback.
+
 ### Python ETL (Meltano)
 
 #### Configuration Structure
@@ -387,7 +389,7 @@ Designed for the prod scale (~5.8 GiB / ~38M subjects). Streaming scan + paralle
 - **Dry-run**: `--dry-run` skips staging creation, `CopyFrom`, and the final upsert but preserves all scan/classification counters so operators can validate row counts before writing.
 - **Summary log fields**: `visits`, `live`, `tombstoned`, `empty`, `native_del`, `staged`, `inserted_rows`, `batches`, `workers`, `max_seq`, `elapsed`, `dry_run`.
 - **Idempotency caveat**: on re-runs against an already-populated `v1_mappings`, subjects whose latest KV revision is a native NATS DEL/PURGE will NOT be removed from Postgres (the WHERE NOT deleted filter excludes them from the INSERT but does not issue a DELETE). This is safe for the initial cutover (empty target) and for the pending online mutation path (LFXV2-2985 follow-ups) where the online DELETE handler owns removals.
-- **Manifest**: TBD (dual-write / online cutover jobs land in follow-up work under LFXV2-2985).
+- **Manifest**: `manifests/backfill-v1-mappings-to-postgres-job.yaml`.
 
 ### 4. `cmd/lfx-v1-sync-helper/handlers.go` — suppress unknown-object warnings (optional)
 

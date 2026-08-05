@@ -1,0 +1,42 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+{{- $mode := .Values.database.mode }}
+{{- if or (eq $mode "database") (eq $mode "cluster+database") }}
+{{- if eq $mode "cluster+database" }}
+---
+# CloudNativePG Cluster provisioned by this chart (mode: cluster+database).
+# Use this mode when deploying the chart standalone without an umbrella chart.
+# In "database" mode the cluster is expected to exist already (typically
+# provisioned by an umbrella chart or by lfx-platform).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ .Values.database.cloudNativePG.clusterName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lfx-v1-sync-helper.labels" . | nindent 4 }}
+spec:
+  instances: {{ .Values.database.cloudNativePG.cluster.instances }}
+  storage:
+    size: {{ .Values.database.cloudNativePG.cluster.storage.size }}
+{{- end }}
+---
+# CloudNativePG Database CR — instructs the operator to run
+# CREATE DATABASE <databaseName> OWNER app on the referenced Cluster.
+# The operator also creates the "app" role and the <clusterName>-app secret
+# (host/port/username/password/dbname keys) that the deployment references
+# via the lfx-v1-sync-helper.cloudNativePGAppSecret helper.
+# Rendered for modes "database" and "cluster+database".
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: {{ .Values.database.cloudNativePG.databaseName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lfx-v1-sync-helper.labels" . | nindent 4 }}
+spec:
+  name: {{ .Values.database.cloudNativePG.databaseName }}
+  owner: app
+  cluster:
+    name: {{ .Values.database.cloudNativePG.clusterName }}
+{{- end }}
