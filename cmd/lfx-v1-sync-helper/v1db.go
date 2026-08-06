@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -26,6 +27,19 @@ import (
 
 // v1DB is the bun handle for the v1 platform database, initialized by initV1DB.
 var v1DB *bun.DB
+
+// v1DBQueryTimeout bounds every db* query below with its own deadline,
+// independent of the caller's context. NATS lookup handlers invoke these
+// resolvers with context.Background(), so without a bounded deadline here a
+// stalled database query would hang the handler goroutine indefinitely
+// instead of returning an error.
+const v1DBQueryTimeout = 10 * time.Second
+
+// withQueryTimeout returns a context bounded by v1DBQueryTimeout and its
+// cancel function. Callers must defer the returned cancel.
+func withQueryTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, v1DBQueryTimeout)
+}
 
 // mergedUserRow maps the columns we need from salesforce.merged_user.
 type mergedUserRow struct {
@@ -43,13 +57,14 @@ type mergedUserRow struct {
 type alternateEmailRow struct {
 	bun.BaseModel `bun:"table:salesforce.alternate_email__c,alias:ae"`
 
-	SFID            string         `bun:"sfid"`
-	LeadOrContactID sql.NullString `bun:"leadorcontactid"`
-	EmailAddress    sql.NullString `bun:"alternate_email_address__c"`
-	IsPrimary       sql.NullBool   `bun:"primary_email__c"`
-	IsVerified      sql.NullBool   `bun:"email_verified__c"`
-	IsActive        sql.NullBool   `bun:"active__c"`
-	IsDeleted       sql.NullBool   `bun:"isdeleted"`
+	SFID             string         `bun:"sfid"`
+	LeadOrContactID  sql.NullString `bun:"leadorcontactid"`
+	EmailAddress     sql.NullString `bun:"alternate_email_address__c"`
+	IsPrimary        sql.NullBool   `bun:"primary_email__c"`
+	IsVerified       sql.NullBool   `bun:"email_verified__c"`
+	IsActive         sql.NullBool   `bun:"active__c"`
+	IsDeleted        sql.NullBool   `bun:"isdeleted"`
+	LastModifiedDate sql.NullTime   `bun:"lastmodifieddate"`
 }
 
 // initV1DB opens a pgx connection pool against the v1 platform database and
@@ -75,19 +90,23 @@ func initV1DB(ctx context.Context, cfg *Config) error {
 }
 
 // activeEmailFilter appends the shared liveness conditions for alternate
-// email rows: not soft-deleted, active__c true, and not a ".old"-suffixed
+// email rows: not soft-deleted, active__c true, not a ".old"-suffixed
 // address (a v1 convention for deactivating an address without flipping
-// active__c).
+// active__c), and belonging to a merged_user that is itself not
+// soft-deleted (otherwise a soft-deleted user's stale email rows could
+// still resolve an SFID).
 func activeEmailFilter(q *bun.SelectQuery) *bun.SelectQuery {
 	return q.
+		Join("JOIN salesforce.merged_user AS mu ON mu.sfid = ae.leadorcontactid").
 		Where("ae.isdeleted IS NOT TRUE").
 		Where("ae.active__c IS TRUE").
-		Where("LOWER(ae.alternate_email_address__c) NOT LIKE '%.old'")
+		Where("LOWER(ae.alternate_email_address__c) NOT LIKE '%.old'").
+		Where("mu.isdeleted IS NOT TRUE")
 }
 
 // dbResolveUserSFIDByUsername resolves a v1 user SFID by username with
 // case-insensitive, whitespace-trimmed matching. The input is normalized with
-// normalizeKVSegment (trim + lower + NFC) in Go; column values are matched via
+// normalizeUserIdentifier (trim + lower) in Go; column values are matched via
 // LOWER(TRIM(...)). Returns ("", nil) on miss.
 func dbResolveUserSFIDByUsername(ctx context.Context, username string) (string, error) {
 	row, err := dbLookupMergedUserRowByUsername(ctx, username)
@@ -100,16 +119,18 @@ func dbResolveUserSFIDByUsername(ctx context.Context, username string) (string, 
 // dbLookupMergedUserRowByUsername fetches the live merged_user row for a
 // username. Returns (nil, nil) on miss (including blank input and deleted rows).
 func dbLookupMergedUserRowByUsername(ctx context.Context, username string) (*mergedUserRow, error) {
-	normalized := normalizeKVSegment(username)
+	normalized := normalizeUserIdentifier(username)
 	if normalized == "" {
 		return nil, nil
 	}
 	row := &mergedUserRow{}
+	qCtx, cancel := withQueryTimeout(ctx)
+	defer cancel()
 	err := v1DB.NewSelect().Model(row).
 		Where("LOWER(TRIM(mu.username__c)) = ?", normalized).
 		Where("mu.isdeleted IS NOT TRUE").
 		Limit(1).
-		Scan(ctx)
+		Scan(qCtx)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -126,11 +147,13 @@ func dbLookupMergedUserRowBySFID(ctx context.Context, sfid string) (*mergedUserR
 		return nil, nil
 	}
 	row := &mergedUserRow{}
+	qCtx, cancel := withQueryTimeout(ctx)
+	defer cancel()
 	err := v1DB.NewSelect().Model(row).
 		Where("mu.sfid = ?", sfid).
 		Where("mu.isdeleted IS NOT TRUE").
 		Limit(1).
-		Scan(ctx)
+		Scan(qCtx)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -143,11 +166,13 @@ func dbLookupMergedUserRowBySFID(ctx context.Context, sfid string) (*mergedUserR
 // dbResolveUserSFIDByEmail resolves a v1 user SFID by any of the user's
 // active alternate email addresses. Returns ("", nil) on miss.
 func dbResolveUserSFIDByEmail(ctx context.Context, email string) (string, error) {
-	normalized := normalizeKVSegment(email)
+	normalized := normalizeUserIdentifier(email)
 	if normalized == "" {
 		return "", nil
 	}
 	row := &alternateEmailRow{}
+	qCtx, cancel := withQueryTimeout(ctx)
+	defer cancel()
 	err := activeEmailFilter(v1DB.NewSelect().Model(row)).
 		Where("LOWER(TRIM(ae.alternate_email_address__c)) = ?", normalized).
 		Where("ae.leadorcontactid IS NOT NULL").
@@ -155,7 +180,7 @@ func dbResolveUserSFIDByEmail(ctx context.Context, email string) (string, error)
 		// multiple rows, then newest SFID for determinism.
 		OrderExpr("ae.primary_email__c DESC NULLS LAST, ae.sfid DESC").
 		Limit(1).
-		Scan(ctx)
+		Scan(qCtx)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", nil
@@ -173,11 +198,13 @@ func dbGetAlternateEmailsForUser(ctx context.Context, userSfid string) ([]altern
 		return nil, nil
 	}
 	var rows []alternateEmailRow
+	qCtx, cancel := withQueryTimeout(ctx)
+	defer cancel()
 	err := v1DB.NewSelect().Model(&rows).
 		Where("ae.leadorcontactid = ?", userSfid).
 		Where("ae.isdeleted IS NOT TRUE").
 		OrderExpr("ae.primary_email__c DESC NULLS LAST, ae.sfid ASC").
-		Scan(ctx)
+		Scan(qCtx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query alternate_email__c by user: %w", err)
 	}
@@ -208,6 +235,13 @@ func dbGetPrimaryEmailForUser(ctx context.Context, userSfid string) (string, err
 	if err != nil {
 		return "", err
 	}
+	return selectPrimaryEmailFromRows(rows), nil
+}
+
+// selectPrimaryEmailFromRows is the pure selection logic behind
+// dbGetPrimaryEmailForUser, extracted so it can be unit tested without a
+// database. Rows must already be filtered to a single user.
+func selectPrimaryEmailFromRows(rows []alternateEmailRow) string {
 	var fallback string
 	for i := range rows {
 		row := &rows[i]
@@ -215,13 +249,13 @@ func dbGetPrimaryEmailForUser(ctx context.Context, userSfid string) (string, err
 			continue
 		}
 		if row.IsPrimary.Valid && row.IsPrimary.Bool {
-			return row.EmailAddress.String, nil
+			return row.EmailAddress.String
 		}
 		if fallback == "" {
 			fallback = row.EmailAddress.String
 		}
 	}
-	return fallback, nil
+	return fallback
 }
 
 // dbGetLastKnownPrimaryEmailForUser returns the user's most plausible primary
@@ -229,18 +263,22 @@ func dbGetPrimaryEmailForUser(ctx context.Context, userSfid string) (string, err
 // path, where the alternate email rows are typically deleted before or
 // alongside the merged_user row (this replaces the KV primary-email cache
 // that previously worked around that ordering). Preference order: primary
-// flag, then not-deleted, then active, then newest SFID.
+// flag, then not-deleted, then active, then most recently modified
+// (lastmodifieddate — the replication key configured for this table in
+// meltano/meltano.yml, so it reflects the latest replicated state).
 func dbGetLastKnownPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error) {
 	if userSfid == "" {
 		return "", nil
 	}
 	row := &alternateEmailRow{}
+	qCtx, cancel := withQueryTimeout(ctx)
+	defer cancel()
 	err := v1DB.NewSelect().Model(row).
 		Where("ae.leadorcontactid = ?", userSfid).
-		Where("ae.alternate_email_address__c IS NOT NULL").
-		OrderExpr("ae.primary_email__c DESC NULLS LAST, ae.isdeleted ASC NULLS FIRST, ae.active__c DESC NULLS LAST, ae.sfid DESC").
+		Where("TRIM(ae.alternate_email_address__c) != ''").
+		OrderExpr("ae.primary_email__c DESC NULLS LAST, ae.isdeleted ASC NULLS FIRST, ae.active__c DESC NULLS LAST, ae.lastmodifieddate DESC NULLS LAST").
 		Limit(1).
-		Scan(ctx)
+		Scan(qCtx)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", nil
@@ -261,8 +299,20 @@ func dbIsSoleQualifyingAlternateEmail(ctx context.Context, userSfid string) (boo
 	if err != nil {
 		return false, err
 	}
-	qualifying := 0
-	sawPrimary := false
+	qualifying, sawPrimary := countQualifyingAlternateEmails(rows)
+	if qualifying <= 1 {
+		return true, nil
+	}
+	if !sawPrimary {
+		return false, fmt.Errorf("user %s has %d qualifying alternate emails and none is flagged primary: %w", userSfid, qualifying, errAmbiguousDefactoPrimaryEmail)
+	}
+	return false, nil
+}
+
+// countQualifyingAlternateEmails is the pure counting logic behind
+// dbIsSoleQualifyingAlternateEmail, extracted so it can be unit tested
+// without a database. Rows must already be filtered to a single user.
+func countQualifyingAlternateEmails(rows []alternateEmailRow) (qualifying int, sawPrimary bool) {
 	for i := range rows {
 		row := &rows[i]
 		isPrimary := row.IsPrimary.Valid && row.IsPrimary.Bool
@@ -274,11 +324,5 @@ func dbIsSoleQualifyingAlternateEmail(ctx context.Context, userSfid string) (boo
 			}
 		}
 	}
-	if qualifying <= 1 {
-		return true, nil
-	}
-	if !sawPrimary {
-		return false, fmt.Errorf("user %s has %d qualifying alternate emails and none is flagged primary: %w", userSfid, qualifying, errAmbiguousDefactoPrimaryEmail)
-	}
-	return false, nil
+	return qualifying, sawPrimary
 }

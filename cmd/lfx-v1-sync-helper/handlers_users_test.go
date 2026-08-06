@@ -16,7 +16,7 @@ import (
 	"github.com/auth0/go-auth0/management"
 )
 
-func TestNormalizeKVSegment(t *testing.T) {
+func TestNormalizeUserIdentifier(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -42,18 +42,13 @@ func TestNormalizeKVSegment(t *testing.T) {
 			input: "Alice",
 			want:  "alice",
 		},
-		{
-			name:  "decomposed Unicode normalized to NFC",
-			input: "n\u0303on\u0303o", // decomposed ñoño
-			want:  "ñoño",
-		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := normalizeKVSegment(tc.input)
+			got := normalizeUserIdentifier(tc.input)
 			if got != tc.want {
-				t.Errorf("normalizeKVSegment(%q) = %q, want %q", tc.input, got, tc.want)
+				t.Errorf("normalizeUserIdentifier(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
 	}

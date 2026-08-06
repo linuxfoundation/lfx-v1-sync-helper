@@ -93,10 +93,14 @@ type emailCandidate struct {
 // qualifying row is flagged primary. See LFXV2-2662 for the qualifying-count
 // heuristic — a sole qualifying row is a de-facto primary and must not be
 // linked as a secondary identity.
-func collectEmailLinkCandidates(ctx context.Context, userSfid string) (candidates []emailCandidate, qualifying int, sawPrimary bool, err error) {
+//
+// rejected counts rows that were fetched but did not become candidates
+// (primary, inactive, unverified, empty address, or a duplicate address) so
+// callers can attribute them in their skipped-email totals.
+func collectEmailLinkCandidates(ctx context.Context, userSfid string) (candidates []emailCandidate, qualifying int, sawPrimary bool, rejected int, err error) {
 	rows, err := getAlternateEmailsForUserFn(ctx, userSfid)
 	if err != nil {
-		return nil, 0, false, fmt.Errorf("fetching alternate emails for %s: %w", userSfid, err)
+		return nil, 0, false, 0, fmt.Errorf("fetching alternate emails for %s: %w", userSfid, err)
 	}
 
 	// Deduplicate candidates by email address (case-insensitive). v1
@@ -118,16 +122,18 @@ func collectEmailLinkCandidates(ctx context.Context, userSfid string) (candidate
 			}
 		}
 		if isPrimary || !isActive || !isVerified || email == "" {
+			rejected++
 			continue
 		}
 		lower := strings.ToLower(email)
 		if seenEmails[lower] {
+			rejected++
 			continue
 		}
 		seenEmails[lower] = true
 		candidates = append(candidates, emailCandidate{emailSfid: row.SFID, email: email})
 	}
-	return candidates, qualifying, sawPrimary, nil
+	return candidates, qualifying, sawPrimary, rejected, nil
 }
 
 // loadBackfillCursor reads the cursor value from the v1-mappings KV bucket.
@@ -292,10 +298,11 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 
 	// Collect candidate emails and qualifying counts live from the v1
 	// platform database.
-	candidates, qualifying, sawPrimary, err := collectEmailLinkCandidates(ctx, userSfid)
+	candidates, qualifying, sawPrimary, rejected, err := collectEmailLinkCandidates(ctx, userSfid)
 	if err != nil {
 		return fmt.Errorf("collecting email candidates (auth0 user %s): %w", auth0UserID, err)
 	}
+	result.emailsSkipped += rejected
 
 	if qualifying <= 1 {
 		logger.With("user_sfid", userSfid, "auth0_user_id", auth0UserID).
@@ -531,7 +538,7 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 	}
 
 	// Sync alternate emails, collected live from the v1 platform database.
-	candidates, qualifying, sawPrimary, err := collectEmailLinkCandidates(ctx, userSfid)
+	candidates, qualifying, sawPrimary, _, err := collectEmailLinkCandidates(ctx, userSfid)
 	if err != nil {
 		return fmt.Errorf("collecting email candidates (auth0 user %s): %w", auth0UserID, err)
 	}

@@ -10,8 +10,6 @@ import (
 	"errors"
 	"strings"
 	"time"
-
-	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -50,12 +48,14 @@ var (
 // isSoleQualifyingAlternateEmailFn is injectable for tests.
 var isSoleQualifyingAlternateEmailFn = dbIsSoleQualifyingAlternateEmail
 
-// normalizeKVSegment normalizes a user-provided string for matching and
-// NATS KV key segments: TrimSpace → ToLower → NFC. NFC unifies
-// decomposed/precomposed Unicode (e.g. n\u0303 ≡ ñ) without semantic
-// transposition.
-func normalizeKVSegment(s string) string {
-	return norm.NFC.String(strings.ToLower(strings.TrimSpace(s)))
+// normalizeUserIdentifier normalizes a user-provided username or email for
+// case-insensitive, whitespace-trimmed matching against the v1 platform
+// database: TrimSpace → ToLower. No Unicode normalization is applied — the
+// database column values are not normalized either, and both fields are
+// expected to be ASCII in practice, so an input-only NFC pass would be
+// misleading without actually guaranteeing canonical-equivalence matches.
+func normalizeUserIdentifier(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 // handleMergedUserUpdate processes merged user updates and syncs profile
@@ -78,7 +78,7 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 	}
 
 	username, _ := v1Data["username__c"].(string)
-	if normalizeKVSegment(username) == "" {
+	if normalizeUserIdentifier(username) == "" {
 		logger.With("key", key).DebugContext(ctx, "merged_user has no username, skipping profile sync")
 		return false
 	}
@@ -104,7 +104,7 @@ func handleMergedUserDelete(ctx context.Context, key, userSfid string, v1Data ma
 	}
 
 	username, _ := v1Data["username__c"].(string)
-	if normalizedUsername := normalizeKVSegment(username); normalizedUsername != "" {
+	if normalizedUsername := normalizeUserIdentifier(username); normalizedUsername != "" {
 		// Best-effort primary email lookup: the alternate email rows may
 		// already be soft-deleted, so this queries without liveness filters.
 		email, emailErr := getPrimaryEmailForUserFn(ctx, userSfid)
