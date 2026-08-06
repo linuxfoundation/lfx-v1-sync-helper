@@ -59,7 +59,6 @@ func main() {
 	var debug = flag.Bool("d", false, "enable debug logging")
 	var port = flag.String("p", "", "health checks port")
 	var bind = flag.String("bind", "", "interface to bind on")
-	var doRebuildUserIndexes = flag.Bool("rebuild-user-secondary-indexes", false, "populate user secondary indexes for existing data, then exit")
 	var doBackfillACSProject = flag.Bool("backfill-acs-project", false, "backfill ACS user grants to v2 project settings, then exit")
 	var doBackfillACSOrg = flag.Bool("backfill-acs-org", false, "backfill ACS org grants to v2 b2b_org settings, then exit")
 	var doBackfillAltEmails = flag.Bool("backfill-alternate-emails", false, "backfill v1 alternate emails to Auth0 linked identities, then exit")
@@ -78,13 +77,13 @@ func main() {
 
 	// Enforce mutual exclusion across all one-shot flags.
 	oneShotCount := 0
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doRebuildUserIndexes, *doBackfillCommitteeMemberMappings} {
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doBackfillCommitteeMemberMappings} {
 		if b {
 			oneShotCount++
 		}
 	}
 	if oneShotCount > 1 {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --sync-user, and --rebuild-user-secondary-indexes are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, and --sync-user are mutually exclusive")
 		os.Exit(2)
 	}
 
@@ -92,16 +91,20 @@ func main() {
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}))
 	slog.SetDefault(logger)
 
-	// --rebuild-user-secondary-indexes and --backfill-committee-member-mappings
-	// only need NATS KV; skip full config and API client init.
+	// --backfill-committee-member-mappings only needs NATS KV; skip full
+	// config and API client init.
 	// --backfill-acs-project and --backfill-acs-org require full config and API client init.
 	var err error
-	if *doRebuildUserIndexes || *doBackfillCommitteeMemberMappings {
-		cfg = LoadReindexConfig()
+	if *doBackfillCommitteeMemberMappings {
+		cfg = LoadMinimalConfig()
 	} else {
 		cfg, err = LoadConfig()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+			os.Exit(1)
+		}
+		if err := initV1DB(context.Background(), cfg); err != nil {
+			logger.With(errKey, err).Error("error initializing v1 platform database connection")
 			os.Exit(1)
 		}
 		if err := initJWTClient(cfg); err != nil {
@@ -254,17 +257,6 @@ func main() {
 	if err != nil {
 		logger.With(errKey, err).Error("error accessing v1-mappings KV bucket")
 		os.Exit(1)
-	}
-
-	// Handle --rebuild-user-secondary-indexes flag: populate secondary indexes for existing data, then exit.
-	if *doRebuildUserIndexes {
-		logger.Info("starting user secondary index rebuild")
-		if err := rebuildUserSecondaryIndexes(ctx); err != nil {
-			logger.With(errKey, err).Error("error during user secondary index rebuild")
-			os.Exit(1)
-		}
-		logger.Info("user secondary index rebuild completed successfully")
-		os.Exit(0)
 	}
 
 	// Handle --backfill-acs-project flag: populate v2 project settings from ACS grants, then exit.

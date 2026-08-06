@@ -309,14 +309,11 @@ func TestLoadConfigAllowlistPrecedence_WhitespaceFilePathFallsBack(t *testing.T)
 	}
 }
 
-func TestLoadReindexConfigDefaults(t *testing.T) {
+func TestLoadMinimalConfigDefaults(t *testing.T) {
 	t.Setenv("NATS_URL", "")
 	t.Setenv("NATS_FETCH_MAX_WAIT", "")
-	t.Setenv("REINDEX_PHASE_TIMEOUT", "")
-	t.Setenv("REINDEX_NATS_OP_TIMEOUT", "")
-	t.Setenv("REINDEX_OP_DELAY", "")
 
-	cfg := LoadReindexConfig()
+	cfg := LoadMinimalConfig()
 
 	if cfg.NATSURL != defaultNATSURL {
 		t.Errorf("NATSURL = %q, want %q", cfg.NATSURL, defaultNATSURL)
@@ -324,25 +321,13 @@ func TestLoadReindexConfigDefaults(t *testing.T) {
 	if cfg.NATSFetchMaxWait != defaultNATSFetchMaxWait {
 		t.Errorf("NATSFetchMaxWait = %v, want %v", cfg.NATSFetchMaxWait, defaultNATSFetchMaxWait)
 	}
-	if cfg.ReindexPhaseTimeout != defaultReindexPhaseTimeout {
-		t.Errorf("ReindexPhaseTimeout = %v, want %v", cfg.ReindexPhaseTimeout, defaultReindexPhaseTimeout)
-	}
-	if cfg.ReindexNATSOpTimeout != defaultReindexNATSOpTimeout {
-		t.Errorf("ReindexNATSOpTimeout = %v, want %v", cfg.ReindexNATSOpTimeout, defaultReindexNATSOpTimeout)
-	}
-	if cfg.ReindexOpDelay != defaultReindexOpDelay {
-		t.Errorf("ReindexOpDelay = %v, want %v", cfg.ReindexOpDelay, defaultReindexOpDelay)
-	}
 }
 
-func TestLoadReindexConfigEnvOverrides(t *testing.T) {
+func TestLoadMinimalConfigEnvOverrides(t *testing.T) {
 	t.Setenv("NATS_URL", "nats://custom:4222")
 	t.Setenv("NATS_FETCH_MAX_WAIT", "90s")
-	t.Setenv("REINDEX_PHASE_TIMEOUT", "60m")
-	t.Setenv("REINDEX_NATS_OP_TIMEOUT", "45s")
-	t.Setenv("REINDEX_OP_DELAY", "2ms")
 
-	cfg := LoadReindexConfig()
+	cfg := LoadMinimalConfig()
 
 	if cfg.NATSURL != "nats://custom:4222" {
 		t.Errorf("NATSURL = %q, want %q", cfg.NATSURL, "nats://custom:4222")
@@ -350,36 +335,15 @@ func TestLoadReindexConfigEnvOverrides(t *testing.T) {
 	if cfg.NATSFetchMaxWait != 90*time.Second {
 		t.Errorf("NATSFetchMaxWait = %v, want 90s", cfg.NATSFetchMaxWait)
 	}
-	if cfg.ReindexPhaseTimeout != 60*time.Minute {
-		t.Errorf("ReindexPhaseTimeout = %v, want 60m", cfg.ReindexPhaseTimeout)
-	}
-	if cfg.ReindexNATSOpTimeout != 45*time.Second {
-		t.Errorf("ReindexNATSOpTimeout = %v, want 45s", cfg.ReindexNATSOpTimeout)
-	}
-	if cfg.ReindexOpDelay != 2*time.Millisecond {
-		t.Errorf("ReindexOpDelay = %v, want 2ms", cfg.ReindexOpDelay)
-	}
 }
 
-func TestLoadReindexConfigInvalidDurationFallsBack(t *testing.T) {
+func TestLoadMinimalConfigInvalidDurationFallsBack(t *testing.T) {
 	t.Setenv("NATS_FETCH_MAX_WAIT", "not-a-duration")
-	t.Setenv("REINDEX_PHASE_TIMEOUT", "not-a-duration")
-	t.Setenv("REINDEX_NATS_OP_TIMEOUT", "???")
-	t.Setenv("REINDEX_OP_DELAY", "bad")
 
-	cfg := LoadReindexConfig()
+	cfg := LoadMinimalConfig()
 
 	if cfg.NATSFetchMaxWait != defaultNATSFetchMaxWait {
 		t.Errorf("NATSFetchMaxWait = %v, want default %v on invalid input", cfg.NATSFetchMaxWait, defaultNATSFetchMaxWait)
-	}
-	if cfg.ReindexPhaseTimeout != defaultReindexPhaseTimeout {
-		t.Errorf("ReindexPhaseTimeout = %v, want default %v on invalid input", cfg.ReindexPhaseTimeout, defaultReindexPhaseTimeout)
-	}
-	if cfg.ReindexNATSOpTimeout != defaultReindexNATSOpTimeout {
-		t.Errorf("ReindexNATSOpTimeout = %v, want default %v on invalid input", cfg.ReindexNATSOpTimeout, defaultReindexNATSOpTimeout)
-	}
-	if cfg.ReindexOpDelay != defaultReindexOpDelay {
-		t.Errorf("ReindexOpDelay = %v, want default %v on invalid input", cfg.ReindexOpDelay, defaultReindexOpDelay)
 	}
 }
 

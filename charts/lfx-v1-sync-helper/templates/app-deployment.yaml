@@ -65,6 +65,28 @@ spec:
               secretKeyRef:
                 name: {{ .Values.app.auth0.secret.name }}
                 key: {{ .Values.app.auth0.secret.privateKeyKey }}
+          # v1 platform database connection for live user lookups
+          - name: V1_DB_HOST
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.app.database.secret.name }}
+                key: {{ .Values.app.database.secret.hostKey }}
+          - name: V1_DB_PORT
+            value: {{ .Values.app.database.port | quote }}
+          - name: V1_DB_NAME
+            value: {{ .Values.app.database.name | quote }}
+          - name: V1_DB_USER
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.app.database.secret.name }}
+                key: {{ .Values.app.database.secret.usernameKey }}
+          - name: V1_DB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.app.database.secret.name }}
+                key: {{ .Values.app.database.secret.passwordKey }}
+          - name: V1_DB_SSLMODE
+            value: {{ .Values.app.database.sslMode | quote }}
           # Allow list file paths from ConfigMap mount
           - name: PROJECT_ALLOWLIST_FILE
             value: {{ .Values.allowlist.configMap.mountPath }}/project_allowlist

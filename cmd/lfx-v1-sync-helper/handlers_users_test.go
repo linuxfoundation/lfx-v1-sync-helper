@@ -16,11 +16,11 @@ import (
 	"github.com/auth0/go-auth0/management"
 )
 
-func TestToKVKey(t *testing.T) {
+func TestNormalizeKVSegment(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
-		want  string // base64.RawURLEncoding of expected normalized form
+		want  string
 	}{
 		{
 			name:  "empty string returns empty",
@@ -35,66 +35,27 @@ func TestToKVKey(t *testing.T) {
 		{
 			name:  "leading/trailing whitespace trimmed",
 			input: "  alice  ",
-			want:  "YWxpY2U", // base64("alice")
+			want:  "alice",
 		},
 		{
 			name:  "uppercase folded to lowercase",
 			input: "Alice",
-			want:  "YWxpY2U", // base64("alice")
+			want:  "alice",
 		},
 		{
-			name:  "precomposed NFC matches decomposed input",
+			name:  "decomposed Unicode normalized to NFC",
 			input: "n\u0303on\u0303o", // decomposed ñoño
-			want:  "w7Fvw7Fv",         // base64(NFC("ñoño")) — decomposed and precomposed unify
-		},
-		{
-			name:  "username with space and special chars is deterministic",
-			input: "first last!",
-			want:  "Zmlyc3QgbGFzdCE", // base64("first last!")
-		},
-		{
-			name:  "email with plus sign",
-			input: "foo+bar@example.com",
-			want:  "Zm9vK2JhckBleGFtcGxlLmNvbQ", // base64("foo+bar@example.com")
+			want:  "ñoño",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := toKVKey(tc.input)
+			got := normalizeKVSegment(tc.input)
 			if got != tc.want {
-				t.Errorf("toKVKey(%q) = %q, want %q", tc.input, got, tc.want)
+				t.Errorf("normalizeKVSegment(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestEmailAndUsernameToKVKey_Collisions(t *testing.T) {
-	// Previously, "foo+bar@x.com" and "foo-plus-bar@x.com" would both encode
-	// to the same key using the old -plus- / -at- substitution scheme.
-	// With base64 encoding they must produce distinct keys.
-	k1 := emailToKVKey("foo+bar@x.com")
-	k2 := emailToKVKey("foo-plus-bar-at-x.com")
-	if k1 == k2 {
-		t.Errorf("collision: emailToKVKey(%q) == emailToKVKey(%q) == %q", "foo+bar@x.com", "foo-plus-bar-at-x.com", k1)
-	}
-}
-
-func TestUsernameToKVKeyNormalization(t *testing.T) {
-	// Callers sending raw vs pre-normalized username must produce the same key.
-	raw := usernameToKVKey("  Alice  ")
-	normalized := usernameToKVKey("alice")
-	if raw != normalized {
-		t.Errorf("usernameToKVKey normalization mismatch: %q vs %q", raw, normalized)
-	}
-}
-
-func TestEmailToKVKeyNormalization(t *testing.T) {
-	// emailToKVKey must normalize internally so callers need not pre-normalize.
-	raw := emailToKVKey("  Alice@Example.COM  ")
-	normalized := emailToKVKey("alice@example.com")
-	if raw != normalized {
-		t.Errorf("emailToKVKey normalization mismatch: %q vs %q", raw, normalized)
 	}
 }
 
@@ -291,67 +252,14 @@ func TestLinkAlternateEmailToAuth0(t *testing.T) {
 	}
 }
 
-// TestExtractUsernameIndex covers the field extraction for the merged_user reindex phase.
-func TestExtractUsernameIndex(t *testing.T) {
-	tests := []struct {
-		name      string
-		data      map[string]any
-		wantKey   string
-		wantValue string
-	}{
-		{
-			name:      "valid username and sfid → index key and sfid",
-			data:      map[string]any{"username__c": "alice", "sfid": "003ABC"},
-			wantKey:   kvKeyUsernamePrefix + usernameToKVKey("alice"),
-			wantValue: "003ABC",
-		},
-		{
-			name:      "username normalization: uppercase folded",
-			data:      map[string]any{"username__c": "Alice", "sfid": "003ABC"},
-			wantKey:   kvKeyUsernamePrefix + usernameToKVKey("alice"),
-			wantValue: "003ABC",
-		},
-		{
-			name: "empty username → skip",
-			data: map[string]any{"username__c": "", "sfid": "003ABC"},
-		},
-		{
-			name: "whitespace-only username → skip",
-			data: map[string]any{"username__c": "   ", "sfid": "003ABC"},
-		},
-		{
-			name: "missing username field → skip",
-			data: map[string]any{"sfid": "003ABC"},
-		},
-		{
-			name: "empty sfid → skip",
-			data: map[string]any{"username__c": "alice", "sfid": ""},
-		},
-		{
-			name: "missing sfid field → skip",
-			data: map[string]any{"username__c": "alice"},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			gotKey, gotVal := extractUsernameIndex(tc.data)
-			if gotKey != tc.wantKey || gotVal != tc.wantValue {
-				t.Errorf("extractUsernameIndex() = (%q, %q), want (%q, %q)", gotKey, gotVal, tc.wantKey, tc.wantValue)
-			}
-		})
-	}
-}
-
 // TestHandleMergedUserDeleteScrub verifies that handleMergedUserDelete triggers the
 // committee username scrub (NATS publish) when a username is present in the payload.
 func TestHandleMergedUserDeleteScrub(t *testing.T) {
 	origLogger := logger
-	origDeleteIndex := deleteIndexKeyFn
 	origPublish := publishUserDeletedEventFn
 	origEmail := getPrimaryEmailForUserFn
 	t.Cleanup(func() {
 		logger = origLogger
-		deleteIndexKeyFn = origDeleteIndex
 		publishUserDeletedEventFn = origPublish
 		getPrimaryEmailForUserFn = origEmail
 	})
@@ -370,10 +278,9 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 		wantPublished bool
 		wantUsername  string
 		wantEmail     string
-		wantDeleted   []string
 	}{
 		{
-			name: "username present → publish normalized event and clear primary-email cache",
+			name: "username present → publish normalized event",
 			v1Data: map[string]any{
 				"sfid":        userSfid,
 				"username__c": " Alice ",
@@ -382,10 +289,6 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 			wantPublished: true,
 			wantUsername:  "alice",
 			wantEmail:     "deleted@example.com",
-			wantDeleted: []string{
-				kvKeyUsernamePrefix + usernameToKVKey(" Alice "),
-				kvKeyPrimaryEmailPrefix + userSfid,
-			},
 		},
 		{
 			name: "email lookup error → still publish without email",
@@ -393,53 +296,35 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 				"sfid":        userSfid,
 				"username__c": username,
 			},
-			emailErr:      errors.New("alternate emails mapping gone"),
+			emailErr:      errors.New("db unavailable"),
 			wantPublished: true,
 			wantUsername:  username,
 			wantEmail:     "",
-			wantDeleted: []string{
-				kvKeyUsernamePrefix + usernameToKVKey(username),
-				kvKeyPrimaryEmailPrefix + userSfid,
-			},
 		},
 		{
-			name: "whitespace-only username → no publish but clear primary-email cache",
+			name: "whitespace-only username → no publish",
 			v1Data: map[string]any{
 				"sfid":        userSfid,
 				"username__c": "   ",
 			},
 			wantPublished: false,
-			wantDeleted: []string{
-				kvKeyPrimaryEmailPrefix + userSfid,
-			},
 		},
 		{
-			name: "no username → no publish but still clear primary-email cache",
+			name: "no username → no publish",
 			v1Data: map[string]any{
 				"sfid": userSfid,
 			},
 			wantPublished: false,
-			wantDeleted: []string{
-				kvKeyPrimaryEmailPrefix + userSfid,
-			},
 		},
 		{
-			name:          "nil v1Data (hard KV delete) → no publish but clear primary-email cache",
+			name:          "nil v1Data (hard KV delete) → no publish",
 			v1Data:        nil,
 			wantPublished: false,
-			wantDeleted: []string{
-				kvKeyPrimaryEmailPrefix + userSfid,
-			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var deletedKeys []string
-			deleteIndexKeyFn = func(_ context.Context, key string) error {
-				deletedKeys = append(deletedKeys, key)
-				return nil
-			}
 			getPrimaryEmailForUserFn = func(_ context.Context, gotSfid string) (string, error) {
 				if gotSfid != userSfid {
 					t.Errorf("getPrimaryEmailForUserFn called with sfid %q, want %q", gotSfid, userSfid)
@@ -471,73 +356,8 @@ func TestHandleMergedUserDeleteScrub(t *testing.T) {
 			if tc.wantPublished && publishedEmail != tc.wantEmail {
 				t.Errorf("published email = %q, want %q", publishedEmail, tc.wantEmail)
 			}
-			if tc.wantDeleted != nil {
-				if len(deletedKeys) != len(tc.wantDeleted) {
-					t.Fatalf("deletedKeys = %v, want %v", deletedKeys, tc.wantDeleted)
-				}
-				for i, want := range tc.wantDeleted {
-					if deletedKeys[i] != want {
-						t.Errorf("deletedKeys[%d] = %q, want %q", i, deletedKeys[i], want)
-					}
-				}
-			} else if len(deletedKeys) != 0 {
-				t.Errorf("expected no index deletes, got %v", deletedKeys)
-			}
 		})
 	}
-}
-
-// TestGetCachedPrimaryEmailForUser verifies cache-first lookup with live fallback.
-func TestGetCachedPrimaryEmailForUser(t *testing.T) {
-	origRead := readMappingsKVValueFn
-	origLive := lookupPrimaryEmailForUserFn
-	t.Cleanup(func() {
-		readMappingsKVValueFn = origRead
-		lookupPrimaryEmailForUserFn = origLive
-	})
-
-	const userSfid = "003ABC"
-
-	t.Run("cache hit → no live lookup", func(t *testing.T) {
-		readMappingsKVValueFn = func(_ context.Context, key string) ([]byte, error) {
-			if key == kvKeyPrimaryEmailPrefix+userSfid {
-				return []byte("cached@example.com"), nil
-			}
-			return nil, errors.New("unexpected key")
-		}
-		lookupPrimaryEmailForUserFn = func(_ context.Context, _ string) (string, error) {
-			t.Fatal("live lookup should not run on cache hit")
-			return "", nil
-		}
-
-		email, err := getCachedPrimaryEmailForUser(context.Background(), userSfid)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if email != "cached@example.com" {
-			t.Fatalf("email = %q, want cached@example.com", email)
-		}
-	})
-
-	t.Run("cache miss → live lookup", func(t *testing.T) {
-		readMappingsKVValueFn = func(_ context.Context, _ string) ([]byte, error) {
-			return nil, errors.New("cache miss")
-		}
-		lookupPrimaryEmailForUserFn = func(_ context.Context, gotSfid string) (string, error) {
-			if gotSfid != userSfid {
-				t.Errorf("lookupPrimaryEmailForUserFn sfid = %q, want %q", gotSfid, userSfid)
-			}
-			return "live@example.com", nil
-		}
-
-		email, err := getCachedPrimaryEmailForUser(context.Background(), userSfid)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if email != "live@example.com" {
-			t.Fatalf("email = %q, want live@example.com", email)
-		}
-	})
 }
 
 func TestPublishUserDeletedEvent(t *testing.T) {
@@ -581,187 +401,21 @@ func TestPublishUserDeletedEvent(t *testing.T) {
 	})
 }
 
-// TestClearPrimaryEmailCacheIfMatched verifies conditional cache cleanup on demote/delete paths.
-func TestClearPrimaryEmailCacheIfMatched(t *testing.T) {
-	origLogger := logger
-	origRead := readMappingsKVValueFn
-	origDelete := deleteIndexKeyFn
-	t.Cleanup(func() {
-		logger = origLogger
-		readMappingsKVValueFn = origRead
-		deleteIndexKeyFn = origDelete
-	})
-	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	const (
-		key      = "test-key"
-		userSfid = "003ABC"
-	)
-	cacheKey := kvKeyPrimaryEmailPrefix + userSfid
-
-	tests := []struct {
-		name       string
-		sfid       string
-		emailAddr  string
-		readResult []byte
-		readErr    error
-		wantDelete bool
-	}{
-		{
-			name:       "match → delete",
-			sfid:       userSfid,
-			emailAddr:  "a@example.com",
-			readResult: []byte("a@example.com"),
-			wantDelete: true,
-		},
-		{
-			name:       "case-insensitive match → delete",
-			sfid:       userSfid,
-			emailAddr:  "A@Example.COM",
-			readResult: []byte("a@example.com"),
-			wantDelete: true,
-		},
-		{
-			name:       "no match → skip",
-			sfid:       userSfid,
-			emailAddr:  "a@example.com",
-			readResult: []byte("b@example.com"),
-			wantDelete: false,
-		},
-		{
-			name:       "empty email → skip",
-			sfid:       userSfid,
-			emailAddr:  "",
-			readResult: []byte("a@example.com"),
-			wantDelete: false,
-		},
-		{
-			name:       "empty user sfid → skip",
-			sfid:       "",
-			emailAddr:  "a@example.com",
-			readResult: []byte("a@example.com"),
-			wantDelete: false,
-		},
-		{
-			name:       "read error → skip",
-			sfid:       userSfid,
-			emailAddr:  "a@example.com",
-			readErr:    errors.New("cache miss"),
-			wantDelete: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			readMappingsKVValueFn = func(_ context.Context, gotKey string) ([]byte, error) {
-				if tt.sfid == "" {
-					t.Fatal("read should not run when user sfid is empty")
-				}
-				if gotKey != cacheKey {
-					t.Fatalf("read key = %q, want %q", gotKey, cacheKey)
-				}
-				return tt.readResult, tt.readErr
-			}
-
-			var deletedKeys []string
-			deleteIndexKeyFn = func(_ context.Context, gotKey string) error {
-				deletedKeys = append(deletedKeys, gotKey)
-				return nil
-			}
-
-			clearPrimaryEmailCacheIfMatched(context.Background(), key, tt.sfid, tt.emailAddr)
-
-			if tt.wantDelete {
-				if len(deletedKeys) != 1 {
-					t.Fatalf("deletedKeys = %v, want one delete", deletedKeys)
-				}
-				if deletedKeys[0] != cacheKey {
-					t.Fatalf("deleted key = %q, want %q", deletedKeys[0], cacheKey)
-				}
-			} else if len(deletedKeys) != 0 {
-				t.Fatalf("expected no delete, got %v", deletedKeys)
-			}
-		})
-	}
-}
-
-// TestExtractEmailIndex covers the field extraction for the alternate_email reindex phase.
-func TestExtractEmailIndex(t *testing.T) {
-	tests := []struct {
-		name      string
-		data      map[string]any
-		wantKey   string
-		wantValue string
-	}{
-		{
-			name:      "valid email and leadorcontactid → index key and sfid",
-			data:      map[string]any{"alternate_email_address__c": "user@example.com", "leadorcontactid": "003DEF"},
-			wantKey:   kvKeyEmailPrefix + emailToKVKey("user@example.com"),
-			wantValue: "003DEF",
-		},
-		{
-			name:      "email normalization: uppercase folded",
-			data:      map[string]any{"alternate_email_address__c": "User@Example.COM", "leadorcontactid": "003DEF"},
-			wantKey:   kvKeyEmailPrefix + emailToKVKey("user@example.com"),
-			wantValue: "003DEF",
-		},
-		{
-			name: "empty email → skip",
-			data: map[string]any{"alternate_email_address__c": "", "leadorcontactid": "003DEF"},
-		},
-		{
-			name: "missing email field → skip",
-			data: map[string]any{"leadorcontactid": "003DEF"},
-		},
-		{
-			name: "empty leadorcontactid → skip",
-			data: map[string]any{"alternate_email_address__c": "user@example.com", "leadorcontactid": ""},
-		},
-		{
-			name: "missing leadorcontactid field → skip",
-			data: map[string]any{"alternate_email_address__c": "user@example.com"},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			gotKey, gotVal := extractEmailIndex(tc.data)
-			if gotKey != tc.wantKey || gotVal != tc.wantValue {
-				t.Errorf("extractEmailIndex() = (%q, %q), want (%q, %q)", gotKey, gotVal, tc.wantKey, tc.wantValue)
-			}
-		})
-	}
-}
-
 // TestHandleAlternateEmailDelete exercises the soft-delete handler:
-// v1-mapping cleanup, primary-email skip, address fallback behavior, and the
-// retry / drop classifications around the Auth0 unlink call.
+// primary-email skip, address fallback behavior, and the retry / drop
+// classifications around the Auth0 unlink call.
 func TestHandleAlternateEmailDelete(t *testing.T) {
 	origLogger := logger
 	origLookup := lookupMergedUserFn
 	origUnlink := unlinkEmailIdentityFn
-	origUpdateEmails := updateContactEmailMappingIndexFn
-	origDeleteIndex := deleteIndexKeyFn
-	origReadCache := readMappingsKVValueFn
 	origAuth0Users := auth0Users
 	t.Cleanup(func() {
 		logger = origLogger
 		lookupMergedUserFn = origLookup
 		unlinkEmailIdentityFn = origUnlink
-		updateContactEmailMappingIndexFn = origUpdateEmails
-		deleteIndexKeyFn = origDeleteIndex
-		readMappingsKVValueFn = origReadCache
 		auth0Users = origAuth0Users
 	})
 	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	// Stub out the KV-touching helpers so the tests don't need a live NATS bucket.
-	// updateContactEmailMappingIndexFn returns nil only if the write applied,
-	// so return nil to simulate the normal successful case.
-	updateContactEmailMappingIndexFn = func(_ context.Context, _, _ string, _ bool) error { return nil }
-	deleteIndexKeyFn = func(_ context.Context, _ string) error { return nil }
-	readMappingsKVValueFn = func(_ context.Context, _ string) ([]byte, error) {
-		return nil, errors.New("cache miss")
-	}
 
 	const (
 		userSfid  = "003DEF"
