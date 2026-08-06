@@ -483,6 +483,14 @@ func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID str
 		payload.Website = &clean
 	}
 
+	if enableVoting, ok := v1Data["enable_voting__c"].(bool); ok {
+		payload.EnableVoting = enableVoting
+	}
+
+	if ssoEnabled, ok := v1Data["sso_group_enabled"].(bool); ok {
+		payload.SsoGroupEnabled = ssoEnabled
+	}
+
 	// Map public enabled field.
 	if public, ok := v1Data["public_enabled"].(bool); ok {
 		payload.Public = public
