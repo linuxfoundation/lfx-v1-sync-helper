@@ -290,17 +290,6 @@ func tombstoneMapping(ctx context.Context, mappingKey string) error {
 	return nil
 }
 
-// deleteIndexKey removes a secondary-index key from the mappings KV store.
-// Unlike tombstoneMapping, this does not leave a "!del" marker — secondary
-// indexes have no resurrection-prevention requirement, so a native KV delete
-// is sufficient.
-func deleteIndexKey(ctx context.Context, mappingKey string) error {
-	if err := mappingsKV.Delete(ctx, mappingKey); err != nil {
-		return fmt.Errorf("failed to delete index key %s: %w", mappingKey, err)
-	}
-	return nil
-}
-
 // isTombstonedMapping checks if a mapping is tombstoned.
 func isTombstonedMapping(mappingValue []byte) bool {
 	return string(mappingValue) == tombstoneMarker

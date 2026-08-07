@@ -6,31 +6,16 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
-
-	"github.com/nats-io/nats.go/jetstream"
-	"github.com/vmihailenco/msgpack/v5"
-	"golang.org/x/text/unicode/norm"
 )
 
 const (
-	// KV key prefixes for secondary indexes written to v1-mappings.
-	kvKeyUsernamePrefix        = "v1-user.username."
-	kvKeyEmailPrefix           = "v1-user.email."
-	kvKeyAlternateEmailsPrefix = "v1-merged-user.alternate-emails."
-	kvKeyPrimaryEmailPrefix    = "v1-user.primary-email."
-
 	// v1-objects KV key prefixes as replicated by Meltano.
 	v1MergedUserKVPrefix     = "salesforce-merged_user."
 	v1AlternateEmailKVPrefix = "salesforce-alternate_email__c."
-
-	// reindexProgressInterval controls how often progress is logged during bulk reindex.
-	reindexProgressInterval = 100_000
 )
 
 // auth0CallTimeout bounds Auth0 Management API work on handler-blocking paths.
@@ -45,63 +30,38 @@ const auth0CallTimeout = 20 * time.Second
 var syncProfileToAuth0Fn = syncProfileToAuth0
 
 // syncAlternateEmailToAuth0 dependencies, split out so tests can inject fakes
-// for the KV reads and Auth0 identity operations without needing a live
-// v1-objects bucket or Management API.
+// for the v1 platform DB reads and Auth0 identity operations without needing
+// a live database or Management API.
 var (
-	lookupMergedUserFn               = lookupMergedUser
-	linkEmailIdentityFn              = linkEmailIdentity
-	unlinkEmailIdentityFn            = unlinkEmailIdentity
-	updateContactEmailMappingIndexFn = updateContactEmailMappingIndex
-	deleteIndexKeyFn                 = deleteIndexKey
+	lookupMergedUserFn    = lookupMergedUser
+	linkEmailIdentityFn   = linkEmailIdentity
+	unlinkEmailIdentityFn = unlinkEmailIdentity
 )
 
 // handleMergedUserDelete dependencies, split out so tests can inject fakes
-// without needing a live NATS connection.
+// without needing a live NATS connection or database.
 var (
 	publishUserDeletedEventFn = publishUserDeletedEvent
-	getPrimaryEmailForUserFn  = getCachedPrimaryEmailForUser
+	getPrimaryEmailForUserFn  = dbGetLastKnownPrimaryEmailForUser
 )
 
-// readMappingsKVValueFn reads a raw value from v1-mappings. Swappable in tests.
-var readMappingsKVValueFn = func(ctx context.Context, key string) ([]byte, error) {
-	entry, err := mappingsKV.Get(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	return entry.Value(), nil
+// isSoleQualifyingAlternateEmailFn is injectable for tests.
+var isSoleQualifyingAlternateEmailFn = dbIsSoleQualifyingAlternateEmail
+
+// normalizeUserIdentifier normalizes a user-provided username or email for
+// case-insensitive, whitespace-trimmed matching against the v1 platform
+// database: TrimSpace → ToLower. No Unicode normalization is applied — the
+// database column values are not normalized either, and both fields are
+// expected to be ASCII in practice, so an input-only NFC pass would be
+// misleading without actually guaranteeing canonical-equivalence matches.
+func normalizeUserIdentifier(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
-// lookupPrimaryEmailForUserFn is the live alternate-email lookup used when the
-// primary-email cache misses. Swappable in tests.
-var lookupPrimaryEmailForUserFn = getPrimaryEmailForUser
-
-// normalizeKVSegment normalizes a user-provided string for NATS KV key segments:
-// TrimSpace → ToLower → NFC. NFC unifies decomposed/precomposed Unicode
-// (e.g. n\u0303 ≡ ñ) without semantic transposition.
-func normalizeKVSegment(s string) string {
-	return norm.NFC.String(strings.ToLower(strings.TrimSpace(s)))
-}
-
-// toKVKey encodes a normalized string as a URL-safe base64 key segment
-// (RawURLEncoding, no padding) safe for NATS KV.
-func toKVKey(s string) string {
-	s = normalizeKVSegment(s)
-	if s == "" {
-		return ""
-	}
-	return base64.RawURLEncoding.EncodeToString([]byte(s))
-}
-
-// emailToKVKey normalizes and encodes an email address as a NATS KV key segment.
-func emailToKVKey(email string) string { return toKVKey(email) }
-
-// usernameToKVKey normalizes and encodes a username as a NATS KV key segment.
-// Historical usernames can contain spaces and special characters.
-func usernameToKVKey(name string) string { return toKVKey(name) }
-
-// handleMergedUserUpdate processes merged user updates, maintains the
-// secondary index for username -> user SFID lookups, and syncs profile
-// fields from the v1 platform DB to Auth0 user_metadata.
+// handleMergedUserUpdate processes merged user updates and syncs profile
+// fields from the v1 platform DB to Auth0 user_metadata. Username and email
+// lookups query the v1 platform database live, so no secondary index
+// maintenance is needed here.
 //
 // The Auth0 profile sync runs synchronously before ACKing the JetStream
 // message. Retryable Auth0 errors (429, 5xx) return true to NACK the
@@ -118,66 +78,35 @@ func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]a
 	}
 
 	username, _ := v1Data["username__c"].(string)
-
-	encodedUsername := usernameToKVKey(username)
-	if encodedUsername == "" {
-		logger.With("key", key).DebugContext(ctx, "merged_user has no username, skipping index")
+	if normalizeUserIdentifier(username) == "" {
+		logger.With("key", key).DebugContext(ctx, "merged_user has no username, skipping profile sync")
 		return false
 	}
-
-	indexKey := kvKeyUsernamePrefix + encodedUsername
-
-	// Uses simple Put() since this is a single-value overwrite, not a JSON array.
-	if _, err := mappingsKV.Put(ctx, indexKey, []byte(sfid)); err != nil {
-		logger.With("error", err, "key", key, "indexKey", indexKey).
-			ErrorContext(ctx, "failed to write username index")
-		return false
-	}
-
-	logger.With("key", key, "indexKey", indexKey, "sfid", sfid).
-		DebugContext(ctx, "successfully updated username index")
 
 	auth0UserID := mapUsernameToAuthSub(username)
 	return syncMergedUserProfile(ctx, key, auth0UserID, v1Data)
 }
 
-// handleMergedUserDelete processes deletion of a merged user record: deletes
-// the username -> SFID secondary index so future lookups do not resolve a
-// deleted user, then scrubs the username from v2 committee data.
+// handleMergedUserDelete processes deletion of a merged user record by
+// publishing a user-deleted event so v2 committee data is scrubbed of the
+// username. Lookups query the v1 platform database live, so there are no
+// secondary indexes to clean up.
 // Soft deletes and hard KV deletes both arrive here; v1Data is nil for a hard KV delete.
 // Returns true if the operation should be retried, false otherwise.
 func handleMergedUserDelete(ctx context.Context, key, userSfid string, v1Data map[string]any) bool {
 	if v1Data == nil {
 		// Hard KV delete — the payload is gone so we cannot resolve the
-		// username to delete the secondary index. Soft deletes should
-		// always carry a payload, so log a warning if we see this.
+		// username to publish a scrub event. Soft deletes should always
+		// carry a payload, so log a warning if we see this.
 		logger.With("key", key, "user_sfid", userSfid).
-			WarnContext(ctx, "merged_user hard-deleted with no payload; cannot clean up username index")
-		if err := deleteIndexKeyFn(ctx, kvKeyPrimaryEmailPrefix+userSfid); err != nil {
-			logger.With(errKey, err, "key", key, "user_sfid", userSfid).
-				WarnContext(ctx, "failed to delete cached primary email after hard user delete")
-		}
+			WarnContext(ctx, "merged_user hard-deleted with no payload; cannot publish user-deleted event")
 		return false
 	}
 
 	username, _ := v1Data["username__c"].(string)
-	if encodedUsername := usernameToKVKey(username); encodedUsername != "" {
-		indexKey := kvKeyUsernamePrefix + encodedUsername
-		if err := deleteIndexKeyFn(ctx, indexKey); err != nil {
-			logger.With("error", err, "key", key, "indexKey", indexKey).
-				ErrorContext(ctx, "failed to delete username index for deleted user")
-		} else {
-			logger.With("key", key, "indexKey", indexKey).
-				DebugContext(ctx, "deleted username index for deleted user")
-		}
-	}
-	// TODO: also delete the alternate-email mapping array (v1-user.alternate-emails.<userSfid>)
-	// and the per-email reverse indexes (v1-user.email.*) for each entry in that array.
-	// In practice the alternate email rows are deleted before or alongside the user row, so
-	// handleAlternateEmailDelete cleans those up individually — but if the user is deleted
-	// without its alternate emails being deleted first, those entries will be orphaned.
-
-	if normalizedUsername := normalizeKVSegment(username); normalizedUsername != "" {
+	if normalizedUsername := normalizeUserIdentifier(username); normalizedUsername != "" {
+		// Best-effort primary email lookup: the alternate email rows may
+		// already be soft-deleted, so this queries without liveness filters.
 		email, emailErr := getPrimaryEmailForUserFn(ctx, userSfid)
 		if emailErr != nil {
 			logger.With(errKey, emailErr, "key", key, "user_sfid", userSfid).
@@ -189,48 +118,7 @@ func handleMergedUserDelete(ctx context.Context, key, userSfid string, v1Data ma
 		publishUserDeletedEventFn(ctx, key, normalizedUsername, email)
 	}
 
-	// Best-effort cleanup of the cached primary-email key (even when username is blank).
-	if err := deleteIndexKeyFn(ctx, kvKeyPrimaryEmailPrefix+userSfid); err != nil {
-		logger.With(errKey, err, "key", key, "user_sfid", userSfid).
-			WarnContext(ctx, "failed to delete cached primary email after user delete")
-	}
-
 	return false
-}
-
-// getCachedPrimaryEmailForUser returns the primary email for a user. It first
-// checks the v1-mappings cache written by handleAlternateEmailUpdate (which
-// survives alternate-email row deletion), then falls back to the live KV
-// lookup. The cache avoids an ordering problem where alternate-email rows are
-// cleaned up before the merged-user deletion event is processed.
-func getCachedPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error) {
-	cacheKey := kvKeyPrimaryEmailPrefix + userSfid
-	if raw, err := readMappingsKVValueFn(ctx, cacheKey); err == nil {
-		if email := strings.TrimSpace(string(raw)); email != "" {
-			return email, nil
-		}
-	}
-	return lookupPrimaryEmailForUserFn(ctx, userSfid)
-}
-
-// clearPrimaryEmailCacheIfMatched deletes the cached primary email when it still
-// points at emailAddr (e.g. after a primary row is demoted or deleted).
-func clearPrimaryEmailCacheIfMatched(ctx context.Context, key, userSfid, emailAddr string) {
-	if emailAddr == "" || userSfid == "" {
-		return
-	}
-	cacheKey := kvKeyPrimaryEmailPrefix + userSfid
-	raw, err := readMappingsKVValueFn(ctx, cacheKey)
-	if err != nil {
-		return
-	}
-	if !strings.EqualFold(strings.TrimSpace(string(raw)), strings.TrimSpace(emailAddr)) {
-		return
-	}
-	if err := deleteIndexKeyFn(ctx, cacheKey); err != nil {
-		logger.With(errKey, err, "key", key, "user_sfid", userSfid).
-			WarnContext(ctx, "failed to delete stale primary email cache")
-	}
 }
 
 // userDeletedEvent is the payload published to "lfx.v1-sync-helper.user.deleted" when a
@@ -297,11 +185,12 @@ func syncMergedUserProfile(ctx context.Context, key, auth0UserID string, v1Data 
 	return false
 }
 
-// handleAlternateEmailUpdate processes additive alternate email updates:
-// maintains v1-mapping records for merged users' alternate emails and the
-// email -> user SFID index, and links the email as an identity on the user's
-// Auth0 account. Soft deletes are intercepted by handleKVPut before reaching
-// this function and routed to handleAlternateEmailDelete instead.
+// handleAlternateEmailUpdate processes additive alternate email updates by
+// linking the email as an identity on the user's Auth0 account. Username and
+// email lookups query the v1 platform database live, so no secondary index
+// maintenance is needed here. Soft deletes are intercepted by handleKVPut
+// before reaching this function and routed to handleAlternateEmailDelete
+// instead.
 // Returns true if the operation should be retried, false otherwise.
 func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	leadorcontactid, ok := v1Data["leadorcontactid"].(string)
@@ -319,69 +208,29 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 	// active__c=false means the user-service deactivated the email without
 	// deleting the row. A ".old" domain suffix is a v1 convention for the
 	// same intent without flipping active__c. Treat both the same as a soft delete.
-	emailAddrForActiveCheck, _ := v1Data["alternate_email_address__c"].(string)
-	isOld := strings.HasSuffix(strings.ToLower(emailAddrForActiveCheck), ".old")
+	emailAddr, _ := v1Data["alternate_email_address__c"].(string)
+	isOld := hasOldDomainSuffix(emailAddr)
 	if isActive, ok := v1Data["active__c"].(bool); (ok && !isActive) || isOld {
 		logger.With("key", key, "email_sfid", emailSfid, "old_domain", isOld).
 			DebugContext(ctx, "alternate email inactive (active__c=false or .old domain), routing to delete handler")
 		return handleAlternateEmailDelete(ctx, key, emailSfid, v1Data)
 	}
 
-	if err := updateContactEmailMappingIndex(ctx, leadorcontactid, emailSfid, false); err != nil {
-		// The rest of this function would be working off stale mapping
-		// data (e.g. this row missing from the qualifying-email count) if
-		// we proceeded here, so bail out now rather than doing (and
-		// potentially mis-deciding) the remaining work on data we know
-		// didn't get updated. See updateContactEmailMappingIndex for the
-		// retryable-vs-not distinction.
-		if errors.Is(err, errCorruptAlternateEmailsMapping) {
-			logger.With(errKey, err, "key", key, "email_sfid", emailSfid, "user_sfid", leadorcontactid).
-				ErrorContext(ctx, "alternate emails mapping record is corrupt, dropping (requires manual data fix)")
-			return false
-		}
-		logger.With(errKey, err, "key", key, "email_sfid", emailSfid, "user_sfid", leadorcontactid).
-			WarnContext(ctx, "alternate emails mapping write did not apply, requesting retry")
-		return true
-	}
-
-	emailAddr, _ := v1Data["alternate_email_address__c"].(string)
-	if encodedEmail := emailToKVKey(emailAddr); encodedEmail != "" {
-		indexKey := kvKeyEmailPrefix + encodedEmail
-		if _, err := mappingsKV.Put(ctx, indexKey, []byte(leadorcontactid)); err != nil {
-			logger.With("error", err, "key", key, "indexKey", indexKey).
-				ErrorContext(ctx, "failed to write email index")
-		} else {
-			logger.With("key", key, "indexKey", indexKey, "userSfid", leadorcontactid).
-				DebugContext(ctx, "successfully updated email index")
-		}
-	}
-
-	// Primary emails are not linked as Auth0 identities (they are the Auth0 user's own email).
-	// Cache the address in mappings so handleMergedUserDelete can supply it to downstream
-	// scrubbers even after the alternate-email rows have been cleaned up ahead of the
-	// merged-user row.
+	// Primary emails are not linked as Auth0 identities (they are the Auth0
+	// user's own email).
 	if isPrimary, _ := v1Data["primary_email__c"].(bool); isPrimary {
-		if emailAddr != "" {
-			cacheKey := kvKeyPrimaryEmailPrefix + leadorcontactid
-			if _, err := mappingsKV.Put(ctx, cacheKey, []byte(emailAddr)); err != nil {
-				logger.With(errKey, err, "key", key, "user_sfid", leadorcontactid).
-					WarnContext(ctx, "failed to cache primary email for user deletion scrub")
-			}
-		}
 		return false
 	}
 
-	clearPrimaryEmailCacheIfMatched(ctx, key, leadorcontactid, emailAddr)
-
 	// If this is the user's only qualifying alternate email, treat it as
-	// though it were flagged primary (see isSoleQualifyingAlternateEmail):
+	// though it were flagged primary (see dbIsSoleQualifyingAlternateEmail):
 	// v1 lazy-sync may not have created/synced the primary row yet.
 	//
 	// Known limitation: if this row is skipped here as sole, and a second
 	// qualifying row (including a later primary-flagged row) arrives after
 	// it, only the new row is considered by its own event — this row is not
 	// revisited until a backfill run reconciles it. See LFXV2-2662.
-	sole, err := isSoleQualifyingAlternateEmail(ctx, leadorcontactid)
+	sole, err := isSoleQualifyingAlternateEmailFn(ctx, leadorcontactid)
 	if err != nil {
 		if errors.Is(err, errAmbiguousDefactoPrimaryEmail) {
 			// Deterministic v1 data condition (multiple qualifying rows,
@@ -395,10 +244,10 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 		}
 		// A read failure could just as easily be masking a true sole-email
 		// case as a true multi-email case, so don't guess non-sole and risk
-		// wrongly linking a row that should be de-facto primary. Unlike the
-		// ambiguous-data case above, this may well be transient, so request
-		// redelivery instead of silently dropping the message — otherwise
-		// this valid link could go missing until a backfill happens to run.
+		// wrongly linking a row that should be de-facto primary. This may
+		// well be transient, so request redelivery instead of silently
+		// dropping the message — otherwise this valid link could go missing
+		// until a backfill happens to run.
 		logger.With(errKey, err, "key", key, "user_sfid", leadorcontactid).
 			WarnContext(ctx, "failed to determine sole-qualifying-email status, requesting retry")
 		return true
@@ -432,10 +281,9 @@ func handleAlternateEmailUpdate(ctx context.Context, key string, v1Data map[stri
 }
 
 // handleAlternateEmailDelete processes a soft delete of an alternate email
-// record: cleans up the v1-mapping secondary indexes and unlinks the
-// corresponding linked identity from the user's Auth0 account. This is the
-// only path that drives Auth0 unlinks — the update handler doesn't fire on
-// soft deletes (handleKVPut routes them here).
+// record by unlinking the corresponding linked identity from the user's Auth0
+// account. This is the only path that drives Auth0 unlinks — the update
+// handler doesn't fire on soft deletes (handleKVPut routes them here).
 // Returns true if the operation should be retried, false otherwise.
 func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Data map[string]any) bool {
 	if v1Data == nil {
@@ -443,7 +291,7 @@ func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Da
 		// can't resolve the user or email. Soft deletes should always carry
 		// a payload, so log a warning if we see this.
 		logger.With("key", key, "email_sfid", emailSfid).
-			WarnContext(ctx, "alternate email hard-deleted with no payload; cannot clean up indexes or unlink Auth0 identity")
+			WarnContext(ctx, "alternate email hard-deleted with no payload; cannot unlink Auth0 identity")
 		return false
 	}
 
@@ -456,33 +304,9 @@ func handleAlternateEmailDelete(ctx context.Context, key, emailSfid string, v1Da
 		return false
 	}
 
-	// Clean up the v1-mapping entry for this alternate email. Bail out
-	// immediately if the write didn't apply (see the analogous check in
-	// handleAlternateEmailUpdate) rather than continuing with cleanup steps;
-	// the event will be redelivered unless the failure is deterministic.
-	if err := updateContactEmailMappingIndexFn(ctx, userSfid, emailSfid, true); err != nil {
-		if errors.Is(err, errCorruptAlternateEmailsMapping) {
-			logger.With(errKey, err, "key", key, "email_sfid", emailSfid, "user_sfid", userSfid).
-				ErrorContext(ctx, "alternate emails mapping record is corrupt, dropping (requires manual data fix)")
-			return false
-		}
-		logger.With(errKey, err, "key", key, "email_sfid", emailSfid, "user_sfid", userSfid).
-			WarnContext(ctx, "alternate emails mapping write did not apply, requesting retry")
-		return true
-	}
-
-	if encodedEmail := emailToKVKey(emailAddr); encodedEmail != "" {
-		indexKey := kvKeyEmailPrefix + encodedEmail
-		if err := deleteIndexKeyFn(ctx, indexKey); err != nil {
-			logger.With("error", err, "key", key, "indexKey", indexKey).
-				ErrorContext(ctx, "failed to delete email index on delete")
-		}
-	}
-
 	// Skip primary emails — the primary email is the Auth0 user's own email
 	// field, not a linked identity, so it is out of scope for this handler.
 	if isPrimary, _ := v1Data["primary_email__c"].(bool); isPrimary {
-		clearPrimaryEmailCacheIfMatched(ctx, key, userSfid, emailAddr)
 		return false
 	}
 
@@ -574,256 +398,7 @@ func linkAlternateEmailToAuth0(ctx context.Context, key, userSfid, email string)
 	return false
 }
 
-// errCorruptAlternateEmailsMapping indicates the existing v1-mappings
-// alternate-emails record for a user could not be parsed, or the updated
-// list built from it could not be re-encoded. This is a deterministic data
-// problem, not a transient one: retrying the same read/write will reach the
-// same result until the record is fixed (e.g. by a corrective write) or the
-// code bug is fixed, so callers should not request retry/redelivery for it,
-// unlike other errors from updateContactEmailMappingIndex.
-var errCorruptAlternateEmailsMapping = errors.New("corrupt or unencodable v1-mappings alternate-emails record")
-
-// updateContactEmailMappingIndex updates the v1-mapping record for a user's
-// alternate emails with concurrency control using atomic KV operations.
-// Returns nil only if the write actually applied. A caller must not treat a
-// non-nil return as good enough to proceed as if the array now reflects
-// this change — e.g. reading it immediately afterward to make a
-// sole-qualifying-email determination would be working off stale data.
-// Most errors here (KV read/write failures, and revision conflicts, which
-// resolve themselves once the conflicting writer's change lands) are
-// potentially transient, so callers should request retry/redelivery for
-// them. An error wrapping errCorruptAlternateEmailsMapping is a
-// deterministic data problem instead, where retrying reaches the same
-// result until the data is fixed, so callers should not retry for it.
-func updateContactEmailMappingIndex(ctx context.Context, userSfid, emailSfid string, isDeleted bool) error {
-	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
-
-	entry, err := mappingsKV.Get(ctx, mappingKey)
-
-	var currentEmails []string
-	var revision uint64
-
-	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
-			currentEmails = []string{}
-			revision = 0
-		} else {
-			logger.With("error", err, "key", mappingKey).
-				ErrorContext(ctx, "failed to get mapping record")
-			return fmt.Errorf("failed to get mapping record %s: %w", mappingKey, err)
-		}
-	} else {
-		revision = entry.Revision()
-		if err := json.Unmarshal(entry.Value(), &currentEmails); err != nil {
-			logger.With("error", err, "key", mappingKey).
-				ErrorContext(ctx, "failed to unmarshal existing emails list")
-			return fmt.Errorf("failed to unmarshal mapping record %s: %w: %w", mappingKey, err, errCorruptAlternateEmailsMapping)
-		}
-	}
-
-	updatedEmails := updateEmailsList(currentEmails, emailSfid, isDeleted)
-
-	updatedData, err := json.Marshal(updatedEmails)
-	if err != nil {
-		logger.With("error", err, "key", mappingKey).
-			ErrorContext(ctx, "failed to marshal updated emails list")
-		return fmt.Errorf("failed to marshal updated emails list for %s: %w: %w", mappingKey, err, errCorruptAlternateEmailsMapping)
-	}
-
-	if revision == 0 {
-		if _, err := mappingsKV.Create(ctx, mappingKey, updatedData); err != nil {
-			if isRevisionMismatchError(err) || err == jetstream.ErrKeyExists {
-				logger.With("error", err, "key", mappingKey).
-					WarnContext(ctx, "key created by another process during create attempt, will retry")
-			} else {
-				logger.With("error", err, "key", mappingKey).
-					ErrorContext(ctx, "failed to create mapping record")
-			}
-			return fmt.Errorf("failed to create mapping record %s: %w", mappingKey, err)
-		}
-	} else {
-		if _, err := mappingsKV.Update(ctx, mappingKey, updatedData, revision); err != nil {
-			if isRevisionMismatchError(err) {
-				logger.With("error", err, "key", mappingKey, "revision", revision).
-					WarnContext(ctx, "mapping record revision mismatch, will retry")
-			} else {
-				logger.With("error", err, "key", mappingKey).
-					ErrorContext(ctx, "failed to update mapping record")
-			}
-			return fmt.Errorf("failed to update mapping record %s: %w", mappingKey, err)
-		}
-	}
-
-	logger.With("key", mappingKey, "emailSfid", emailSfid, "isDeleted", isDeleted).
-		DebugContext(ctx, "successfully updated alternate emails mapping")
-	return nil
-}
-
-// updateEmailsList adds or removes an email sfid from the list based on deletion status.
-func updateEmailsList(currentEmails []string, emailSfid string, isDeleted bool) []string {
-	index := -1
-	for i, email := range currentEmails {
-		if email == emailSfid {
-			index = i
-			break
-		}
-	}
-
-	if isDeleted {
-		if index != -1 {
-			return append(currentEmails[:index], currentEmails[index+1:]...)
-		}
-		return currentEmails
-	}
-	if index == -1 {
-		return append(currentEmails, emailSfid)
-	}
-	return currentEmails
-}
-
 const (
 	// kvObjectsStream is the JetStream stream backing the v1-objects KV bucket.
 	kvObjectsStream = "KV_v1-objects"
 )
-
-// extractUsernameIndex extracts the secondary index key and value for a
-// merged_user record. Returns ("", "") to signal that the record should be skipped.
-func extractUsernameIndex(data map[string]any) (indexKey, value string) {
-	username, _ := data["username__c"].(string)
-	sfid, _ := data["sfid"].(string)
-	enc := usernameToKVKey(username)
-	if enc == "" || sfid == "" {
-		return "", ""
-	}
-	return kvKeyUsernamePrefix + enc, sfid
-}
-
-// extractEmailIndex extracts the secondary index key and value for an
-// alternate_email__c record. Returns ("", "") to signal that the record should be skipped.
-func extractEmailIndex(data map[string]any) (indexKey, value string) {
-	email, _ := data["alternate_email_address__c"].(string)
-	userSfid, _ := data["leadorcontactid"].(string)
-	enc := emailToKVKey(email)
-	if enc == "" || userSfid == "" {
-		return "", ""
-	}
-	return kvKeyEmailPrefix + enc, userSfid
-}
-
-// streamUserSecondaryIndex rebuilds one class of secondary index (username or
-// email) by scanning the v1-objects stream with ScanSubjectData and writing
-// an index entry for each live, non-deleted subject.
-//
-// KV_v1-objects in prod has 54M sequences (18.5M subjects, 35.6M tombstones).
-// A DeliverAllPolicy consumer would stream all sequences through a single
-// connection, saturating NATS server CPU and preventing heartbeat delivery.
-// ScanSubjectData uses sequential GetMsg with next_by_subj: each call is an
-// independent request-reply, spreading the server load across ~N round trips.
-// Payloads are returned directly so no separate KV.Get per subject is needed.
-//
-// # Deadline strategy (env-configurable via REINDEX_* env vars)
-//
-//   - REINDEX_PHASE_TIMEOUT (default 45m): total budget for scan + index writes.
-//   - REINDEX_NATS_OP_TIMEOUT (default 30s): per-op cap on each GetMsg and Put.
-//   - REINDEX_OP_DELAY (default 1ms): inter-iteration sleep to cap op-rate on
-//     the shared broker. Primary throughput knob for prod runs.
-func streamUserSecondaryIndex(
-	ctx context.Context,
-	phaseName string,
-	subjectFilter string,
-	extractIndex func(data map[string]any) (string, string),
-) (written, errors int, err error) {
-	phaseCtx, phaseCancel := context.WithTimeout(ctx, cfg.ReindexPhaseTimeout)
-	defer phaseCancel()
-
-	subjectData, err := ScanSubjectData(phaseCtx, jsContext, kvObjectsStream, subjectFilter, cfg.ReindexNATSOpTimeout)
-	if err != nil {
-		return 0, 0, fmt.Errorf("%s reindex scan: %w", phaseName, err)
-	}
-
-	logger.With("subjects", len(subjectData), "phase", phaseName).Info("reindex scan complete; starting index writes")
-
-	for subject, rawData := range subjectData {
-		if err := phaseCtx.Err(); err != nil {
-			return written, errors, fmt.Errorf("%s reindex phase timed out after %d writes: %w", phaseName, written, err)
-		}
-
-		if isTombstonedMapping(rawData) {
-			continue
-		}
-
-		// Decode JSON, fall back to msgpack — mirrors getV1ObjectData in lfx_v1_client.go.
-		var data map[string]any
-		if jsonErr := json.Unmarshal(rawData, &data); jsonErr != nil {
-			if mpErr := msgpack.Unmarshal(rawData, &data); mpErr != nil {
-				logger.With("subject", subject, "phase", phaseName).Warn("failed to decode reindex value; skipping")
-				errors++
-				continue
-			}
-		}
-
-		if isDeleted, ok := data["isdeleted"].(bool); ok && isDeleted {
-			continue
-		}
-		// Mirror getV1ObjectData: skip WAL-based soft deletes (_sdc_deleted_at).
-		if deletedAt, ok := data["_sdc_deleted_at"]; ok {
-			if s, okStr := deletedAt.(string); (okStr && strings.TrimSpace(s) != "") || (!okStr && deletedAt != nil) {
-				continue
-			}
-		}
-
-		indexKey, value := extractIndex(data)
-		if indexKey == "" {
-			continue
-		}
-
-		if cfg.ReindexOpDelay > 0 {
-			time.Sleep(cfg.ReindexOpDelay)
-		}
-
-		putCtx, cancelPut := context.WithTimeout(ctx, cfg.ReindexNATSOpTimeout)
-		_, putErr := mappingsKV.Put(putCtx, indexKey, []byte(value))
-		cancelPut()
-		if putErr != nil {
-			logger.With("error", putErr, "subject", subject, "indexKey", indexKey, "phase", phaseName).Warn("failed to write index during reindex")
-			errors++
-			continue
-		}
-		written++
-		if written%reindexProgressInterval == 0 {
-			logger.With("count", written, "phase", phaseName).Info("reindex progress")
-		}
-	}
-
-	return written, errors, nil
-}
-
-// rebuildUserSecondaryIndexes populates secondary indexes for all existing
-// merged_user and alternate_email records. One-time operation triggered by the
-// --rebuild-user-secondary-indexes CLI flag.
-func rebuildUserSecondaryIndexes(ctx context.Context) error {
-	logger.Info("rebuilding username secondary indexes from merged_user records")
-	usernameCount, usernameErrors, err := streamUserSecondaryIndex(
-		ctx, "username",
-		"$KV.v1-objects."+v1MergedUserKVPrefix+">",
-		extractUsernameIndex,
-	)
-	if err != nil {
-		return fmt.Errorf("username phase: %w", err)
-	}
-	logger.With("count", usernameCount, "errors", usernameErrors).Info("completed username secondary index rebuild")
-
-	logger.Info("rebuilding email secondary indexes from alternate_email records")
-	emailCount, emailErrors, err := streamUserSecondaryIndex(
-		ctx, "email",
-		"$KV.v1-objects."+v1AlternateEmailKVPrefix+">",
-		extractEmailIndex,
-	)
-	if err != nil {
-		return fmt.Errorf("email phase: %w", err)
-	}
-	logger.With("count", emailCount, "errors", emailErrors).Info("completed email secondary index rebuild")
-
-	logger.With("usernameIndexes", usernameCount, "emailIndexes", emailCount).Info("user secondary index rebuild summary")
-	return nil
-}

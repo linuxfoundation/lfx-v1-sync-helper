@@ -33,7 +33,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -77,8 +76,65 @@ type backfillProfilesResult struct {
 	usersSkipped   int
 }
 
-// getAlternateEmailDetailsFn is injectable for tests.
-var getAlternateEmailDetailsFn = getAlternateEmailDetails
+// getAlternateEmailsForUserFn is injectable for tests.
+var getAlternateEmailsForUserFn = dbGetAlternateEmailsForUser
+
+// emailCandidate is a linkable alternate email row (non-primary, active,
+// verified, non-empty address).
+type emailCandidate struct {
+	emailSfid string
+	email     string
+}
+
+// collectEmailLinkCandidates fetches a user's alternate email rows from the
+// v1 platform database and returns the candidate (non-primary, active,
+// verified) emails to link, deduplicated by address, along with the count of
+// "qualifying" rows (active and either verified or primary) and whether any
+// qualifying row is flagged primary. See LFXV2-2662 for the qualifying-count
+// heuristic — a sole qualifying row is a de-facto primary and must not be
+// linked as a secondary identity.
+//
+// rejected counts rows that were fetched but did not become candidates
+// (primary, inactive, unverified, empty address, or a duplicate address) so
+// callers can attribute them in their skipped-email totals.
+func collectEmailLinkCandidates(ctx context.Context, userSfid string) (candidates []emailCandidate, qualifying int, sawPrimary bool, rejected int, err error) {
+	rows, err := getAlternateEmailsForUserFn(ctx, userSfid)
+	if err != nil {
+		return nil, 0, false, 0, fmt.Errorf("fetching alternate emails for %s: %w", userSfid, err)
+	}
+
+	// Deduplicate candidates by email address (case-insensitive). v1
+	// enforces email uniqueness per user, so duplicates are not expected,
+	// but deduplicating here avoids a wasted Auth0 Search call if two
+	// rows somehow resolve to the same address — the pre-fetched user's
+	// identity list would be stale after the first successful link.
+	seenEmails := make(map[string]bool)
+	for i := range rows {
+		row := &rows[i]
+		email := row.EmailAddress.String
+		isPrimary := row.IsPrimary.Valid && row.IsPrimary.Bool
+		isVerified := row.IsVerified.Valid && row.IsVerified.Bool
+		isActive := emailRowIsActive(row)
+		if isActive && (isVerified || isPrimary) {
+			qualifying++
+			if isPrimary {
+				sawPrimary = true
+			}
+		}
+		if isPrimary || !isActive || !isVerified || email == "" {
+			rejected++
+			continue
+		}
+		lower := strings.ToLower(email)
+		if seenEmails[lower] {
+			rejected++
+			continue
+		}
+		seenEmails[lower] = true
+		candidates = append(candidates, emailCandidate{emailSfid: row.SFID, email: email})
+	}
+	return candidates, qualifying, sawPrimary, rejected, nil
+}
 
 // loadBackfillCursor reads the cursor value from the v1-mappings KV bucket.
 // Returns ("", nil) when the key does not exist (first run).
@@ -240,67 +296,13 @@ func backfillEmailsForUser(ctx context.Context, auth0UserID, username string, dr
 		return nil
 	}
 
-	// Fetch the list of alternate email SFIDs from the v1-mappings KV bucket.
-	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
-	entry, err := mappingsKV.Get(ctx, mappingKey)
+	// Collect candidate emails and qualifying counts live from the v1
+	// platform database.
+	candidates, qualifying, sawPrimary, rejected, err := collectEmailLinkCandidates(ctx, userSfid)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
-			// No alternate emails registered for this user.
-			result.emailsSkipped++
-			return nil
-		}
-		return fmt.Errorf("fetching alternate email SFIDs for %s: %w", userSfid, err)
+		return fmt.Errorf("collecting email candidates (auth0 user %s): %w", auth0UserID, err)
 	}
-
-	var emailSfids []string
-	if err := json.Unmarshal(entry.Value(), &emailSfids); err != nil {
-		return fmt.Errorf("parsing email SFIDs for %s: %w", userSfid, err)
-	}
-
-	// Single pass: collect candidate (non-primary, active, verified) emails to
-	// link, while also counting "qualifying" emails (active and either
-	// verified or primary) across ALL of the user's alternate email rows. If
-	// only one email qualifies, that row is a lone alternate_email__c acting
-	// as a de-facto primary — v1 lazy-sync may not have created/synced the
-	// primary row yet — so it should not be linked as a secondary identity,
-	// even if it was collected as a link candidate (see LFXV2-2662; this
-	// mirrors auth0-db-sync.js's heuristic).
-	type emailCandidate struct {
-		emailSfid string
-		email     string
-	}
-	var candidates []emailCandidate
-	// Deduplicate candidates by email address (case-insensitive). v1
-	// enforces email uniqueness per user, so duplicates are not expected,
-	// but deduplicating here avoids a wasted Auth0 Search call if two
-	// SFIDs somehow resolve to the same address — the pre-fetched user's
-	// identity list would be stale after the first successful link.
-	seenEmails := make(map[string]bool)
-	qualifying := 0
-	sawPrimary := false
-	for _, emailSfid := range emailSfids {
-		email, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, emailSfid)
-		if err != nil {
-			return fmt.Errorf("getting alternate email details for %s (auth0 user %s): %w", emailSfid, auth0UserID, err)
-		}
-		if isActive && (isVerified || isPrimary) {
-			qualifying++
-			if isPrimary {
-				sawPrimary = true
-			}
-		}
-		if isPrimary || !isActive || !isVerified || email == "" {
-			result.emailsSkipped++
-			continue
-		}
-		lower := strings.ToLower(email)
-		if seenEmails[lower] {
-			result.emailsSkipped++
-			continue
-		}
-		seenEmails[lower] = true
-		candidates = append(candidates, emailCandidate{emailSfid: emailSfid, email: email})
-	}
+	result.emailsSkipped += rejected
 
 	if qualifying <= 1 {
 		logger.With("user_sfid", userSfid, "auth0_user_id", auth0UserID).
@@ -535,76 +537,10 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 		}
 	}
 
-	// Sync alternate emails.
-	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
-	entry, err := mappingsKV.Get(ctx, mappingKey)
+	// Sync alternate emails, collected live from the v1 platform database.
+	candidates, qualifying, sawPrimary, _, err := collectEmailLinkCandidates(ctx, userSfid)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
-			logger.With("user_sfid", userSfid).Info("no alternate email SFIDs found in v1-mappings, skipping email sync")
-			return nil
-		}
-		return fmt.Errorf("fetching alternate email SFIDs: %w", err)
-	}
-
-	var emailSfids []string
-	if err := json.Unmarshal(entry.Value(), &emailSfids); err != nil {
-		return fmt.Errorf("parsing email SFIDs: %w", err)
-	}
-
-	// Single pass: collect candidate (non-primary, active, verified) emails to
-	// link, while also counting "qualifying" emails (active and either
-	// verified or primary) across ALL of the user's alternate email rows. If
-	// only one email qualifies, that row is a lone alternate_email__c acting
-	// as a de-facto primary — v1 lazy-sync may not have created/synced the
-	// primary row yet — so it should not be linked as a secondary identity,
-	// even if it was collected as a link candidate (see LFXV2-2662; this
-	// mirrors auth0-db-sync.js's heuristic).
-	type emailCandidate struct {
-		emailSfid string
-		email     string
-	}
-	var candidates []emailCandidate
-	// Deduplicate candidates by email address (case-insensitive). v1
-	// enforces email uniqueness per user, so duplicates are not expected,
-	// but deduplicating here avoids a wasted Auth0 Search call if two
-	// SFIDs somehow resolve to the same address — the pre-fetched user's
-	// identity list would be stale after the first successful link.
-	seenEmails := make(map[string]bool)
-	qualifying := 0
-	sawPrimary := false
-	for _, emailSfid := range emailSfids {
-		email, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, emailSfid)
-		if err != nil {
-			// A read failure makes the qualifying count unreliable, and
-			// guessing either way (sole vs. non-sole) risks a wrong link
-			// decision, so abort rather than silently proceed. Re-run
-			// --sync-user for this user once the underlying read problem
-			// (or bad data) is resolved.
-			return fmt.Errorf("getting alternate email details for %s (auth0 user %s): %w", emailSfid, auth0UserID, err)
-		}
-		if isActive && (isVerified || isPrimary) {
-			qualifying++
-			if isPrimary {
-				sawPrimary = true
-			}
-		}
-		if isPrimary || !isActive {
-			continue
-		}
-		if !isVerified {
-			logger.With("email", email, "email_sfid", emailSfid).
-				Debug("email not verified, skipping")
-			continue
-		}
-		if email == "" {
-			continue
-		}
-		lower := strings.ToLower(email)
-		if seenEmails[lower] {
-			continue
-		}
-		seenEmails[lower] = true
-		candidates = append(candidates, emailCandidate{emailSfid: emailSfid, email: email})
+		return fmt.Errorf("collecting email candidates (auth0 user %s): %w", auth0UserID, err)
 	}
 
 	if qualifying <= 1 {

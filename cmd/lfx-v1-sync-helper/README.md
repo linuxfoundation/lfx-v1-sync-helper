@@ -87,6 +87,13 @@ Loop detection prevents infinite sync cycles: if a non-tombstoned reverse mappin
 | `AUTH0_CLIENT_ID`           | Yes      | Auth0 client ID for v1 API authentication                                         |
 | `AUTH0_PRIVATE_KEY`         | Yes      | Auth0 private key (PEM format) for v1 API                                         |
 | `LFX_API_GW`                | No       | LFX API Gateway URL (default: `https://api-gw.dev.platform.linuxfoundation.org/`) |
+| `DATABASE_URL`              | Yes*     | PostgreSQL DSN for the v1 platform database (live user lookups). *Alternatively set the discrete `V1_DB_*` variables below. |
+| `V1_DB_HOST`                | Yes*     | v1 platform database host (used when `DATABASE_URL` is unset)                     |
+| `V1_DB_PORT`                | No       | v1 platform database port (default: `5432`)                                       |
+| `V1_DB_NAME`                | No       | v1 platform database name (default: `sfdc`)                                       |
+| `V1_DB_USER`                | Yes*     | v1 platform database username (used when `DATABASE_URL` is unset)                 |
+| `V1_DB_PASSWORD`            | Yes*     | v1 platform database password (used when `DATABASE_URL` is unset)                 |
+| `V1_DB_SSLMODE`             | No       | PostgreSQL `sslmode` parameter (default: `prefer`)                                |
 | `USE_MSGPACK`               | No       | Encode KV values as MessagePack instead of JSON (default: `false`)                |
 | `DYNAMODB_INGEST_ENABLED`   | No       | Subscribe to DynamoDB stream events from `dynamodb-stream-consumer` (default: `false`). Requires the `dynamodb_streams` NATS stream to exist. |
 | `DYNAMODB_STREAM_NAME`      | No       | NATS stream name to consume DynamoDB events from (default: `dynamodb_streams`)    |
@@ -178,8 +185,6 @@ See the Helm chart in `./charts/lfx-v1-sync-helper` for deployment configuration
 ### One-shot administrative commands
 
 The binary supports one-shot commands that exit after completing their task.
-
-**`--rebuild-user-secondary-indexes`** — populates username/email secondary indexes from existing `merged_user` and `alternate_email` records. Only `NATS_URL` is required. See the root README for production deployment guidance.
 
 **`--backfill-acs-project`** — merges ACS user grants into v2 project settings (`Writers`, `Auditors`, `MeetingCoordinators`). Reads SFID→UID mappings from the `v1-mappings` KV bucket. Additive-only (never removes existing entries) and idempotent. Supports `--dry-run` to preview without writing.
 

@@ -210,6 +210,26 @@ app:
       # key in the secret which contains the signing certificate
       privateKeyKey: signer.pem
 
+  # database is the v1 platform PostgreSQL connection used for live user
+  # lookups (salesforce.merged_user and salesforce.alternate_email__c).
+  # Uses the same secret as the wal-listener and meltano by default.
+  database:
+    secret:
+      # name is the name of the secret containing database credentials
+      name: v1-platform-db-credentials
+      # hostKey is the key in the secret containing the database host
+      hostKey: host
+      # usernameKey is the key in the secret containing the database username
+      usernameKey: username
+      # passwordKey is the key in the secret containing the database password
+      passwordKey: password
+    # port is the database port
+    port: 5432
+    # name is the database name
+    name: sfdc
+    # sslMode is the PostgreSQL sslmode connection parameter
+    sslMode: prefer
+
   # resources is the resource configuration for the app container
   resources:
     requests:
