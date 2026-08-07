@@ -105,9 +105,13 @@ func activeEmailFilter(q *bun.SelectQuery) *bun.SelectQuery {
 }
 
 // dbResolveUserSFIDByUsername resolves a v1 user SFID by username with
-// case-insensitive, whitespace-trimmed matching. The input is normalized with
+// case-insensitive matching. The input is normalized with
 // normalizeUserIdentifier (trim + lower) in Go; column values are matched via
-// LOWER(TRIM(...)). Returns ("", nil) on miss.
+// LOWER(...) only (no TRIM: confirmed via direct query against dev/staging/prod
+// that no rows have leading/trailing whitespace in username__c or
+// alternate_email_address__c, and wrapping the column in TRIM() prevents the
+// planner from using the existing lower(...) functional indexes, forcing a
+// full sequential scan). Returns ("", nil) on miss.
 func dbResolveUserSFIDByUsername(ctx context.Context, username string) (string, error) {
 	row, err := dbLookupMergedUserRowByUsername(ctx, username)
 	if err != nil || row == nil {
@@ -127,7 +131,7 @@ func dbLookupMergedUserRowByUsername(ctx context.Context, username string) (*mer
 	qCtx, cancel := withQueryTimeout(ctx)
 	defer cancel()
 	err := v1DB.NewSelect().Model(row).
-		Where("LOWER(TRIM(mu.username__c)) = ?", normalized).
+		Where("LOWER(mu.username__c) = ?", normalized).
 		Where("mu.isdeleted IS NOT TRUE").
 		Limit(1).
 		Scan(qCtx)
@@ -174,7 +178,7 @@ func dbResolveUserSFIDByEmail(ctx context.Context, email string) (string, error)
 	qCtx, cancel := withQueryTimeout(ctx)
 	defer cancel()
 	err := activeEmailFilter(v1DB.NewSelect().Model(row)).
-		Where("LOWER(TRIM(ae.alternate_email_address__c)) = ?", normalized).
+		Where("LOWER(ae.alternate_email_address__c) = ?", normalized).
 		Where("ae.leadorcontactid IS NOT NULL").
 		// Prefer the primary-flagged row when the same address appears on
 		// multiple rows, then newest SFID for determinism.
@@ -275,7 +279,7 @@ func dbGetLastKnownPrimaryEmailForUser(ctx context.Context, userSfid string) (st
 	defer cancel()
 	err := v1DB.NewSelect().Model(row).
 		Where("ae.leadorcontactid = ?", userSfid).
-		Where("TRIM(ae.alternate_email_address__c) != ''").
+		Where("ae.alternate_email_address__c != ''").
 		OrderExpr("ae.primary_email__c DESC NULLS LAST, ae.isdeleted ASC NULLS FIRST, ae.active__c DESC NULLS LAST, ae.lastmodifieddate DESC NULLS LAST").
 		Limit(1).
 		Scan(qCtx)
