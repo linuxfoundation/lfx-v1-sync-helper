@@ -675,6 +675,7 @@ type projectServiceCommitteeCreate struct {
 	SSOGroupEnabled *bool  `json:"SSOGroupEnabled,omitempty"`
 	PublicEnabled   *bool  `json:"PublicEnabled,omitempty"`
 	PublicName      string `json:"PublicName,omitempty"`
+	SSOGroupName    string `json:"SSOGroupName,omitempty"`
 	JoinMode        string `json:"JoinMode,omitempty"`
 	MailingList     string `json:"MailingList,omitempty"`
 	ChatChannel     string `json:"ChatChannel,omitempty"`
@@ -690,6 +691,7 @@ type projectServiceCommitteeUpdate struct {
 	SSOGroupEnabled *bool  `json:"SSOGroupEnabled,omitempty"`
 	PublicEnabled   *bool  `json:"PublicEnabled,omitempty"`
 	PublicName      string `json:"PublicName,omitempty"`
+	SSOGroupName    string `json:"SSOGroupName,omitempty"`
 	JoinMode        string `json:"JoinMode,omitempty"`
 	MailingList     string `json:"MailingList,omitempty"`
 	ChatChannel     string `json:"ChatChannel,omitempty"`
@@ -706,6 +708,7 @@ type projectServiceCommitteeResponse struct {
 	SSOGroupEnabled bool   `json:"SSOGroupEnabled"`
 	PublicEnabled   bool   `json:"PublicEnabled"`
 	PublicName      string `json:"PublicName"`
+	SSOGroupName    string `json:"SSOGroupName"`
 }
 
 // createCommittee creates a committee in Postgres via the Project Service v2 API.

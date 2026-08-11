@@ -171,6 +171,7 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 
 	var uid string
 	var err error
+	var v2SSOGroupName string
 
 	if existingUID != "" {
 		// Update existing committee. updateCommittee fetches the current V2 base,
@@ -178,7 +179,7 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		// current values), and only issues the API call when a synced field differs.
 		logger.With("committee_uid", existingUID, "sfid", sfid).InfoContext(ctx, "updating existing committee")
 
-		err = updateCommittee(ctx, existingUID, v1Data, v1Principal)
+		v2SSOGroupName, err = updateCommittee(ctx, existingUID, v1Data, v1Principal)
 		uid = existingUID
 	} else {
 		// Check if parent project exists in mappings before creating new committee.
@@ -206,11 +207,25 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		if response != nil && response.UID != nil {
 			uid = *response.UID
 		}
+		if response != nil && response.SsoGroupName != nil {
+			v2SSOGroupName = *response.SsoGroupName
+		}
 	}
 
 	if err != nil {
 		logger.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to sync committee")
 		return
+	}
+
+	// Write the v2-generated SSOGroupName back to the v1 project-service so PCC can display it.
+	if v2SSOGroupName != "" && projectSFID != "" {
+		if writeErr := updateV1Committee(ctx, projectSFID, sfid, projectServiceCommitteeUpdate{
+			SSOGroupName: v2SSOGroupName,
+		}); writeErr != nil {
+			logger.With(errKey, writeErr, "sfid", sfid, "sso_group_name", v2SSOGroupName).WarnContext(ctx, "failed to write SSOGroupName back to v1")
+		} else {
+			logger.With("sfid", sfid, "sso_group_name", v2SSOGroupName).InfoContext(ctx, "wrote SSOGroupName back to v1")
+		}
 	}
 
 	// Store the SFID mapping and reverse mapping.

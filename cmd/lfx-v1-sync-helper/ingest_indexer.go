@@ -266,6 +266,9 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 	if chatChannel, ok := data["chat_channel"].(string); ok {
 		payload.ChatChannel = chatChannel
 	}
+	if ssoGroupName, ok := data["sso_group_name"].(string); ok && ssoGroupName != "" {
+		payload.SSOGroupName = ssoGroupName
+	}
 
 	log.With("payload_category", payload.Category).InfoContext(ctx, "creating committee in v1")
 
@@ -316,6 +319,9 @@ func syncCommitteeUpdateToV1(ctx context.Context, committeeUID, projectSFID, com
 	}
 	if chatChannel, ok := data["chat_channel"].(string); ok {
 		payload.ChatChannel = chatChannel
+	}
+	if ssoGroupName, ok := data["sso_group_name"].(string); ok && ssoGroupName != "" {
+		payload.SSOGroupName = ssoGroupName
 	}
 
 	if err := updateV1Committee(ctx, projectSFID, committeeSFID, payload); err != nil {
