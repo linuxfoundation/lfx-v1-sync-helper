@@ -59,18 +59,17 @@ func createCommittee(ctx context.Context, payload *committeeservice.CreateCommit
 // do not clobber existing V2 values with the Go zero value for plain-bool payload
 // fields (EnableVoting, SsoGroupEnabled, Public).
 //
-// Returns the SsoGroupName from the v2 response (non-empty only when a slug was generated or changed).
-func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string]any, v1Principal string) (ssoGroupName string, err error) {
+func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string]any, v1Principal string) (*committeeservice.CommitteeBaseWithReadonlyAttributes, error) {
 	// Fetch current committee base + ETag.
 	currentBase, baseETag, err := fetchCommitteeBase(ctx, committeeUID)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch current committee base: %w", err)
+		return nil, fmt.Errorf("failed to fetch current committee base: %w", err)
 	}
 
 	// Build a fully-merged update payload: start from currentBase, overlay V1 fields.
 	payload, err := mapV1DataToCommitteeUpdateBasePayload(ctx, committeeUID, v1Data, currentBase)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	// Snapshot the merged payload as a base struct for change detection.
@@ -78,12 +77,12 @@ func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string
 
 	// Skip the call if no synced field has changed.
 	if committeeBasesEqual(currentBase, updatedBase) {
-		return "", nil
+		return nil, nil
 	}
 
 	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, v1Principal)
 	if err != nil {
-		return "", fmt.Errorf("failed to generate token for committee base update: %w", err)
+		return nil, fmt.Errorf("failed to generate token for committee base update: %w", err)
 	}
 
 	payload.BearerToken = &token
@@ -91,14 +90,10 @@ func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string
 
 	result, err := committeeClient.UpdateCommitteeBase(ctx, payload)
 	if err != nil {
-		return "", fmt.Errorf("failed to update committee base: %w", err)
+		return nil, fmt.Errorf("failed to update committee base: %w", err)
 	}
 
-	if result != nil && result.SsoGroupName != nil {
-		ssoGroupName = *result.SsoGroupName
-	}
-
-	return ssoGroupName, nil
+	return result, nil
 }
 
 // committeeBaseFromUpdatePayload projects an UpdateCommitteeBasePayload into a

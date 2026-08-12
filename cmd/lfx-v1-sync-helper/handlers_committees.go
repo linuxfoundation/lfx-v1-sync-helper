@@ -179,7 +179,11 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		// current values), and only issues the API call when a synced field differs.
 		logger.With("committee_uid", existingUID, "sfid", sfid).InfoContext(ctx, "updating existing committee")
 
-		v2SSOGroupName, err = updateCommittee(ctx, existingUID, v1Data, v1Principal)
+		var updateResult *committeeservice.CommitteeBaseWithReadonlyAttributes
+		updateResult, err = updateCommittee(ctx, existingUID, v1Data, v1Principal)
+		if updateResult != nil && updateResult.SsoGroupName != nil {
+			v2SSOGroupName = *updateResult.SsoGroupName
+		}
 		uid = existingUID
 	} else {
 		// Check if parent project exists in mappings before creating new committee.
