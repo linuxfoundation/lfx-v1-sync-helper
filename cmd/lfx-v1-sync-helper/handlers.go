@@ -120,7 +120,7 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 	case "platform-community__c":
 		handleCommitteeMemberUpdate(ctx, key, v1Data)
 		return false
-	case "itx-poll", "itx-poll-vote":
+	case "itx-poll", "itx-poll-vote", "itx-poll-results":
 		// Voting records are handled by lfx-v2-voting-service.
 		logger.With("key", key).DebugContext(ctx, "voting record, handled by lfx-v2-voting-service")
 		return false
@@ -243,7 +243,7 @@ func handleResourceDelete(ctx context.Context, key string, v1Data map[string]any
 		// Meeting records are handled by lfx-v2-meeting-service.
 		logger.With("key", key).DebugContext(ctx, "meeting record deleted, handled by lfx-v2-meeting-service")
 		return false
-	case "itx-poll", "itx-poll-vote":
+	case "itx-poll", "itx-poll-vote", "itx-poll-results":
 		// Voting records are handled by lfx-v2-voting-service.
 		logger.With("key", key).DebugContext(ctx, "voting record deleted, handled by lfx-v2-voting-service")
 		return false
