@@ -58,17 +58,18 @@ func createCommittee(ctx context.Context, payload *committeeservice.CreateCommit
 // The mapper is called with currentBase as the default seed so that absent V1 keys
 // do not clobber existing V2 values with the Go zero value for plain-bool payload
 // fields (EnableVoting, SsoGroupEnabled, Public).
-func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string]any, v1Principal string) error {
+//
+func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string]any, v1Principal string) (*committeeservice.CommitteeBaseWithReadonlyAttributes, error) {
 	// Fetch current committee base + ETag.
 	currentBase, baseETag, err := fetchCommitteeBase(ctx, committeeUID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch current committee base: %w", err)
+		return nil, fmt.Errorf("failed to fetch current committee base: %w", err)
 	}
 
 	// Build a fully-merged update payload: start from currentBase, overlay V1 fields.
 	payload, err := mapV1DataToCommitteeUpdateBasePayload(ctx, committeeUID, v1Data, currentBase)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Snapshot the merged payload as a base struct for change detection.
@@ -76,25 +77,23 @@ func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string
 
 	// Skip the call if no synced field has changed.
 	if committeeBasesEqual(currentBase, updatedBase) {
-		return nil
+		return nil, nil
 	}
 
 	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, v1Principal)
 	if err != nil {
-		return fmt.Errorf("failed to generate token for committee base update: %w", err)
+		return nil, fmt.Errorf("failed to generate token for committee base update: %w", err)
 	}
 
 	payload.BearerToken = &token
 	payload.IfMatch = stringToStringPtr(baseETag)
 
-	if _, err = committeeClient.UpdateCommitteeBase(ctx, payload); err != nil {
-		return fmt.Errorf("failed to update committee base: %w", err)
+	result, err := committeeClient.UpdateCommitteeBase(ctx, payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update committee base: %w", err)
 	}
 
-	// For now, assuming all fields are in base. If there are settings-specific fields,
-	// we would handle them similarly here with fetchCommitteeSettings and UpdateCommitteeSettings.
-
-	return nil
+	return result, nil
 }
 
 // committeeBaseFromUpdatePayload projects an UpdateCommitteeBasePayload into a

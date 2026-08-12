@@ -171,6 +171,7 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 
 	var uid string
 	var err error
+	var v2SSOGroupName string
 
 	if existingUID != "" {
 		// Update existing committee. updateCommittee fetches the current V2 base,
@@ -178,7 +179,11 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		// current values), and only issues the API call when a synced field differs.
 		logger.With("committee_uid", existingUID, "sfid", sfid).InfoContext(ctx, "updating existing committee")
 
-		err = updateCommittee(ctx, existingUID, v1Data, v1Principal)
+		var updateResult *committeeservice.CommitteeBaseWithReadonlyAttributes
+		updateResult, err = updateCommittee(ctx, existingUID, v1Data, v1Principal)
+		if updateResult != nil && updateResult.SsoGroupName != nil {
+			v2SSOGroupName = *updateResult.SsoGroupName
+		}
 		uid = existingUID
 	} else {
 		// Check if parent project exists in mappings before creating new committee.
@@ -206,6 +211,9 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		if response != nil && response.UID != nil {
 			uid = *response.UID
 		}
+		if response != nil && response.SsoGroupName != nil {
+			v2SSOGroupName = *response.SsoGroupName
+		}
 	}
 
 	if err != nil {
@@ -213,7 +221,10 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		return
 	}
 
-	// Store the SFID mapping and reverse mapping.
+	// Store the SFID mapping and reverse mapping before the writeback PATCH.
+	// This must happen first: the PATCH can trigger a v1 WAL event, and without
+	// the reverse mapping the indexer would see no committee.uid.* entry and
+	// attempt a duplicate v2 create.
 	if uid != "" {
 		if _, err := mappingsKV.Put(ctx, mappingKey, []byte(uid)); err != nil {
 			logger.With(errKey, err, "sfid", sfid, "uid", uid).WarnContext(ctx, "failed to store committee mapping")
@@ -224,6 +235,17 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		reverseMappingValue := fmt.Sprintf("%s:%s", projectSFID, sfid)
 		if _, err := mappingsKV.Put(ctx, reverseMappingKey, []byte(reverseMappingValue)); err != nil {
 			logger.With(errKey, err, "committee_uid", uid, "sfid", sfid).WarnContext(ctx, "failed to store committee reverse mapping")
+		}
+	}
+
+	// Write the v2-generated SSOGroupName back to the v1 project-service so PCC can display it.
+	if v2SSOGroupName != "" && projectSFID != "" {
+		if writeErr := updateV1Committee(ctx, projectSFID, sfid, projectServiceCommitteeUpdate{
+			SSOGroupName: v2SSOGroupName,
+		}); writeErr != nil {
+			logger.With(errKey, writeErr, "sfid", sfid, "sso_group_name", v2SSOGroupName).WarnContext(ctx, "failed to write SSOGroupName back to v1")
+		} else {
+			logger.With("sfid", sfid, "sso_group_name", v2SSOGroupName).InfoContext(ctx, "wrote SSOGroupName back to v1")
 		}
 	}
 
