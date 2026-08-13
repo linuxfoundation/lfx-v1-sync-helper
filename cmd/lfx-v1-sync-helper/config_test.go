@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -309,14 +310,11 @@ func TestLoadConfigAllowlistPrecedence_WhitespaceFilePathFallsBack(t *testing.T)
 	}
 }
 
-func TestLoadReindexConfigDefaults(t *testing.T) {
+func TestLoadMinimalConfigDefaults(t *testing.T) {
 	t.Setenv("NATS_URL", "")
 	t.Setenv("NATS_FETCH_MAX_WAIT", "")
-	t.Setenv("REINDEX_PHASE_TIMEOUT", "")
-	t.Setenv("REINDEX_NATS_OP_TIMEOUT", "")
-	t.Setenv("REINDEX_OP_DELAY", "")
 
-	cfg := LoadReindexConfig()
+	cfg := LoadMinimalConfig()
 
 	if cfg.NATSURL != defaultNATSURL {
 		t.Errorf("NATSURL = %q, want %q", cfg.NATSURL, defaultNATSURL)
@@ -324,25 +322,13 @@ func TestLoadReindexConfigDefaults(t *testing.T) {
 	if cfg.NATSFetchMaxWait != defaultNATSFetchMaxWait {
 		t.Errorf("NATSFetchMaxWait = %v, want %v", cfg.NATSFetchMaxWait, defaultNATSFetchMaxWait)
 	}
-	if cfg.ReindexPhaseTimeout != defaultReindexPhaseTimeout {
-		t.Errorf("ReindexPhaseTimeout = %v, want %v", cfg.ReindexPhaseTimeout, defaultReindexPhaseTimeout)
-	}
-	if cfg.ReindexNATSOpTimeout != defaultReindexNATSOpTimeout {
-		t.Errorf("ReindexNATSOpTimeout = %v, want %v", cfg.ReindexNATSOpTimeout, defaultReindexNATSOpTimeout)
-	}
-	if cfg.ReindexOpDelay != defaultReindexOpDelay {
-		t.Errorf("ReindexOpDelay = %v, want %v", cfg.ReindexOpDelay, defaultReindexOpDelay)
-	}
 }
 
-func TestLoadReindexConfigEnvOverrides(t *testing.T) {
+func TestLoadMinimalConfigEnvOverrides(t *testing.T) {
 	t.Setenv("NATS_URL", "nats://custom:4222")
 	t.Setenv("NATS_FETCH_MAX_WAIT", "90s")
-	t.Setenv("REINDEX_PHASE_TIMEOUT", "60m")
-	t.Setenv("REINDEX_NATS_OP_TIMEOUT", "45s")
-	t.Setenv("REINDEX_OP_DELAY", "2ms")
 
-	cfg := LoadReindexConfig()
+	cfg := LoadMinimalConfig()
 
 	if cfg.NATSURL != "nats://custom:4222" {
 		t.Errorf("NATSURL = %q, want %q", cfg.NATSURL, "nats://custom:4222")
@@ -350,36 +336,15 @@ func TestLoadReindexConfigEnvOverrides(t *testing.T) {
 	if cfg.NATSFetchMaxWait != 90*time.Second {
 		t.Errorf("NATSFetchMaxWait = %v, want 90s", cfg.NATSFetchMaxWait)
 	}
-	if cfg.ReindexPhaseTimeout != 60*time.Minute {
-		t.Errorf("ReindexPhaseTimeout = %v, want 60m", cfg.ReindexPhaseTimeout)
-	}
-	if cfg.ReindexNATSOpTimeout != 45*time.Second {
-		t.Errorf("ReindexNATSOpTimeout = %v, want 45s", cfg.ReindexNATSOpTimeout)
-	}
-	if cfg.ReindexOpDelay != 2*time.Millisecond {
-		t.Errorf("ReindexOpDelay = %v, want 2ms", cfg.ReindexOpDelay)
-	}
 }
 
-func TestLoadReindexConfigInvalidDurationFallsBack(t *testing.T) {
+func TestLoadMinimalConfigInvalidDurationFallsBack(t *testing.T) {
 	t.Setenv("NATS_FETCH_MAX_WAIT", "not-a-duration")
-	t.Setenv("REINDEX_PHASE_TIMEOUT", "not-a-duration")
-	t.Setenv("REINDEX_NATS_OP_TIMEOUT", "???")
-	t.Setenv("REINDEX_OP_DELAY", "bad")
 
-	cfg := LoadReindexConfig()
+	cfg := LoadMinimalConfig()
 
 	if cfg.NATSFetchMaxWait != defaultNATSFetchMaxWait {
 		t.Errorf("NATSFetchMaxWait = %v, want default %v on invalid input", cfg.NATSFetchMaxWait, defaultNATSFetchMaxWait)
-	}
-	if cfg.ReindexPhaseTimeout != defaultReindexPhaseTimeout {
-		t.Errorf("ReindexPhaseTimeout = %v, want default %v on invalid input", cfg.ReindexPhaseTimeout, defaultReindexPhaseTimeout)
-	}
-	if cfg.ReindexNATSOpTimeout != defaultReindexNATSOpTimeout {
-		t.Errorf("ReindexNATSOpTimeout = %v, want default %v on invalid input", cfg.ReindexNATSOpTimeout, defaultReindexNATSOpTimeout)
-	}
-	if cfg.ReindexOpDelay != defaultReindexOpDelay {
-		t.Errorf("ReindexOpDelay = %v, want default %v on invalid input", cfg.ReindexOpDelay, defaultReindexOpDelay)
 	}
 }
 
@@ -429,5 +394,147 @@ func TestCommitteeSkipMemberNotificationsConfig(t *testing.T) {
 				t.Errorf("CommitteeSkipMemberNotifications = %v, want %v", cfg.CommitteeSkipMemberNotifications, tt.want)
 			}
 		})
+	}
+}
+
+// clearV1DBEnv resets every V1_DB_* and DATABASE_URL env var, since
+// t.Setenv only sets/restores vars a test explicitly touches and
+// buildV1DatabaseDSN/LoadConfig read all of them.
+func clearV1DBEnv(t *testing.T) {
+	t.Helper()
+	for _, v := range []string{
+		"DATABASE_URL",
+		"V1_DB_HOST",
+		"V1_DB_PORT",
+		"V1_DB_NAME",
+		"V1_DB_USER",
+		"V1_DB_PASSWORD",
+		"V1_DB_SSLMODE",
+	} {
+		t.Setenv(v, "")
+	}
+}
+
+func TestBuildV1DatabaseDSN_NoHost(t *testing.T) {
+	clearV1DBEnv(t)
+
+	if dsn := buildV1DatabaseDSN(); dsn != "" {
+		t.Errorf("buildV1DatabaseDSN() = %q, want empty string when V1_DB_HOST is unset", dsn)
+	}
+}
+
+func TestBuildV1DatabaseDSN_Defaults(t *testing.T) {
+	clearV1DBEnv(t)
+	t.Setenv("V1_DB_HOST", "db.example.com")
+	t.Setenv("V1_DB_USER", "svc")
+
+	dsn := buildV1DatabaseDSN()
+
+	want := "host='db.example.com' port='5432' dbname='sfdc' user='svc' sslmode='prefer'"
+	if dsn != want {
+		t.Errorf("buildV1DatabaseDSN() = %q, want %q", dsn, want)
+	}
+}
+
+func TestBuildV1DatabaseDSN_AllFieldsOverridden(t *testing.T) {
+	clearV1DBEnv(t)
+	t.Setenv("V1_DB_HOST", "db.example.com")
+	t.Setenv("V1_DB_PORT", "5433")
+	t.Setenv("V1_DB_NAME", "otherdb")
+	t.Setenv("V1_DB_USER", "svc")
+	t.Setenv("V1_DB_PASSWORD", "hunter2")
+	t.Setenv("V1_DB_SSLMODE", "require")
+
+	dsn := buildV1DatabaseDSN()
+
+	want := "host='db.example.com' port='5433' dbname='otherdb' user='svc' password='hunter2' sslmode='require'"
+	if dsn != want {
+		t.Errorf("buildV1DatabaseDSN() = %q, want %q", dsn, want)
+	}
+}
+
+func TestBuildV1DatabaseDSN_TrimsWhitespaceExceptPassword(t *testing.T) {
+	clearV1DBEnv(t)
+	t.Setenv("V1_DB_HOST", "  db.example.com  ")
+	t.Setenv("V1_DB_USER", "  svc  ")
+	// Leading/trailing whitespace in the password is significant and must
+	// be preserved verbatim.
+	t.Setenv("V1_DB_PASSWORD", "  hunter2  ")
+
+	dsn := buildV1DatabaseDSN()
+
+	want := "host='db.example.com' port='5432' dbname='sfdc' user='svc' password='  hunter2  ' sslmode='prefer'"
+	if dsn != want {
+		t.Errorf("buildV1DatabaseDSN() = %q, want %q", dsn, want)
+	}
+}
+
+func TestBuildV1DatabaseDSN_EscapesSpecialCharactersInPassword(t *testing.T) {
+	clearV1DBEnv(t)
+	t.Setenv("V1_DB_HOST", "db.example.com")
+	t.Setenv("V1_DB_USER", "svc")
+	t.Setenv("V1_DB_PASSWORD", `p'\ss"word`)
+
+	dsn := buildV1DatabaseDSN()
+
+	want := `host='db.example.com' port='5432' dbname='sfdc' user='svc' password='p\'\\ss"word' sslmode='prefer'`
+	if dsn != want {
+		t.Errorf("buildV1DatabaseDSN() = %q, want %q", dsn, want)
+	}
+}
+
+func TestBuildV1DatabaseDSN_BlankPasswordOmitted(t *testing.T) {
+	clearV1DBEnv(t)
+	t.Setenv("V1_DB_HOST", "db.example.com")
+	t.Setenv("V1_DB_USER", "svc")
+
+	dsn := buildV1DatabaseDSN()
+
+	if strings.Contains(dsn, "password=") {
+		t.Errorf("buildV1DatabaseDSN() = %q, want no password= keyword when V1_DB_PASSWORD is unset", dsn)
+	}
+}
+
+func TestLoadConfig_DatabaseURLTakesPrecedenceOverDiscreteVars(t *testing.T) {
+	setRequiredEnvs(t)
+	clearV1DBEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://explicit-dsn")
+	t.Setenv("V1_DB_HOST", "db.example.com")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.DatabaseURL != "postgres://explicit-dsn" {
+		t.Errorf("DatabaseURL = %q, want DATABASE_URL to take precedence", cfg.DatabaseURL)
+	}
+}
+
+func TestLoadConfig_AssemblesDatabaseURLFromDiscreteVarsWhenUnset(t *testing.T) {
+	setRequiredEnvs(t)
+	clearV1DBEnv(t)
+	t.Setenv("V1_DB_HOST", "db.example.com")
+	t.Setenv("V1_DB_USER", "svc")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	want := "host='db.example.com' port='5432' dbname='sfdc' user='svc' sslmode='prefer'"
+	if cfg.DatabaseURL != want {
+		t.Errorf("DatabaseURL = %q, want %q", cfg.DatabaseURL, want)
+	}
+}
+
+func TestLoadConfig_EmptyDatabaseURLWhenNoV1DBHost(t *testing.T) {
+	setRequiredEnvs(t)
+	clearV1DBEnv(t)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.DatabaseURL != "" {
+		t.Errorf("DatabaseURL = %q, want empty when neither DATABASE_URL nor V1_DB_HOST is set", cfg.DatabaseURL)
 	}
 }

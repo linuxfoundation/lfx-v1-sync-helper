@@ -58,6 +58,7 @@ var v1ToAuth0Fields = map[string]string{
 	"tshirt_size__c":    "t_shirt_size",
 	"photo_url__c":      "picture",
 	"timezone__c":       "zoneinfo",
+	"bio__c":            "bio",
 }
 
 // v1NoAccountPlaceholder is the v1 sentinel org name for individuals with no

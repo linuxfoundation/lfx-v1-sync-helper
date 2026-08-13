@@ -97,6 +97,22 @@ spec:
                 secretKeyRef:
                   key: client_private_key
                   name: v1-sync-helper-auth0-credentials
+            # v1 platform database connection for live user lookups.
+            - name: V1_DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  key: host
+                  name: v1-platform-db-credentials
+            - name: V1_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  key: username
+                  name: v1-platform-db-credentials
+            - name: V1_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: v1-platform-db-credentials
           resources:
             requests:
               memory: "128Mi"

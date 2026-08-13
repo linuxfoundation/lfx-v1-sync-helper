@@ -40,6 +40,13 @@ type Config struct {
 	// NATS configuration
 	NATSURL string
 
+	// DatabaseURL is the PostgreSQL DSN for the v1 platform database
+	// (read-only queries against the replicated Salesforce schema).
+	// Set via DATABASE_URL, or assembled from the discrete V1_DB_HOST,
+	// V1_DB_PORT, V1_DB_NAME, V1_DB_USER, V1_DB_PASSWORD, and V1_DB_SSLMODE
+	// variables when DATABASE_URL is unset.
+	DatabaseURL string
+
 	// Server configuration
 	Port string
 	Bind string
@@ -66,30 +73,6 @@ type Config struct {
 	// NATS_FETCH_MAX_WAIT (Go duration: "120s", "3m"). Default: 120s.
 	NATSFetchMaxWait time.Duration
 
-	// ReindexPhaseTimeout caps the wall-clock time for each reindex phase
-	// (username, then email). Both the ListKeysFiltered consumer and every
-	// per-key Get/Put inside that phase share this deadline. Sized to cover
-	// up to ~2 M records per phase under normal NATS load. Set via
-	// REINDEX_PHASE_TIMEOUT (Go duration: "45m", "1h"). Default: 45m.
-	ReindexPhaseTimeout time.Duration
-
-	// ReindexNATSOpTimeout caps each individual NATS KV Get/Put inside the
-	// reindex loop. Without this, the NATS SDK's wrapContextWithoutDeadline
-	// injects a 5 s default per call, which fires under prod load. 30 s
-	// gives ~6× headroom while still failing fast if a single op truly hangs.
-	// Set via REINDEX_NATS_OP_TIMEOUT (Go duration: "30s", "1m").
-	// Must be <= ReindexPhaseTimeout. Default: 30s.
-	ReindexNATSOpTimeout time.Duration
-
-	// ReindexOpDelay is an optional per-iteration sleep that caps the loop's
-	// op-rate against the shared NATS broker. The reindex pod and the main
-	// app share NATS; an unthrottled run saturated the broker on 2026-04-23
-	// and caused readiness/liveness failures on app pods. A small delay
-	// (~1ms) drops op-rate by orders of magnitude with negligible runtime
-	// impact. Zero disables pacing (default; suitable for dev/staging).
-	// Set via REINDEX_OP_DELAY (Go duration: "1ms", "5ms"). Default: 0.
-	ReindexOpDelay time.Duration
-
 	// Project allowlists — file paths (PROJECT_ALLOWLIST_FILE /
 	// PROJECT_FAMILY_ALLOWLIST_FILE) take precedence over comma-separated env
 	// vars (PROJECT_ALLOWLIST / PROJECT_FAMILY_ALLOWLIST), which fall back to
@@ -108,27 +91,20 @@ type Config struct {
 }
 
 const (
-	defaultNATSFetchMaxWait     = 120 * time.Second
-	defaultReindexPhaseTimeout  = 45 * time.Minute
-	defaultReindexNATSOpTimeout = 30 * time.Second
-	defaultReindexOpDelay       = 0
+	defaultNATSFetchMaxWait = 120 * time.Second
 )
 
-// LoadReindexConfig returns a config for --rebuild-user-secondary-indexes mode.
-// Only NATS_URL and the REINDEX_* tuning vars are read; all other fields are
-// left at zero values. Tuning defaults: REINDEX_PHASE_TIMEOUT=45m,
-// REINDEX_NATS_OP_TIMEOUT=30s, REINDEX_OP_DELAY=0 (no pacing).
-func LoadReindexConfig() *Config {
+// LoadMinimalConfig returns a config for one-shot modes that only need NATS
+// (e.g. --backfill-committee-member-mappings). Only NATS_URL and
+// NATS_FETCH_MAX_WAIT are read; all other fields are left at zero values.
+func LoadMinimalConfig() *Config {
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
 		natsURL = defaultNATSURL
 	}
 	return &Config{
-		NATSURL:              natsURL,
-		NATSFetchMaxWait:     parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
-		ReindexPhaseTimeout:  parseDurationEnv("REINDEX_PHASE_TIMEOUT", defaultReindexPhaseTimeout),
-		ReindexNATSOpTimeout: parseDurationEnv("REINDEX_NATS_OP_TIMEOUT", defaultReindexNATSOpTimeout),
-		ReindexOpDelay:       parseDurationEnv("REINDEX_OP_DELAY", defaultReindexOpDelay),
+		NATSURL:          natsURL,
+		NATSFetchMaxWait: parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
 	}
 }
 
@@ -168,6 +144,7 @@ func LoadConfig() (*Config, error) {
 		Auth0PrivateKey: os.Getenv("AUTH0_PRIVATE_KEY"),
 		// Other configuration
 		NATSURL:                          os.Getenv("NATS_URL"),
+		DatabaseURL:                      os.Getenv("DATABASE_URL"),
 		Port:                             os.Getenv("PORT"),
 		Bind:                             os.Getenv("BIND"),
 		Debug:                            parseBooleanEnv("DEBUG"),
@@ -202,6 +179,12 @@ func LoadConfig() (*Config, error) {
 	// Set defaults
 	if cfg.NATSURL == "" {
 		cfg.NATSURL = defaultNATSURL
+	}
+
+	// Assemble the v1 platform DB DSN from discrete env vars when
+	// DATABASE_URL is not set directly.
+	if cfg.DatabaseURL == "" {
+		cfg.DatabaseURL = buildV1DatabaseDSN()
 	}
 
 	if cfg.Port == "" {
@@ -282,6 +265,47 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// buildV1DatabaseDSN assembles a keyword/value PostgreSQL DSN from the
+// discrete V1_DB_* env vars (as provided by the Helm chart's database secret
+// wiring). Returns "" when V1_DB_HOST is unset. Values are single-quoted with
+// backslash escaping so passwords containing spaces or quotes are safe.
+func buildV1DatabaseDSN() string {
+	host := strings.TrimSpace(os.Getenv("V1_DB_HOST"))
+	if host == "" {
+		return ""
+	}
+	quote := func(v string) string {
+		v = strings.ReplaceAll(v, `\`, `\\`)
+		v = strings.ReplaceAll(v, `'`, `\'`)
+		return "'" + v + "'"
+	}
+	params := []string{"host=" + quote(host)}
+	for _, kv := range []struct {
+		key, env, def string
+		trim          bool
+	}{
+		{"port", "V1_DB_PORT", "5432", true},
+		{"dbname", "V1_DB_NAME", "sfdc", true},
+		{"user", "V1_DB_USER", "", true},
+		// The password is not trimmed: leading/trailing whitespace may be
+		// significant.
+		{"password", "V1_DB_PASSWORD", "", false},
+		{"sslmode", "V1_DB_SSLMODE", "prefer", true},
+	} {
+		v := os.Getenv(kv.env)
+		if kv.trim {
+			v = strings.TrimSpace(v)
+		}
+		if v == "" {
+			v = kv.def
+		}
+		if v != "" {
+			params = append(params, kv.key+"="+quote(v))
+		}
+	}
+	return strings.Join(params, " ")
 }
 
 // parseStringListEnv parses a comma-separated environment variable into a

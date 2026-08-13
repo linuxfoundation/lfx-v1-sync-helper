@@ -40,8 +40,8 @@ import (
 //
 // The opTimeout parameter controls the per-call context deadline passed to
 // GetMsg. Callers should pass the relevant per-operation timeout (e.g.
-// cfg.NATSFetchMaxWait for backfill scans, cfg.ReindexNATSOpTimeout for reindex
-// scans). A zero or negative value falls back to defaultNATSFetchMaxWait.
+// cfg.NATSFetchMaxWait for backfill scans). A zero or negative value falls
+// back to defaultNATSFetchMaxWait.
 func ScanSubjectData(ctx context.Context, js jetstream.JetStream, streamName, subjectFilter string, opTimeout time.Duration) (map[string][]byte, error) {
 	if opTimeout <= 0 {
 		opTimeout = defaultNATSFetchMaxWait

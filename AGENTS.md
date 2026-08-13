@@ -324,7 +324,7 @@ Backfills ACS legacy org grants into v2 b2b_org settings:
 Iterates Auth0 users (Username-Password-Authentication connection only), sorted by `updated_at` ascending, and links any v1 verified alternate emails not yet linked as Auth0 email-connection identities.
 
 - **Cursor**: stored at `v1-mappings` key `backfill.alternate-emails.cursor` (updated_at of last processed user). Re-run to advance. Uses an inclusive range query so the last user of the previous run is re-processed on the next run; all operations are idempotent.
-- **Per-user flow**: resolves v1 SFID via username secondary index → fetches alternate email SFIDs from `v1-mappings` → calls `linkEmailIdentity` for each verified, active, non-primary email.
+- **Per-user flow**: resolves v1 SFID via a live PostgreSQL query on `salesforce.merged_user` → fetches alternate email rows from `salesforce.alternate_email__c` → calls `linkEmailIdentity` for each verified, active, non-primary email.
 - **`--limit N`** (default 1000): caps users processed per run.
 - **Summary log fields**: `users_processed`, `emails_linked`, `emails_skipped`, `errors`.
 - **Manifest**: `manifests/backfill-alternate-emails-job.yaml`.

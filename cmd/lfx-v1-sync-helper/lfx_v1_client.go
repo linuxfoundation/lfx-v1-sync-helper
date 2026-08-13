@@ -150,59 +150,52 @@ func initV1Client(cfg *Config) error {
 	return nil
 }
 
-// lookupMergedUser fetches user information from the v1-objects KV bucket (replicated by Meltano)
+// lookupMergedUser fetches user information live from the v1 platform
+// database (salesforce.merged_user), including the primary email from
+// salesforce.alternate_email__c.
 func lookupMergedUser(ctx context.Context, platformID string) (*V1User, error) {
-	userKey := v1MergedUserKVPrefix + platformID
-
-	userData, exists, err := getV1ObjectData(ctx, userKey)
+	row, err := dbLookupMergedUserRowBySFID(ctx, platformID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user data: %w", err)
 	}
-	if !exists {
-		return nil, fmt.Errorf("user %s not found or is deleted in v1-objects KV bucket", platformID)
+	if row == nil {
+		return nil, fmt.Errorf("user %s not found or is deleted in v1 platform database", platformID)
 	}
+	return mergedUserRowToV1User(ctx, row)
+}
 
-	// Extract user fields from the merged_user record
+// mergedUserRowToV1User converts a merged_user row to a V1User, enforcing the
+// username validity rules and enriching with the user's primary email.
+func mergedUserRowToV1User(ctx context.Context, row *mergedUserRow) (*V1User, error) {
 	user := &V1User{
-		ID: platformID,
+		ID: row.SFID,
 	}
 
-	// Map username from username__c field. A username is required for Auth0
-	// mapping, so bail out early (before the alternate-email lookup below)
-	// if it's missing. Values containing a space or "@" are bogus (e.g. an
-	// email address stored where a username belongs by problematic SCORM
-	// user syncing) and are rejected rather than synced verbatim into v2 as
-	// a literal identifier (committee members, project/org FGA writer and
+	// A username is required for Auth0 mapping, so bail out early if it's
+	// missing. Values containing a space or "@" are bogus (e.g. an email
+	// address stored where a username belongs by problematic SCORM user
+	// syncing) and are rejected rather than synced verbatim into v2 as a
+	// literal identifier (committee members, project/org FGA writer and
 	// auditor lists, etc.).
-	username, _ := userData["username__c"].(string)
+	username := row.Username.String
 	if username == "" {
-		return nil, fmt.Errorf("user %s has no username in merged_user record", platformID)
+		return nil, fmt.Errorf("user %s has no username in merged_user record", row.SFID)
 	}
 	if strings.ContainsAny(username, " @") {
-		return nil, fmt.Errorf("user %s has an invalid username in merged_user record", platformID)
+		return nil, fmt.Errorf("user %s has an invalid username in merged_user record", row.SFID)
 	}
 	user.Username = username
+	user.FirstName = row.FirstName.String
+	user.LastName = row.LastName.String
 
-	// Map first name
-	if firstName, ok := userData["firstname"].(string); ok {
-		user.FirstName = firstName
-	}
+	// Map avatar from photo_url__c (LF platform profile picture).
+	user.Avatar = row.PhotoURL.String
 
-	// Map last name
-	if lastName, ok := userData["lastname"].(string); ok {
-		user.LastName = lastName
-	}
-
-	// Map avatar from photo_url__c field (LF platform profile picture).
-	if photoURL, ok := userData["photo_url__c"].(string); ok && photoURL != "" {
-		user.Avatar = photoURL
-	}
-
-	// Look up user's primary email from alternate email mappings.
-	if email, emailErr := getPrimaryEmailForUser(ctx, platformID); emailErr == nil && email != "" {
+	// Look up user's primary email from the alternate email table.
+	if email, emailErr := getPrimaryEmailForUser(ctx, row.SFID); emailErr == nil && email != "" {
 		user.Email = email
 	} else if emailErr != nil {
-		logger.With("platform_id", platformID, "error", emailErr).DebugContext(ctx, "failed to lookup primary email for user")
+		logger.With("platform_id", row.SFID, "error", emailErr).DebugContext(ctx, "failed to lookup primary email for user")
 	}
 
 	return user, nil
@@ -243,117 +236,18 @@ func lookupB2BUser(ctx context.Context, b2bUserID string) (*V1User, error) {
 	return user, nil
 }
 
-// getPrimaryEmailForUser retrieves the primary email address for a user by looking up
-// their alternate emails from the mappings KV bucket and the v1-objects KV bucket
+// getPrimaryEmailForUser retrieves the primary email address for a user from
+// the v1 platform database: the active row flagged primary_email__c, falling
+// back to the first active row when none is flagged.
 func getPrimaryEmailForUser(ctx context.Context, userSfid string) (string, error) {
-	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
-
-	entry, err := mappingsKV.Get(ctx, mappingKey)
+	email, err := dbGetPrimaryEmailForUser(ctx, userSfid)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
-			return "", fmt.Errorf("no alternate emails found for user %s", userSfid)
-		}
-		return "", fmt.Errorf("failed to get alternate emails mapping: %w", err)
+		return "", err
 	}
-
-	// Parse the list of email SFIDs
-	var emailSfids []string
-	if err := json.Unmarshal(entry.Value(), &emailSfids); err != nil {
-		return "", fmt.Errorf("failed to unmarshal email SFIDs: %w", err)
-	}
-
-	if len(emailSfids) == 0 {
-		return "", fmt.Errorf("user %s has no alternate emails", userSfid)
-	}
-
-	// Single pass: look for primary email while tracking first valid fallback
-	var fallbackEmail string
-	for _, emailSfid := range emailSfids {
-		email, isPrimary, _, isActive, err := getAlternateEmailDetails(ctx, emailSfid)
-		if err != nil {
-			logger.With("email_sfid", emailSfid, "error", err).DebugContext(ctx, "failed to get alternate email details")
-			continue
-		}
-		if !isActive {
-			logger.With("email_sfid", emailSfid).DebugContext(ctx, "skipping inactive email record")
-			continue
-		}
-
-		// Return immediately if we find a primary email
-		if isPrimary && email != "" {
-			return email, nil
-		}
-
-		// Track first valid email as fallback
-		if fallbackEmail == "" && email != "" {
-			fallbackEmail = email
-		}
-	}
-
-	// If no primary email found, return the first valid email as fallback
-	if fallbackEmail != "" {
-		logger.With("user_sfid", userSfid, "email", fallbackEmail).DebugContext(ctx, "using first available email as fallback (no primary found)")
-		return fallbackEmail, nil
-	}
-
-	return "", fmt.Errorf("no valid emails found for user %s", userSfid)
-}
-
-// getAlternateEmailDetails retrieves email address, primary status, verification
-// status, and active status from the v1-objects KV bucket.
-// Returns (email, isPrimary, isVerified, isActive, error) where isActive is
-// false when active__c=false (email deactivated by the user-service). A missing,
-// deleted, or tombstoned record returns isActive=false with an empty email —
-// callers should treat that as "not found" rather than "deactivated".
-func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email string, isPrimary bool, isVerified bool, isActive bool, err error) {
-	emailKey := v1AlternateEmailKVPrefix + emailSfid
-
-	// Parse the alternate email record. getV1ObjectData returns !exists for
-	// hard-deleted and tombstoned KV entries. The delete handler previously
-	// wrote a "!del" tombstone marker; it now calls KV.Delete(), but tombstone
-	// checks remain for any stale entries written by older versions.
-	emailData, exists, err := getV1ObjectData(ctx, emailKey)
-	if err != nil {
-		return "", false, false, false, fmt.Errorf("failed to get email data: %w", err)
-	}
-	if !exists {
-		return "", false, false, false, nil
-	}
-
-	// Extract email address and primary flag before the active check: downstream
-	// callers use isPrimary to short-circuit (the primary email is the Auth0
-	// user's own email field, not a linked identity, so it is out of scope for
-	// this handler), and they need the address for inactive (active__c=false) records.
-	if emailAddr, ok := emailData["alternate_email_address__c"].(string); ok && emailAddr != "" {
-		email = emailAddr
-	}
-	if primaryFlag, ok := emailData["primary_email__c"].(bool); ok {
-		isPrimary = primaryFlag
-	}
-
-	// Check if the email is active (active__c must be explicitly true).
-	if activeFlag, ok := emailData["active__c"].(bool); !ok || !activeFlag {
-		return email, isPrimary, false, false, nil
-	}
-
-	// Emails with a domain ending in ".old" (e.g. "user@example.com.old") are
-	// a v1 convention for soft-deactivating a stale address without flipping
-	// active__c. Treat these the same as active__c=false.
-	if strings.HasSuffix(strings.ToLower(email), ".old") {
-		return email, isPrimary, false, false, nil
-	}
-
 	if email == "" {
-		return "", false, false, false, fmt.Errorf("email record %s has no email address", emailSfid)
+		return "", fmt.Errorf("no valid emails found for user %s", userSfid)
 	}
-
-	// Check if the email is verified using email_verified__c (the active field).
-	// verified__c is a deprecated legacy column that is almost never set.
-	if verifiedFlag, ok := emailData["email_verified__c"].(bool); ok {
-		isVerified = verifiedFlag
-	}
-
-	return email, isPrimary, isVerified, true, nil
+	return email, nil
 }
 
 // errAmbiguousDefactoPrimaryEmail indicates that more than one of a user's
@@ -363,238 +257,47 @@ func getAlternateEmailDetails(ctx context.Context, emailSfid string) (email stri
 // transient failure: retrying the same read will reach the same result
 // until the underlying data is fixed, so callers should not request
 // redelivery/retry for it, unlike other errors from
-// isSoleQualifyingAlternateEmail.
+// unlike other errors from dbIsSoleQualifyingAlternateEmail.
 var errAmbiguousDefactoPrimaryEmail = errors.New("ambiguous de-facto primary alternate email")
 
-// isSoleQualifyingAlternateEmail reports whether userSfid has at most one
-// "qualifying" alternate email — active (post .old-domain override) and
-// either verified or already flagged primary — across all of their alternate
-// email rows. This mirrors the heuristic in auth0-sync-userdb/auth0-db-sync.js
-// (checkPlatformEmails), which promotes a lone non-primary row to primary
-// when v1 lazy-sync hasn't created/synced the primary alternate_email__c row
-// yet. Without this check, the live NATS sync path would instead link that
-// lone email as a secondary Auth0 identity, diverging from the reconciliation
-// script (see LFXV2-2662).
-//
-// If the mapping index has no entries yet for the user (e.g. it hasn't
-// caught up with this event), the candidate is treated as the sole
-// qualifying email since it's the only one currently known.
-//
-// If more than one row qualifies and none of them is flagged primary, which
-// row is the de-facto primary is genuinely ambiguous (the heuristic only
-// covers the single-unflagged-row case), so this returns an error wrapping
-// errAmbiguousDefactoPrimaryEmail rather than guessing. Callers should treat
-// that case as deterministic (do not retry) and any other error as
-// potentially transient (safe to retry).
-func isSoleQualifyingAlternateEmail(ctx context.Context, userSfid string) (bool, error) {
-	mappingKey := kvKeyAlternateEmailsPrefix + userSfid
-	entry, err := mappingsKV.Get(ctx, mappingKey)
-	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
-			return true, nil
-		}
-		return false, fmt.Errorf("failed to get alternate emails mapping: %w", err)
-	}
-
-	var emailSfids []string
-	if err := json.Unmarshal(entry.Value(), &emailSfids); err != nil {
-		return false, fmt.Errorf("failed to unmarshal email SFIDs: %w", err)
-	}
-
-	qualifying := 0
-	sawPrimary := false
-	for _, sfid := range emailSfids {
-		_, isPrimary, isVerified, isActive, err := getAlternateEmailDetailsFn(ctx, sfid)
-		if err != nil {
-			// A read failure makes the qualifying count unreliable, so
-			// propagate it rather than risk a false "sole qualifying email"
-			// determination. The caller (handleAlternateEmailUpdate)
-			// requests redelivery for this case rather than falling back to
-			// normal per-email link logic, since guessing sole vs. non-sole
-			// risks a wrong link decision.
-			return false, fmt.Errorf("failed to get alternate email details for %s: %w", sfid, err)
-		}
-		if isActive && (isVerified || isPrimary) {
-			qualifying++
-			if isPrimary {
-				sawPrimary = true
-			}
-		}
-	}
-
-	if qualifying <= 1 {
-		return true, nil
-	}
-	if !sawPrimary {
-		return false, fmt.Errorf("user %s has %d qualifying alternate emails and none is flagged primary: %w", userSfid, qualifying, errAmbiguousDefactoPrimaryEmail)
-	}
-	return false, nil
-}
-
-// ResolveV1UserSFIDByUsername looks up a v1 user SFID by username using the secondary index.
-// It validates the resolved SFID by fetching the user record and confirming the username matches.
-// Returns (sfid, nil) on success, ("", nil) on miss (including stale index), or ("", error) on failure.
+// ResolveV1UserSFIDByUsername looks up a v1 user SFID by username live in the
+// v1 platform database.
+// Returns (sfid, nil) on success, ("", nil) on miss, or ("", error) on failure.
 func ResolveV1UserSFIDByUsername(ctx context.Context, username string) (string, error) {
-	// Look up the secondary index.
-	encodedUsername := usernameToKVKey(username)
-	if encodedUsername == "" {
-		return "", nil
-	}
-	indexKey := kvKeyUsernamePrefix + encodedUsername
-	entry, err := mappingsKV.Get(ctx, indexKey)
-	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
-			return "", nil // Miss
-		}
-		return "", fmt.Errorf("failed to get username index: %w", err)
-	}
-
-	// Check if tombstoned.
-	if isTombstonedMapping(entry.Value()) {
-		return "", nil // Tombstoned, treat as miss
-	}
-
-	candidateSFID := string(entry.Value())
-
-	// Validate by fetching the user record.
-	user, err := lookupMergedUser(ctx, candidateSFID)
-	if err != nil {
-		// Per ticket: "silently treat mismatched usernames as a miss (not an error)"
-		logger.With("candidate_sfid", candidateSFID, "error", err).
-			DebugContext(ctx, "failed to lookup user for username validation, treating as miss")
-		return "", nil
-	}
-
-	// Validate that the username still matches (handles stale index data).
-	// Use the same full canonicalization as the index (NFC + lower + trim) so decomposed
-	// vs precomposed Unicode forms, case, and whitespace never cause false misses.
-	if usernameToKVKey(user.Username) != encodedUsername {
-		logger.With("candidate_sfid", candidateSFID, "expected_username", username, "actual_username", user.Username).
-			DebugContext(ctx, "username mismatch in validation, treating as miss (stale index)")
-		return "", nil
-	}
-
-	return candidateSFID, nil
+	return dbResolveUserSFIDByUsername(ctx, username)
 }
 
-// lookupUserByUsername looks up a username in the v1 secondary index and returns
-// the resolved V1User and SFID in a single operation, avoiding the double KV lookup
-// that would result from calling ResolveV1UserSFIDByUsername followed by lookupMergedUser.
+// lookupUserByUsername looks up a username live in the v1 platform database
+// and returns the resolved V1User and SFID in a single operation.
 // Returns (nil, "") on any miss or error.
 func lookupUserByUsername(ctx context.Context, username string) (*V1User, string) {
-	encodedUsername := usernameToKVKey(username)
-	if encodedUsername == "" {
-		return nil, ""
-	}
-	indexKey := kvKeyUsernamePrefix + encodedUsername
-	entry, err := mappingsKV.Get(ctx, indexKey)
+	row, err := dbLookupMergedUserRowByUsername(ctx, username)
 	if err != nil {
-		if err != jetstream.ErrKeyNotFound {
-			logger.With(errKey, err, "username", username).
-				WarnContext(ctx, "failed to get username index for user enrichment")
-		}
+		logger.With(errKey, err, "username", username).
+			WarnContext(ctx, "failed to query v1 user by username for enrichment")
 		return nil, ""
 	}
-	if isTombstonedMapping(entry.Value()) {
+	if row == nil {
 		return nil, ""
 	}
-
-	sfid := string(entry.Value())
-	user, err := lookupMergedUser(ctx, sfid)
+	user, err := mergedUserRowToV1User(ctx, row)
 	if err != nil {
-		logger.With(errKey, err, "username", username, "sfid", sfid).
-			WarnContext(ctx, "failed to lookup merged user for enrichment")
+		logger.With(errKey, err, "username", username, "sfid", row.SFID).
+			WarnContext(ctx, "failed to build v1 user for enrichment")
 		return nil, ""
 	}
-
-	// Validate that the index is still current (handles stale index data).
-	if usernameToKVKey(user.Username) != encodedUsername {
-		logger.With("sfid", sfid, "expected_username", username, "actual_username", user.Username).
-			DebugContext(ctx, "username mismatch in validation, treating as miss (stale index)")
-		return nil, ""
-	}
-
-	return user, sfid
+	return user, row.SFID
 }
 
 // lookupUserByUsernameForACS is the v1 username resolver used during ACS project
 // settings merge. Tests may replace it to stub v1 lookups.
 var lookupUserByUsernameForACS = lookupUserByUsername
 
-// ResolveV1UserSFIDByEmail looks up a v1 user SFID by email using the secondary index.
-// It validates the resolved SFID by checking all alternate emails for the user.
-// Returns (sfid, nil) on success, ("", nil) on miss (including stale index), or ("", error) on failure.
+// ResolveV1UserSFIDByEmail looks up a v1 user SFID by email live in the v1
+// platform database (matching any active alternate email address).
+// Returns (sfid, nil) on success, ("", nil) on miss, or ("", error) on failure.
 func ResolveV1UserSFIDByEmail(ctx context.Context, email string) (string, error) {
-	// Look up the secondary index.
-	encodedEmail := emailToKVKey(email)
-	if encodedEmail == "" {
-		return "", nil
-	}
-	indexKey := kvKeyEmailPrefix + encodedEmail
-	entry, err := mappingsKV.Get(ctx, indexKey)
-	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
-			return "", nil // Miss
-		}
-		return "", fmt.Errorf("failed to get email index: %w", err)
-	}
-
-	// Check if tombstoned.
-	if isTombstonedMapping(entry.Value()) {
-		return "", nil // Tombstoned, treat as miss
-	}
-
-	candidateSFID := string(entry.Value())
-
-	// Get the list of alternate email SFIDs for this user to validate.
-	// merged_user has NO email field - all emails are in alternate_email records.
-	mappingKey := kvKeyAlternateEmailsPrefix + candidateSFID
-	emailListEntry, err := mappingsKV.Get(ctx, mappingKey)
-	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
-			// Per ticket: "silently treat missing emails as a miss"
-			logger.With("candidate_sfid", candidateSFID).
-				DebugContext(ctx, "no alternate emails found for user, treating as miss")
-			return "", nil
-		}
-		return "", fmt.Errorf("failed to get alternate emails mapping: %w", err)
-	}
-
-	// Parse the list of email SFIDs.
-	var emailSfids []string
-	if err := json.Unmarshal(emailListEntry.Value(), &emailSfids); err != nil {
-		return "", fmt.Errorf("failed to unmarshal email SFIDs: %w", err)
-	}
-
-	if len(emailSfids) == 0 {
-		logger.With("candidate_sfid", candidateSFID).
-			DebugContext(ctx, "empty alternate emails list for user, treating as miss")
-		return "", nil
-	}
-
-	// Check each email to see if any matches the queried email.
-	for _, emailSfid := range emailSfids {
-		emailAddr, _, _, isActive, err := getAlternateEmailDetails(ctx, emailSfid)
-		if err != nil {
-			logger.With("email_sfid", emailSfid, "error", err).
-				DebugContext(ctx, "failed to get alternate email details, skipping")
-			continue
-		}
-		if !isActive {
-			continue
-		}
-
-		// Use the same full canonicalization as the index (NFC + lower + trim) so decomposed
-		// vs precomposed Unicode forms, case, and whitespace never cause false misses.
-		if emailToKVKey(emailAddr) == encodedEmail {
-			return candidateSFID, nil
-		}
-	}
-
-	// No match found after checking all emails - stale index.
-	logger.With("candidate_sfid", candidateSFID, "email", email).
-		DebugContext(ctx, "email not found in user's alternate emails, treating as miss (stale index)")
-	return "", nil
+	return dbResolveUserSFIDByEmail(ctx, email)
 }
 
 // getOrganizationFromV1API fetches organization information from the LFX v1 Organization Service
@@ -972,6 +675,7 @@ type projectServiceCommitteeCreate struct {
 	SSOGroupEnabled *bool  `json:"SSOGroupEnabled,omitempty"`
 	PublicEnabled   *bool  `json:"PublicEnabled,omitempty"`
 	PublicName      string `json:"PublicName,omitempty"`
+	SSOGroupName    string `json:"SSOGroupName,omitempty"`
 	JoinMode        string `json:"JoinMode,omitempty"`
 	MailingList     string `json:"MailingList,omitempty"`
 	ChatChannel     string `json:"ChatChannel,omitempty"`
@@ -987,6 +691,7 @@ type projectServiceCommitteeUpdate struct {
 	SSOGroupEnabled *bool  `json:"SSOGroupEnabled,omitempty"`
 	PublicEnabled   *bool  `json:"PublicEnabled,omitempty"`
 	PublicName      string `json:"PublicName,omitempty"`
+	SSOGroupName    string `json:"SSOGroupName,omitempty"`
 	JoinMode        string `json:"JoinMode,omitempty"`
 	MailingList     string `json:"MailingList,omitempty"`
 	ChatChannel     string `json:"ChatChannel,omitempty"`
@@ -1003,6 +708,7 @@ type projectServiceCommitteeResponse struct {
 	SSOGroupEnabled bool   `json:"SSOGroupEnabled"`
 	PublicEnabled   bool   `json:"PublicEnabled"`
 	PublicName      string `json:"PublicName"`
+	SSOGroupName    string `json:"SSOGroupName"`
 }
 
 // createCommittee creates a committee in Postgres via the Project Service v2 API.

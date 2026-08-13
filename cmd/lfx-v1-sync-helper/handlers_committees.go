@@ -171,20 +171,19 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 
 	var uid string
 	var err error
+	var v2SSOGroupName string
 
 	if existingUID != "" {
-		// Update existing committee.
+		// Update existing committee. updateCommittee fetches the current V2 base,
+		// runs the mapper with currentBase as the seed (so absent V1 keys preserve
+		// current values), and only issues the API call when a synced field differs.
 		logger.With("committee_uid", existingUID, "sfid", sfid).InfoContext(ctx, "updating existing committee")
 
-		// Map v1 data to update payload.
-		var payload *committeeservice.UpdateCommitteeBasePayload
-		payload, err = mapV1DataToCommitteeUpdateBasePayload(ctx, existingUID, v1Data)
-		if err != nil {
-			logger.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to map v1 data to update payload")
-			return
+		var updateResult *committeeservice.CommitteeBaseWithReadonlyAttributes
+		updateResult, err = updateCommittee(ctx, existingUID, v1Data, v1Principal)
+		if updateResult != nil && updateResult.SsoGroupName != nil {
+			v2SSOGroupName = *updateResult.SsoGroupName
 		}
-
-		err = updateCommittee(ctx, payload, v1Principal)
 		uid = existingUID
 	} else {
 		// Check if parent project exists in mappings before creating new committee.
@@ -212,6 +211,9 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		if response != nil && response.UID != nil {
 			uid = *response.UID
 		}
+		if response != nil && response.SsoGroupName != nil {
+			v2SSOGroupName = *response.SsoGroupName
+		}
 	}
 
 	if err != nil {
@@ -219,7 +221,10 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		return
 	}
 
-	// Store the SFID mapping and reverse mapping.
+	// Store the SFID mapping and reverse mapping before the writeback PATCH.
+	// This must happen first: the PATCH can trigger a v1 WAL event, and without
+	// the reverse mapping the indexer would see no committee.uid.* entry and
+	// attempt a duplicate v2 create.
 	if uid != "" {
 		if _, err := mappingsKV.Put(ctx, mappingKey, []byte(uid)); err != nil {
 			logger.With(errKey, err, "sfid", sfid, "uid", uid).WarnContext(ctx, "failed to store committee mapping")
@@ -230,6 +235,17 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		reverseMappingValue := fmt.Sprintf("%s:%s", projectSFID, sfid)
 		if _, err := mappingsKV.Put(ctx, reverseMappingKey, []byte(reverseMappingValue)); err != nil {
 			logger.With(errKey, err, "committee_uid", uid, "sfid", sfid).WarnContext(ctx, "failed to store committee reverse mapping")
+		}
+	}
+
+	// Write the v2-generated SSOGroupName back to the v1 project-service so PCC can display it.
+	if v2SSOGroupName != "" && projectSFID != "" {
+		if writeErr := updateV1Committee(ctx, projectSFID, sfid, projectServiceCommitteeUpdate{
+			SSOGroupName: v2SSOGroupName,
+		}); writeErr != nil {
+			logger.With(errKey, writeErr, "sfid", sfid, "sso_group_name", v2SSOGroupName).WarnContext(ctx, "failed to write SSOGroupName back to v1")
+		} else {
+			logger.With("sfid", sfid, "sso_group_name", v2SSOGroupName).InfoContext(ctx, "wrote SSOGroupName back to v1")
 		}
 	}
 
@@ -437,8 +453,14 @@ func mapV1DataToCommitteeCreatePayload(ctx context.Context, v1Data map[string]an
 	return payload, nil
 }
 
-// mapV1DataToCommitteeUpdateBasePayload converts v1 committee data to an UpdateCommitteeBasePayload.
-func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID string, v1Data map[string]any) (*committeeservice.UpdateCommitteeBasePayload, error) {
+// mapV1DataToCommitteeUpdateBasePayload converts v1 committee data to an
+// UpdateCommitteeBasePayload. The payload is seeded from currentBase so that
+// V1 fields absent from v1Data preserve the current V2 values instead of being
+// overwritten with Go zero values (particularly important for plain-bool payload
+// fields like EnableVoting, SsoGroupEnabled, and Public: their zero value `false`
+// would silently clobber a current V2 `true` whenever another unrelated field
+// change triggered the update).
+func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID string, v1Data map[string]any, currentBase *committeeservice.CommitteeBaseWithReadonlyAttributes) (*committeeservice.UpdateCommitteeBasePayload, error) {
 	// Extract required fields.
 	name := ""
 	if mailingList, ok := v1Data["mailing_list__c"].(string); ok {
@@ -466,8 +488,38 @@ func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID str
 		Name:       name,
 		ProjectUID: projectUID,
 	}
+	seedCommitteeUpdateFromCurrentBase(payload, currentBase)
+	overlayV1CommitteeUpdatePayload(ctx, payload, v1Data, name)
 
-	// Map optional fields.
+	return payload, nil
+}
+
+// seedCommitteeUpdateFromCurrentBase seeds sync-managed fields on payload from
+// the currently-fetched V2 committee base so that absent V1 keys preserve current
+// values instead of falling back to Go zero values. This is essential for plain-bool
+// fields (EnableVoting, SsoGroupEnabled, Public) whose zero value `false` would
+// otherwise clobber a current V2 `true` on any unrelated-field-triggered update.
+// currentBase may be nil (defensive for unit tests); nil is a no-op.
+func seedCommitteeUpdateFromCurrentBase(payload *committeeservice.UpdateCommitteeBasePayload, currentBase *committeeservice.CommitteeBaseWithReadonlyAttributes) {
+	if payload == nil || currentBase == nil {
+		return
+	}
+	payload.Category = stringPtrToString(currentBase.Category)
+	payload.Description = currentBase.Description
+	payload.Website = currentBase.Website
+	payload.MailingList = currentBase.MailingList
+	payload.ChatChannel = currentBase.ChatChannel
+	payload.DisplayName = currentBase.DisplayName
+	payload.EnableVoting = currentBase.EnableVoting
+	payload.SsoGroupEnabled = currentBase.SsoGroupEnabled
+	payload.Public = currentBase.Public
+}
+
+// overlayV1CommitteeUpdatePayload overlays V1 values on top of payload for every
+// field the sync manages. Each guard leaves the pre-seeded value in place when the
+// V1 key is absent, empty, or invalid. name is the required committee name already
+// extracted by the caller (used for category validation error messages).
+func overlayV1CommitteeUpdatePayload(ctx context.Context, payload *committeeservice.UpdateCommitteeBasePayload, v1Data map[string]any, name string) {
 	if desc, ok := v1Data["description__c"].(string); ok && desc != "" {
 		payload.Description = &desc
 	}
@@ -483,13 +535,19 @@ func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID str
 		payload.Website = &clean
 	}
 
-	// Map public enabled field.
+	if enableVoting, ok := v1Data["enable_voting__c"].(bool); ok {
+		payload.EnableVoting = enableVoting
+	}
+
+	if ssoEnabled, ok := v1Data["sso_group_enabled"].(bool); ok {
+		payload.SsoGroupEnabled = ssoEnabled
+	}
+
 	if public, ok := v1Data["public_enabled"].(bool); ok {
 		payload.Public = public
 		logger.With("public_enabled", public).DebugContext(ctx, "mapped committee public enabled field for update")
 	}
 
-	// Map public display name field.
 	if displayName, ok := v1Data["public_name"].(string); ok && displayName != "" {
 		payload.DisplayName = &displayName
 		logger.With("display_name", displayName).DebugContext(ctx, "mapped committee display name field for update")
@@ -508,8 +566,6 @@ func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID str
 		payload.ChatChannel = &chatChannel
 		logger.With("chat_channel", chatChannel).DebugContext(ctx, "mapped committee chat channel field for update")
 	}
-
-	return payload, nil
 }
 
 // handleCommitteeMemberUpdate processes a committee member update from platform-community__c records.
