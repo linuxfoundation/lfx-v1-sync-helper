@@ -59,6 +59,12 @@ func TestDynamodbKVKey(t *testing.T) {
 			keys:      map[string]interface{}{"vote_id": float64(1234567890)},
 			expected:  "itx-poll-vote.1234567890",
 		},
+		{
+			name:      "poll results with string poll_id",
+			tableName: "itx-poll-results",
+			keys:      map[string]interface{}{"poll_id": "abc-123-def-456"},
+			expected:  "itx-poll-results.abc-123-def-456",
+		},
 	}
 
 	for _, tt := range tests {
