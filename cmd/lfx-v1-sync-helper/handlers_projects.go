@@ -7,7 +7,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
@@ -52,61 +51,6 @@ var allowedCategories = map[string]bool{
 	"Working Group":  true,
 	"TAG":            true,
 	"NONE":           true,
-}
-
-// isProjectAllowed determines if a project should be allowed to sync in based on allowlist rules.
-// Returns (allowed, reason) where allowed indicates if the project should be synced and reason explains why.
-func isProjectAllowed(ctx context.Context, v1Data map[string]any) (bool, string) {
-	// Extract project slug.
-	slug, _ := v1Data["slug__c"].(string)
-	slug = strings.ToLower(slug)
-
-	// Check if the project's slug is in either allowlist.
-	if slices.Contains(cfg.ProjectAllowlist, slug) || slices.Contains(cfg.ProjectFamilyAllowlist, slug) {
-		return true, "project slug is in allowlist"
-	}
-
-	// Extract parent SFID.
-	parentProjectID := ""
-	if parentID, ok := v1Data["parent_project__c"].(string); ok {
-		parentProjectID = strings.TrimSpace(parentID)
-	}
-
-	// If parent SFID is blank, this is a root-level project.
-	if parentProjectID == "" {
-		// For root-level projects, only allow if slug is in allowlist (already checked above).
-		return false, "root-level project slug not in allowlist"
-	}
-
-	// Parent SFID is not blank - resolve it to v2 UID.
-	mappingKey := fmt.Sprintf("project.sfid.%s", parentProjectID)
-	entry, err := mappingsKV.Get(ctx, mappingKey)
-	if err != nil {
-		return false, fmt.Sprintf("parent SFID %s not mapped to v2 UID", parentProjectID)
-	}
-
-	parentUID := string(entry.Value())
-	if parentUID == "" {
-		return false, fmt.Sprintf("empty parent UID for SFID %s", parentProjectID)
-	}
-
-	// Get the parent project's slug.
-	parentSlug, err := getProjectSlugByUID(ctx, parentUID)
-	if err != nil {
-		return false, fmt.Sprintf("failed to get parent slug for UID %s: %v", parentUID, err)
-	}
-	parentSlug = strings.ToLower(parentSlug)
-
-	// Check if parent is one of the "overarching" grouping projects which does
-	// not allow all children.
-	if slices.Contains(cfg.ProjectAllowlist, parentSlug) {
-		// For children of overarching projects, only allow if child slug is in allowlist.
-		return false, fmt.Sprintf("child of overarching project %s but child slug not in allowlist", parentSlug)
-	}
-
-	// Parent is not an overarching project, so this is a "descendant" of an
-	// allowlisted project "family".
-	return true, fmt.Sprintf("child of allowlisted project %s", parentSlug)
 }
 
 // mapAdminCategoryToCategory filters and maps admin_category__c to category.
@@ -182,13 +126,6 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 		err = updateProject(ctx, payload, settingsPayload, v1Principal)
 		uid = existingUID
 	} else {
-		// Check allowlist before creating new project.
-		allowed, reason := isProjectAllowed(ctx, v1Data)
-		if !allowed {
-			logger.With("sfid", sfid, "slug", slug, "reason", reason).InfoContext(ctx, "skipping project creation - not in allowlist")
-			return
-		}
-
 		// Create new project.
 		logger.With("sfid", sfid, "slug", slug).InfoContext(ctx, "creating new project")
 

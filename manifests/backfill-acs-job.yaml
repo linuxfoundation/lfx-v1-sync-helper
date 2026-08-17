@@ -50,11 +50,6 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: v1-sync-helper-sa
-      volumes:
-        - name: allowlists
-          configMap:
-            defaultMode: 420
-            name: lfx-v1-sync-helper-allowlists
       containers:
         - name: backfill
           # XXX: Replace with the image SHA for the release you want to run against.
@@ -128,14 +123,6 @@ spec:
                 secretKeyRef:
                   key: password
                   name: v1-platform-db-credentials
-            - name: PROJECT_ALLOWLIST_FILE
-              value: "/etc/lfx/allowlists/project_allowlist"
-            - name: PROJECT_FAMILY_ALLOWLIST_FILE
-              value: "/etc/lfx/allowlists/project_family_allowlist"
-          volumeMounts:
-            - mountPath: /etc/lfx/allowlists
-              name: allowlists
-              readOnly: true
           resources:
             requests:
               memory: "128Mi"
