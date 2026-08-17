@@ -45,14 +45,26 @@ Also check other files that could pin the Go version:
 - `docker/Dockerfile.v1-sync-helper` / `docker/Dockerfile.dynamodb-stream-consumer`
   — these build from `cgr.dev/chainguard/go:latest`, not a pinned version, so
   no update is needed here.
-- `.github/workflows/*.yml` — this repo has no `actions/setup-go` step today
-  (MegaLinter runs Go tooling inside its own container). If a workflow step
-  is ever added that needs a Go version, it MUST use a file reference (e.g.
-  `go-version-file: go.mod`) rather than a hardcoded `go-version: 'X.Y'` — that
-  way the toolchain follows `go.mod` automatically and this step never needs a
-  manual edit here. Treat any hardcoded `go-version:` found during this check
-  as a bug to fix (switch it to `go-version-file`), not a version to bump.
+- `.github/workflows/*.yml` and `*.yaml` — `publish-main.yaml`,
+  `publish-branch.yaml`, and `publish-release.yaml` all use
+  `actions/setup-go` with `go-version-file: go.mod`, so these already follow
+  `go.mod` automatically and need no manual edit here. Confirm this is still
+  true (`grep -n 'setup-go\|go-version' .github/workflows/*.y*ml`); treat any
+  hardcoded `go-version: 'X.Y'` found during this check as a bug to fix
+  (switch it to `go-version-file: go.mod`), not a version to bump.
 - `Makefile` — any hardcoded Go version variable (none currently).
+
+**MegaLinter constraint**: MegaLinter ships its own bundled Go toolchain and
+several linters (e.g. `golangci-lint`) run against that bundled version, not
+`go.mod`'s. If `go.mod`'s `go` directive is newer than MegaLinter's bundled
+Go, those checks fail. Pinning to the exact same patch version as MegaLinter
+is not reliable either, since that patch can itself be flagged as vulnerable
+by dependency/vulnerability scanners. The safest policy: keep `go.mod` **one
+minor version behind** MegaLinter's bundled Go (e.g. if MegaLinter bundles
+1.25.x, pin `go.mod` to `1.24.x`), and freely bump the *patch* within that
+minor version to pick up security fixes. Check MegaLinter's bundled Go
+version in its release notes / Dockerfile before deciding whether a toolchain
+bump in this step is actually safe to take.
 
 ### Step 1.2 — Upgrade Go module dependencies
 
@@ -118,8 +130,12 @@ for every upstream contract change.
 
 ### Step 2.1 — Discover what changed upstream
 
-Diff the generated enum/validation code between the old and new SDK versions
-(old version from `git diff go.mod`):
+Diff the generated code between the old and new SDK versions (old version
+from `git diff go.mod`). The **complete diff is the required review
+artifact** — read it in full, since ordinary generated field declarations
+usually contain none of `Enum`, `Category`, `OneOf`, or a quoted capitalized
+value, and missing a field change here is exactly the failure mode this skill
+exists to prevent:
 
 ```bash
 MODCACHE=$(go env GOMODCACHE)
@@ -127,9 +143,15 @@ SVC=github.com/linuxfoundation/lfx-v2-committee-service
 OLD=vX.Y.Z    # from git diff go.mod
 NEW=vX.Y.Z+n
 
-# Enum values live in Goa validation code and the design package.
-diff -r "${MODCACHE}/${SVC}@${OLD}/gen" "${MODCACHE}/${SVC}@${NEW}/gen" \
-  | grep -E '^[<>].*(Enum|Category|OneOf|"[A-Z])' | sort -u | head -50
+diff -r "${MODCACHE}/${SVC}@${OLD}/gen" "${MODCACHE}/${SVC}@${NEW}/gen" > /tmp/sdk-diff.txt
+wc -l /tmp/sdk-diff.txt   # review every line of this file
+```
+
+Use a grep filter only as an optional secondary view to jump to likely enum
+changes first — never as a substitute for reading the full diff:
+
+```bash
+grep -E '^[<>].*(Enum|Category|OneOf|"[A-Z])' /tmp/sdk-diff.txt | sort -u
 ```
 
 Repeat for `lfx-v2-project-service`. Note every **added enum value** and every
