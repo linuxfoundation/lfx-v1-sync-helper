@@ -28,6 +28,7 @@ var allowedCommitteeCategories = map[string]bool{
 	"Marketing Committee/Sub Committee": true,
 	"Marketing Mailing List":            true,
 	"Marketing Oversight Committee/Marketing Advisory Committee": true,
+	"Newsletter":                    true,
 	"Other":                         true,
 	"Product Security":              true,
 	"Special Interest Group":        true,
