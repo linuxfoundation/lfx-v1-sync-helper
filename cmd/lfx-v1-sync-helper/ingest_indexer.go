@@ -662,7 +662,7 @@ func mapV2CategoryToV1(category string) string {
 	case "Ambassador", "Board", "Code of Conduct", "Committers", "Expert Group",
 		"Finance Committee", "Government Advisory Council", "Legal Committee", "Maintainers",
 		"Marketing Committee/Sub Committee", "Marketing Mailing List",
-		"Marketing Oversight Committee/Marketing Advisory Committee", "Other",
+		"Marketing Oversight Committee/Marketing Advisory Committee", "Newsletter", "Other",
 		"Product Security", "Special Interest Group", "Technical Mailing List",
 		"Technical Steering Committee", "Working Group":
 		return category

@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
 
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
@@ -410,5 +412,124 @@ func TestNoChangeSkipsUpdate(t *testing.T) {
 	updated := committeeBaseFromUpdatePayload(currentBase.UID, payload)
 	if !committeeBasesEqual(currentBase, updated) {
 		t.Fatal("identical state reported as changed; would issue wasted UpdateCommitteeBase call")
+	}
+}
+
+// TestMapTypeToCategory pins the v1 type__c -> v2 category mapping, including
+// the Newsletter category and the Technical Oversight/Advisory special case.
+func TestMapTypeToCategory(t *testing.T) {
+	// Swap in a discard logger for the duration of the test: mapTypeToCategory
+	// logs a warning on its fallback path, and the package-level logger is only
+	// initialized by main().
+	origLogger := logger
+	defer func() { logger = origLogger }()
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	tests := []struct {
+		name          string
+		typeVal       string
+		committeeName string
+		want          *string
+	}{
+		{
+			name:          "Newsletter passes through",
+			typeVal:       "Newsletter",
+			committeeName: "Weekly Newsletter",
+			want:          sptr("Newsletter"),
+		},
+		{
+			name:          "allowlisted control value passes through",
+			typeVal:       "Working Group",
+			committeeName: "Working Group",
+			want:          sptr("Working Group"),
+		},
+		{
+			name:          "empty type returns nil",
+			typeVal:       "",
+			committeeName: "anything",
+			want:          nil,
+		},
+		{
+			name:          "combined TOC/TAC value with advisory in name maps to TAC",
+			typeVal:       "Technical Oversight Committee/Technical Advisory Committee",
+			committeeName: "Foo Advisory Board",
+			want:          sptr("Technical Advisory Committee"),
+		},
+		{
+			name:          "combined TOC/TAC value with tac in name maps to TAC",
+			typeVal:       "Technical Oversight Committee/Technical Advisory Committee",
+			committeeName: "Project tac lowercase",
+			want:          sptr("Technical Advisory Committee"),
+		},
+		{
+			name:          "combined TOC/TAC value otherwise maps to TOC",
+			typeVal:       "Technical Oversight Committee/Technical Advisory Committee",
+			committeeName: "Governing Council",
+			want:          sptr("Technical Oversight Committee"),
+		},
+		{
+			name:          "unrecognized value falls back to Other",
+			typeVal:       "Bogus Category",
+			committeeName: "x",
+			want:          sptr("Other"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mapTypeToCategory(context.Background(), tt.typeVal, tt.committeeName)
+			if (got == nil) != (tt.want == nil) {
+				t.Fatalf("mapTypeToCategory() = %v, want %v", got, tt.want)
+			}
+			if got != nil && *got != *tt.want {
+				t.Fatalf("mapTypeToCategory() = %q, want %q", *got, *tt.want)
+			}
+		})
+	}
+}
+
+// TestNewsletterCategoryRoundTrip pins that a v1 Newsletter committee survives
+// a v1 -> v2 -> v1 round trip unchanged, in contrast to the lossy-but-intentional
+// Technical Oversight/Advisory collapse and the absorbing Other fallback.
+func TestNewsletterCategoryRoundTrip(t *testing.T) {
+	origLogger := logger
+	defer func() { logger = origLogger }()
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	tests := []struct {
+		name          string
+		typeVal       string
+		committeeName string
+		want          string
+	}{
+		{
+			name:          "Newsletter is the identity",
+			typeVal:       "Newsletter",
+			committeeName: "Weekly Newsletter",
+			want:          "Newsletter",
+		},
+		{
+			name:          "combined TOC/TAC value round-trips to itself",
+			typeVal:       "Technical Oversight Committee/Technical Advisory Committee",
+			committeeName: "Governing Council",
+			want:          "Technical Oversight Committee/Technical Advisory Committee",
+		},
+		{
+			name:          "unrecognized value is absorbed into Other",
+			typeVal:       "Bogus Category",
+			committeeName: "x",
+			want:          "Other",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			category := mapTypeToCategory(context.Background(), tt.typeVal, tt.committeeName)
+			if category == nil {
+				t.Fatal("mapTypeToCategory() = nil, want non-nil")
+			}
+			got := mapV2CategoryToV1(*category)
+			if got != tt.want {
+				t.Fatalf("mapV2CategoryToV1(mapTypeToCategory(%q)) = %q, want %q", tt.typeVal, got, tt.want)
+			}
+		})
 	}
 }
