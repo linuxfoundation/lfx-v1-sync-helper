@@ -27,6 +27,15 @@
 --                            occurrences the user is registered for
 --                            (protection: destructive fixes skip users with a
 --                            non-zero count)
+--   ti_id                  — Thought Industries (Training LMS) user ID for
+--                            this username; empty when not in TI
+--   flagged_email_other_ti_id — TI user ID for the OTHER username (LDAP uid,
+--                            or Auth0 username when no LDAP conflict) that
+--                            owns the flagged email. Non-empty signals the
+--                            accounts should NOT be merged: swap/delete is
+--                            safe. Empty: LDAP proxy delete if the other
+--                            account is Identity-only, or defer to a support
+--                            merge if it has an Auth0 row.
 --
 -- Run with:
 --   rm -f resolved_usernames.csv && \
@@ -113,7 +122,8 @@ per_user AS (
 flagged_email_conflicts AS (
     SELECT
         pu.platform_username,
-        MAX(a0_other.id) AS flagged_email_other_auth0_id
+        MAX(a0_other.id) AS flagged_email_other_auth0_id,
+        MAX(a0_other.username) AS flagged_email_other_auth0_username
     FROM per_user pu
     INNER JOIN fivetran_ingest.auth0.users a0_other
         ON LOWER(a0_other.email) = LOWER(pu.flagged_primary_email)
@@ -161,6 +171,20 @@ meeting_counts AS (
         mr.is_past = FALSE
         AND mr.is_cancelled = FALSE
     GROUP BY pu.platform_username
+),
+
+-- Thought Industries (Training LMS) presence, matched on lowercased
+-- externalcustomerid. Deduplicated to latest activity per username.
+ti_users AS (
+    SELECT
+        LOWER(externalcustomerid) AS ti_username,
+        id AS ti_id
+    FROM census_ingest.ti_redshift.users
+    WHERE externalcustomerid IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY LOWER(externalcustomerid)
+        ORDER BY lastactiveat DESC NULLS LAST
+    ) = 1
 )
 
 SELECT
@@ -174,7 +198,9 @@ SELECT
     pu.matching_email_sfid,
     c.flagged_email_other_auth0_id,
     lc.flagged_email_other_ldap_uid,
-    COALESCE(m.meeting_count, 0) AS meeting_count
+    COALESCE(m.meeting_count, 0) AS meeting_count,
+    ti_self.ti_id AS ti_id,
+    ti_other.ti_id AS flagged_email_other_ti_id
 FROM per_user pu
 LEFT JOIN flagged_email_conflicts c
     ON pu.platform_username = c.platform_username
@@ -182,5 +208,12 @@ LEFT JOIN flagged_email_ldap_conflicts lc
     ON pu.platform_username = lc.platform_username
 LEFT JOIN meeting_counts m
     ON pu.platform_username = m.platform_username
+LEFT JOIN ti_users ti_self
+    ON ti_self.ti_username = LOWER(pu.platform_username)
+LEFT JOIN ti_users ti_other
+    ON ti_other.ti_username = LOWER(COALESCE(
+        lc.flagged_email_other_ldap_uid,
+        c.flagged_email_other_auth0_username
+    ))
 ORDER BY pu.platform_username
 ;

@@ -75,7 +75,7 @@ FIXED=0
 SKIPPED=0
 ERRORS=0
 
-while IFS=',' read -r platform_username contact_sfid auth0_id auth0_email ldap_email flagged_primary_email flagged_email_sfid matching_email_sfid flagged_email_other_auth0_id flagged_email_other_ldap_uid meeting_count; do
+while IFS=',' read -r platform_username contact_sfid auth0_id auth0_email ldap_email flagged_primary_email flagged_email_sfid matching_email_sfid flagged_email_other_auth0_id flagged_email_other_ldap_uid meeting_count ti_id flagged_email_other_ti_id; do
     # Strip surrounding quotes.
     platform_username="${platform_username//\"/}"
     auth0_email="${auth0_email//\"/}"
@@ -106,6 +106,23 @@ while IFS=',' read -r platform_username contact_sfid auth0_id auth0_email ldap_e
     meeting_count="${meeting_count//[$'\r\n ']/}"
     if [[ "${meeting_count:-0}" != "0" ]]; then
         echo "[$COUNT/$TOTAL] SKIP $platform_username: meeting_count=$meeting_count — manual review" >&2
+        SKIPPED=$((SKIPPED + 1))
+        continue
+    fi
+
+    # Gate: only swap/delete when the other username also exists in TI
+    # (Thought Industries) — separate training history signals the accounts
+    # should NOT be merged. Otherwise route: Identity-only other account
+    # (no Auth0, no TI) -> LDAP proxy delete; other account in Auth0 ->
+    # defer to a support merge.
+    flagged_email_other_ti_id="${flagged_email_other_ti_id//\"/}"
+    flagged_email_other_ti_id="${flagged_email_other_ti_id//[$'\r\n ']/}"
+    if [[ -z "$flagged_email_other_ti_id" ]]; then
+        if [[ -n "$flagged_email_other_auth0_id" ]]; then
+            echo "[$COUNT/$TOTAL] SKIP $platform_username: other account $flagged_email_other_auth0_id has no TI — defer to support merge" >&2
+        else
+            echo "[$COUNT/$TOTAL] SKIP $platform_username: other account $flagged_email_other_ldap_uid is Identity-only, no TI — LDAP proxy delete candidate" >&2
+        fi
         SKIPPED=$((SKIPPED + 1))
         continue
     fi

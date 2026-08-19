@@ -20,7 +20,7 @@ literal `&USERNAMES` causes a SQL compilation error.
 
 | File | Purpose |
 |------|---------|
-| `lfxv2_2662_resolve_usernames.sql` | Snowflake → CSV: takes comma-separated usernames, outputs all columns any apply script needs (platform_username, contact_sfid, auth0_id, auth0_email, ldap_email, flagged_primary_email, flagged_email_sfid, matching_email_sfid) |
+| `lfxv2_2662_resolve_usernames.sql` | Snowflake → CSV: takes comma-separated usernames, outputs all columns any apply script needs (platform_username, contact_sfid, auth0_id, auth0_email, ldap_email, flagged_primary_email, flagged_email_sfid, matching_email_sfid, flagged_email_other_auth0_id, flagged_email_other_ldap_uid, meeting_count, ti_id, flagged_email_other_ti_id) |
 
 ## Workflow
 
@@ -40,7 +40,7 @@ Drilldown cells: `PLATFORM_VERIFIED+NEWER_AUTH0`, `PLATFORM_VERIFIED+NEWER_LDAP`
 | File | Purpose |
 |------|---------|
 | `lfxv2_2662_apply_wrong_primary_verified.sh` | PATCHes Auth0 email to the Platform flagged primary (verified). Skips rows where the resolver's conflict columns (`flagged_email_other_auth0_id`, `flagged_email_other_ldap_uid`) show the flagged email is owned by a different account — Auth0 validates email availability against LDAP/Identity, so either ownership blocks the push. Also skips users with no Auth0 account. Supports `--dry-run`, `--batch-size`, `--sleep` |
-| `lfxv2_2662_apply_wrong_primary_conflict.sh` | For the conflict rows skipped above: on the Platform DB, flips `primary_email__c` to the row matching the user's own Auth0 email and DELETEs the flagged `alternate_email__c` row (email belongs to a different LFID). One transaction per user; fires live sync events. Supports `--dry-run`, `--batch-size`, `--sleep` |
+| `lfxv2_2662_apply_wrong_primary_conflict.sh` | For the conflict rows skipped above: on the Platform DB, flips `primary_email__c` to the row matching the user's own Auth0 email and DELETEs the flagged `alternate_email__c` row (email belongs to a different LFID). Only acts when the other username also exists in TI (separate training history = do not merge); otherwise skips with routing: Identity-only other account → LDAP proxy delete, Auth0 other account → support merge. Also skips users with non-zero meeting_count. One transaction per user; fires live sync events. Supports `--dry-run`, `--batch-size`, `--sleep` |
 | `lfxv2_2662_apply_multiple_primary.sh` | For MULTIPLE_PRIMARY_RESOLVED_BY_MATCH users: keeps `primary_email__c` on the row matching the user's own Auth0 email (`matching_email_sfid`) and unsets it on every other primary-flagged row for the contact. One transaction per user; fires live sync events. Supports `--dry-run`, `--batch-size`, `--sleep` |
 
 ### WRONG_PRIMARY_FLAG / PLATFORM_UNVERIFIED (Platform DB flag swap)
