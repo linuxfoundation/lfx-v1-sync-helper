@@ -15,7 +15,7 @@
 --   ldap_email             — current LDAP mail attribute
 --   flagged_primary_email  — Platform row flagged primary_email__c=true
 --   flagged_email_sfid     — SFID of the flagged-primary alternate_email__c row
---   matching_email_sfid    — SFID of the Platform row matching Auth0 (non-primary)
+--   matching_email_sfid    — SFID of the Platform row matching Auth0 (any primary state)
 --   flagged_email_other_auth0_id — Auth0 user ID of a DIFFERENT account that
 --                            owns the flagged primary email (conflict: do not
 --                            push this email to Auth0; empty when no conflict)
@@ -92,8 +92,7 @@ per_user AS (
         l.ldap_email,
         MAX(CASE WHEN p_any.is_primary THEN p_any.email END) AS flagged_primary_email,
         MAX(CASE WHEN p_any.is_primary THEN p_any.email_sfid END) AS flagged_email_sfid,
-        MAX(CASE WHEN NOT p_any.is_primary
-                      AND LOWER(p_any.email) = LOWER(a.auth0_email)
+        MAX(CASE WHEN LOWER(p_any.email) = LOWER(a.auth0_email)
                  THEN p_any.email_sfid END) AS matching_email_sfid
     FROM username_list u
     LEFT JOIN auth0_primary a
