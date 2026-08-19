@@ -23,6 +23,10 @@
 --                            the flagged primary email (catches LDAP/Drupal
 --                            accounts with no Auth0 row; Auth0 checks LDAP
 --                            for email availability and rejects the push)
+--   meeting_count          — distinct current/upcoming non-cancelled meeting
+--                            occurrences the user is registered for
+--                            (protection: destructive fixes skip users with a
+--                            non-zero count)
 --
 -- Run with:
 --   rm -f resolved_usernames.csv && \
@@ -140,6 +144,23 @@ flagged_email_ldap_conflicts AS (
         ON LOWER(ldap_other.mail) = LOWER(pu.flagged_primary_email)
     WHERE LOWER(ldap_other.uid) != LOWER(pu.platform_username)
     GROUP BY pu.platform_username
+),
+
+-- Current/upcoming scheduled meeting participation: protection signal —
+-- apply scripts skip destructive fixes for users registered for any
+-- non-cancelled current or upcoming meeting occurrence.
+meeting_counts AS (
+    SELECT
+        pu.platform_username,
+        COUNT(DISTINCT mr.meeting_and_occurrence_id) AS meeting_count
+    FROM per_user pu
+    INNER JOIN analytics.silver_fact.meeting_registrant mr
+        ON (LOWER(mr.username) = LOWER(pu.platform_username)
+            OR mr.user_id = pu.contact_sfid)
+    WHERE
+        mr.is_past = FALSE
+        AND mr.is_cancelled = FALSE
+    GROUP BY pu.platform_username
 )
 
 SELECT
@@ -152,11 +173,14 @@ SELECT
     pu.flagged_email_sfid,
     pu.matching_email_sfid,
     c.flagged_email_other_auth0_id,
-    lc.flagged_email_other_ldap_uid
+    lc.flagged_email_other_ldap_uid,
+    COALESCE(m.meeting_count, 0) AS meeting_count
 FROM per_user pu
 LEFT JOIN flagged_email_conflicts c
     ON pu.platform_username = c.platform_username
 LEFT JOIN flagged_email_ldap_conflicts lc
     ON pu.platform_username = lc.platform_username
+LEFT JOIN meeting_counts m
+    ON pu.platform_username = m.platform_username
 ORDER BY pu.platform_username
 ;

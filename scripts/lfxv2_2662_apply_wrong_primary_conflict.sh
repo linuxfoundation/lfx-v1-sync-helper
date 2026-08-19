@@ -75,7 +75,7 @@ FIXED=0
 SKIPPED=0
 ERRORS=0
 
-while IFS=',' read -r platform_username contact_sfid auth0_id auth0_email ldap_email flagged_primary_email flagged_email_sfid matching_email_sfid flagged_email_other_auth0_id flagged_email_other_ldap_uid; do
+while IFS=',' read -r platform_username contact_sfid auth0_id auth0_email ldap_email flagged_primary_email flagged_email_sfid matching_email_sfid flagged_email_other_auth0_id flagged_email_other_ldap_uid meeting_count; do
     # Strip surrounding quotes.
     platform_username="${platform_username//\"/}"
     auth0_email="${auth0_email//\"/}"
@@ -97,6 +97,15 @@ while IFS=',' read -r platform_username contact_sfid auth0_id auth0_email ldap_e
 
     if [[ -z "$matching_email_sfid" || -z "$flagged_email_sfid" ]]; then
         echo "[$COUNT/$TOTAL] SKIP $platform_username: missing matching or flagged sfid — manual review" >&2
+        SKIPPED=$((SKIPPED + 1))
+        continue
+    fi
+
+    # Protection: never swap/delete for users with recorded meeting attendance.
+    meeting_count="${meeting_count//\"/}"
+    meeting_count="${meeting_count//[$'\r\n ']/}"
+    if [[ "${meeting_count:-0}" != "0" ]]; then
+        echo "[$COUNT/$TOTAL] SKIP $platform_username: meeting_count=$meeting_count — manual review" >&2
         SKIPPED=$((SKIPPED + 1))
         continue
     fi
