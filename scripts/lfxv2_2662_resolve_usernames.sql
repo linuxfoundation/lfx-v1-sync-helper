@@ -16,6 +16,13 @@
 --   flagged_primary_email  — Platform row flagged primary_email__c=true
 --   flagged_email_sfid     — SFID of the flagged-primary alternate_email__c row
 --   matching_email_sfid    — SFID of the Platform row matching Auth0 (non-primary)
+--   flagged_email_other_auth0_id — Auth0 user ID of a DIFFERENT account that
+--                            owns the flagged primary email (conflict: do not
+--                            push this email to Auth0; empty when no conflict)
+--   flagged_email_other_ldap_uid — LDAP uid of a DIFFERENT account that owns
+--                            the flagged primary email (catches LDAP/Drupal
+--                            accounts with no Auth0 row; Auth0 checks LDAP
+--                            for email availability and rejects the push)
 --
 -- Run with:
 --   rm -f resolved_usernames.csv && \
@@ -23,12 +30,12 @@
 --     --warehouse VIEWER --rolename DATA_DEV --private-key-path rsa_key.p8 \
 --     -o friendly=false -o header=true -o timing=false \
 --     -o output_format=csv -o output_file=resolved_usernames.csv \
---     -D USERNAMES="'user1,user2,user3'" \
+--     -D USERNAMES="user1,user2,user3" \
 --     -f scripts/lfxv2_2662_resolve_usernames.sql
 
 WITH username_list AS (
     SELECT TRIM(value) AS username
-    FROM TABLE(SPLIT_TO_TABLE(&USERNAMES, ','))
+    FROM TABLE(SPLIT_TO_TABLE('&USERNAMES', ','))
 ),
 
 platform_alt_emails AS (
@@ -96,17 +103,61 @@ per_user AS (
     LEFT JOIN platform_alt_emails p_any
         ON LOWER(u.username) = LOWER(p_any.platform_username)
     GROUP BY u.username, a.auth0_id, a.auth0_email, l.ldap_email
+),
+
+-- Conflict check: does the flagged primary email belong to a different
+-- Auth0 account (Username-Password-Authentication connection)?
+flagged_email_conflicts AS (
+    SELECT
+        pu.platform_username,
+        MAX(a0_other.id) AS flagged_email_other_auth0_id
+    FROM per_user pu
+    INNER JOIN fivetran_ingest.auth0.users a0_other
+        ON LOWER(a0_other.email) = LOWER(pu.flagged_primary_email)
+    INNER JOIN fivetran_ingest.auth0.user_identities a0_other_ids
+        ON a0_other.id = a0_other_ids.users_id
+    WHERE
+        a0_other_ids.connection = 'Username-Password-Authentication'
+        AND a0_other_ids._fivetran_deleted = FALSE
+        AND a0_other._fivetran_deleted = FALSE
+        AND LOWER(a0_other.username) != LOWER(pu.platform_username)
+    GROUP BY pu.platform_username
+),
+
+-- Conflict check 2: does the flagged primary email belong to a different
+-- LDAP account? Catches LDAP/Drupal-only accounts with no Auth0 row; Auth0
+-- validates email availability against LDAP/Identity before an email update
+-- and rejects the push.
+flagged_email_ldap_conflicts AS (
+    SELECT
+        pu.platform_username,
+        MAX(ldap_other.uid) AS flagged_email_other_ldap_uid
+    FROM per_user pu
+    INNER JOIN (
+        SELECT uid, mail
+        FROM analytics_dev.dev_eric.ldap_users
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY uid ORDER BY _sdc_extracted_at DESC) = 1
+    ) ldap_other
+        ON LOWER(ldap_other.mail) = LOWER(pu.flagged_primary_email)
+    WHERE LOWER(ldap_other.uid) != LOWER(pu.platform_username)
+    GROUP BY pu.platform_username
 )
 
 SELECT
-    platform_username,
-    contact_sfid,
-    auth0_id,
-    auth0_email,
-    ldap_email,
-    flagged_primary_email,
-    flagged_email_sfid,
-    matching_email_sfid
-FROM per_user
-ORDER BY platform_username
+    pu.platform_username,
+    pu.contact_sfid,
+    pu.auth0_id,
+    pu.auth0_email,
+    pu.ldap_email,
+    pu.flagged_primary_email,
+    pu.flagged_email_sfid,
+    pu.matching_email_sfid,
+    c.flagged_email_other_auth0_id,
+    lc.flagged_email_other_ldap_uid
+FROM per_user pu
+LEFT JOIN flagged_email_conflicts c
+    ON pu.platform_username = c.platform_username
+LEFT JOIN flagged_email_ldap_conflicts lc
+    ON pu.platform_username = lc.platform_username
+ORDER BY pu.platform_username
 ;

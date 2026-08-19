@@ -2,24 +2,26 @@
 # Copyright The Linux Foundation and each contributor to LFX.
 # SPDX-License-Identifier: MIT
 
-# LFXV2-2662: Push Platform-verified primary email to Auth0 for
-# WRONG_PRIMARY_FLAG / PLATFORM_VERIFIED users.
+# LFXV2-2662: Sync Drupal block status to Auth0 for ALIGNED / DRUPAL_BLOCKED
+# users by setting blocked=true via the Auth0 Management API.
 #
-# Matrixed drilldown cells:
-#   WRONG_PRIMARY_FLAG / PLATFORM_VERIFIED+NEWER_AUTH0
-#   WRONG_PRIMARY_FLAG / PLATFORM_VERIFIED+NEWER_LDAP
-#   WRONG_PRIMARY_FLAG / PLATFORM_VERIFIED+TS_UNKNOWN
+# Matrixed drilldown cell:
+#   ALIGNED / DRUPAL_BLOCKED
 #
-# Resolves usernames via lfxv2_2662_resolve_usernames.sql, then PATCHes
-# Auth0 Management API to set the Platform flagged primary as Auth0's email.
+# These users are blocked in Drupal but not in Auth0. Blocking them in Auth0
+# aligns the block state across systems so the v1-sync-helper no-op guard
+# (PR #136) treats them consistently.
 #
-# Uses columns: platform_username, auth0_id, auth0_email (current),
-#               flagged_primary_email (target)
+# For each user, the script first GETs the current blocked state and skips
+# users that are already blocked (idempotent re-runs), then PATCHes
+# {"blocked": true}.
+#
+# Uses columns: platform_username, auth0_id
 #
 # Usage:
 #   export AUTH0_DOMAIN="linuxfoundation.auth0.com"
-#   export AUTH0_MGMT_TOKEN="..."  # Management API token with update:users scope
-#   ./scripts/lfxv2_2662_apply_wrong_primary_verified.sh [--dry-run] [--batch-size N] [--sleep S] <csv_file>
+#   export AUTH0_MGMT_TOKEN="..."  # Management API token with read:users and update:users scopes
+#   ./scripts/lfxv2_2662_apply_drupal_blocked.sh [--dry-run] [--batch-size N] [--sleep S] <csv_file>
 #
 # Generate CSV:
 #   rm -f resolved.csv && \
@@ -69,6 +71,7 @@ TOTAL=$(tail -n +2 "$CSV_FILE" | wc -l | tr -d ' ')
 echo "Processing $TOTAL users (batch_size=$BATCH_SIZE, sleep=${SLEEP_SECONDS}s, dry_run=$DRY_RUN)"
 
 COUNT=0
+BLOCKED=0
 SKIPPED=0
 ERRORS=0
 
@@ -76,48 +79,51 @@ while IFS=',' read -r platform_username contact_sfid auth0_id auth0_email ldap_e
     # Strip surrounding quotes.
     platform_username="${platform_username//\"/}"
     auth0_id="${auth0_id//\"/}"
-    auth0_email="${auth0_email//\"/}"
-    flagged_primary_email="${flagged_primary_email//\"/}"
-    flagged_email_other_auth0_id="${flagged_email_other_auth0_id//\"/}"
-    flagged_email_other_auth0_id="${flagged_email_other_auth0_id//[$'\r\n ']/}"
-    flagged_email_other_ldap_uid="${flagged_email_other_ldap_uid//\"/}"
-    flagged_email_other_ldap_uid="${flagged_email_other_ldap_uid//[$'\r\n ']/}"
 
     COUNT=$((COUNT + 1))
 
-    # Conflict guard: the flagged primary email belongs to a DIFFERENT Auth0
-    # or LDAP account. Auth0 validates email availability against
-    # LDAP/Identity, so either ownership blocks the push. These need a
-    # Platform-side fix or an account merge instead — skip.
-    if [[ -n "$flagged_email_other_auth0_id" || -n "$flagged_email_other_ldap_uid" ]]; then
-        echo "[$COUNT/$TOTAL] SKIP $platform_username: flagged email $flagged_primary_email owned by other account (auth0=$flagged_email_other_auth0_id ldap=$flagged_email_other_ldap_uid)"
-        SKIPPED=$((SKIPPED + 1))
+    if [[ -z "$auth0_id" ]]; then
+        echo "[$COUNT/$TOTAL] SKIP $platform_username: no auth0_id resolved" >&2
+        ERRORS=$((ERRORS + 1))
         continue
     fi
 
-    # No Auth0 account: nothing to push, and the conflict check cannot see
-    # collisions without an Auth0 row. Needs manual investigation.
-    if [[ -z "$auth0_id" ]]; then
-        echo "[$COUNT/$TOTAL] SKIP $platform_username: no Auth0 account (LDAP/Drupal only) — manual review"
+    # Check current blocked state so re-runs are idempotent.
+    HTTP_CODE=$(curl -s -o /tmp/auth0_get_resp.json -w "%{http_code}" \
+        -X GET "https://${AUTH0_DOMAIN}/api/v2/users/${auth0_id}?fields=blocked" \
+        -H "Authorization: Bearer ${AUTH0_MGMT_TOKEN}")
+
+    if [[ "$HTTP_CODE" != "200" ]]; then
+        echo "[$COUNT/$TOTAL] ERROR: GET HTTP $HTTP_CODE for $platform_username ($auth0_id)" >&2
+        cat /tmp/auth0_get_resp.json >&2
+        echo "" >&2
+        ERRORS=$((ERRORS + 1))
+        continue
+    fi
+
+    if jq -e '.blocked == true' /tmp/auth0_get_resp.json > /dev/null; then
+        echo "[$COUNT/$TOTAL] SKIP $platform_username ($auth0_id): already blocked"
         SKIPPED=$((SKIPPED + 1))
         continue
     fi
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        echo "[$COUNT/$TOTAL] DRY-RUN $platform_username ($auth0_id): $auth0_email -> $flagged_primary_email"
+        echo "[$COUNT/$TOTAL] DRY-RUN $platform_username ($auth0_id): would set blocked=true"
     else
-        echo "[$COUNT/$TOTAL] Updating $platform_username ($auth0_id): $auth0_email -> $flagged_primary_email"
+        echo "[$COUNT/$TOTAL] Blocking $platform_username ($auth0_id)"
         HTTP_CODE=$(curl -s -o /tmp/auth0_resp.json -w "%{http_code}" \
             -X PATCH "https://${AUTH0_DOMAIN}/api/v2/users/${auth0_id}" \
             -H "Authorization: Bearer ${AUTH0_MGMT_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "{\"email\": \"${flagged_primary_email}\", \"email_verified\": true}")
+            -d '{"blocked": true}')
 
         if [[ "$HTTP_CODE" != "200" ]]; then
-            echo "  ERROR: HTTP $HTTP_CODE for $platform_username" >&2
+            echo "  ERROR: PATCH HTTP $HTTP_CODE for $platform_username" >&2
             cat /tmp/auth0_resp.json >&2
             echo "" >&2
             ERRORS=$((ERRORS + 1))
+        else
+            BLOCKED=$((BLOCKED + 1))
         fi
     fi
 
@@ -130,4 +136,4 @@ while IFS=',' read -r platform_username contact_sfid auth0_id auth0_email ldap_e
 done < <(tail -n +2 "$CSV_FILE")
 
 echo ""
-echo "Done: $COUNT processed, $SKIPPED skipped (conflicts), $ERRORS errors."
+echo "Done: $COUNT processed, $BLOCKED blocked, $SKIPPED already blocked, $ERRORS errors."

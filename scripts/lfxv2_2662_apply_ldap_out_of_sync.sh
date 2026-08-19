@@ -28,7 +28,8 @@
 #     --warehouse VIEWER --rolename DATA_DEV --private-key-path rsa_key.p8 \
 #     -o friendly=false -o header=true -o timing=false \
 #     -o output_format=csv -o output_file=resolved.csv \
-#     -D USERNAMES="'user1,user2,user3'" \
+#     -o variable_substitution=true \
+#     -D USERNAMES="user1,user2,user3" \
 #     -f scripts/lfxv2_2662_resolve_usernames.sql
 #
 # CSV columns (from resolve_usernames.sql):
@@ -71,7 +72,7 @@ echo "Processing $TOTAL users (batch_size=$BATCH_SIZE, sleep=${SLEEP_SECONDS}s, 
 COUNT=0
 ERRORS=0
 
-while IFS=',' read -r platform_username contact_sfid auth0_id auth0_email ldap_email flagged_primary_email flagged_email_sfid matching_email_sfid; do
+while IFS=',' read -r platform_username contact_sfid auth0_id auth0_email ldap_email flagged_primary_email flagged_email_sfid matching_email_sfid flagged_email_other_auth0_id flagged_email_other_ldap_uid; do
     # Strip surrounding quotes.
     platform_username="${platform_username//\"/}"
     auth0_email="${auth0_email//\"/}"

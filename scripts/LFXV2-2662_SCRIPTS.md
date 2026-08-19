@@ -14,7 +14,9 @@ the release build; kept locally for reference and execution during remediation.
 ## Username Resolver (Snowflake)
 
 Single generic script used by all apply scripts to look up user details from
-the matrixed sample usernames. Pass usernames via `-D USERNAMES="'...'"`.
+the matrixed sample usernames. Pass usernames via `-D USERNAMES="user1,user2,..." (no inner quotes)` and
+include `-o variable_substitution=true`, or `-D` is silently ignored and the
+literal `&USERNAMES` causes a SQL compilation error.
 
 | File | Purpose |
 |------|---------|
@@ -24,7 +26,7 @@ the matrixed sample usernames. Pass usernames via `-D USERNAMES="'...'"`.
 
 1. Run `lfxv2_2662_matrixed_buckets.sql` to get per-cell counts and sample usernames.
 2. Copy the comma-separated samples from the target drilldown cell(s).
-3. Run `lfxv2_2662_resolve_usernames.sql` with `-D USERNAMES="'<samples>'"` to generate a CSV.
+3. Run `lfxv2_2662_resolve_usernames.sql` with `-D USERNAMES="<samples>"` to generate a CSV.
 4. Feed the CSV into the appropriate apply script.
 5. Re-run the matrixed query to verify the cell counts dropped and get the next batch.
 
@@ -37,7 +39,8 @@ Drilldown cells: `PLATFORM_VERIFIED+NEWER_AUTH0`, `PLATFORM_VERIFIED+NEWER_LDAP`
 
 | File | Purpose |
 |------|---------|
-| `lfxv2_2662_apply_wrong_primary_verified.sh` | PATCHes Auth0 email to the Platform flagged primary (verified). Supports `--dry-run`, `--batch-size`, `--sleep` |
+| `lfxv2_2662_apply_wrong_primary_verified.sh` | PATCHes Auth0 email to the Platform flagged primary (verified). Skips rows where the resolver's conflict columns (`flagged_email_other_auth0_id`, `flagged_email_other_ldap_uid`) show the flagged email is owned by a different account — Auth0 validates email availability against LDAP/Identity, so either ownership blocks the push. Also skips users with no Auth0 account. Supports `--dry-run`, `--batch-size`, `--sleep` |
+| `lfxv2_2662_apply_wrong_primary_conflict.sh` | For the conflict rows skipped above: on the Platform DB, flips `primary_email__c` to the row matching the user's own Auth0 email and DELETEs the flagged `alternate_email__c` row (email belongs to a different LFID). One transaction per user; fires live sync events. Supports `--dry-run`, `--batch-size`, `--sleep` |
 
 ### WRONG_PRIMARY_FLAG / PLATFORM_UNVERIFIED (Platform DB flag swap)
 
@@ -56,6 +59,32 @@ Drilldown cells: `PLATFORM_VERIFIED+NEWER_LDAP`, `PLATFORM_VERIFIED+NEWER_AUTH0`
 | File | Purpose |
 |------|---------|
 | `lfxv2_2662_apply_ldap_out_of_sync.sh` | Updates LDAP mail attribute via PUT /users/:name/email. Supports `--dry-run`, `--batch-size`, `--sleep` |
+
+### ALIGNED / DRUPAL_BLOCKED (Auth0 Management API block)
+
+Drilldown cell: `DRUPAL_BLOCKED` (under `ALIGNED`)
+
+| File | Purpose |
+|------|---------|
+| `lfxv2_2662_apply_drupal_blocked.sh` | Sets `blocked=true` on Auth0 users blocked in Drupal but not Auth0. Skips already-blocked users (idempotent). Supports `--dry-run`, `--batch-size`, `--sleep` |
+
+### MISSING_FROM_AUTH0 / DRUPAL_BLOCKED (LDAP REST Proxy delete)
+
+Drilldown cells: `DRUPAL_BLOCKED`, `DRUPAL_BLOCKED+MANGLED_LDAP`,
+`DRUPAL_BLOCKED+MANGLED_PLATFORM+MANGLED_LDAP` (under `MISSING_FROM_AUTH0`)
+
+| File | Purpose |
+|------|---------|
+| `lfxv2_2662_apply_ldap_delete.sh` | Completes incomplete deletions by DELETE /users/:name on the LDAP REST Proxy (requires `delete:users` scope; proxy auto-tombstones verified/blocked users), then blanks `username__c` on the Platform DB (needs PG* env vars). Treats 404 as already deleted. Supports `--dry-run`, `--batch-size`, `--sleep` |
+
+### PLATFORM_OUT_OF_SYNC_WITH_BOTH blocked/mangled (Auth0 delete)
+
+Drilldown cells: `BLOCKED/AUTH0_BLOCKED/DRUPAL_BLOCKED + MANGLED_AUTH0+MANGLED_LDAP + ...`
+(under `PLATFORM_OUT_OF_SYNC_WITH_BOTH`)
+
+| File | Purpose |
+|------|---------|
+| `lfxv2_2662_apply_auth0_delete.sh` | Completes incomplete deletions: DELETE the Auth0 user (cascades to LDAP with auto-tombstone), verify the cascade via the LDAP REST Proxy (direct proxy DELETE as fallback), then blank `username__c` on the Platform DB. Pre-step: block AUTH0_BLOCKED-only users in Drupal via sso-tools (Identity block state determines tombstone behavior); DRUPAL_BLOCKED-only users need no pre-step. Supports `--dry-run`, `--batch-size`, `--sleep` |
 
 ### PLATFORM_OUT_OF_SYNC_WITH_AUTH0 / NEWER_LDAP (fake login to re-sync)
 
