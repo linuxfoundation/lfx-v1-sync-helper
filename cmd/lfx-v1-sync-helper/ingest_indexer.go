@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
-	nats "github.com/nats-io/nats.go"
 )
 
 // indexingEvent mirrors the IndexingEvent published by the indexer service after a
@@ -31,19 +30,17 @@ type indexingEventBody struct {
 	Data map[string]any `json:"data"`
 }
 
-// committeeIndexerEventHandler handles lfx.committee.{created,updated,deleted} events
+// processCommitteeIndexingEvent handles lfx.committee.{created,updated,deleted} events
 // published by the indexer service after successful OpenSearch writes.
-func committeeIndexerEventHandler(msg *nats.Msg) {
-	ctx := context.Background()
-
+func processCommitteeIndexingEvent(ctx context.Context, subject string, data []byte) {
 	var event indexingEvent
-	if err := json.Unmarshal(msg.Data, &event); err != nil {
-		logger.With(errKey, err, "subject", msg.Subject).ErrorContext(ctx, "failed to unmarshal committee indexing event")
+	if err := json.Unmarshal(data, &event); err != nil {
+		logger.With(errKey, err, "subject", subject).ErrorContext(ctx, "failed to unmarshal committee indexing event")
 		return
 	}
 
 	logger.With(
-		"subject", msg.Subject,
+		"subject", subject,
 		"object_id", event.ObjectID,
 		"action", event.Action,
 	).InfoContext(ctx, "received committee indexing event")
@@ -113,24 +110,22 @@ func committeeIndexerEventHandler(msg *nats.Msg) {
 		syncCommitteeDeleteToV1(ctx, event.ObjectID, projectSFID, committeeSFID)
 
 	default:
-		logger.With("action", event.Action, "subject", msg.Subject).
+		logger.With("action", event.Action, "subject", subject).
 			WarnContext(ctx, "unknown action in committee indexing event, skipping")
 	}
 }
 
-// committeeMemberIndexerEventHandler handles lfx.committee_member.{created,updated,deleted} events
+// processCommitteeMemberIndexingEvent handles lfx.committee_member.{created,updated,deleted} events
 // published by the indexer service after successful OpenSearch writes.
-func committeeMemberIndexerEventHandler(msg *nats.Msg) {
-	ctx := context.Background()
-
+func processCommitteeMemberIndexingEvent(ctx context.Context, subject string, data []byte) {
 	var event indexingEvent
-	if err := json.Unmarshal(msg.Data, &event); err != nil {
-		logger.With(errKey, err, "subject", msg.Subject).ErrorContext(ctx, "failed to unmarshal committee member indexing event")
+	if err := json.Unmarshal(data, &event); err != nil {
+		logger.With(errKey, err, "subject", subject).ErrorContext(ctx, "failed to unmarshal committee member indexing event")
 		return
 	}
 
 	logger.With(
-		"subject", msg.Subject,
+		"subject", subject,
 		"object_id", event.ObjectID,
 		"action", event.Action,
 	).InfoContext(ctx, "received committee member indexing event")
@@ -171,7 +166,7 @@ func committeeMemberIndexerEventHandler(msg *nats.Msg) {
 		reverseMappingKey := "committee_member.uid." + event.ObjectID
 		entry, err := mappingsKV.Get(ctx, reverseMappingKey)
 		if err != nil {
-			logger.With(errKey, err, "member_uid", event.ObjectID, "subject", msg.Subject).
+			logger.With(errKey, err, "member_uid", event.ObjectID, "subject", subject).
 				WarnContext(ctx, "no reverse mapping for committee member UID, cannot sync to v1")
 			return
 		}
@@ -195,7 +190,7 @@ func committeeMemberIndexerEventHandler(msg *nats.Msg) {
 		reverseMappingKey := "committee_member.uid." + event.ObjectID
 		entry, err := mappingsKV.Get(ctx, reverseMappingKey)
 		if err != nil {
-			logger.With(errKey, err, "member_uid", event.ObjectID, "subject", msg.Subject).
+			logger.With(errKey, err, "member_uid", event.ObjectID, "subject", subject).
 				WarnContext(ctx, "no reverse mapping for committee member UID, cannot sync to v1")
 			return
 		}
@@ -223,7 +218,7 @@ func committeeMemberIndexerEventHandler(msg *nats.Msg) {
 		syncCommitteeMemberDeleteToV1(ctx, event.ObjectID, projectSFID, committeeSFID, apiMemberSFID, recordSFID)
 
 	default:
-		logger.With("action", event.Action, "subject", msg.Subject).
+		logger.With("action", event.Action, "subject", subject).
 			WarnContext(ctx, "unknown action in committee member indexing event, skipping")
 	}
 }
