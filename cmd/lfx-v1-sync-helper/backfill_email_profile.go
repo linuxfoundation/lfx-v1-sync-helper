@@ -32,8 +32,10 @@ package main
 //     full backfill run.
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -580,4 +582,71 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 
 	logger.With("username", username, "auth0_user_id", auth0UserID).Info("single-user sync complete")
 	return nil
+}
+
+// syncUsersFileResult holds summary counters for a batch --sync-users-file run.
+type syncUsersFileResult struct {
+	processed      int
+	succeeded      int
+	failed         int
+	emailsLinked   int
+	profilesSynced int
+}
+
+// syncUsersFromFile reads a newline-delimited file of usernames and runs
+// syncSingleUser for each one, reusing the same authenticated clients for the
+// entire batch. A 500ms delay between users avoids hammering Auth0/platform
+// APIs. Errors on individual users are logged but do not abort the batch.
+func syncUsersFromFile(ctx context.Context, path string, dryRun bool) (syncUsersFileResult, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return syncUsersFileResult{}, fmt.Errorf("opening users file: %w", err)
+	}
+	defer f.Close() //nolint:errcheck // Best-effort close on read-only file.
+
+	var usernames []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		usernames = append(usernames, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return syncUsersFileResult{}, fmt.Errorf("reading users file: %w", err)
+	}
+
+	logger.With("file", path, "users", len(usernames), "dry_run", dryRun).
+		Info("batch user sync starting")
+
+	var result syncUsersFileResult
+	for i, username := range usernames {
+		result.processed++
+
+		logger.With(
+			"username", username,
+			"index", i+1,
+			"total", len(usernames),
+			"dry_run", dryRun,
+		).Info("syncing user")
+
+		if err := syncSingleUser(ctx, username, dryRun); err != nil {
+			result.failed++
+			logger.With(
+				"error", err,
+				"username", username,
+				"index", i+1,
+			).Warn("user sync failed, continuing")
+		} else {
+			result.succeeded++
+		}
+
+		// Brief delay between users to avoid API rate limits.
+		if i < len(usernames)-1 {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+
+	return result, nil
 }
