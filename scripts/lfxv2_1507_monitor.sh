@@ -32,21 +32,28 @@ echo ""
 
 # Poll until job completes.
 while true; do
-    status=$(kubectl_cmd get job "$JOB_NAME" -o jsonpath='{.status.conditions[0].type}' 2>/dev/null || echo "")
-    active=$(kubectl_cmd get job "$JOB_NAME" -o jsonpath='{.status.active}' 2>/dev/null || echo "0")
+    # Single kubectl call: get job JSON, extract status + tail log in one
+    # aws-vault session to avoid repeated STS overhead.
+    job_json=$(kubectl_cmd get job "$JOB_NAME" -o json 2>/dev/null || echo "{}")
+    status=$(echo "$job_json" | python3 -c "
+import json, sys
+j = json.loads(sys.stdin.read())
+conds = j.get('status', {}).get('conditions', [])
+print(conds[0]['type'] if conds else '')
+" 2>/dev/null || echo "")
 
     if [ "$status" = "Complete" ] || [ "$status" = "Failed" ]; then
         break
     fi
 
-    # Show progress from log tail.
-    last_line=$(kubectl_cmd logs "job/$JOB_NAME" --tail=1 2>/dev/null || echo "")
-    if echo "$last_line" | grep -q '"index"'; then
-        index=$(echo "$last_line" | grep -o '"index":[0-9]*' | cut -d: -f2)
-        total=$(echo "$last_line" | grep -o '"total":[0-9]*' | cut -d: -f2)
+    # Show progress from the last "syncing user" log line.
+    progress_line=$(kubectl_cmd logs "job/$JOB_NAME" --tail=50 2>/dev/null | grep '"syncing user"' | tail -1 || echo "")
+    if [ -n "$progress_line" ]; then
+        index=$(echo "$progress_line" | grep -o '"index":[0-9]*' | cut -d: -f2)
+        total=$(echo "$progress_line" | grep -o '"total":[0-9]*' | cut -d: -f2)
         if [ -n "$index" ] && [ -n "$total" ]; then
             pct=$((index * 100 / total))
-            printf "\r  progress: %s/%s (%d%%)   " "$index" "$total" "$pct"
+            printf "  progress: %s/%s (%d%%)\n" "$index" "$total" "$pct"
         fi
     fi
 
