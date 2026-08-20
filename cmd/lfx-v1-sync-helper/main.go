@@ -66,7 +66,8 @@ func main() {
 	var doBackfillWorkspaces = flag.Bool("backfill-workspaces", false, "backfill legacy workspaces into v2 member-service, then exit")
 	var doBackfillCommitteeMemberMappings = flag.Bool("backfill-committee-member-mappings", false, "repair committee-member reverse mappings that store the record sfid instead of the contact SFID, then exit")
 	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
-	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-* and --sync-user)")
+	var syncUsersFile = flag.String("sync-users-file", "", "sync profile and alternate emails for each username listed in a file (one per line), then exit")
+	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-*, --sync-user, and --sync-users-file)")
 	var backfillLimit = flag.Int("limit", 1000, "maximum number of users to process per backfill run (applicable with --backfill-alternate-emails and --backfill-profiles)")
 
 	flag.Usage = func() {
@@ -77,13 +78,13 @@ func main() {
 
 	// Enforce mutual exclusion across all one-shot flags.
 	oneShotCount := 0
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doBackfillCommitteeMemberMappings} {
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *syncUsersFile != "", *doBackfillCommitteeMemberMappings} {
 		if b {
 			oneShotCount++
 		}
 	}
 	if oneShotCount > 1 {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, and --sync-user are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --sync-user, and --sync-users-file are mutually exclusive")
 		os.Exit(2)
 	}
 
@@ -318,6 +319,27 @@ func main() {
 		logger.With("username", *syncUser, "dry_run", *dryRun).Info("starting single-user sync")
 		if err := syncSingleUser(ctx, *syncUser, *dryRun); err != nil {
 			logger.With(errKey, err).Error("error during single-user sync")
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	// Handle --sync-users-file flag: batch sync from a file of usernames.
+	if *syncUsersFile != "" {
+		logger.With("file", *syncUsersFile, "dry_run", *dryRun).Info("starting batch user sync from file")
+		result, err := syncUsersFromFile(ctx, *syncUsersFile, *dryRun)
+		if err != nil {
+			logger.With(errKey, err).Error("error during batch user sync")
+			os.Exit(1)
+		}
+		logger.With(
+			"users_processed", result.processed,
+			"users_succeeded", result.succeeded,
+			"users_failed", result.failed,
+			"emails_linked", result.emailsLinked,
+			"profiles_synced", result.profilesSynced,
+		).Info("batch user sync completed")
+		if result.failed > 0 {
 			os.Exit(1)
 		}
 		os.Exit(0)
