@@ -497,9 +497,14 @@ func main() {
 	committeeEventsConsumerName := "v1-sync-helper-committee-events-consumer"
 
 	committeeEventsConsumer, err := jsContext.CreateOrUpdateConsumer(ctx, committeeEventsStreamName, jetstream.ConsumerConfig{
-		Name:          committeeEventsConsumerName,
-		Durable:       committeeEventsConsumerName,
-		DeliverPolicy: jetstream.DeliverAllPolicy,
+		Name:    committeeEventsConsumerName,
+		Durable: committeeEventsConsumerName,
+		// DeliverNewPolicy: only deliver messages published after this consumer is first created.
+		// The old QueueSubscribe only processed events after subscription; replaying stream history
+		// on first start would flood V1 with redundant updates. The durable name ensures the
+		// consumer resumes from its last ACKed position on restarts, so no events are dropped
+		// after the initial connection.
+		DeliverPolicy: jetstream.DeliverNewPolicy,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		FilterSubjects: []string{
 			"lfx.committee.>",

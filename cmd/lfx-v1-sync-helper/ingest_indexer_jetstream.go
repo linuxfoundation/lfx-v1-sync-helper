@@ -28,6 +28,9 @@ func committeeEventsIngestHandler(msg jetstream.Msg) {
 		logger.With("subject", subject).WarnContext(ctx, "committee-events consumer received unexpected subject, skipping")
 	}
 
+	// ACK after processing regardless of outcome. A transient ACK failure means
+	// JetStream will redeliver after AckWait; downstream sync operations must be
+	// idempotent to handle that case safely.
 	if err := msg.Ack(); err != nil {
 		logger.With(errKey, err, "subject", subject).ErrorContext(ctx, "failed to ACK committee-events message")
 	}
