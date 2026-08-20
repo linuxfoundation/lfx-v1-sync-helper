@@ -1,11 +1,13 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
+// The lfx-v1-sync-helper service.
 package main
 
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -17,7 +19,10 @@ func committeeEventsIngestHandler(msg jetstream.Msg) {
 	subject := msg.Subject()
 	data := msg.Data()
 
-	ctx := context.Background()
+	// Bound processing to 25 seconds — below the 30-second AckWait — so JetStream
+	// does not redeliver the message while a slow V1 API call is still in flight.
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
 
 	switch {
 	case strings.HasPrefix(subject, "lfx.committee_member."):
