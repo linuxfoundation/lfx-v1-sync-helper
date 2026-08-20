@@ -7,15 +7,20 @@
 -- types on the foundation or any project rolling up to it via the project
 -- spine:
 --
---   committee    — ANALYTICS.SILVER_DIM.SILVER_DIM_COMMITTEE_MEMBERS
---   meeting      — ANALYTICS.SILVER_FACT.SILVER_FACT_MEETING_ATTENDANCE
+--   committee    — ANALYTICS.SILVER_DIM.COMMITTEE_MEMBERS
+--                  (has user_name = LFID username, user_id = contact SFID)
+--   meeting      — ANALYTICS.SILVER_FACT.MEETING_ATTENDANCE
 --                  (all invitees, past and upcoming)
---   mailing_list — ANALYTICS.SILVER_FACT.SILVER_FACT_MAILING_LISTS
---                  (current subscribers; email-keyed, resolved to usernames
---                  via platform alternate_email__c rows)
---   key_contact  — ANALYTICS.SILVER_DIM._SILVER_DIM_CORPORATE_KEY_CONTACTS
---                  (contacts of currently-active member accounts; also
---                  email-keyed, resolved the same way)
+--   mailing_list — ANALYTICS.SILVER_FACT.MAILING_LISTS
+--                  (current subscribers; member_id is a CDP member UUID,
+--                  resolved to LFID username via MEMBER_USER_MAPPING
+--                  where mapping_type='lfid'; falls back to member_email
+--                  via platform alternate_email__c)
+--   key_contact  — ANALYTICS.SILVER_DIM._CORPORATE_KEY_CONTACTS
+--                  (contacts of currently-active member accounts; user_id
+--                  is a contact SFID, resolved to LFID username via
+--                  _SILVER_DIM_LFID_TO_USER_ID; falls back to user_email
+--                  via platform alternate_email__c)
 --
 -- Project scope is expanded with ANALYTICS.SILVER_DIM.PROJECT_SPINE: the
 -- foundation slugs themselves plus every base project whose spine maps it to
@@ -32,6 +37,7 @@
 --   snowsql --accountname JNMHVWD-XPB85243 --username DEV_ERIC \
 --     --warehouse VIEWER --rolename DATA_DEV --private-key-path rsa_key.p8 \
 --     -o friendly=false -o header=true -o timing=false \
+--     -o variable_substitution=true \
 --     -o output_format=csv -o output_file=wave_usernames.csv \
 --     -D SLUGS="slug1,slug2" \
 --     -f scripts/lfxv2_1507_affected_usernames.sql
@@ -106,7 +112,7 @@ committee_engagement AS (
         cm.user_id AS contact_sfid,
         'committee' AS engagement,
         sp.foundation_slug
-    FROM analytics.silver_dim.silver_dim_committee_members cm
+    FROM analytics.silver_dim.committee_members cm
     INNER JOIN scoped_projects sp
         ON cm.project_id = sp.project_id
     WHERE cm.user_name IS NOT NULL
@@ -118,38 +124,55 @@ meeting_engagement AS (
         ma.invitee_lf_user_id AS contact_sfid,
         'meeting' AS engagement,
         sp.foundation_slug
-    FROM analytics.silver_fact.silver_fact_meeting_attendance ma
+    FROM analytics.silver_fact.meeting_attendance ma
     INNER JOIN scoped_projects sp
         ON ma.project_id = sp.project_id
     WHERE ma.invitee_lf_sso IS NOT NULL
 ),
 
+-- Mailing list: member_id is a CDP member UUID. Resolve to LFID username
+-- via member_user_mapping (mapping_type='lfid'), falling back to
+-- member_email via platform alternate_email__c.
 mailing_list_engagement AS (
     SELECT DISTINCT
-        LOWER(pe.platform_username) AS platform_username,
-        pe.contact_sfid,
+        LOWER(COALESCE(mum.user_name, pe.platform_username)) AS platform_username,
+        COALESCE(lfid.user_id, pe.contact_sfid) AS contact_sfid,
         'mailing_list' AS engagement,
         sp.foundation_slug
-    FROM analytics.silver_fact.silver_fact_mailing_lists ml
+    FROM analytics.silver_fact.mailing_lists ml
     INNER JOIN scoped_projects sp
         ON ml.project_id = sp.project_id
-    INNER JOIN platform_emails pe
+    LEFT JOIN analytics.silver_dim.member_user_mapping mum
+        ON ml.member_id = mum.member_id
+        AND mum.mapping_type = 'lfid'
+    LEFT JOIN analytics.silver_dim._silver_dim_lfid_to_user_id lfid
+        ON LOWER(mum.user_name) = LOWER(lfid.lf_user_name)
+    LEFT JOIN platform_emails pe
         ON LOWER(ml.member_email) = pe.email
-    WHERE ml.is_subscribed_current = TRUE
+    WHERE
+        ml.is_subscribed_current = TRUE
+        AND COALESCE(mum.user_name, pe.platform_username) IS NOT NULL
 ),
 
+-- Key contacts: user_id is a contact SFID. Resolve to LFID username via
+-- _silver_dim_lfid_to_user_id, falling back to user_email via platform
+-- alternate_email__c.
 key_contact_engagement AS (
     SELECT DISTINCT
-        LOWER(pe.platform_username) AS platform_username,
-        pe.contact_sfid,
+        LOWER(COALESCE(lfid.lf_user_name, pe.platform_username)) AS platform_username,
+        kc.user_id AS contact_sfid,
         'key_contact' AS engagement,
         sp.foundation_slug
-    FROM analytics.silver_dim._silver_dim_corporate_key_contacts kc
+    FROM analytics.silver_dim._corporate_key_contacts kc
     INNER JOIN scoped_projects sp
         ON kc.project_id = sp.project_id
-    INNER JOIN platform_emails pe
+    LEFT JOIN analytics.silver_dim._silver_dim_lfid_to_user_id lfid
+        ON kc.user_id = lfid.user_id
+    LEFT JOIN platform_emails pe
         ON LOWER(kc.user_email) = pe.email
-    WHERE kc.is_currently_active = TRUE
+    WHERE
+        kc.is_currently_active = TRUE
+        AND COALESCE(lfid.lf_user_name, pe.platform_username) IS NOT NULL
 ),
 
 all_engagement AS (

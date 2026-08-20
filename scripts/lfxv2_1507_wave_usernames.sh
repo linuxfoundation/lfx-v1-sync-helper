@@ -41,6 +41,7 @@ rm -f "$OUT"
 snowsql --accountname JNMHVWD-XPB85243 --username DEV_ERIC \
   --warehouse VIEWER --rolename DATA_DEV --private-key-path rsa_key.p8 \
   -o friendly=false -o header=true -o timing=false \
+  -o variable_substitution=true \
   -o output_format=csv -o output_file="$OUT" \
   -D SLUGS="$SLUGS" \
   -f "$(dirname "$0")/lfxv2_1507_affected_usernames.sql"
@@ -52,8 +53,9 @@ if [ -f resolved.csv ]; then
   "$(dirname "$0")/lfxv2_1507_categorize.sh" "$OUT" resolved.csv \
     > "lfxv2_1507_wave${WAVE}_categorized.csv"
   echo "wrote lfxv2_1507_wave${WAVE}_categorized.csv"
-  # Quick summary of the flag column.
-  cut -d, -f5 "lfxv2_1507_wave${WAVE}_categorized.csv" | tail -n +2 | sort | uniq -c
+  # Quick summary of the flag column (last field; can't use cut because
+  # earlier CSV fields contain quoted commas).
+  awk -F, '{print $NF}' "lfxv2_1507_wave${WAVE}_categorized.csv" | tail -n +2 | sort | uniq -c
 else
   echo "resolved.csv not found; skipping LFXV2-2662 categorization" >&2
 fi
