@@ -107,5 +107,6 @@ aws-vault exec lfx-prod -s -- kubectl --context="$CONTEXT" -n "$NAMESPACE" \
     create configmap "$CONFIGMAP" --from-file=usernames.txt="$CLEAN_TXT"
 
 echo "created ConfigMap $CONFIGMAP in $NAMESPACE ($deduped_count usernames, ${size} bytes)"
-echo "apply the batch Job with:"
-echo "  aws-vault exec lfx-prod -s -- kubectl --context=$CONTEXT -n $NAMESPACE apply -f manifests/sync-users-batch-prod.yaml"
+echo ""
+echo "next:"
+echo "  scripts/lfxv2_1507_run_batch.sh"

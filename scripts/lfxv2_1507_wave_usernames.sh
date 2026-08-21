@@ -56,6 +56,9 @@ if [ -f resolved.csv ]; then
   # Quick summary of the flag column (last field; can't use cut because
   # earlier CSV fields contain quoted commas).
   awk -F, '{print $NF}' "lfxv2_1507_wave${WAVE}_categorized.csv" | tail -n +2 | sort | uniq -c
+  echo ""
+  echo "next:"
+  echo "  scripts/lfxv2_1507_deploy_wave.sh $WAVE"
 else
   echo "resolved.csv not found; skipping LFXV2-2662 categorization" >&2
 fi

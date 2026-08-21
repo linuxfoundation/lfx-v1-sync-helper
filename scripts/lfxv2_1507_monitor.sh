@@ -32,28 +32,26 @@ echo ""
 
 # Poll until job completes.
 while true; do
-    # Single kubectl call: get job JSON, extract status + tail log in one
-    # aws-vault session to avoid repeated STS overhead.
-    job_json=$(kubectl_cmd get job "$JOB_NAME" -o json 2>/dev/null || echo "{}")
-    status=$(echo "$job_json" | python3 -c "
-import json, sys
-j = json.loads(sys.stdin.read())
-s = j.get('status', {})
-# Check all conditions, not just the first — Kubernetes may add
-# FailureTarget before Failed.
-for c in s.get('conditions', []):
-    if c.get('type') in ('Complete', 'Failed') and c.get('status') == 'True':
-        print(c['type'])
-        sys.exit()
-# Fallback: if succeeded or failed counts are set but no matching
-# condition yet (brief race window).
-if s.get('succeeded', 0) and s.get('succeeded') > 0:
-    print('Complete')
-elif s.get('failed', 0) and s.get('failed') > 0 and not s.get('active'):
-    print('Failed')
-else:
-    print('')
-" 2>/dev/null || echo "")
+    # Check job completion via jsonpath on conditions. Kubernetes jobs set
+    # condition type=Complete or type=Failed with status=True.
+    status=""
+    conditions=$(kubectl_cmd get job "$JOB_NAME" -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}' 2>/dev/null || echo "")
+    case "$conditions" in
+        *"Complete=True"*) status="Complete" ;;
+        *"Failed=True"*)   status="Failed" ;;
+    esac
+
+    # Fallback: check succeeded/failed counts if conditions aren't set yet.
+    if [ -z "$status" ]; then
+        succeeded=$(kubectl_cmd get job "$JOB_NAME" -o jsonpath='{.status.succeeded}' 2>/dev/null || echo "")
+        failed=$(kubectl_cmd get job "$JOB_NAME" -o jsonpath='{.status.failed}' 2>/dev/null || echo "")
+        active=$(kubectl_cmd get job "$JOB_NAME" -o jsonpath='{.status.active}' 2>/dev/null || echo "")
+        if [ "$succeeded" = "1" ]; then
+            status="Complete"
+        elif [ "$failed" = "1" ] && [ "$active" != "1" ]; then
+            status="Failed"
+        fi
+    fi
 
     if [ "$status" = "Complete" ] || [ "$status" = "Failed" ]; then
         break
