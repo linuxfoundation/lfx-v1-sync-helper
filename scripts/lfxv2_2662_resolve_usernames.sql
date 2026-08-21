@@ -36,6 +36,15 @@
 --                            safe. Empty: LDAP proxy delete if the other
 --                            account is Identity-only, or defer to a support
 --                            merge if it has an Auth0 row.
+--   flagged_email_other_contact_sfid — merged_user contact SFID of a DIFFERENT
+--                            contact that owns an alternate_email__c row with
+--                            the flagged primary email. Catches stub contacts
+--                            without usernames that may need merging.
+--   meeting_count_other_sfid — distinct current/upcoming non-cancelled meeting
+--                            occurrences registered under the OTHER contact
+--                            SFID (protection: merging/deleting a stub contact
+--                            with registrations may change ICS calendar
+--                            destinations)
 --
 -- Run with:
 --   rm -f resolved_usernames.csv && \
@@ -173,6 +182,42 @@ meeting_counts AS (
     GROUP BY pu.platform_username
 ),
 
+-- Conflict check 3: does the flagged primary email appear on an
+-- alternate_email__c row of a DIFFERENT merged_user contact? Catches stub
+-- contacts without usernames that the Auth0/LDAP checks cannot see; these
+-- may need a contact merge on the Platform side.
+flagged_email_other_contacts AS (
+    SELECT
+        pu.platform_username,
+        MAX(mu_other.sfid) AS flagged_email_other_contact_sfid
+    FROM per_user pu
+    INNER JOIN fivetran_ingest.sfdc_connector_prod_salesforce.alternate_email__c ae_other
+        ON LOWER(ae_other.alternate_email_address__c) = LOWER(pu.flagged_primary_email)
+    INNER JOIN fivetran_ingest.sfdc_connector_prod_salesforce.merged_user mu_other
+        ON mu_other.sfid = ae_other.leadorcontactid
+    WHERE
+        ae_other._fivetran_deleted = FALSE
+        AND mu_other._fivetran_deleted = FALSE
+        AND mu_other.sfid != pu.contact_sfid
+    GROUP BY pu.platform_username
+),
+
+-- Meeting participation registered under the OTHER contact SFID: protection
+-- signal — merging or deleting a stub contact with current/upcoming
+-- registrations may change ICS calendar destinations.
+meeting_counts_other AS (
+    SELECT
+        oc.platform_username,
+        COUNT(DISTINCT mr.meeting_and_occurrence_id) AS meeting_count_other_sfid
+    FROM flagged_email_other_contacts oc
+    INNER JOIN analytics.silver_fact.meeting_registrant mr
+        ON mr.user_id = oc.flagged_email_other_contact_sfid
+    WHERE
+        mr.is_past = FALSE
+        AND mr.is_cancelled = FALSE
+    GROUP BY oc.platform_username
+),
+
 -- Thought Industries (Training LMS) presence, matched on lowercased
 -- externalcustomerid. Deduplicated to latest activity per username.
 ti_users AS (
@@ -200,7 +245,9 @@ SELECT
     lc.flagged_email_other_ldap_uid,
     COALESCE(m.meeting_count, 0) AS meeting_count,
     ti_self.ti_id AS ti_id,
-    ti_other.ti_id AS flagged_email_other_ti_id
+    ti_other.ti_id AS flagged_email_other_ti_id,
+    oc.flagged_email_other_contact_sfid,
+    COALESCE(mo.meeting_count_other_sfid, 0) AS meeting_count_other_sfid
 FROM per_user pu
 LEFT JOIN flagged_email_conflicts c
     ON pu.platform_username = c.platform_username
@@ -215,5 +262,9 @@ LEFT JOIN ti_users ti_other
         lc.flagged_email_other_ldap_uid,
         c.flagged_email_other_auth0_username
     ))
+LEFT JOIN flagged_email_other_contacts oc
+    ON pu.platform_username = oc.platform_username
+LEFT JOIN meeting_counts_other mo
+    ON pu.platform_username = mo.platform_username
 ORDER BY pu.platform_username
 ;

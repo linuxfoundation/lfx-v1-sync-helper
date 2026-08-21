@@ -20,7 +20,7 @@ literal `&USERNAMES` causes a SQL compilation error.
 
 | File | Purpose |
 |------|---------|
-| `lfxv2_2662_resolve_usernames.sql` | Snowflake → CSV: takes comma-separated usernames, outputs all columns any apply script needs (platform_username, contact_sfid, auth0_id, auth0_email, ldap_email, flagged_primary_email, flagged_email_sfid, matching_email_sfid, flagged_email_other_auth0_id, flagged_email_other_ldap_uid, meeting_count, ti_id, flagged_email_other_ti_id) |
+| `lfxv2_2662_resolve_usernames.sql` | Snowflake → CSV: takes comma-separated usernames, outputs all columns any apply script needs (platform_username, contact_sfid, auth0_id, auth0_email, ldap_email, flagged_primary_email, flagged_email_sfid, matching_email_sfid, flagged_email_other_auth0_id, flagged_email_other_ldap_uid, meeting_count, ti_id, flagged_email_other_ti_id, flagged_email_other_contact_sfid, meeting_count_other_sfid) |
 
 ## Workflow
 
