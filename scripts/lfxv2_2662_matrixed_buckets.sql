@@ -352,7 +352,7 @@ SELECT
     alignment_status,
     drilldown,
     COUNT(*) AS user_count,
-    LISTAGG(CASE WHEN rn <= 90 THEN platform_username END, ',') WITHIN GROUP (ORDER BY rn) AS samples
+    LISTAGG(CASE WHEN rn <= 650 THEN platform_username END, ',') WITHIN GROUP (ORDER BY rn) AS samples
 FROM ranked
 GROUP BY alignment_status, drilldown
 ORDER BY alignment_status, user_count DESC
