@@ -182,17 +182,20 @@ meeting_counts AS (
     GROUP BY pu.platform_username
 ),
 
--- Conflict check 3: does the flagged primary email appear on an
--- alternate_email__c row of a DIFFERENT merged_user contact? Catches stub
--- contacts without usernames that the Auth0/LDAP checks cannot see; these
--- may need a contact merge on the Platform side.
+-- Conflict check 3: does the flagged primary email OR the Auth0 email
+-- appear on an alternate_email__c row of a DIFFERENT merged_user contact?
+-- Catches stub contacts without usernames that the Auth0/LDAP checks cannot
+-- see (typically the Auth0 email living on a username-less stub contact);
+-- these may need a contact merge on the Platform side.
 flagged_email_other_contacts AS (
     SELECT
         pu.platform_username,
         MAX(mu_other.sfid) AS flagged_email_other_contact_sfid
     FROM per_user pu
     INNER JOIN fivetran_ingest.sfdc_connector_prod_salesforce.alternate_email__c ae_other
-        ON LOWER(ae_other.alternate_email_address__c) = LOWER(pu.flagged_primary_email)
+        ON LOWER(ae_other.alternate_email_address__c) IN (
+            LOWER(pu.flagged_primary_email), LOWER(pu.auth0_email)
+        )
     INNER JOIN fivetran_ingest.sfdc_connector_prod_salesforce.merged_user mu_other
         ON mu_other.sfid = ae_other.leadorcontactid
     WHERE
