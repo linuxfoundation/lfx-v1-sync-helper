@@ -71,6 +71,7 @@ plugins:
         tables:
           - itx-poll
           - itx-poll-vote
+          - itx-poll-results
           - itx-surveys
           - itx-survey-responses
           - surveymonkey-surveys
@@ -99,6 +100,8 @@ plugins:
           itx-poll:
             replication-key: last_modified_time
           itx-poll-vote:
+            replication-key: last_modified_time
+          itx-poll-results:
             replication-key: last_modified_time
           itx-surveys:
             replication-key: last_modified_at

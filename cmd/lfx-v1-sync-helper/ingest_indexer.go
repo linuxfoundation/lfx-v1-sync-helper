@@ -266,6 +266,9 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 	if chatChannel, ok := data["chat_channel"].(string); ok {
 		payload.ChatChannel = chatChannel
 	}
+	if ssoGroupName, ok := data["sso_group_name"].(string); ok && ssoGroupName != "" {
+		payload.SSOGroupName = ssoGroupName
+	}
 
 	log.With("payload_category", payload.Category).InfoContext(ctx, "creating committee in v1")
 
@@ -316,6 +319,9 @@ func syncCommitteeUpdateToV1(ctx context.Context, committeeUID, projectSFID, com
 	}
 	if chatChannel, ok := data["chat_channel"].(string); ok {
 		payload.ChatChannel = chatChannel
+	}
+	if ssoGroupName, ok := data["sso_group_name"].(string); ok && ssoGroupName != "" {
+		payload.SSOGroupName = ssoGroupName
 	}
 
 	if err := updateV1Committee(ctx, projectSFID, committeeSFID, payload); err != nil {
@@ -656,7 +662,7 @@ func mapV2CategoryToV1(category string) string {
 	case "Ambassador", "Board", "Code of Conduct", "Committers", "Expert Group",
 		"Finance Committee", "Government Advisory Council", "Legal Committee", "Maintainers",
 		"Marketing Committee/Sub Committee", "Marketing Mailing List",
-		"Marketing Oversight Committee/Marketing Advisory Committee", "Other",
+		"Marketing Oversight Committee/Marketing Advisory Committee", "Newsletter", "Other",
 		"Product Security", "Special Interest Group", "Technical Mailing List",
 		"Technical Steering Committee", "Working Group":
 		return category
