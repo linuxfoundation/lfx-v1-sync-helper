@@ -42,4 +42,4 @@ aws-vault exec lfx-prod -s -- kubectl --context="$CONTEXT" -n "$NAMESPACE" \
 
 echo ""
 echo "monitor with:"
-echo "  scripts/lfxv2_1507_monitor.sh"
+echo "  scripts/lfxv2_1507_monitor.sh --save-log"
