@@ -38,8 +38,21 @@ while true; do
     status=$(echo "$job_json" | python3 -c "
 import json, sys
 j = json.loads(sys.stdin.read())
-conds = j.get('status', {}).get('conditions', [])
-print(conds[0]['type'] if conds else '')
+s = j.get('status', {})
+# Check all conditions, not just the first — Kubernetes may add
+# FailureTarget before Failed.
+for c in s.get('conditions', []):
+    if c.get('type') in ('Complete', 'Failed') and c.get('status') == 'True':
+        print(c['type'])
+        sys.exit()
+# Fallback: if succeeded or failed counts are set but no matching
+# condition yet (brief race window).
+if s.get('succeeded', 0) and s.get('succeeded') > 0:
+    print('Complete')
+elif s.get('failed', 0) and s.get('failed') > 0 and not s.get('active'):
+    print('Failed')
+else:
+    print('')
 " 2>/dev/null || echo "")
 
     if [ "$status" = "Complete" ] || [ "$status" = "Failed" ]; then

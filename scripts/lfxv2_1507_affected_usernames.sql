@@ -108,7 +108,7 @@ platform_usernames AS (
 
 committee_engagement AS (
     SELECT DISTINCT
-        LOWER(cm.user_name) AS platform_username,
+        cm.user_name AS platform_username,
         cm.user_id AS contact_sfid,
         'committee' AS engagement,
         sp.foundation_slug
@@ -120,7 +120,7 @@ committee_engagement AS (
 
 meeting_engagement AS (
     SELECT DISTINCT
-        LOWER(ma.invitee_lf_sso) AS platform_username,
+        ma.invitee_lf_sso AS platform_username,
         ma.invitee_lf_user_id AS contact_sfid,
         'meeting' AS engagement,
         sp.foundation_slug
@@ -135,7 +135,7 @@ meeting_engagement AS (
 -- member_email via platform alternate_email__c.
 mailing_list_engagement AS (
     SELECT DISTINCT
-        LOWER(COALESCE(mum.user_name, pe.platform_username)) AS platform_username,
+        COALESCE(mum.user_name, pe.platform_username) AS platform_username,
         COALESCE(lfid.user_id, pe.contact_sfid) AS contact_sfid,
         'mailing_list' AS engagement,
         sp.foundation_slug
@@ -159,7 +159,7 @@ mailing_list_engagement AS (
 -- alternate_email__c.
 key_contact_engagement AS (
     SELECT DISTINCT
-        LOWER(COALESCE(lfid.lf_user_name, pe.platform_username)) AS platform_username,
+        COALESCE(lfid.lf_user_name, pe.platform_username) AS platform_username,
         kc.user_id AS contact_sfid,
         'key_contact' AS engagement,
         sp.foundation_slug
@@ -186,7 +186,9 @@ all_engagement AS (
 )
 
 SELECT
-    e.platform_username,
+    -- Pick original-case username; prefer the shortest (most canonical) form
+    -- when multiple casings exist across engagement sources.
+    MIN(e.platform_username) AS platform_username,
     COALESCE(MAX(e.contact_sfid), MAX(pu.contact_sfid)) AS contact_sfid,
     LISTAGG(DISTINCT e.engagement, ',') WITHIN GROUP (ORDER BY e.engagement)
         AS engagements,
@@ -194,7 +196,7 @@ SELECT
         WITHIN GROUP (ORDER BY e.foundation_slug) AS foundations
 FROM all_engagement e
 LEFT JOIN platform_usernames pu
-    ON e.platform_username = pu.platform_username_lower
-GROUP BY e.platform_username
-ORDER BY e.platform_username
+    ON LOWER(e.platform_username) = pu.platform_username_lower
+GROUP BY LOWER(e.platform_username)
+ORDER BY LOWER(e.platform_username)
 ;
