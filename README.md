@@ -76,7 +76,7 @@ Payload: <mapping_key>
 The following table shows the supported mapping key patterns and their expected response formats:
 
 | Direction | Lookup Key Pattern | Example Key | Response Format | Description |
-|-----------|-------------------|-------------|-----------------|-------------|
+| ----------- | ------------------- | ------------- | ----------------- | ------------- |
 | **Projects** |
 | v1→v2 | `project.sfid.{v1_sfid}` | `project.sfid.a0941000002wBjEAAU` | `{v2_uuid}` | Project SFID to UUID |
 | v2→v1 | `project.uid.{v2_uuid}` | `project.uid.123e4567-e89b-12d3-a456-426614174000` | `{v1_sfid}` | Project UUID to SFID |
@@ -352,9 +352,23 @@ sequenceDiagram
 
 ### LFX One to v1 bidirectional sync
 
-Implemented for **projects**, **committees**, and **committee members**. The v1-sync-helper subscribes to indexer domain events (`lfx.project.*`, `lfx.committee.*`, `lfx.committee_member.*`) published after every successful OpenSearch write and mirrors the change to the v1 API — projects via the Project Service v1 API (`/project-service/v1/projects`), committees and members via the Project Service v2 API.
+Implemented for **projects**, **committees**, **committee members**, and **project staff**. The v1-sync-helper subscribes to indexer domain events (`lfx.project.*`, `lfx.committee.*`, `lfx.committee_member.*`) published after every successful OpenSearch write and mirrors the change to the v1 API — projects via the Project Service v1 API (`/project-service/v1/projects`), committees and members via the Project Service v2 API. Project staff uses a separate projects-api event subscription; see below.
 
 Loop detection: if a non-tombstoned reverse mapping already exists for the v2 object, the event originated from v1 and the create is skipped to prevent duplicate v1 records. On the update and delete paths the loop is broken on the v1 side by `shouldSkipSync`, which detects v1 records whose `lastmodifiedbyid` matches the v1-sync-helper's own Auth0 client ID.
+
+#### Project staff sync (GH-1802)
+
+When `V2_TO_V1_PROJECT_STAFF_SYNC_ENABLED=true`, the service also subscribes to `lfx.projects-api.project_settings.updated` (published by project-service on every settings write, with before/after snapshots) and pushes `executive_director` / `program_manager` changes back to the v1 platform via `PATCH {LFX_API_GW}project-service/v1/projects/{sfid}` — the same v1 contract PCC's own staff edit dialog uses, including `"None"` to clear an assignment.
+
+Staff-field direction coverage:
+
+| Field | v1→v2 | v2→v1 | Notes |
+| --- | --- | --- | --- |
+| `executive_director` | ✅ | ✅ | Resolves through B2C `merged_user` by username, then email |
+| `program_manager` | ✅ | ✅ | Resolves through B2C `merged_user` by username, then email |
+| `opportunity_owner` | ✅ | ❌ | SFDC-owned; resolves through the B2B user store; one-way only |
+
+Echo/loop guards: the v1 write is attributed to this service's Auth0 M2M principal (`lastmodifiedbyid = "{AUTH0_CLIENT_ID}@clients"`), which `shouldSkipSync` already skips when the change replicates back through WAL → `v1-objects` KV; events whose actor is this service's own Heimdall principal (`{HEIMDALL_CLIENT_ID}@clients`, i.e. our own v1→v2 sync writes) are skipped on receipt; and before writing, the event's staff values are compared against the current `v1-objects` record so PCC-originated edits no-op.
 
 ```mermaid
 sequenceDiagram
