@@ -39,6 +39,7 @@ WITH platform_alt_emails AS (
         platform_emails.alternate_email_address__c AS email,
         platform_emails.primary_email__c AS is_primary,
         platform_emails.email_verified__c AS is_verified,
+        platform_emails.active__c AS is_active,
         platform_emails.lastmodifieddate AS platform_email_lastmod
     FROM fivetran_ingest.sfdc_connector_prod_salesforce.merged_user platform_users
     INNER JOIN fivetran_ingest.sfdc_connector_prod_salesforce.alternate_email__c platform_emails
@@ -120,6 +121,7 @@ platform_rows_with_matches AS (
         platform_alt_emails.email,
         platform_alt_emails.is_primary,
         platform_alt_emails.is_verified,
+        platform_alt_emails.is_active,
         platform_alt_emails.platform_email_lastmod,
         (LOWER(platform_alt_emails.email) = LOWER(auth0_primary.auth0_primary_email)) AS matches_auth0,
         (LOWER(platform_alt_emails.email) = LOWER(ldap_primary.ldap_primary_email)) AS matches_ldap
@@ -141,6 +143,8 @@ platform_primary_candidates AS (
         MAX(CASE WHEN matches_auth0 AND matches_ldap THEN email END) AS matched_both_email,
         BOOLOR_AGG(CASE WHEN is_primary THEN COALESCE(is_verified, FALSE) ELSE FALSE END) AS flagged_primary_verified,
         MAX(CASE WHEN NOT is_primary THEN COALESCE(is_verified, FALSE) END) AS lone_verified,
+        BOOLOR_AGG(CASE WHEN is_primary THEN COALESCE(is_active, FALSE) ELSE FALSE END) AS flagged_primary_active,
+        MAX(CASE WHEN NOT is_primary THEN COALESCE(is_active, FALSE) END) AS lone_active,
         MAX(CASE WHEN is_primary THEN platform_email_lastmod END) AS flagged_primary_lastmod,
         MAX(CASE WHEN NOT is_primary THEN platform_email_lastmod END) AS lone_lastmod
     FROM platform_rows_with_matches
@@ -163,6 +167,11 @@ platform_primary AS (
             WHEN primary_row_count = 0 AND total_rows = 1 THEN COALESCE(lone_verified, FALSE)
             ELSE NULL
         END AS platform_primary_verified,
+        CASE
+            WHEN primary_row_count = 1 THEN flagged_primary_active
+            WHEN primary_row_count = 0 AND total_rows = 1 THEN COALESCE(lone_active, FALSE)
+            ELSE NULL
+        END AS platform_primary_active,
         CASE
             WHEN primary_row_count = 1 THEN flagged_primary_lastmod
             WHEN primary_row_count = 0 AND total_rows = 1 THEN lone_lastmod
@@ -238,6 +247,7 @@ joined AS (
             ))
         ) AS gdpr_marker,
         platform_primary.platform_primary_verified,
+        platform_primary.platform_primary_active,
         -- For OUT_OF_SYNC_WITH_BOTH: compare platform primary lastmod vs
         -- LDAP modifyTimestamp to decide direction.
         CASE
@@ -321,6 +331,10 @@ joined_with_drilldown AS (
                     'PLATFORM_OUT_OF_SYNC_WITH_AUTH0'
                 ) THEN IFF(COALESCE(platform_primary_verified, FALSE), 'PLATFORM_VERIFIED', 'PLATFORM_UNVERIFIED')
             END,
+            -- Inactive primary: the resolved platform primary row is marked
+            -- active__c=false while other (active) rows exist unflagged. An
+            -- orthogonal defect: flag it in every bucket, ALIGNED included.
+            IFF(NOT COALESCE(platform_primary_active, TRUE), 'INACTIVE_PRIMARY', NULL),
             -- Timestamp direction: only relevant where Auth0 and LDAP
             -- disagree with each other.
             CASE
