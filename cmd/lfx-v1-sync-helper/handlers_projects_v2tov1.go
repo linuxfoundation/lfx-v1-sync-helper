@@ -15,10 +15,19 @@ package main
 //
 // Loop safety: the v1 write sets lastmodifiedbyid to this service's Auth0 M2M
 // principal, so when the change replicates back (WAL -> v1-objects KV),
-// shouldSkipSync skips re-processing. The defensive origin skip below also
-// drops events whose actor is our own Heimdall principal (our v1->v2 sync
-// writes), and the compare-before-write against the current v1 record makes
-// PCC-originated edits a no-op here.
+// shouldSkipSync skips re-processing. The primary guard against echoing a
+// PCC-originated edit is the compare-before-write against the current v1
+// record: our v1->v2 write is downstream of the v1-objects update that
+// triggered it, so the record we read back already carries the new values and
+// the event no-ops. The Heimdall origin skip below only catches the subset of
+// v1->v2 writes that fall back to the service account (empty/platform/unknown
+// Salesforce principals) — v1->v2 normally impersonates the real v1 user, so
+// the event actor is that user's LFID, not our machine principal.
+//
+// Only the staff fields that actually changed in the event are sent to v1. The
+// v1 project PATCH is partial (PCC's other project dialogs send disjoint field
+// subsets), so re-sending an unchanged field would risk clobbering a newer v1
+// value with the possibly-stale v1-objects replica.
 
 import (
 	"bytes"
@@ -130,10 +139,12 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 		return
 	}
 
-	// Defensive origin skip (AC-3): writes made by this service's own v1->v2
-	// sync carry our Heimdall machine principal as the event actor. Other M2M
-	// writes (e.g. a manual API correction) MUST still sync — only our own
-	// client ID is skipped.
+	// Defensive origin skip (AC-3): our own v1->v2 writes carry the Heimdall
+	// machine principal as the event actor only when they fall back to the
+	// service account (empty/platform/unknown-Salesforce principal) — the
+	// impersonating path puts the real v1 user's LFID here instead, which is why
+	// the compare-before-write below is the primary echo guard. Other M2M writes
+	// (e.g. a manual API correction) MUST still sync: only our client ID skips.
 	if event.Actor.Username == cfg.HeimdallClientID+"@clients" {
 		log.DebugContext(ctx, "skipping settings event from our own v1-to-v2 sync")
 		return
@@ -152,24 +163,6 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 	}
 	log = log.With("sfid", sfid)
 
-	// Resolve each changed staff value to a v1 contact SFID. Cleared (nil) or
-	// unresolvable users map to the clear literal, matching the PCC contract.
-	targetED, targetPM := "", ""
-	if edChanged {
-		targetED, err = resolveV1StaffSFID(ctx, log, event.NewSettings.ExecutiveDirector, "executive_director")
-		if err != nil {
-			log.With(errKey, err).ErrorContext(ctx, "failed to resolve executive director v1 contact")
-			return
-		}
-	}
-	if pmChanged {
-		targetPM, err = resolveV1StaffSFID(ctx, log, event.NewSettings.ProgramManager, "program_manager")
-		if err != nil {
-			log.With(errKey, err).ErrorContext(ctx, "failed to resolve program manager v1 contact")
-			return
-		}
-	}
-
 	// Compare against current v1 state (AC-4): a PCC-originated edit already
 	// has the new values in v1, making this bridge write a no-op.
 	v1Staff, err := getV1ProjectStaffSFIDs(ctx, sfid)
@@ -181,23 +174,52 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 		log.WarnContext(ctx, "no live v1 project record in v1-objects, skipping staff sync")
 		return
 	}
-	currentED := v1Staff["executive_director__c"]
-	currentPM := v1Staff["program_manager__c"]
 
-	// The v1 API staff contract used by PCC always carries both fields; an
-	// unchanged field is re-sent at its current v1 value ("None" when empty).
-	if !edChanged {
-		targetED = staffValueOrNone(currentED)
+	// Build a partial payload carrying only the fields that changed in v2 and
+	// still differ from v1. Unchanged fields are omitted rather than re-sent at
+	// their v1-objects value: that replica lags v1 by the WAL pipeline, so
+	// echoing it back could revert a newer v1 assignment (e.g. the second of two
+	// single-role edits made from the LFXSS staff dialog inside the lag window).
+	staffFields := []struct {
+		changed    bool
+		v1Field    string
+		payloadKey string
+		name       string
+		info       *events.UserInfo
+	}{
+		{edChanged, "executive_director__c", "ExecutiveDirectorID", "executive_director", event.NewSettings.ExecutiveDirector},
+		{pmChanged, "program_manager__c", "ProgramManagerID", "program_manager", event.NewSettings.ProgramManager},
 	}
-	if !pmChanged {
-		targetPM = staffValueOrNone(currentPM)
+
+	payload := make(map[string]string, len(staffFields))
+	for _, field := range staffFields {
+		if !field.changed {
+			continue
+		}
+		target, resolveErr := resolveV1StaffSFID(ctx, log, field.info, field.name)
+		if resolveErr != nil {
+			log.With(errKey, resolveErr, "field", field.name).ErrorContext(ctx, "failed to resolve staff v1 contact")
+			return
+		}
+		if target == "" {
+			// Assigned in v2 but unresolvable in v1 (e.g. an LFXSS manual entry
+			// whose email has no v1 merged_user). Leave the v1 field as-is:
+			// clearing it would silently drop the PCC assignment.
+			continue
+		}
+		if target == staffValueOrNone(v1Staff[field.v1Field]) {
+			log.With("field", field.name).DebugContext(ctx, "staff field already matches v1 state, omitting from v1 write")
+			continue
+		}
+		payload[field.payloadKey] = target
 	}
-	if targetED == staffValueOrNone(currentED) && targetPM == staffValueOrNone(currentPM) {
+
+	if len(payload) == 0 {
 		log.DebugContext(ctx, "no staff diff vs v1 state, skipping v1 write")
 		return
 	}
 
-	if err := patchV1ProjectStaff(ctx, sfid, targetED, targetPM); err != nil {
+	if err := patchV1ProjectStaff(ctx, sfid, payload); err != nil {
 		if errors.Is(err, errV1ProjectNotFound) {
 			log.WarnContext(ctx, "project has no Salesforce-backed v1 record (platform-native), skipping staff sync")
 			return
@@ -206,8 +228,7 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 		return
 	}
 
-	log.With("executive_director_id", targetED, "program_manager_id", targetPM).
-		InfoContext(ctx, "synced v2 project staff to v1")
+	log.With("fields", payload).InfoContext(ctx, "synced v2 project staff to v1")
 }
 
 // staffUserInfosEqual compares event staff snapshots by identity fields
@@ -233,11 +254,18 @@ func staffValueOrNone(v string) string {
 }
 
 // resolveV1StaffSFID resolves a v2 staff UserInfo to a v1 contact SFID for the
-// project-service PATCH. Cleared (nil) users map to the clear literal; users
-// that cannot be resolved via username or email also map to the clear literal
-// (v1 has no contact to point at). Resolution failures (DB errors) are
-// returned as errors so the event is aborted rather than clearing v1 state on
-// a transient read failure.
+// project-service PATCH. A cleared (nil) user maps to the clear literal — that
+// is the one case where wiping the v1 field is what the v2 edit asked for.
+//
+// A user that is assigned in v2 but cannot be resolved to a v1 contact returns
+// ("", nil): the caller omits the field so the existing v1 assignment survives.
+// LFXSS allows a manual staff entry (name + email, no username — see
+// updateProjectStaff in lfx-self-serve apps/lfx-one/src/server/services/
+// project.service.ts), and such an email often has no v1 merged_user row;
+// clearing v1 in that case would silently drop the PCC assignment.
+//
+// Resolution failures (DB errors) are returned as errors so the event is
+// aborted rather than acted on from a partial read.
 func resolveV1StaffSFID(ctx context.Context, log *slog.Logger, info *events.UserInfo, field string) (string, error) {
 	if info == nil {
 		return v1ClearStaffValue, nil
@@ -261,21 +289,22 @@ func resolveV1StaffSFID(ctx context.Context, log *slog.Logger, info *events.User
 		}
 	}
 	log.With("field", field, "username", info.Username, "email", info.Email).
-		WarnContext(ctx, "could not resolve v1 contact for staff user, clearing v1 field")
-	return v1ClearStaffValue, nil
+		WarnContext(ctx, "could not resolve v1 contact for staff user, leaving v1 field unchanged")
+	return "", nil
 }
 
 // patchV1ProjectStaff sends a PATCH request to the v1 API Gateway
 // project-service to update a project's staff assignments — the same contract
 // PCC's edit-project-staff dialog uses, including the "None" clear literal
 // (mirror: patchV1User in handlers_profile_v2tov1.go).
-func patchV1ProjectStaff(ctx context.Context, sfid, executiveDirectorID, programManagerID string) error {
+//
+// fields carries only the staff keys being changed (ExecutiveDirectorID and/or
+// ProgramManagerID); the v1 PATCH leaves omitted fields untouched, as PCC's
+// other project dialogs (edit-legal, edit-project-details) rely on.
+func patchV1ProjectStaff(ctx context.Context, sfid string, fields map[string]string) error {
 	apiURL := fmt.Sprintf("%sproject-service/v1/projects/%s", cfg.LFXAPIGateway.String(), sfid)
 
-	body, err := json.Marshal(map[string]string{
-		"ExecutiveDirectorID": executiveDirectorID,
-		"ProgramManagerID":    programManagerID,
-	})
+	body, err := json.Marshal(fields)
 	if err != nil {
 		return fmt.Errorf("failed to marshal project-service payload: %w", err)
 	}

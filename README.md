@@ -76,7 +76,7 @@ Payload: <mapping_key>
 The following table shows the supported mapping key patterns and their expected response formats:
 
 | Direction | Lookup Key Pattern | Example Key | Response Format | Description |
-| ----------- | ------------------- | ------------- | ----------------- | ------------- |
+|-----------|-------------------|-------------|-----------------|-------------|
 | **Projects** |
 | v1→v2 | `project.sfid.{v1_sfid}` | `project.sfid.a0941000002wBjEAAU` | `{v2_uuid}` | Project SFID to UUID |
 | v2→v1 | `project.uid.{v2_uuid}` | `project.uid.123e4567-e89b-12d3-a456-426614174000` | `{v1_sfid}` | Project UUID to SFID |
@@ -358,7 +358,11 @@ Loop detection: if a non-tombstoned reverse mapping already exists for the v2 ob
 
 #### Project staff sync (GH-1802)
 
-When `V2_TO_V1_PROJECT_STAFF_SYNC_ENABLED=true`, the service also subscribes to `lfx.projects-api.project_settings.updated` (published by project-service on every settings write, with before/after snapshots) and pushes `executive_director` / `program_manager` changes back to the v1 platform via `PATCH {LFX_API_GW}project-service/v1/projects/{sfid}` — the same v1 contract PCC's own staff edit dialog uses, including `"None"` to clear an assignment.
+When `V2_TO_V1_PROJECT_STAFF_SYNC_ENABLED=true`, the service also subscribes to `lfx.projects-api.project_settings.updated` (published by project-service on every settings write, with before/after snapshots) and pushes `executive_director` / `program_manager` changes back to the v1 platform via `PATCH {LFX_API_GW}project-service/v1/projects/{sfid}` — the same v1 contract PCC's own staff edit dialog uses, including `"None"` to clear an assignment. This is the return path for the LFX One staff dialog (lfx-self-serve `PUT /projects/{uid}/staff`, which edits one role per save).
+
+Only the roles that actually changed in the event are sent. The v1 PATCH is partial (PCC's other project dialogs send disjoint field subsets), so an unchanged role is omitted rather than re-sent from the `v1-objects` replica — that replica lags v1 by the WAL pipeline, and echoing it back would revert a newer v1 assignment when two single-role edits land inside the lag window.
+
+A role assigned in v2 that cannot be resolved to a v1 contact — LFX One allows a manual staff entry with name + email and no username, and such an email often has no `merged_user` row — is logged and **omitted**, leaving the existing v1 assignment intact. `"None"` is written only when the role was genuinely cleared in v2.
 
 Staff-field direction coverage:
 
@@ -368,7 +372,13 @@ Staff-field direction coverage:
 | `program_manager` | ✅ | ✅ | Resolves through B2C `merged_user` by username, then email |
 | `opportunity_owner` | ✅ | ❌ | SFDC-owned; resolves through the B2B user store; one-way only |
 
-Echo/loop guards: the v1 write is attributed to this service's Auth0 M2M principal (`lastmodifiedbyid = "{AUTH0_CLIENT_ID}@clients"`), which `shouldSkipSync` already skips when the change replicates back through WAL → `v1-objects` KV; events whose actor is this service's own Heimdall principal (`{HEIMDALL_CLIENT_ID}@clients`, i.e. our own v1→v2 sync writes) are skipped on receipt; and before writing, the event's staff values are compared against the current `v1-objects` record so PCC-originated edits no-op.
+Echo/loop guards:
+
+- **Compare-before-write (primary).** Each changed role is compared against the current `v1-objects` record before writing. A PCC-originated edit reaches v2 only *after* the `v1-objects` update that triggered the v1→v2 sync, so the record read back already carries the new value and the event no-ops.
+- **Auth0 M2M attribution.** The v1 write sets `lastmodifiedbyid = "{AUTH0_CLIENT_ID}@clients"`, which `shouldSkipSync` skips when the change replicates back through WAL → `v1-objects` KV, so our own v1 write never bounces into v2.
+- **Heimdall origin skip (partial).** Events whose actor is `{HEIMDALL_CLIENT_ID}@clients` are dropped on receipt. This only covers the v1→v2 writes that fall back to the service account (empty/`platform`/unknown-Salesforce principals): v1→v2 normally impersonates the real v1 user, so the actor is usually that user's LFID.
+
+Delivery: the subscription is core NATS (matching `lfx.user_profile.updated`), so there is no redelivery. A transient failure — v1 DB unavailable during contact resolution, or a 5xx from the gateway — is logged as an error and the event is dropped; recovering that project's staff state requires a fresh edit or a manual backfill.
 
 ```mermaid
 sequenceDiagram

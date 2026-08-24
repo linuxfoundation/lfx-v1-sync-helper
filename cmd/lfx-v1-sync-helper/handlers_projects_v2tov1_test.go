@@ -135,10 +135,11 @@ func TestHandleProjectSettingsUpdated_StaffChangeWritesV1(t *testing.T) {
 	if got := spy.lastBody["ProgramManagerID"]; got != bridgeTestPMSFID {
 		t.Errorf("ProgramManagerID = %q, want %q", got, bridgeTestPMSFID)
 	}
-	// Unchanged ED is re-sent at its current v1 value (empty -> "None") per the
-	// PCC both-fields contract.
-	if got := spy.lastBody["ExecutiveDirectorID"]; got != v1ClearStaffValue {
-		t.Errorf("ExecutiveDirectorID = %q, want %q", got, v1ClearStaffValue)
+	// The unchanged ED must be omitted entirely: the v1 PATCH is partial, and
+	// re-sending it from the (possibly stale) v1-objects replica could revert a
+	// newer v1 assignment.
+	if got, present := spy.lastBody["ExecutiveDirectorID"]; present {
+		t.Errorf("ExecutiveDirectorID = %q in payload, want omitted (unchanged field)", got)
 	}
 }
 
@@ -253,23 +254,53 @@ func TestHandleProjectSettingsUpdated_ClearWritesNone(t *testing.T) {
 	}
 }
 
-func TestHandleProjectSettingsUpdated_UnresolvableUserClears(t *testing.T) {
+// A user assigned in v2 with no v1 contact — e.g. an LFXSS manual staff entry,
+// which carries name + email and an empty username (updateProjectStaff in
+// lfx-self-serve apps/lfx-one/src/server/services/project.service.ts) — must
+// leave the existing v1 assignment alone rather than clearing it.
+func TestHandleProjectSettingsUpdated_UnresolvableUserLeavesV1Unchanged(t *testing.T) {
 	spy := setupStaffBridgeTest(t, http.StatusOK)
 	getV1ProjectStaffSFIDs = func(context.Context, string) (map[string]string, error) {
 		return map[string]string{"program_manager__c": bridgeTestPMSFID}, nil
 	}
-	// Default seams resolve nothing for this username.
+	// Default seams resolve nothing for this user.
 
 	msg := settingsUpdatedMsg(t, "audigregorie",
 		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "kperez"}},
-		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "ghost-user"}})
+		events.ProjectSettings{ProgramManager: &events.UserInfo{Name: "Ghost User", Email: "ghost@example.com"}})
+	handleProjectSettingsUpdated(msg)
+
+	if spy.patchCalls != 0 {
+		t.Fatalf("PATCH calls = %d, want 0 (unresolvable assignee must not clear the v1 field)", spy.patchCalls)
+	}
+}
+
+// An unresolvable field must not block the sibling field that did resolve.
+func TestHandleProjectSettingsUpdated_UnresolvableFieldDoesNotBlockSibling(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	resolveV1UserSFIDByUsername = func(_ context.Context, username string) (string, error) {
+		if username == "kperez" {
+			return bridgeTestPMSFID, nil
+		}
+		return "", nil
+	}
+
+	msg := settingsUpdatedMsg(t, "audigregorie",
+		events.ProjectSettings{},
+		events.ProjectSettings{
+			ExecutiveDirector: &events.UserInfo{Name: "Ghost User", Email: "ghost@example.com"},
+			ProgramManager:    &events.UserInfo{Username: "kperez"},
+		})
 	handleProjectSettingsUpdated(msg)
 
 	if spy.patchCalls != 1 {
 		t.Fatalf("PATCH calls = %d, want 1", spy.patchCalls)
 	}
-	if got := spy.lastBody["ProgramManagerID"]; got != v1ClearStaffValue {
-		t.Errorf("ProgramManagerID = %q, want %q (unresolvable user clears the v1 field)", got, v1ClearStaffValue)
+	if got := spy.lastBody["ProgramManagerID"]; got != bridgeTestPMSFID {
+		t.Errorf("ProgramManagerID = %q, want %q", got, bridgeTestPMSFID)
+	}
+	if got, present := spy.lastBody["ExecutiveDirectorID"]; present {
+		t.Errorf("ExecutiveDirectorID = %q in payload, want omitted (unresolvable)", got)
 	}
 }
 
@@ -350,7 +381,7 @@ func TestHandleProjectSettingsUpdated_Patch404IsTerminalSkip(t *testing.T) {
 	}
 }
 
-func TestHandleProjectSettingsUpdated_EDChangePreservesCurrentPM(t *testing.T) {
+func TestHandleProjectSettingsUpdated_EDChangeOmitsUnchangedPM(t *testing.T) {
 	spy := setupStaffBridgeTest(t, http.StatusOK)
 	resolveV1UserSFIDByUsername = func(_ context.Context, username string) (string, error) {
 		if username == "asitha" {
@@ -376,9 +407,43 @@ func TestHandleProjectSettingsUpdated_EDChangePreservesCurrentPM(t *testing.T) {
 	if got := spy.lastBody["ExecutiveDirectorID"]; got != "0034100001oQRLDAA4" {
 		t.Errorf("ExecutiveDirectorID = %q, want %q", got, "0034100001oQRLDAA4")
 	}
-	// Unchanged PM is re-sent at its current v1 value (both-fields contract).
+	// The unchanged PM is left out of the partial PATCH entirely.
+	if got, present := spy.lastBody["ProgramManagerID"]; present {
+		t.Errorf("ProgramManagerID = %q in payload, want omitted (unchanged field)", got)
+	}
+}
+
+// Regression (GH-1802): the LFXSS staff dialog saves one role at a time, so a
+// second edit can arrive while v1-objects still shows the pre-first-edit value
+// for the other role. That stale value must never be echoed back to v1.
+func TestHandleProjectSettingsUpdated_StaleReplicaDoesNotRevertSiblingField(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	resolveV1UserSFIDByUsername = func(_ context.Context, username string) (string, error) {
+		if username == "kperez" {
+			return bridgeTestPMSFID, nil
+		}
+		return "", nil
+	}
+	// v1 already carries the new ED from the first edit, but the KV replica
+	// still holds the previous one because the WAL pipeline has not caught up.
+	getV1ProjectStaffSFIDs = func(context.Context, string) (map[string]string, error) {
+		return map[string]string{"executive_director__c": "0034100001staleED"}, nil
+	}
+
+	ed := &events.UserInfo{Username: "asitha"}
+	msg := settingsUpdatedMsg(t, "audigregorie",
+		events.ProjectSettings{ExecutiveDirector: ed},
+		events.ProjectSettings{ExecutiveDirector: ed, ProgramManager: &events.UserInfo{Username: "kperez"}})
+	handleProjectSettingsUpdated(msg)
+
+	if spy.patchCalls != 1 {
+		t.Fatalf("PATCH calls = %d, want 1", spy.patchCalls)
+	}
 	if got := spy.lastBody["ProgramManagerID"]; got != bridgeTestPMSFID {
-		t.Errorf("ProgramManagerID = %q, want current v1 value %q", got, bridgeTestPMSFID)
+		t.Errorf("ProgramManagerID = %q, want %q", got, bridgeTestPMSFID)
+	}
+	if got, present := spy.lastBody["ExecutiveDirectorID"]; present {
+		t.Errorf("ExecutiveDirectorID = %q sent from the stale replica, want omitted", got)
 	}
 }
 
@@ -438,7 +503,10 @@ func TestPatchV1ProjectStaff(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			spy := setupStaffBridgeTest(t, tc.status)
 
-			err := patchV1ProjectStaff(context.Background(), bridgeTestProjectSFID, "0034100001oQRLDAA4", v1ClearStaffValue)
+			err := patchV1ProjectStaff(context.Background(), bridgeTestProjectSFID, map[string]string{
+				"ExecutiveDirectorID": "0034100001oQRLDAA4",
+				"ProgramManagerID":    v1ClearStaffValue,
+			})
 
 			if tc.wantErr && err == nil {
 				t.Fatal("expected error, got nil")
