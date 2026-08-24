@@ -12,8 +12,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 const defaultNATSURL = "nats://nats:4222"
@@ -72,15 +70,6 @@ type Config struct {
 	// requests longer than 10s, which is fine for in-cluster use. Set via
 	// NATS_FETCH_MAX_WAIT (Go duration: "120s", "3m"). Default: 120s.
 	NATSFetchMaxWait time.Duration
-
-	// Project allowlists — file paths (PROJECT_ALLOWLIST_FILE /
-	// PROJECT_FAMILY_ALLOWLIST_FILE) take precedence over comma-separated env
-	// vars (PROJECT_ALLOWLIST / PROJECT_FAMILY_ALLOWLIST), which fall back to
-	// built-in defaults. All entries are stored lowercase.
-	ProjectAllowlistFile       string   // Path to a YAML list file; overrides PROJECT_ALLOWLIST
-	ProjectFamilyAllowlistFile string   // Path to a YAML list file; overrides PROJECT_FAMILY_ALLOWLIST
-	ProjectAllowlist           []string // Root slugs synced without their children
-	ProjectFamilyAllowlist     []string // Root slugs synced together with all descendants
 
 	// CommitteeSkipMemberNotifications controls whether committee member creates
 	// from this sync process suppress V2 notification emails. When true (default),
@@ -154,28 +143,8 @@ func LoadConfig() (*Config, error) {
 		CommitteeSkipMemberNotifications: parseBooleanEnvWithDefault("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS", true),
 		DynamoDBStreamName:               os.Getenv("DYNAMODB_STREAM_NAME"),
 		NATSFetchMaxWait:                 parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
-		ProjectAllowlistFile:             os.Getenv("PROJECT_ALLOWLIST_FILE"),
-		ProjectFamilyAllowlistFile:       os.Getenv("PROJECT_FAMILY_ALLOWLIST_FILE"),
 	}
 
-	// Project allowlists — file path overrides env var overrides built-in defaults.
-	var err error
-	if strings.TrimSpace(cfg.ProjectAllowlistFile) != "" {
-		cfg.ProjectAllowlist, err = readYAMLListFile(cfg.ProjectAllowlistFile)
-		if err != nil {
-			return nil, fmt.Errorf("loading PROJECT_ALLOWLIST_FILE (%s): %w", cfg.ProjectAllowlistFile, err)
-		}
-	} else {
-		cfg.ProjectAllowlist = parseStringListEnv("PROJECT_ALLOWLIST")
-	}
-	if strings.TrimSpace(cfg.ProjectFamilyAllowlistFile) != "" {
-		cfg.ProjectFamilyAllowlist, err = readYAMLListFile(cfg.ProjectFamilyAllowlistFile)
-		if err != nil {
-			return nil, fmt.Errorf("loading PROJECT_FAMILY_ALLOWLIST_FILE %q: %w", cfg.ProjectFamilyAllowlistFile, err)
-		}
-	} else {
-		cfg.ProjectFamilyAllowlist = parseStringListEnv("PROJECT_FAMILY_ALLOWLIST")
-	}
 	// Set defaults
 	if cfg.NATSURL == "" {
 		cfg.NATSURL = defaultNATSURL
@@ -306,47 +275,6 @@ func buildV1DatabaseDSN() string {
 		}
 	}
 	return strings.Join(params, " ")
-}
-
-// parseStringListEnv parses a comma-separated environment variable into a
-// lowercase string slice, trimming whitespace from each element and dropping
-// empty entries. Returns nil when the variable is unset or empty.
-func parseStringListEnv(envVar string) []string {
-	raw := strings.TrimSpace(os.Getenv(envVar))
-	if raw == "" {
-		return nil
-	}
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.ToLower(strings.TrimSpace(p))
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// readYAMLListFile reads a YAML file containing a sequence of strings and
-// returns the entries as a lowercase slice with whitespace trimmed.
-func readYAMLListFile(path string) ([]string, error) {
-	path = strings.TrimSpace(path)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", path, err)
-	}
-	var items []string
-	if err := yaml.Unmarshal(data, &items); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", path, err)
-	}
-	out := make([]string, 0, len(items))
-	for _, item := range items {
-		item = strings.ToLower(strings.TrimSpace(item))
-		if item != "" {
-			out = append(out, item)
-		}
-	}
-	return out, nil
 }
 
 // parseBooleanEnv parses a boolean environment variable with common truthy values.
