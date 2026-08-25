@@ -237,6 +237,29 @@ curl -s "https://go.dev/dl/?mode=json&include=all" \
 - Maintain `pyproject.toml` and `uv.lock` consistency
 - Environment-based configuration
 
+### Python Upgrade Policy
+
+Keep Python upgrades conservative, mirroring the Go toolchain policy above:
+
+- **Patch releases**: freely bump the pinned Python *patch* version (e.g.
+  `pyproject.toml`'s `requires-python = ">=3.12,<3.13"` stays on the `3.12`
+  minor, but the interpreter/base image patch level, e.g.
+  `docker/Dockerfile.meltano`'s Python base image tag, can always move to the
+  latest `3.12.x` patch). Do **not** bump the *minor* version (e.g.
+  `3.12` → `3.13`) unless the user explicitly asks for it — Meltano and its
+  plugin ecosystem lag behind new Python minors.
+- **Insecure packages**: before pushing, run `uv audit` as a local pre-check
+  for known vulnerabilities in `uv.lock`. For any finding, upgrade **only
+  that package** to its fixed version, via the narrowest possible constraint
+  (direct dependency: `pyproject.toml`'s `dependencies` list; transitive/
+  build-env dependency such as `pip` or `uv`: `[tool.uv].constraint-dependencies`),
+  then regenerate the lockfile with `uv lock`. Do not perform a broader
+  `uv sync -U` / full dependency upgrade in response to a vulnerability
+  finding — that's a separate, deliberate decision.
+- **Everything else** (Meltano itself, extractor/loader plugins, dev
+  tooling): leave alone unless the user explicitly asks for an upgrade or a
+  vulnerability finding specifically names that package.
+
 ### Data Serialization
 - **target-nats-kv** supports both JSON and MessagePack encoding
 - Set `msgpack: true` in Meltano configuration to enable MessagePack
