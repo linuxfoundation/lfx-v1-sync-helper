@@ -1,0 +1,16 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+#
+# zizmor configuration.
+#
+# See https://docs.zizmor.sh/configuration/ for details.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        # The SLSA generator workflows *must* be referenced by tag (not by
+        # commit SHA) so that slsa-verifier can validate the builder's ref.
+        # See "Referencing SLSA builders and generators" in
+        # https://github.com/slsa-framework/slsa-github-generator/blob/main/README.md.
+        slsa-framework/slsa-github-generator/*: ref-pin
+        "*": hash-pin

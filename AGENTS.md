@@ -188,9 +188,16 @@ Freely bump `go.mod`'s `go` directive to the latest available *patch*
 release (e.g. `1.X.Y` → `1.X.{Y+1}`) to pick up security fixes. Do **not**
 bump the *minor* version (e.g. `1.X.x` → `1.{X+1}.x`) unless the user
 explicitly asks for it, **and** you've validated it against the Go version
-MegaLinter itself bundles -- MegaLinter runs several linters (e.g.
-`golangci-lint`) against its own bundled Go version, and a `go.mod`
-directive newer than that bundled version breaks those checks.
+MegaLinter itself bundles -- MegaLinter's `golangci-lint` and `govulncheck`
+(pulled in via its `osv-scanner` check) are guaranteed to lag behind the
+latest Go release by some amount (their binaries are built against
+whatever Go version was current when that MegaLinter flavor tag was cut),
+and a `go.mod` directive newer than what they were built with breaks them
+outright. This is a hard ceiling with no environment-variable workaround --
+`GOTOOLCHAIN: auto` only affects invocations of the `go` command itself
+and does nothing for these precompiled binaries' own internal version
+checks (confirmed empirically: setting it in both the workflow and
+`.mega-linter.yml` still failed).
 
 To find MegaLinter's bundled Go version:
 
@@ -199,17 +206,19 @@ To find MegaLinter's bundled Go version:
 grep -A1 'oxsecurity/megalinter' .github/workflows/*.yml
 # e.g. "uses: oxsecurity/megalinter/flavors/<flavor>@<sha>  # <tag>"
 
-# 2. Fetch that flavor's Dockerfile and read its GO_ALPINE_VERSION (or
-#    GO_IMAGE_VERSION) build arg.
+# 2. Fetch that flavor's Dockerfile and read its GO_ALPINE_VERSION build
+#    arg -- this is what the final image installs as `go`, not
+#    GO_IMAGE_VERSION (which only applies to an intermediate builder
+#    stage).
 curl -s "https://raw.githubusercontent.com/oxsecurity/megalinter/<tag>/flavors/<flavor>/Dockerfile" \
-  | grep -i 'GO_ALPINE_VERSION\|GO_IMAGE_VERSION'
+  | grep -i 'GO_ALPINE_VERSION'
 ```
 
 `go.mod`'s `go` directive must never exceed that bundled version. Staying
 one minor version behind it (rather than matching its minor *and* patch
 exactly) leaves room to always take the latest patch release for security
 fixes without ever being blocked by MegaLinter's own bundled patch version
-lagging behind a newly disclosed vulnerability.
+lagging a newly disclosed vulnerability.
 
 There's no built-in `go` subcommand to look up the latest patch release for
 a given minor version -- query the official `go.dev/dl` JSON feed instead:
