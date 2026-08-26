@@ -272,8 +272,15 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 	log := logger.With("committee_uid", committeeUID, "project_sfid", projectSFID)
 
 	// A non-tombstoned reverse mapping means this was created from v1; skip.
+	// A transient KV error is returned so JetStream redelivers rather than
+	// proceeding to a create that may duplicate a record whose mapping just
+	// couldn't be fetched.
 	reverseKey := "committee.uid." + committeeUID
-	if entry, err := mappingsKV.Get(ctx, reverseKey); err == nil && !isTombstonedMapping(entry.Value()) {
+	reverseEntry, reverseErr := mappingsKV.Get(ctx, reverseKey)
+	if reverseErr != nil && reverseErr != jetstream.ErrKeyNotFound && reverseErr != jetstream.ErrKeyDeleted {
+		return reverseErr // transient: KV unavailable
+	}
+	if reverseErr == nil && !isTombstonedMapping(reverseEntry.Value()) {
 		log.DebugContext(ctx, "committee originated from v1 — skipping reverse sync")
 		return nil
 	}
@@ -401,8 +408,15 @@ func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID,
 	log := logger.With("member_uid", memberUID, "committee_uid", committeeUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID)
 
 	// A non-tombstoned reverse mapping means this was created from v1; skip.
+	// A transient KV error is returned so JetStream redelivers rather than
+	// proceeding to a create that may duplicate a record whose mapping just
+	// couldn't be fetched.
 	reverseKey := "committee_member.uid." + memberUID
-	if entry, err := mappingsKV.Get(ctx, reverseKey); err == nil && !isTombstonedMapping(entry.Value()) {
+	reverseEntry, reverseErr := mappingsKV.Get(ctx, reverseKey)
+	if reverseErr != nil && reverseErr != jetstream.ErrKeyNotFound && reverseErr != jetstream.ErrKeyDeleted {
+		return reverseErr // transient: KV unavailable
+	}
+	if reverseErr == nil && !isTombstonedMapping(reverseEntry.Value()) {
 		log.DebugContext(ctx, "committee member originated from v1 — skipping reverse sync")
 		return nil
 	}
