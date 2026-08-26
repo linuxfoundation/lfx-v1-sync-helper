@@ -52,6 +52,7 @@
 --     --warehouse VIEWER --rolename DATA_DEV --private-key-path rsa_key.p8 \
 --     -o friendly=false -o header=true -o timing=false \
 --     -o output_format=csv -o output_file=resolved_usernames.csv \
+--     -o variable_substitution=true \
 --     -D USERNAMES="user1,user2,user3" \
 --     -f scripts/lfxv2_2662_resolve_usernames.sql
 
