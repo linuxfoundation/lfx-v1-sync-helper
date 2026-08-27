@@ -52,6 +52,21 @@ Drilldown cells: `PLATFORM_UNVERIFIED+NEWER_AUTH0`, `PLATFORM_UNVERIFIED+NEWER_L
 |------|---------|
 | `lfxv2_2662_apply_wrong_primary_unverified.sh` | Swaps primary_email__c flags on Platform DB (matching row ON, flagged row OFF). Supports `--dry-run`, `--batch-size`, `--sleep` |
 
+### INACTIVE_PRIMARY (Platform DB active flag flip)
+
+Drilldown cells: `ALIGNED / INACTIVE_PRIMARY`, `MISSING_FROM_AUTH0 / INACTIVE_PRIMARY`
+(and BLOCKED/MANGLED combinations thereof)
+
+The Platform primary email row is marked `active__c=false` while all systems
+agree on the address. Pure flag flip on the same row — no email value changes,
+so no Auth0/LDAP writes and no meeting (ICS) impact. Verified: itx-service-zoom
+selects by `IsPrimary` only (SDK does not deserialize `Active`) and user-service
+returns inactive emails unfiltered.
+
+| File | Purpose |
+|------|---------|
+| `lfxv2_2662_apply_inactive_primary.sh` | Sets `active__c=true` on the flagged primary row via self-guarding idempotent UPDATEs (sfid, contact, email value, primary=true, active=false all in the WHERE; `UPDATE 0` = live drift, reported as skip). Alignment guard: `matching_email_sfid` must equal `flagged_email_sfid`, or — for users with no Auth0 account — the flagged primary must equal the LDAP email (case-insensitive). Needs `PGPASSWORD`. Supports `--dry-run` |
+
 ### PLATFORM_OUT_OF_SYNC_WITH_LDAP (LDAP REST Proxy email update)
 
 Drilldown cells: `PLATFORM_VERIFIED+NEWER_LDAP`, `PLATFORM_VERIFIED+NEWER_AUTH0`,
