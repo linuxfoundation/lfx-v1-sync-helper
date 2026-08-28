@@ -70,7 +70,7 @@ deduped_count=0
 already_synced=0
 while IFS= read -r user; do
     lower_user=$(echo "$user" | tr '[:upper:]' '[:lower:]')
-    if grep -qx "$lower_user" "$prior_usernames" 2>/dev/null; then
+    if grep -qxF "$lower_user" "$prior_usernames" 2>/dev/null; then
         already_synced=$((already_synced + 1))
     else
         echo "$user"
