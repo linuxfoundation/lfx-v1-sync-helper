@@ -54,6 +54,12 @@ func TestReconcileV1Skills(t *testing.T) {
 			current:     []userSkillEntry{{ID: "1", Name: "Go"}, {ID: "2", Name: "Python"}},
 			wantRemoved: []string{"1", "2"},
 		},
+		{
+			name:        "non-string skills value is a no-op",
+			metadata:    map[string]any{"skills": 123},
+			current:     []userSkillEntry{{ID: "1", Name: "Go"}},
+			wantNoCalls: true,
+		},
 	}
 
 	for _, tt := range tests {

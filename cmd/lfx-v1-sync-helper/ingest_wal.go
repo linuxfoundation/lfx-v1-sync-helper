@@ -70,6 +70,20 @@ func (w *WALEvent) pkColumn() string {
 	return "sfid"
 }
 
+// walDeleteFallbackTables lists tables where handleWALDelete should build a
+// tombstone directly from a DELETE event's DataOld when no v1-objects KV
+// entry already exists for the row, instead of silently skipping the
+// delete. This matters for tables that (unlike Salesforce __c objects) are
+// not seeded by the Meltano backfill pipeline: a row that existed before the
+// table was added to the WAL filter, and is later deleted without ever
+// having triggered an INSERT/UPDATE WAL event first, would otherwise have no
+// KV entry to update, and the delete would be lost forever rather than
+// merely delayed. Relying on DataOld here requires REPLICA IDENTITY FULL on
+// the source table so the deleted row's non-PK columns are present.
+var walDeleteFallbackTables = map[string]bool{
+	"user_skills": true,
+}
+
 // GetSFID extracts the row identity key from the appropriate data field based
 // on the action. For DELETE actions, it looks in DataOld; for others, it
 // looks in Data. Despite the name, the column read is table-dependent: most
@@ -302,22 +316,38 @@ func handleWALDelete(ctx context.Context, walEvent *WALEvent) bool {
 
 	// Check if the key exists in the KV bucket.
 	existing, err := v1KV.Get(ctx, key)
-	if err == jetstream.ErrKeyNotFound {
-		// Key doesn't exist, nothing to delete.
-		logger.With("key", key).DebugContext(ctx, "WAL delete event for non-existent key, skipping")
-		return false
-	} else if err != nil {
+	var existingData map[string]interface{}
+	var lastRevision uint64
+
+	switch {
+	case err == jetstream.ErrKeyNotFound:
+		if !walDeleteFallbackTables[walEvent.Table] || len(walEvent.DataOld) == 0 {
+			// Key doesn't exist and this table has no DataOld fallback,
+			// nothing to delete.
+			logger.With("key", key).DebugContext(ctx, "WAL delete event for non-existent key, skipping")
+			return false
+		}
+		// No prior KV entry — this table isn't Meltano-backfilled, so a row
+		// that predates being added to the WAL filter never got one. DataOld
+		// carries the full row (REPLICA IDENTITY FULL), so build the
+		// tombstone from it directly instead of dropping the delete.
+		existingData = make(map[string]interface{}, len(walEvent.DataOld))
+		for k, v := range walEvent.DataOld {
+			existingData[k] = v
+		}
+		logger.With("key", key, "table", walEvent.Table).InfoContext(ctx, "WAL delete event for untracked key, creating tombstone from DataOld")
+	case err != nil:
 		logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to get existing KV entry for delete")
 		return false
-	}
-
-	// Parse existing data.
-	var existingData map[string]interface{}
-	if unmarshalErr := json.Unmarshal(existing.Value(), &existingData); unmarshalErr != nil {
-		// Try msgpack if JSON fails.
-		if msgpackErr := msgpack.Unmarshal(existing.Value(), &existingData); msgpackErr != nil {
-			logger.With(errKey, unmarshalErr, "msgpack_error", msgpackErr, "key", key).ErrorContext(ctx, "failed to unmarshal existing KV entry data for delete")
-			return false
+	default:
+		lastRevision = existing.Revision()
+		// Parse existing data.
+		if unmarshalErr := json.Unmarshal(existing.Value(), &existingData); unmarshalErr != nil {
+			// Try msgpack if JSON fails.
+			if msgpackErr := msgpack.Unmarshal(existing.Value(), &existingData); msgpackErr != nil {
+				logger.With(errKey, unmarshalErr, "msgpack_error", msgpackErr, "key", key).ErrorContext(ctx, "failed to unmarshal existing KV entry data for delete")
+				return false
+			}
 		}
 	}
 
@@ -339,14 +369,20 @@ func handleWALDelete(ctx context.Context, walEvent *WALEvent) bool {
 		return false
 	}
 
-	// Update the entry with the deletion marker.
-	if _, err := v1KV.Update(ctx, key, dataBytes, existing.Revision()); err != nil {
+	// Update the entry with the deletion marker. If there was no existing KV
+	// entry (the DataOld-fallback tombstone case above), create it instead.
+	if lastRevision == 0 {
+		if _, err := v1KV.Create(ctx, key, dataBytes); err != nil {
+			logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to create tombstone KV entry for delete")
+			return false
+		}
+	} else if _, err := v1KV.Update(ctx, key, dataBytes, lastRevision); err != nil {
 		// Check if this is a revision mismatch that should be retried.
 		if isRevisionMismatchError(err) {
-			logger.With(errKey, err, "key", key, "revision", existing.Revision()).WarnContext(ctx, "KV revision mismatch on delete, will retry")
+			logger.With(errKey, err, "key", key, "revision", lastRevision).WarnContext(ctx, "KV revision mismatch on delete, will retry")
 			return true
 		}
-		logger.With(errKey, err, "key", key, "revision", existing.Revision()).ErrorContext(ctx, "failed to update KV entry with deletion marker")
+		logger.With(errKey, err, "key", key, "revision", lastRevision).ErrorContext(ctx, "failed to update KV entry with deletion marker")
 		return false
 	}
 

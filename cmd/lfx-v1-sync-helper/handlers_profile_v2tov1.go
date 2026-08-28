@@ -104,10 +104,15 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 	payload := mapMetadataToV1Payload(event.Metadata)
 	if len(payload) > 0 {
 		if err := patchV1User(ctx, sfid, payload); err != nil {
+			// Do not return here: a patchV1User failure only means the
+			// top-level/address fields didn't sync this round. Skills is an
+			// independent reconciliation path below and must still run even
+			// when this call fails, so a transient user-service error on one
+			// field group doesn't also block the other.
 			log.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to patch v1 user")
-			return
+		} else {
+			log.With("sfid", sfid).InfoContext(ctx, "synced v2 profile to v1 user-service")
 		}
-		log.With("sfid", sfid).InfoContext(ctx, "synced v2 profile to v1 user-service")
 	} else {
 		log.DebugContext(ctx, "no mappable top-level/address fields in event")
 	}
@@ -116,10 +121,24 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 	// payload above (user-service has no replace-list PATCH field for it), and
 	// the event may carry only a skills change with no other payload fields, so
 	// this must not be skipped by the empty-payload branch above.
-	if err := reconcileV1SkillsFn(ctx, sfid, event.Metadata); err != nil {
+	//
+	// This handler is dispatched via a core NATS QueueSubscribe, which has no
+	// per-key ordering guarantee: two events for the same user can be
+	// processed concurrently and complete out of order. Skills reconciliation
+	// is a destructive read-diff-write, so processing a stale, out-of-order
+	// event here can undo a later one. Guard on the event's own timestamp,
+	// keyed by sfid, before reconciling.
+	if profileSkillsStaleGuard.isStale(sfid, event.Timestamp) {
+		log.With("sfid", sfid).WarnContext(ctx, "skipping out-of-order skills reconciliation (a newer profile event for this user was already processed)")
+	} else if err := reconcileV1SkillsFn(ctx, sfid, event.Metadata); err != nil {
 		log.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to reconcile v1 skills")
 	}
 }
+
+// profileSkillsStaleGuard skips an out-of-order lfx.user_profile.updated
+// delivery for the skills-reconcile step. See the ordering note above
+// handleUserProfileUpdated's guard check.
+var profileSkillsStaleGuard staleEventGuard
 
 // resolveV1UsernameFromV2UserID returns the LFX username to use for v1 user-service
 // lookups from a v2 profile event user_id. Plain LFX usernames are accepted
@@ -228,7 +247,11 @@ func reconcileV1Skills(ctx context.Context, sfid string, metadata map[string]any
 	if !ok {
 		return nil
 	}
-	skillsStr, _ := rawSkills.(string)
+	skillsStr, ok := rawSkills.(string)
+	if !ok {
+		logger.With("sfid", sfid).WarnContext(ctx, "skills field present but not a string, skipping reconciliation")
+		return nil
+	}
 
 	desired := map[string]string{} // lowercase name -> original-case name
 	for _, name := range strings.Split(skillsStr, ",") {

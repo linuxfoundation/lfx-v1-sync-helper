@@ -230,7 +230,8 @@ func dbGetAlternateEmailsForUser(ctx context.Context, userSfid string) ([]altern
 // ORDER BY, which would otherwise make the resulting Auth0 write nondeterministic
 // and cause churn on every sync.
 func dbGetSkillsForUser(ctx context.Context, lfid string) ([]string, error) {
-	if lfid == "" {
+	normalized := normalizeUserIdentifier(lfid)
+	if normalized == "" {
 		return nil, nil
 	}
 	var rows []userSkillRow
@@ -240,7 +241,7 @@ func dbGetSkillsForUser(ctx context.Context, lfid string) ([]string, error) {
 		ColumnExpr("usk.id AS id").
 		ColumnExpr(`sk."name" AS sk_name`).
 		Join(`JOIN salesforce.skills AS sk ON sk.id = usk.skill_id`).
-		Where("usk.lfid = ?", lfid).
+		Where("LOWER(usk.lfid) = ?", normalized).
 		OrderExpr(`sk."name" ASC`).
 		Scan(qCtx)
 	if err != nil {

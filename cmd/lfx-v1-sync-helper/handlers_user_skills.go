@@ -10,6 +10,16 @@ import "context"
 // user's skill list to Auth0. Swappable in tests.
 var syncSkillsToAuth0Fn = syncSkillsToAuth0
 
+// userSkillsStaleGuard skips an out-of-order WAL delivery for a user_skills
+// update that arrives after a newer one for the same lfid was already
+// processed. Handler dispatch has no per-key ordering guarantee, and this
+// handler's read-diff-write against Auth0 is destructive (it replaces the
+// whole skill list), so processing a stale, out-of-order event can undo a
+// later change. Keyed by lfid, using the WAL event's own extraction
+// timestamp rather than wall-clock time so redelivery of the same event is
+// never mistaken for a newer one.
+var userSkillsStaleGuard staleEventGuard
+
 // handleUserSkillsUpdate processes salesforce.user_skills insert/update/delete
 // events. Unlike most synced tables, it always re-reads the user's full
 // current skill list from the v1 platform DB rather than reacting to the
@@ -35,11 +45,19 @@ func handleUserSkillsUpdate(ctx context.Context, key string, v1Data map[string]a
 		return false
 	}
 
+	if extractedAt := getTimestampString(v1Data, "_sdc_extracted_at"); extractedAt != "" {
+		if ts, err := parseTimestamp(extractedAt); err == nil && userSkillsStaleGuard.isStale(lfid, ts) {
+			logger.With("key", key, "lfid", lfid).
+				WarnContext(ctx, "skipping out-of-order user_skills event (a newer event for this user was already processed)")
+			return false
+		}
+	}
+
 	skillNames, err := getSkillsForUserFn(ctx, lfid)
 	if err != nil {
 		logger.With(errKey, err, "key", key, "lfid", lfid).
-			ErrorContext(ctx, "failed to read v1 skills for user, skipping")
-		return false
+			ErrorContext(ctx, "failed to read v1 skills for user, retrying")
+		return true
 	}
 
 	auth0UserID := mapUsernameToAuthSub(lfid)
