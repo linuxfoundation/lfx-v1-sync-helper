@@ -99,11 +99,24 @@ COMMIT;"
         echo "[$COUNT/$TOTAL] DRY-RUN $platform_username ($contact_sfid): keep primary $auth0_email ($matching_email_sfid); unset all other primaries"
     else
         echo "[$COUNT/$TOTAL] Fixing $platform_username ($contact_sfid): keep primary $auth0_email; unset all other primaries"
-        if psql -c "$SQL" 2>&1; then
-            FIXED=$((FIXED + 1))
-        else
+        # Check the command tags, not just psql's exit status: a WHERE that
+        # matches no rows still exits 0. Unlike the other apply scripts, both
+        # UPDATEs here may legitimately affect zero rows (the intended primary
+        # is already flagged, and there may be no other primaries left), so
+        # only a combined zero — a complete no-op — is reported, as a skip
+        # rather than an error.
+        if ! PSQL_OUT=$(PGOPTIONS='--client-min-messages=warning' psql -tA -c "$SQL" 2>&1); then
             echo "  ERROR: failed for $platform_username" >&2
+            echo "$PSQL_OUT" >&2
             ERRORS=$((ERRORS + 1))
+        else
+            ROWS=$(grep '^UPDATE [0-9]' <<<"$PSQL_OUT" | awk '{s += $2} END {print s + 0}')
+            if [[ "$ROWS" -eq 0 ]]; then
+                echo "  SKIP: no rows changed (already correct, or live rows drifted from snapshot)"
+                SKIPPED=$((SKIPPED + 1))
+            else
+                FIXED=$((FIXED + 1))
+            fi
         fi
     fi
 

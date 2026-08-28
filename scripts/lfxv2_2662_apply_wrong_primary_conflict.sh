@@ -138,10 +138,18 @@ COMMIT;"
         echo "[$COUNT/$TOTAL] DRY-RUN $platform_username: primary -> $auth0_email ($matching_email_sfid); delete $flagged_primary_email ($flagged_email_sfid, owned by auth0=$flagged_email_other_auth0_id ldap=$flagged_email_other_ldap_uid)"
     else
         echo "[$COUNT/$TOTAL] Fixing $platform_username: primary -> $auth0_email; deleting $flagged_primary_email (owned by auth0=$flagged_email_other_auth0_id ldap=$flagged_email_other_ldap_uid)"
-        if psql -c "$SQL" 2>&1; then
+        # Check the command tags, not just psql's exit status: a WHERE that
+        # matches no rows still exits 0, which would silently report a no-op
+        # as success. Expect one row promoted and one row deleted.
+        if ! PSQL_OUT=$(PGOPTIONS='--client-min-messages=warning' psql -tA -c "$SQL" 2>&1); then
+            echo "  ERROR: failed for $platform_username" >&2
+            echo "$PSQL_OUT" >&2
+            ERRORS=$((ERRORS + 1))
+        elif grep -q '^UPDATE 1$' <<<"$PSQL_OUT" && grep -q '^DELETE 1$' <<<"$PSQL_OUT"; then
             FIXED=$((FIXED + 1))
         else
-            echo "  ERROR: failed for $platform_username" >&2
+            echo "  ERROR: expected UPDATE 1 + DELETE 1 (live rows drifted from snapshot) for $platform_username" >&2
+            echo "$PSQL_OUT" >&2
             ERRORS=$((ERRORS + 1))
         fi
     fi

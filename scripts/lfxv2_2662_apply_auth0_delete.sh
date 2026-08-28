@@ -179,12 +179,20 @@ while IFS=',' read -r platform_username contact_sfid auth0_id auth0_email ldap_e
     if [[ -z "$contact_sfid" ]]; then
         echo "  WARN: no contact_sfid for $platform_username; username__c not blanked" >&2
         ERRORS=$((ERRORS + 1))
-    elif psql -c "$BLANK_SQL" 2>&1; then
-        echo "  OK: username__c blanked on $contact_sfid"
-        BLANKED=$((BLANKED + 1))
     else
-        echo "  ERROR: username__c blank failed for $platform_username ($contact_sfid)" >&2
-        ERRORS=$((ERRORS + 1))
+        # Check the command tag, not just psql's exit status: the guarded
+        # WHERE matches no rows when username__c is already blank or the row
+        # has drifted, yet psql still exits 0.
+        if ! PSQL_OUT=$(PGOPTIONS='--client-min-messages=warning' psql -tA -c "$BLANK_SQL" 2>&1); then
+            echo "  ERROR: username__c blank failed for $platform_username ($contact_sfid)" >&2
+            echo "$PSQL_OUT" >&2
+            ERRORS=$((ERRORS + 1))
+        elif grep -q '^UPDATE 1$' <<<"$PSQL_OUT"; then
+            echo "  OK: username__c blanked on $contact_sfid"
+            BLANKED=$((BLANKED + 1))
+        else
+            echo "  SKIP: username__c already blank or row drifted on $contact_sfid ($PSQL_OUT)"
+        fi
     fi
 
     # Throttle every batch_size rows.

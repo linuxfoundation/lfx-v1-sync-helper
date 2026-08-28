@@ -94,9 +94,20 @@ COMMIT;"
         echo "  correct_sfid=$matching_email_sfid  wrong_sfid=$flagged_email_sfid"
     else
         echo "[$COUNT/$TOTAL] Fixing $platform_username: $flagged_primary_email -> $auth0_email"
-        if ! psql -c "$SQL" 2>&1; then
+        # Check the command tags, not just psql's exit status: a WHERE that
+        # matches no rows still exits 0, which would silently report a no-op
+        # as success. Both UPDATEs must affect exactly one row.
+        if ! PSQL_OUT=$(PGOPTIONS='--client-min-messages=warning' psql -tA -c "$SQL" 2>&1); then
             echo "  ERROR: failed for $platform_username" >&2
+            echo "$PSQL_OUT" >&2
             ERRORS=$((ERRORS + 1))
+        else
+            APPLIED=$(grep -c '^UPDATE 1$' <<<"$PSQL_OUT" || true)
+            if [[ "$APPLIED" -ne 2 ]]; then
+                echo "  ERROR: expected 2 single-row updates, got $APPLIED (live rows drifted from snapshot) for $platform_username" >&2
+                echo "$PSQL_OUT" >&2
+                ERRORS=$((ERRORS + 1))
+            fi
         fi
     fi
 
