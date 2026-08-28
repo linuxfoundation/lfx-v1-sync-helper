@@ -14,9 +14,10 @@ the release build; kept locally for reference and execution during remediation.
 ## Username Resolver (Snowflake)
 
 Single generic script used by all apply scripts to look up user details from
-the matrixed sample usernames. Pass usernames via `-D USERNAMES="user1,user2,..." (no inner quotes)` and
-include `-o variable_substitution=true`, or `-D` is silently ignored and the
-literal `&USERNAMES` causes a SQL compilation error.
+the matrixed sample usernames. Pass usernames via `-D USERNAMES="user1,user2,..." (no inner quotes)`.
+Note that `variable_substitution` must be enabled for `-D` to work — it is off
+by default, so include `-o variable_substitution=true` or the literal
+`&USERNAMES` reaches the compiler and fails with a syntax error near `ername`.
 
 | File | Purpose |
 |------|---------|

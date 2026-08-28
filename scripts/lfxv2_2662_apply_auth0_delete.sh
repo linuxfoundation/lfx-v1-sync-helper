@@ -54,6 +54,8 @@
 #     -D USERNAMES="user1,user2,user3" \
 #     -f scripts/lfxv2_2662_resolve_usernames.sql
 #
+#   (variable_substitution must be enabled for "-D" to work)
+#
 # CSV columns (from resolve_usernames.sql):
 #   platform_username,contact_sfid,auth0_id,auth0_email,ldap_email,
 #   flagged_primary_email,flagged_email_sfid,matching_email_sfid

@@ -1,4 +1,7 @@
--- LFXV2-2662: Revised matrixed bucketing (scratch, not committed).
+-- Copyright The Linux Foundation and each contributor to LFX.
+-- SPDX-License-Identifier: MIT
+
+-- LFXV2-2662: Revised matrixed bucketing.
 -- Base alignment_status (as in scripts/lfxv2_2662_primary_email_alignment.sql)
 -- crossed with drilldown signals: blocked (Auth0 AND Drupal), gdpr markers,
 -- rewrite markers, platform-primary verified flag, and Auth0-vs-LDAP
