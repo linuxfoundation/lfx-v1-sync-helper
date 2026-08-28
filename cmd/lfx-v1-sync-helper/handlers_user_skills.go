@@ -4,7 +4,10 @@
 // The lfx-v1-sync-helper service.
 package main
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // syncSkillsToAuth0Fn is the function handleUserSkillsUpdate calls to push a
 // user's skill list to Auth0. Swappable in tests.
@@ -45,12 +48,41 @@ func handleUserSkillsUpdate(ctx context.Context, key string, v1Data map[string]a
 		return false
 	}
 
+	var ts time.Time
 	if extractedAt := getTimestampString(v1Data, "_sdc_extracted_at"); extractedAt != "" {
-		if ts, err := parseTimestamp(extractedAt); err == nil && userSkillsStaleGuard.isStale(lfid, ts) {
-			logger.With("key", key, "lfid", lfid).
-				WarnContext(ctx, "skipping out-of-order user_skills event (a newer event for this user was already processed)")
-			return false
+		if parsed, err := parseTimestamp(extractedAt); err == nil {
+			ts = parsed
 		}
+	}
+
+	retryNeeded, ran := userSkillsStaleGuard.run(lfid, ts, func() bool {
+		return syncUserSkillsToAuth0(ctx, key, lfid)
+	})
+	if !ran {
+		logger.With("key", key, "lfid", lfid).
+			WarnContext(ctx, "skipping out-of-order user_skills event (a newer event for this user was already processed)")
+		return false
+	}
+	return retryNeeded
+}
+
+// syncUserSkillsToAuth0 re-reads lfid's full current skill list from v1 and
+// pushes it to Auth0. Returns true if the operation should be retried.
+func syncUserSkillsToAuth0(ctx context.Context, key, lfid string) bool {
+	// Resolve the canonical merged_user.username__c casing before deriving
+	// the Auth0 subject: dbGetSkillsForUser below matches lfid
+	// case-insensitively, but mapUsernameToAuthSub is byte/case-sensitive, so
+	// a casing mismatch between the WAL's lfid and the username Auth0 was
+	// originally provisioned under would otherwise 404. Fall back to the raw
+	// lfid if no merged_user row matches (best-effort, preserves prior
+	// behavior rather than blocking the sync).
+	canonicalLfid := lfid
+	if row, err := lookupMergedUserRowByUsernameFn(ctx, lfid); err != nil {
+		logger.With(errKey, err, "key", key, "lfid", lfid).
+			ErrorContext(ctx, "failed to resolve canonical username for skills sync, retrying")
+		return true
+	} else if row != nil && row.Username.Valid && row.Username.String != "" {
+		canonicalLfid = row.Username.String
 	}
 
 	skillNames, err := getSkillsForUserFn(ctx, lfid)
@@ -60,7 +92,7 @@ func handleUserSkillsUpdate(ctx context.Context, key string, v1Data map[string]a
 		return true
 	}
 
-	auth0UserID := mapUsernameToAuthSub(lfid)
+	auth0UserID := mapUsernameToAuthSub(canonicalLfid)
 
 	syncCtx, cancel := context.WithTimeout(ctx, auth0CallTimeout)
 	defer cancel()

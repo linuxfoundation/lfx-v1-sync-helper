@@ -128,10 +128,18 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 	// is a destructive read-diff-write, so processing a stale, out-of-order
 	// event here can undo a later one. Guard on the event's own timestamp,
 	// keyed by sfid, before reconciling.
-	if profileSkillsStaleGuard.isStale(sfid, event.Timestamp) {
+	// This handler has no redelivery/retry mechanism (core NATS
+	// QueueSubscribe, not JetStream), so the guarded function always reports
+	// "no retry needed": the watermark must advance after every attempt,
+	// successful or not, or a later stale check would never see it.
+	_, ran := profileSkillsStaleGuard.run(sfid, event.Timestamp, func() bool {
+		if err := reconcileV1SkillsFn(ctx, sfid, event.Metadata); err != nil {
+			log.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to reconcile v1 skills")
+		}
+		return false
+	})
+	if !ran {
 		log.With("sfid", sfid).WarnContext(ctx, "skipping out-of-order skills reconciliation (a newer profile event for this user was already processed)")
-	} else if err := reconcileV1SkillsFn(ctx, sfid, event.Metadata); err != nil {
-		log.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to reconcile v1 skills")
 	}
 }
 

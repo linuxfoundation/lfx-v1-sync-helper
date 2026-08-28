@@ -84,6 +84,17 @@ var walDeleteFallbackTables = map[string]bool{
 	"user_skills": true,
 }
 
+// walTimestamplessTables lists tables that never carry a "systemmodstamp" or
+// "lastmodifieddate" column (unlike Salesforce __c objects), so
+// shouldUpdateBasedOnTimestamps would always find both timestamps missing on
+// both sides and default to skipping the update. For these tables,
+// handleWALUpsert instead compares WAL commit times via
+// shouldUpdateBasedOnCommitTime, so real UPDATEs after the initial INSERT
+// aren't silently dropped.
+var walTimestamplessTables = map[string]bool{
+	"user_skills": true,
+}
+
 // GetSFID extracts the row identity key from the appropriate data field based
 // on the action. For DELETE actions, it looks in DataOld; for others, it
 // looks in Data. Despite the name, the column read is table-dependent: most
@@ -241,8 +252,14 @@ func handleWALUpsert(ctx context.Context, walEvent *WALEvent) bool {
 				return false
 			}
 
-			// Compare timestamps to determine if we should update.
-			shouldUpdate = shouldUpdateBasedOnTimestamps(ctx, walEvent.Data, existingData, key)
+			// Compare timestamps to determine if we should update. Tables with
+			// no systemmodstamp/lastmodifieddate columns fall back to
+			// comparing WAL commit times instead.
+			if walTimestamplessTables[walEvent.Table] {
+				shouldUpdate = shouldUpdateBasedOnCommitTime(ctx, walEvent.CommitTime, existingData, key)
+			} else {
+				shouldUpdate = shouldUpdateBasedOnTimestamps(ctx, walEvent.Data, existingData, key)
+			}
 		}
 	}
 
@@ -373,6 +390,11 @@ func handleWALDelete(ctx context.Context, walEvent *WALEvent) bool {
 	// entry (the DataOld-fallback tombstone case above), create it instead.
 	if lastRevision == 0 {
 		if _, err := v1KV.Create(ctx, key, dataBytes); err != nil {
+			// Check if this is a revision mismatch (key already exists) that should be retried.
+			if isRevisionMismatchError(err) {
+				logger.With(errKey, err, "key", key).WarnContext(ctx, "KV create failed due to existing key on delete, will retry")
+				return true
+			}
 			logger.With(errKey, err, "key", key).ErrorContext(ctx, "failed to create tombstone KV entry for delete")
 			return false
 		}
@@ -446,6 +468,34 @@ func shouldUpdateBasedOnTimestamps(ctx context.Context, newData, existingData ma
 	}
 
 	logger.With("key", key).DebugContext(ctx, "WAL upsert: existing data is newer or same, skipping")
+	return false
+}
+
+// shouldUpdateBasedOnCommitTime compares the incoming WAL event's commit time
+// against the existing KV entry's recorded "_sdc_extracted_at" (itself set
+// from a prior event's commit time) to decide whether to update. Used for
+// walTimestamplessTables, where shouldUpdateBasedOnTimestamps can't compare
+// systemmodstamp/lastmodifieddate because the table never has those columns.
+func shouldUpdateBasedOnCommitTime(ctx context.Context, newCommitTime string, existingData map[string]interface{}, key string) bool {
+	newTime, newErr := parseTimestamp(newCommitTime)
+	if newErr != nil {
+		logger.With(errKey, newErr, "key", key, "commit_time", newCommitTime).WarnContext(ctx, "WAL event has invalid commit time, skipping upsert")
+		return false
+	}
+
+	existingExtractedAt := getTimestampString(existingData, "_sdc_extracted_at")
+	existingTime, existingErr := parseTimestamp(existingExtractedAt)
+	if existingErr != nil {
+		logger.With("key", key).DebugContext(ctx, "WAL upsert: existing entry has no valid commit time on record, updating")
+		return true
+	}
+
+	if newTime.After(existingTime) {
+		logger.With("key", key).DebugContext(ctx, "WAL upsert: new commit time is later")
+		return true
+	}
+
+	logger.With("key", key).DebugContext(ctx, "WAL upsert: existing data is newer or same by commit time, skipping")
 	return false
 }
 

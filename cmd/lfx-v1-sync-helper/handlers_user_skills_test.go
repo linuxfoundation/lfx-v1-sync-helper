@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 
@@ -30,10 +31,13 @@ func TestHandleUserSkillsUpdate(t *testing.T) {
 	t.Run("resolves lfid, reads current skills, and syncs to Auth0", func(t *testing.T) {
 		origGetSkills := getSkillsForUserFn
 		origSyncSkills := syncSkillsToAuth0Fn
+		origLookup := lookupMergedUserRowByUsernameFn
 		defer func() {
 			getSkillsForUserFn = origGetSkills
 			syncSkillsToAuth0Fn = origSyncSkills
+			lookupMergedUserRowByUsernameFn = origLookup
 		}()
+		lookupMergedUserRowByUsernameFn = func(context.Context, string) (*mergedUserRow, error) { return nil, nil }
 
 		var gotLfid string
 		getSkillsForUserFn = func(_ context.Context, lfid string) ([]string, error) {
@@ -71,7 +75,12 @@ func TestHandleUserSkillsUpdate(t *testing.T) {
 
 	t.Run("db read error is retried", func(t *testing.T) {
 		origGetSkills := getSkillsForUserFn
-		defer func() { getSkillsForUserFn = origGetSkills }()
+		origLookup := lookupMergedUserRowByUsernameFn
+		defer func() {
+			getSkillsForUserFn = origGetSkills
+			lookupMergedUserRowByUsernameFn = origLookup
+		}()
+		lookupMergedUserRowByUsernameFn = func(context.Context, string) (*mergedUserRow, error) { return nil, nil }
 		getSkillsForUserFn = func(_ context.Context, _ string) ([]string, error) {
 			return nil, errors.New("db unavailable")
 		}
@@ -82,9 +91,71 @@ func TestHandleUserSkillsUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("canonical username lookup error is retried", func(t *testing.T) {
+		origLookup := lookupMergedUserRowByUsernameFn
+		defer func() { lookupMergedUserRowByUsernameFn = origLookup }()
+		lookupMergedUserRowByUsernameFn = func(context.Context, string) (*mergedUserRow, error) {
+			return nil, errors.New("db unavailable")
+		}
+
+		retry := handleUserSkillsUpdate(context.Background(), "salesforce-user_skills.abc", map[string]any{"lfid": "jdoe"})
+		if !retry {
+			t.Error("expected retry: canonical username lookup errors may be transient and should be retried")
+		}
+	})
+
+	t.Run("uses canonical merged_user casing to derive the Auth0 subject", func(t *testing.T) {
+		origGetSkills := getSkillsForUserFn
+		origSyncSkills := syncSkillsToAuth0Fn
+		origLookup := lookupMergedUserRowByUsernameFn
+		defer func() {
+			getSkillsForUserFn = origGetSkills
+			syncSkillsToAuth0Fn = origSyncSkills
+			lookupMergedUserRowByUsernameFn = origLookup
+		}()
+
+		// The WAL event's lfid is lowercased, but the canonical username on
+		// record (and the one Auth0 was provisioned under) is "JDoe".
+		lookupMergedUserRowByUsernameFn = func(_ context.Context, username string) (*mergedUserRow, error) {
+			if username != "jdoe" {
+				t.Errorf("lookupMergedUserRowByUsernameFn called with %q, want jdoe", username)
+			}
+			return &mergedUserRow{Username: sql.NullString{String: "JDoe", Valid: true}}, nil
+		}
+		getSkillsForUserFn = func(_ context.Context, _ string) ([]string, error) {
+			return []string{"GO"}, nil
+		}
+		var gotAuth0ID string
+		syncSkillsToAuth0Fn = func(_ context.Context, auth0ID string, _ *management.User, _ []string, _ bool) (bool, error) {
+			gotAuth0ID = auth0ID
+			return true, nil
+		}
+
+		fake := &fakeAuth0Users{
+			users: map[string]*management.User{
+				mapUsernameToAuthSub("JDoe"): {ID: auth0.String(mapUsernameToAuthSub("JDoe"))},
+			},
+		}
+		cleanup := setupLinkTest(t, fake)
+		defer cleanup()
+
+		retry := handleUserSkillsUpdate(context.Background(), "salesforce-user_skills.abc", map[string]any{"lfid": "jdoe"})
+		if retry {
+			t.Error("expected no retry")
+		}
+		if want := mapUsernameToAuthSub("JDoe"); gotAuth0ID != want {
+			t.Errorf("synced to Auth0 subject %q, want %q (derived from canonical casing)", gotAuth0ID, want)
+		}
+	})
+
 	t.Run("retryable Auth0 fetch error triggers retry", func(t *testing.T) {
 		origGetSkills := getSkillsForUserFn
-		defer func() { getSkillsForUserFn = origGetSkills }()
+		origLookup := lookupMergedUserRowByUsernameFn
+		defer func() {
+			getSkillsForUserFn = origGetSkills
+			lookupMergedUserRowByUsernameFn = origLookup
+		}()
+		lookupMergedUserRowByUsernameFn = func(context.Context, string) (*mergedUserRow, error) { return nil, nil }
 		getSkillsForUserFn = func(_ context.Context, _ string) ([]string, error) {
 			return []string{"GO"}, nil
 		}
@@ -115,6 +186,10 @@ func TestHandleUserSkillsUpdate(t *testing.T) {
 		syncSkillsToAuth0Fn = func(_ context.Context, _ string, _ *management.User, _ []string, _ bool) (bool, error) {
 			return true, nil
 		}
+
+		origLookup := lookupMergedUserRowByUsernameFn
+		lookupMergedUserRowByUsernameFn = func(context.Context, string) (*mergedUserRow, error) { return nil, nil }
+		defer func() { lookupMergedUserRowByUsernameFn = origLookup }()
 
 		const lfid = "stale-order-test-user"
 		fake := &fakeAuth0Users{

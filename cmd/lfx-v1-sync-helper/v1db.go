@@ -154,6 +154,9 @@ func dbLookupMergedUserRowByUsername(ctx context.Context, username string) (*mer
 	return row, nil
 }
 
+// lookupMergedUserRowByUsernameFn is injectable for tests.
+var lookupMergedUserRowByUsernameFn = dbLookupMergedUserRowByUsername
+
 // dbLookupMergedUserRowBySFID fetches the live merged_user row for an SFID.
 // Returns (nil, nil) on miss (including deleted rows).
 func dbLookupMergedUserRowBySFID(ctx context.Context, sfid string) (*mergedUserRow, error) {
