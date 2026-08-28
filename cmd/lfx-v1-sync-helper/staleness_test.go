@@ -4,6 +4,8 @@
 package main
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -165,5 +167,44 @@ func TestStaleEventGuard(t *testing.T) {
 
 		close(release)
 		<-done
+	})
+
+	t.Run("aggressive concurrent eviction never lets two callers hold the same key at once", func(t *testing.T) {
+		// Regression test for the TOCTOU eviction bug flagged in review: with
+		// staleGuardRetention/staleGuardSweepInterval both driven to their
+		// most aggressive settings, a sweep is attempted on nearly every
+		// call, maximizing the chance that a naive TryLock-based eviction
+		// hands out a second, different mutex for the same key to a
+		// concurrent caller.
+		origRetention := staleGuardRetention
+		origInterval := staleGuardSweepInterval
+		staleGuardRetention = time.Nanosecond
+		staleGuardSweepInterval = 1
+		defer func() {
+			staleGuardRetention = origRetention
+			staleGuardSweepInterval = origInterval
+		}()
+
+		var g staleEventGuard
+		var inFlight int32
+		var wg sync.WaitGroup
+		const n = 500
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				// A zero timestamp is never stale, so every call reaches fn
+				// regardless of watermark state, maximizing contention on k1.
+				g.run("k1", time.Time{}, func() bool {
+					if !atomic.CompareAndSwapInt32(&inFlight, 0, 1) {
+						t.Error("two callers ran concurrently for the same key")
+						return false
+					}
+					atomic.StoreInt32(&inFlight, 0)
+					return false
+				})
+			}()
+		}
+		wg.Wait()
 	})
 }

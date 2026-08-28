@@ -41,15 +41,25 @@ var (
 // attempt.
 //
 // locks and seen otherwise grow by one entry per key ever seen and are never
-// removed, a memory leak on a long-running service. touch/evict below
-// periodically sweep out keys that have gone quiet (by real wall-clock time,
-// not by the caller-supplied event timestamp, which can be arbitrarily old
-// or synthetic) for longer than staleGuardRetention, evicting a key's lock
-// only when TryLock (Go 1.18+) confirms it isn't currently held, so an
-// in-flight caller of run is never evicted out from under it.
+// removed, a memory leak on a long-running service. sweep below periodically
+// evicts keys that have gone quiet (by real wall-clock time, not by the
+// caller-supplied event timestamp, which can be arbitrarily old or
+// synthetic) for longer than staleGuardRetention. Liveness is tracked with an
+// explicit reference count (refs), incremented/decremented under g.mu around
+// every acquire/release, rather than inferred from whether the per-key mutex
+// happens to be locked: a goroutine can fetch a key's mutex from the locks
+// map but not yet have called Lock() on it, and inferring "unused" from a
+// successful TryLock in that window would let eviction hand out a second,
+// different mutex for the same key to a new caller while the first still
+// holds (or is about to lock) the original one - two callers then run
+// destructive reconciliation concurrently for the same key. Since refs is
+// only ever mutated while holding g.mu, and a sweep also holds g.mu for the
+// whole decision, refs[key] == 0 is authoritative: no goroutine can be
+// concurrently acquiring the same key's lock.
 type staleEventGuard struct {
 	mu          sync.Mutex
 	locks       map[string]*sync.Mutex
+	refs        map[string]int
 	seen        map[string]time.Time
 	lastTouched map[string]time.Time
 	calls       int
@@ -63,9 +73,8 @@ type staleEventGuard struct {
 // fn was not called). Returns ran == true with retryNeeded set to fn's
 // return value otherwise.
 func (g *staleEventGuard) run(key string, ts time.Time, fn func() bool) (retryNeeded bool, ran bool) {
-	keyLock := g.lockFor(key)
-	keyLock.Lock()
-	defer keyLock.Unlock()
+	keyLock := g.acquire(key)
+	defer g.release(key, keyLock)
 
 	if !ts.IsZero() {
 		g.mu.Lock()
@@ -92,6 +101,41 @@ func (g *staleEventGuard) run(key string, ts time.Time, fn func() bool) (retryNe
 	return retryNeeded, true
 }
 
+// acquire returns key's per-key mutex, locked, having first marked key as
+// referenced (under g.mu) so a concurrent sweep can never evict key's
+// bookkeeping out from under this call - see the staleEventGuard doc comment.
+func (g *staleEventGuard) acquire(key string) *sync.Mutex {
+	g.mu.Lock()
+	if g.locks == nil {
+		g.locks = make(map[string]*sync.Mutex)
+	}
+	if g.refs == nil {
+		g.refs = make(map[string]int)
+	}
+	l, ok := g.locks[key]
+	if !ok {
+		l = &sync.Mutex{}
+		g.locks[key] = l
+	}
+	g.refs[key]++
+	g.mu.Unlock()
+
+	l.Lock()
+	return l
+}
+
+// release unlocks l and drops key's reference taken by acquire.
+func (g *staleEventGuard) release(key string, l *sync.Mutex) {
+	l.Unlock()
+
+	g.mu.Lock()
+	g.refs[key]--
+	if g.refs[key] <= 0 {
+		delete(g.refs, key)
+	}
+	g.mu.Unlock()
+}
+
 // touch records real wall-clock activity for key and, every
 // staleGuardSweepInterval calls, sweeps out keys that have gone quiet for
 // longer than staleGuardRetention.
@@ -105,57 +149,23 @@ func (g *staleEventGuard) touch(key string) {
 	due := g.calls >= staleGuardSweepInterval
 	if due {
 		g.calls = 0
+		g.sweepLocked()
 	}
-	var stale []string
-	if due {
-		cutoff := time.Now().Add(-staleGuardRetention)
-		for k, t := range g.lastTouched {
-			if t.Before(cutoff) {
-				stale = append(stale, k)
-			}
+	g.mu.Unlock()
+}
+
+// sweepLocked evicts every key whose last activity is older than
+// staleGuardRetention and which currently has no active/waiting acquirer.
+// Must be called with g.mu held; refs[key] == 0 (or absent) is authoritative
+// under that lock, since acquire also only ever increments refs while
+// holding g.mu.
+func (g *staleEventGuard) sweepLocked() {
+	cutoff := time.Now().Add(-staleGuardRetention)
+	for k, t := range g.lastTouched {
+		if t.Before(cutoff) && g.refs[k] == 0 {
+			delete(g.locks, k)
+			delete(g.seen, k)
+			delete(g.lastTouched, k)
 		}
 	}
-	g.mu.Unlock()
-
-	for _, k := range stale {
-		g.evict(k)
-	}
-}
-
-// evict removes a stale key's bookkeeping, but only if its lock is not
-// currently held. If the lock is held (the key isn't as idle as
-// lastTouched suggested, or a caller is mid-flight), the entry is left
-// alone for a future sweep to reconsider.
-func (g *staleEventGuard) evict(key string) {
-	g.mu.Lock()
-	l, ok := g.locks[key]
-	g.mu.Unlock()
-	if !ok {
-		return
-	}
-	if !l.TryLock() {
-		return
-	}
-	defer l.Unlock()
-
-	g.mu.Lock()
-	delete(g.locks, key)
-	delete(g.seen, key)
-	delete(g.lastTouched, key)
-	g.mu.Unlock()
-}
-
-// lockFor returns the per-key mutex for key, creating it if necessary.
-func (g *staleEventGuard) lockFor(key string) *sync.Mutex {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.locks == nil {
-		g.locks = make(map[string]*sync.Mutex)
-	}
-	l, ok := g.locks[key]
-	if !ok {
-		l = &sync.Mutex{}
-		g.locks[key] = l
-	}
-	return l
 }
