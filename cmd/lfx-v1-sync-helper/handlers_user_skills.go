@@ -43,7 +43,8 @@ func handleUserSkillsUpdate(ctx context.Context, key string, v1Data map[string]a
 	}
 
 	lfid, ok := v1Data["lfid"].(string)
-	if !ok || normalizeUserIdentifier(lfid) == "" {
+	normalizedLfid := normalizeUserIdentifier(lfid)
+	if !ok || normalizedLfid == "" {
 		logger.With("key", key).WarnContext(ctx, "user_skills missing lfid, skipping")
 		return false
 	}
@@ -55,7 +56,11 @@ func handleUserSkillsUpdate(ctx context.Context, key string, v1Data map[string]a
 		}
 	}
 
-	retryNeeded, ran := userSkillsStaleGuard.run(lfid, ts, func() bool {
+	// Guard on the normalized lfid: the DB lookup and Auth0-subject
+	// resolution below both treat lfid case-insensitively, so "jdoe" and
+	// "JDoe" must share the same lock/watermark or they'd race each other
+	// as if they were different users.
+	retryNeeded, ran := userSkillsStaleGuard.run(normalizedLfid, ts, func() bool {
 		return syncUserSkillsToAuth0(ctx, key, lfid)
 	})
 	if !ran {

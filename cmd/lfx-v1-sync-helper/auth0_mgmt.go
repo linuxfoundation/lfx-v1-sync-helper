@@ -200,7 +200,20 @@ func fetchAuth0User(ctx context.Context, auth0UserID string) (*management.User, 
 // written), so callers (in particular backfill summaries) can distinguish an
 // update from a no-op skip. When dryRun is true, all eligibility and diff
 // checks still run but the Management API write is skipped.
-func syncProfileToAuth0(ctx context.Context, auth0UserID string, primaryUser *management.User, v1Data map[string]any, dryRun bool) (bool, error) {
+//
+// includeSkills controls whether this call also resolves and writes the
+// "skills" field. handleUserSkillsUpdate (see handlers_user_skills.go) is a
+// second, independent live writer of that same field, keyed and serialized
+// by lfid via userSkillsStaleGuard — but this function is keyed by SFID and
+// isn't serialized against that guard at all, so if both ran live at once, a
+// merged_user event here could read a stale skill list and overwrite a
+// concurrent user_skills write with an older value. To avoid that race, the
+// live merged_user handler (handlers_users.go) passes includeSkills=false,
+// leaving skills exclusively owned by the live user_skills handler; only the
+// administrative, on-demand backfill/single-user-resync call sites
+// (backfill_email_profile.go) pass true, since those aren't a second
+// continuously-racing live writer.
+func syncProfileToAuth0(ctx context.Context, auth0UserID string, primaryUser *management.User, v1Data map[string]any, includeSkills, dryRun bool) (bool, error) {
 	// Blocked accounts are treated as inactive/deprovisioned: don't push new
 	// profile data to them. This is a no-op skip, not an error.
 	if primaryUser.GetBlocked() {
@@ -234,15 +247,18 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, primaryUser *ma
 	// Resolve skills from salesforce.user_skills, keyed by v1 username (lfid) —
 	// skills has no merged_user column, so it can't come from v1Data directly.
 	// A missing/blank username__c leaves skills nil (untouched), matching how
-	// orgName is skipped above when accountid is absent.
+	// orgName is skipped above when accountid is absent. Skipped entirely when
+	// includeSkills is false (see the doc comment above for why).
 	var skills *string
-	if username, ok := v1Data["username__c"].(string); ok && normalizeUserIdentifier(username) != "" {
-		skillNames, skillErr := getSkillsForUserFn(ctx, username)
-		if skillErr != nil {
-			return false, fmt.Errorf("failed to resolve v1 skills for %s: %w", username, skillErr)
+	if includeSkills {
+		if username, ok := v1Data["username__c"].(string); ok && normalizeUserIdentifier(username) != "" {
+			skillNames, skillErr := getSkillsForUserFn(ctx, username)
+			if skillErr != nil {
+				return false, fmt.Errorf("failed to resolve v1 skills for %s: %w", username, skillErr)
+			}
+			joined := strings.Join(skillNames, ", ")
+			skills = &joined
 		}
-		joined := strings.Join(skillNames, ", ")
-		skills = &joined
 	}
 
 	metadata := buildAuth0Metadata(existingMetadata, v1Data, orgName, skills)

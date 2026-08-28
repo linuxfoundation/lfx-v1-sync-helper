@@ -92,4 +92,78 @@ func TestStaleEventGuard(t *testing.T) {
 			t.Error("expected a duplicate of an already-succeeded event to be treated as stale")
 		}
 	})
+
+	t.Run("keys idle past the retention window are evicted on the next sweep", func(t *testing.T) {
+		origRetention := staleGuardRetention
+		origInterval := staleGuardSweepInterval
+		staleGuardRetention = time.Millisecond
+		staleGuardSweepInterval = 2
+		defer func() {
+			staleGuardRetention = origRetention
+			staleGuardSweepInterval = origInterval
+		}()
+
+		var g staleEventGuard
+		g.run("k1", time.Unix(100, 0), func() bool { return false })
+		time.Sleep(5 * time.Millisecond)
+		// This second call bumps calls to staleGuardSweepInterval, triggering
+		// a sweep. k1's lastTouched (real wall-clock, unrelated to the
+		// synthetic event timestamps above) is now older than the shrunk
+		// retention window, so it should be evicted; k2 was just touched and
+		// must survive.
+		g.run("k2", time.Unix(100, 0), func() bool { return false })
+
+		g.mu.Lock()
+		_, k1Seen := g.seen["k1"]
+		_, k1Locked := g.locks["k1"]
+		_, k2Seen := g.seen["k2"]
+		g.mu.Unlock()
+
+		if k1Seen || k1Locked {
+			t.Error("expected k1's watermark and lock to be evicted after exceeding the retention window")
+		}
+		if !k2Seen {
+			t.Error("expected k2, touched just now, to survive the sweep")
+		}
+	})
+
+	t.Run("a key whose lock is held during a sweep is not evicted", func(t *testing.T) {
+		origRetention := staleGuardRetention
+		origInterval := staleGuardSweepInterval
+		staleGuardRetention = time.Millisecond
+		staleGuardSweepInterval = 1
+		defer func() {
+			staleGuardRetention = origRetention
+			staleGuardSweepInterval = origInterval
+		}()
+
+		var g staleEventGuard
+		release := make(chan struct{})
+		started := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			g.run("k1", time.Unix(100, 0), func() bool {
+				close(started)
+				<-release
+				return false
+			})
+			close(done)
+		}()
+
+		<-started
+		time.Sleep(5 * time.Millisecond)
+		// Trigger a sweep from a second key while k1's lock is still held by
+		// the in-flight goroutine above; k1 must survive since TryLock fails.
+		g.run("k2", time.Unix(100, 0), func() bool { return false })
+
+		g.mu.Lock()
+		_, k1Locked := g.locks["k1"]
+		g.mu.Unlock()
+		if !k1Locked {
+			t.Error("expected k1's lock, held by an in-flight caller, to survive the sweep")
+		}
+
+		close(release)
+		<-done
+	})
 }
