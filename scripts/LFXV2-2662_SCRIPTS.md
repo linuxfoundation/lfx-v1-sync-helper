@@ -8,7 +8,7 @@ the release build; kept locally for reference and execution during remediation.
 | File | Purpose |
 |------|---------|
 | `lfxv2_2662_primary_email_alignment.sql` | Base alignment query — classifies all platform users into alignment buckets (ALIGNED, WRONG_PRIMARY_FLAG, MISSING_FROM_AUTH0, etc.) |
-| `lfxv2_2662_matrixed_buckets.sql` | Extended matrix — crosses alignment_status with drilldown signals (BLOCKED, GDPR, MANGLED, EXT, PHONY_USERNAME, timestamps) and outputs counts + up to 50 sample usernames per cell |
+| `lfxv2_2662_matrixed_buckets.sql` | Extended matrix — crosses alignment_status with drilldown signals (BLOCKED, GDPR, MANGLED, EXT, PHONY_USERNAME, timestamps) and outputs counts + up to 850 sample usernames per cell |
 | `lfxv2_2662_secondary_email_alignment.sql` | Secondary/alternate email alignment analysis |
 
 ## Username Resolver (Snowflake)
@@ -21,13 +21,23 @@ literal `&USERNAMES` causes a SQL compilation error.
 | File | Purpose |
 |------|---------|
 | `lfxv2_2662_resolve_usernames.sql` | Snowflake → CSV: takes comma-separated usernames, outputs all columns any apply script needs (platform_username, contact_sfid, auth0_id, auth0_email, ldap_email, flagged_primary_email, flagged_email_sfid, matching_email_sfid, flagged_email_other_auth0_id, flagged_email_other_ldap_uid, meeting_count, ti_id, flagged_email_other_ti_id, flagged_email_other_contact_sfid, meeting_count_other_sfid) |
+| `lfxv2_2662_join_buckets.awk` | `awk -f scripts/lfxv2_2662_join_buckets.awk matrixed_buckets.csv resolved.csv > resolved_with_buckets.csv` — prepends `ALIGNMENT_STATUS` and `DRILLDOWN` from the matrix so the resolver output doubles as a manual-remediation reference. Case-insensitive username match; unmatched rows keep empty bucket columns. Feed the apply scripts the plain `resolved.csv` (they read columns positionally) |
 
 ## Workflow
 
 1. Run `lfxv2_2662_matrixed_buckets.sql` to get per-cell counts and sample usernames.
-2. Copy the comma-separated samples from the target drilldown cell(s).
+2. Copy the comma-separated samples from the target drilldown cell(s), or extract
+   several cells at once from the saved matrix CSV:
+
+   ```bash
+   USERNAMES=$(awk -F'","' '{s=$1; sub(/^"/,"",s); d=$2} \
+     s ~ /^PLATFORM_OUT_OF_SYNC_WITH_/ || s=="WRONG_PRIMARY_FLAG" || d ~ /INACTIVE_PRIMARY/ \
+     {u=$4; sub(/"$/,"",u); print u}' matrixed_buckets.csv | paste -sd, -)
+   ```
+
 3. Run `lfxv2_2662_resolve_usernames.sql` with `-D USERNAMES="<samples>"` to generate a CSV.
-4. Feed the CSV into the appropriate apply script.
+4. Feed the CSV into the appropriate apply script. Optionally run
+   `lfxv2_2662_join_buckets.awk` first for a bucket-annotated reference copy.
 5. Re-run the matrixed query to verify the cell counts dropped and get the next batch.
 
 ## Apply Scripts
