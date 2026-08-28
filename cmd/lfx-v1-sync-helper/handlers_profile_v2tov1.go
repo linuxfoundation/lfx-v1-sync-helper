@@ -102,17 +102,23 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 	}
 
 	payload := mapMetadataToV1Payload(event.Metadata)
-	if len(payload) == 0 {
-		log.DebugContext(ctx, "no mappable fields in event, skipping user-service update")
-		return
+	if len(payload) > 0 {
+		if err := patchV1User(ctx, sfid, payload); err != nil {
+			log.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to patch v1 user")
+			return
+		}
+		log.With("sfid", sfid).InfoContext(ctx, "synced v2 profile to v1 user-service")
+	} else {
+		log.DebugContext(ctx, "no mappable top-level/address fields in event")
 	}
 
-	if err := patchV1User(ctx, sfid, payload); err != nil {
-		log.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to patch v1 user")
-		return
+	// Skills is reconciled separately: it isn't part of mapMetadataToV1Payload's
+	// payload above (user-service has no replace-list PATCH field for it), and
+	// the event may carry only a skills change with no other payload fields, so
+	// this must not be skipped by the empty-payload branch above.
+	if err := reconcileV1SkillsFn(ctx, sfid, event.Metadata); err != nil {
+		log.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to reconcile v1 skills")
 	}
-
-	log.With("sfid", sfid).InfoContext(ctx, "synced v2 profile to v1 user-service")
 }
 
 // resolveV1UsernameFromV2UserID returns the LFX username to use for v1 user-service
@@ -197,6 +203,166 @@ func mapMetadataToV1Payload(metadata map[string]any) map[string]any {
 	}
 
 	return payload
+}
+
+// reconcileV1SkillsFn is injectable for tests.
+var reconcileV1SkillsFn = reconcileV1Skills
+
+// userSkillEntry is one row of user-service's GET /v1/users/{sfid}/skills
+// response: ID is the join-row UUID needed for DELETE, Name is the skill name.
+type userSkillEntry struct {
+	ID   string `json:"ID"`
+	Name string `json:"Name"`
+}
+
+// reconcileV1Skills makes v1's user_skills rows match the v2 skills field.
+// A missing "skills" key in metadata means skills weren't touched by this
+// event — not managed here, do nothing. An empty string means the user
+// cleared all skills. Diffing is set-based and case-insensitive so that v1's
+// unordered reads and the catalog's irregular casing don't cause write churn;
+// names that don't match the v1 catalog are silently dropped by
+// CreateUserSkills itself (see package doc / plan), so this function does not
+// pre-filter against the catalog.
+func reconcileV1Skills(ctx context.Context, sfid string, metadata map[string]any) error {
+	rawSkills, ok := metadata["skills"]
+	if !ok {
+		return nil
+	}
+	skillsStr, _ := rawSkills.(string)
+
+	desired := map[string]string{} // lowercase name -> original-case name
+	for _, name := range strings.Split(skillsStr, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		desired[strings.ToLower(name)] = name
+	}
+
+	current, err := getV1UserSkills(ctx, sfid)
+	if err != nil {
+		return fmt.Errorf("failed to read current v1 skills: %w", err)
+	}
+
+	currentByLower := make(map[string]userSkillEntry, len(current))
+	for _, entry := range current {
+		currentByLower[strings.ToLower(entry.Name)] = entry
+	}
+
+	var toAdd []string
+	for lower, name := range desired {
+		if _, ok := currentByLower[lower]; !ok {
+			toAdd = append(toAdd, name)
+		}
+	}
+
+	var toRemove []userSkillEntry
+	for lower, entry := range currentByLower {
+		if _, ok := desired[lower]; !ok {
+			toRemove = append(toRemove, entry)
+		}
+	}
+
+	if len(toAdd) == 0 && len(toRemove) == 0 {
+		return nil
+	}
+
+	if len(toAdd) > 0 {
+		if err := postV1UserSkills(ctx, sfid, toAdd); err != nil {
+			return fmt.Errorf("failed to add v1 skills: %w", err)
+		}
+	}
+	for _, entry := range toRemove {
+		if err := deleteV1UserSkill(ctx, sfid, entry.ID); err != nil {
+			return fmt.Errorf("failed to delete v1 skill %s: %w", entry.ID, err)
+		}
+	}
+
+	logger.With("sfid", sfid, "added", len(toAdd), "removed", len(toRemove)).
+		InfoContext(ctx, "reconciled v1 skills from v2 profile update")
+	return nil
+}
+
+// getV1UserSkills fetches a v1 user's current skill list.
+func getV1UserSkills(ctx context.Context, sfid string) ([]userSkillEntry, error) {
+	apiURL := fmt.Sprintf("%suser-service/v1/users/%s/skills", cfg.LFXAPIGateway.String(), sfid)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create user-service request: %w", err)
+	}
+
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send user-service request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("user-service returned status %d for user %s: %s", resp.StatusCode, sfid, string(respBody))
+	}
+
+	var entries []userSkillEntry
+	if err := json.Unmarshal(respBody, &entries); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal user-service skills response: %w", err)
+	}
+	return entries, nil
+}
+
+// postV1UserSkills adds skill names to a v1 user via the additive POST
+// endpoint. Names not present in v1's catalog are dropped silently by
+// user-service; the request itself is not an error in that case.
+func postV1UserSkills(ctx context.Context, sfid string, names []string) error {
+	apiURL := fmt.Sprintf("%suser-service/v1/users/%s/skills", cfg.LFXAPIGateway.String(), sfid)
+
+	body, err := json.Marshal(names)
+	if err != nil {
+		return fmt.Errorf("failed to marshal skills payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create user-service request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send user-service request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("user-service returned status %d for user %s: %s", resp.StatusCode, sfid, string(respBody))
+	}
+	return nil
+}
+
+// deleteV1UserSkill removes a single skill (by its join-row ID) from a v1 user.
+func deleteV1UserSkill(ctx context.Context, sfid, userSkillID string) error {
+	apiURL := fmt.Sprintf("%suser-service/v1/users/%s/skills/%s", cfg.LFXAPIGateway.String(), sfid, userSkillID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, apiURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create user-service request: %w", err)
+	}
+
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send user-service request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("user-service returned status %d for user %s skill %s: %s", resp.StatusCode, sfid, userSkillID, string(respBody))
+	}
+	return nil
 }
 
 // patchV1User sends a PATCH request to user-service to update a v1 user record.

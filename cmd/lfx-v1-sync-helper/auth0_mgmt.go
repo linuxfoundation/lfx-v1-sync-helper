@@ -40,6 +40,9 @@ type auth0UserAPI interface {
 // Tests can replace this with a fake.
 var auth0Users auth0UserAPI
 
+// getSkillsForUserFn is injectable for tests, mirroring getAlternateEmailsForUserFn.
+var getSkillsForUserFn = dbGetSkillsForUser
+
 // v1ToAuth0Fields maps v1 platform DB column names to Auth0 user_metadata keys.
 // Address fields use the Salesforce MailingAddress columns (mailingstreet, etc.);
 // merged_user has no bare street/city/state/country/postalcode columns.
@@ -120,12 +123,17 @@ func isRetryableAuth0Error(err error) bool {
 // buildAuth0Metadata diffs v1 platform DB fields against the existing Auth0
 // user_metadata and returns a patch map containing only the keys that changed.
 // The orgName parameter is the resolved organization name (empty or the
-// individual placeholder to skip org mapping). The patch map is safe to send
-// as the user_metadata body of an Auth0 Management API PATCH: Auth0 merges
-// top-level keys, so sending only changed keys avoids unnecessary writes and
-// is race-safer than sending the full metadata object. An empty patch map
-// means nothing changed.
-func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, orgName string) map[string]interface{} {
+// individual placeholder to skip org mapping). The skills parameter is the
+// resolved, comma-joined skill list; nil means "not resolved this call, leave
+// untouched" and a non-nil empty string means "user has no skills, clear the
+// field" — the same nil-vs-empty convention as orgName, needed because skills
+// (like organization) lives outside v1Data (it comes from a separate
+// salesforce.user_skills join, not a merged_user column). The patch map is
+// safe to send as the user_metadata body of an Auth0 Management API PATCH:
+// Auth0 merges top-level keys, so sending only changed keys avoids
+// unnecessary writes and is race-safer than sending the full metadata object.
+// An empty patch map means nothing changed.
+func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, orgName string, skills *string) map[string]interface{} {
 	patch := make(map[string]interface{})
 
 	// Map each v1 field to the corresponding Auth0 user_metadata key.
@@ -145,6 +153,15 @@ func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, 
 		existingOrg, _ := existing["organization"].(string)
 		if orgName != existingOrg {
 			patch["organization"] = orgName
+		}
+	}
+
+	// Skills mapping: nil means the caller didn't resolve a v1 username for
+	// this user, so skills are left untouched rather than wiped.
+	if skills != nil {
+		existingSkills, _ := existing["skills"].(string)
+		if *skills != existingSkills {
+			patch["skills"] = *skills
 		}
 	}
 
@@ -214,7 +231,21 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, primaryUser *ma
 		}
 	}
 
-	metadata := buildAuth0Metadata(existingMetadata, v1Data, orgName)
+	// Resolve skills from salesforce.user_skills, keyed by v1 username (lfid) —
+	// skills has no merged_user column, so it can't come from v1Data directly.
+	// A missing/blank username__c leaves skills nil (untouched), matching how
+	// orgName is skipped above when accountid is absent.
+	var skills *string
+	if username, ok := v1Data["username__c"].(string); ok && normalizeUserIdentifier(username) != "" {
+		skillNames, skillErr := getSkillsForUserFn(ctx, username)
+		if skillErr != nil {
+			return false, fmt.Errorf("failed to resolve v1 skills for %s: %w", username, skillErr)
+		}
+		joined := strings.Join(skillNames, ", ")
+		skills = &joined
+	}
+
+	metadata := buildAuth0Metadata(existingMetadata, v1Data, orgName, skills)
 
 	if len(metadata) == 0 {
 		logger.With("auth0_user_id", auth0UserID).
@@ -237,6 +268,52 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, primaryUser *ma
 
 	logger.With("auth0_user_id", auth0UserID).
 		InfoContext(ctx, "synced v1 profile to Auth0 user_metadata")
+	return true, nil
+}
+
+// syncSkillsToAuth0 pushes a user's current v1 skill list to Auth0
+// user_metadata, touching only the "skills" key. This exists separately from
+// syncProfileToAuth0 because the user_skills WAL trigger never carries
+// merged_user's other profile columns (job_title, bio, address, ...) —
+// running those through buildAuth0Metadata's full field diff would read every
+// missing column as "cleared" and wipe out unrelated profile data that this
+// event has nothing to do with. The caller must pass the pre-fetched Auth0
+// user. The returned bool is true only when user_metadata was actually
+// written (or would have been, in dry-run mode).
+func syncSkillsToAuth0(ctx context.Context, auth0UserID string, primaryUser *management.User, skillNames []string, dryRun bool) (bool, error) {
+	if primaryUser.GetBlocked() {
+		logger.With("auth0_user_id", auth0UserID).
+			WarnContext(ctx, "Auth0 user is blocked, skipping skills sync")
+		return false, nil
+	}
+
+	var existingSkills string
+	if primaryUser.UserMetadata != nil {
+		existingSkills, _ = (*primaryUser.UserMetadata)["skills"].(string)
+	}
+
+	joined := strings.Join(skillNames, ", ")
+	if joined == existingSkills {
+		logger.With("auth0_user_id", auth0UserID).
+			DebugContext(ctx, "no skills change detected, skipping Auth0 update")
+		return false, nil
+	}
+
+	if dryRun {
+		logger.With("auth0_user_id", auth0UserID).
+			InfoContext(ctx, "[dry-run] would sync skills to Auth0 user_metadata")
+		return true, nil
+	}
+
+	metadata := map[string]interface{}{"skills": joined}
+	if err := auth0Users.Update(ctx, auth0UserID, &management.User{
+		UserMetadata: &metadata,
+	}); err != nil {
+		return false, fmt.Errorf("failed to update Auth0 user %s skills: %w", auth0UserID, err)
+	}
+
+	logger.With("auth0_user_id", auth0UserID).
+		InfoContext(ctx, "synced v1 skills to Auth0 user_metadata")
 	return true, nil
 }
 

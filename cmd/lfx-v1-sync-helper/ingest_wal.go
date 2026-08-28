@@ -54,8 +54,27 @@ func (w *WALEvent) IsValid() bool {
 	return w.Schema != "" && w.Table != "" && w.Action != ""
 }
 
-// GetSFID extracts the SFID from the appropriate data field based on the action.
-// For DELETE actions, it looks in DataOld; for others, it looks in Data.
+// walPKColumnOverrides maps a table name to its primary-key column, for the
+// handful of tables that aren't Salesforce __c objects and so don't carry a
+// literal "sfid" column. Every other table defaults to "sfid".
+var walPKColumnOverrides = map[string]string{
+	"user_skills": "id",
+}
+
+// pkColumn returns the column GetSFID should read as the row's identity key
+// for this event's table, defaulting to "sfid".
+func (w *WALEvent) pkColumn() string {
+	if col, ok := walPKColumnOverrides[w.Table]; ok {
+		return col
+	}
+	return "sfid"
+}
+
+// GetSFID extracts the row identity key from the appropriate data field based
+// on the action. For DELETE actions, it looks in DataOld; for others, it
+// looks in Data. Despite the name, the column read is table-dependent: most
+// tables are Salesforce __c objects keyed by "sfid", but a few plain platform
+// tables (e.g. user_skills) are keyed by "id" instead — see pkColumn.
 func (w *WALEvent) GetSFID() (string, bool) {
 	var dataSource map[string]interface{}
 
@@ -70,7 +89,7 @@ func (w *WALEvent) GetSFID() (string, bool) {
 		return "", false
 	}
 
-	sfidValue, exists := dataSource["sfid"]
+	sfidValue, exists := dataSource[w.pkColumn()]
 	if !exists || sfidValue == nil {
 		return "", false
 	}

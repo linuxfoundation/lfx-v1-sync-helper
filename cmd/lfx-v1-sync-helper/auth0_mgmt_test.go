@@ -44,6 +44,7 @@ func TestBuildAuth0Metadata(t *testing.T) {
 		existing        map[string]interface{}
 		v1Data          map[string]any
 		orgName         string
+		skills          *string
 		wantEmpty       bool              // true when no changes are expected (patch should be empty)
 		wantFieldChecks map[string]string // key -> expected value in patch
 		wantAbsent      []string          // keys that must NOT appear in patch
@@ -160,11 +161,43 @@ func TestBuildAuth0Metadata(t *testing.T) {
 			// Name fields are absent from the patch (Auth0 PATCH preserves them).
 			wantAbsent: []string{"given_name", "family_name", "name"},
 		},
+		{
+			name:       "skills nil leaves field untouched",
+			existing:   map[string]interface{}{"skills": "Go, Python"},
+			v1Data:     map[string]any{},
+			skills:     nil,
+			wantAbsent: []string{"skills"},
+		},
+		{
+			name:     "skills populated and changed",
+			existing: map[string]interface{}{},
+			v1Data:   map[string]any{},
+			skills:   auth0.String("GO, Python"),
+			wantFieldChecks: map[string]string{
+				"skills": "GO, Python",
+			},
+		},
+		{
+			name:       "skills unchanged causes no patch entry",
+			existing:   map[string]interface{}{"skills": "GO, Python"},
+			v1Data:     map[string]any{},
+			skills:     auth0.String("GO, Python"),
+			wantAbsent: []string{"skills"},
+		},
+		{
+			name:     "empty skills clears existing value",
+			existing: map[string]interface{}{"skills": "GO, Python"},
+			v1Data:   map[string]any{},
+			skills:   auth0.String(""),
+			wantFieldChecks: map[string]string{
+				"skills": "",
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			patch := buildAuth0Metadata(tt.existing, tt.v1Data, tt.orgName)
+			patch := buildAuth0Metadata(tt.existing, tt.v1Data, tt.orgName, tt.skills)
 
 			if tt.wantEmpty && len(patch) != 0 {
 				t.Errorf("expected empty patch, got %v", patch)
