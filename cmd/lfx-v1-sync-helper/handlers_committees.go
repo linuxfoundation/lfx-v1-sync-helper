@@ -777,7 +777,20 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 		// Look up user information from v1 API using the SFID.
 		user, err := lookupMergedUser(ctx, contactNameV1)
 		if err != nil {
-			logger.With(errKey, err, "contact_name_sfid", contactNameV1).WarnContext(ctx, "failed to lookup user from v1 API, leaving user fields unset")
+			logger.With(errKey, err, "contact_name_sfid", contactNameV1).WarnContext(ctx, "failed to lookup user from v1 API, falling back to name-only lookup")
+			// The lookup fails for members who have not yet created an LFX account
+			// (no username in merged_user). Fall back to the raw DB row so we can
+			// still populate first_name/last_name even without a username.
+			if row, rowErr := dbLookupMergedUserRowBySFID(ctx, contactNameV1); rowErr == nil && row != nil {
+				if row.FirstName.String != "" {
+					fn := row.FirstName.String
+					payload.FirstName = &fn
+				}
+				if row.LastName.String != "" {
+					ln := row.LastName.String
+					payload.LastName = &ln
+				}
+			}
 		} else {
 			payload.Username = &user.Username
 			if user.FirstName != "" {
@@ -942,7 +955,20 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID s
 		// Look up user information from v1 API using the SFID.
 		user, err := lookupMergedUser(ctx, contactNameV1)
 		if err != nil {
-			logger.With(errKey, err, "contact_name_sfid", contactNameV1).WarnContext(ctx, "failed to lookup user from v1 API, leaving user fields unset")
+			logger.With(errKey, err, "contact_name_sfid", contactNameV1).WarnContext(ctx, "failed to lookup user from v1 API, falling back to name-only lookup")
+			// The lookup fails for members who have not yet created an LFX account
+			// (no username in merged_user). Fall back to the raw DB row so we can
+			// still populate first_name/last_name even without a username.
+			if row, rowErr := dbLookupMergedUserRowBySFID(ctx, contactNameV1); rowErr == nil && row != nil {
+				if row.FirstName.String != "" {
+					fn := row.FirstName.String
+					payload.FirstName = &fn
+				}
+				if row.LastName.String != "" {
+					ln := row.LastName.String
+					payload.LastName = &ln
+				}
+			}
 		} else {
 			payload.Username = &user.Username
 			if user.FirstName != "" {
