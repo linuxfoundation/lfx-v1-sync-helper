@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/auth0/go-auth0"
@@ -258,4 +259,71 @@ func TestIsRetryableAuth0Error(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNormalizeSkillsForAuth0(t *testing.T) {
+	t.Run("trims and joins", func(t *testing.T) {
+		got := normalizeSkillsForAuth0([]string{" Go ", "Python", " Rust"})
+		want := "Go, Python, Rust"
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("drops empty items after trimming", func(t *testing.T) {
+		got := normalizeSkillsForAuth0([]string{"Go", "  ", "", "Python"})
+		want := "Go, Python"
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("case-fold deduplicates, keeping the first-seen casing", func(t *testing.T) {
+		got := normalizeSkillsForAuth0([]string{"GO", "Python", "go", "PYTHON"})
+		want := "GO, Python"
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("caps at auth0SkillsMaxCount items", func(t *testing.T) {
+		names := make([]string, auth0SkillsMaxCount+10)
+		for i := range names {
+			names[i] = fmt.Sprintf("skill-%d", i)
+		}
+		got := normalizeSkillsForAuth0(names)
+		count := 1
+		for _, r := range got {
+			if r == ',' {
+				count++
+			}
+		}
+		if count != auth0SkillsMaxCount {
+			t.Errorf("got %d items, want %d", count, auth0SkillsMaxCount)
+		}
+		if !strings.HasPrefix(got, "skill-0, ") {
+			t.Errorf("expected original order preserved, got prefix of %q", got)
+		}
+	})
+
+	t.Run("caps at auth0SkillsMaxLength runes without a dangling separator", func(t *testing.T) {
+		names := make([]string, 0, 300)
+		for i := 0; i < 300; i++ {
+			names = append(names, fmt.Sprintf("skill-name-number-%d", i))
+		}
+		got := normalizeSkillsForAuth0(names)
+		if runes := []rune(got); len(runes) > auth0SkillsMaxLength {
+			t.Errorf("got %d runes, want <= %d", len(runes), auth0SkillsMaxLength)
+		}
+		if strings.HasSuffix(got, ",") || strings.HasSuffix(got, ", ") {
+			t.Errorf("expected no dangling separator, got suffix of %q", got)
+		}
+	})
+
+	t.Run("empty input yields empty string", func(t *testing.T) {
+		got := normalizeSkillsForAuth0(nil)
+		if got != "" {
+			t.Errorf("got %q, want empty string", got)
+		}
+	})
 }

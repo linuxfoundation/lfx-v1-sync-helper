@@ -20,6 +20,7 @@ import (
 
 	"github.com/auth0/go-auth0"
 	"github.com/auth0/go-auth0/management"
+	"golang.org/x/text/cases"
 	"golang.org/x/time/rate"
 )
 
@@ -118,6 +119,56 @@ func isRetryableAuth0Error(err error) bool {
 		return true
 	}
 	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+}
+
+// auth0SkillsMaxCount and auth0SkillsMaxLength mirror the caps auth-service's
+// own UserMetadata sanitizer applies to user_metadata.skills (skillsMaxCount /
+// skillsMaxLength in lfx-v2-auth-service's internal/domain/model/user.go).
+// This repo writes skills to Auth0 directly via the Management API on both
+// the live WAL path (syncSkillsToAuth0) and the backfill path
+// (syncProfileToAuth0), bypassing that sanitizer entirely. Without mirroring
+// it here, a v1-sourced list that exceeds these caps or contains
+// case-duplicate entries would be written outside the v2 contract; the next
+// unrelated auth-service write would then apply its sanitizer, appear to
+// shrink the list, and reconcileV1Skills would read that shrinkage as a real
+// v2-side removal and delete the "missing" skills from v1.
+const (
+	auth0SkillsMaxCount  = 50
+	auth0SkillsMaxLength = 2000
+)
+
+// normalizeSkillsForAuth0 joins skill names into the same comma-separated,
+// capped, deduplicated form auth-service's sanitizer would itself produce:
+// trim each item, drop empties, fold case for Unicode-aware deduplication
+// (so "GO" and "go" collapse, matching auth-service's use of cases.Fold()
+// over strings.ToLower), keep at most auth0SkillsMaxCount items in their
+// original order, then join and truncate to auth0SkillsMaxLength runes
+// without leaving a dangling separator.
+func normalizeSkillsForAuth0(skillNames []string) string {
+	folder := cases.Fold()
+	cleaned := make([]string, 0, len(skillNames))
+	seen := make(map[string]struct{}, len(skillNames))
+	for _, item := range skillNames {
+		if len(cleaned) == auth0SkillsMaxCount {
+			break
+		}
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		key := folder.String(item)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		cleaned = append(cleaned, item)
+	}
+
+	joined := strings.Join(cleaned, ", ")
+	if runes := []rune(joined); len(runes) > auth0SkillsMaxLength {
+		joined = strings.TrimRight(string(runes[:auth0SkillsMaxLength]), ", ")
+	}
+	return joined
 }
 
 // buildAuth0Metadata diffs v1 platform DB fields against the existing Auth0
@@ -256,7 +307,7 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, primaryUser *ma
 			if skillErr != nil {
 				return false, fmt.Errorf("failed to resolve v1 skills for %s: %w", username, skillErr)
 			}
-			joined := strings.Join(skillNames, ", ")
+			joined := normalizeSkillsForAuth0(skillNames)
 			skills = &joined
 		}
 	}
@@ -308,7 +359,7 @@ func syncSkillsToAuth0(ctx context.Context, auth0UserID string, primaryUser *man
 		existingSkills, _ = (*primaryUser.UserMetadata)["skills"].(string)
 	}
 
-	joined := strings.Join(skillNames, ", ")
+	joined := normalizeSkillsForAuth0(skillNames)
 	if joined == existingSkills {
 		logger.With("auth0_user_id", auth0UserID).
 			DebugContext(ctx, "no skills change detected, skipping Auth0 update")
