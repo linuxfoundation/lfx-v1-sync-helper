@@ -42,6 +42,9 @@ type fakeAuth0Users struct {
 	searchUsers []*management.User
 	// searchErr, when non-nil, is returned by Search.
 	searchErr error
+	// readErr, when non-nil, is returned by Read instead of the default
+	// not-found behavior.
+	readErr error
 
 	// createErr is returned by Create. If nil and the user already exists
 	// (based on email), a 409 is returned.
@@ -70,6 +73,9 @@ type linkCall struct {
 }
 
 func (f *fakeAuth0Users) Read(_ context.Context, id string, _ ...management.RequestOption) (*management.User, error) {
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
 	if u, ok := f.users[id]; ok {
 		return u, nil
 	}

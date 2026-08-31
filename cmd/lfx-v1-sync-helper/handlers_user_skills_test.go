@@ -148,6 +148,28 @@ func TestHandleUserSkillsUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("non-retryable Auth0 fetch error does not retry", func(t *testing.T) {
+		origGetSkills := getSkillsForUserFn
+		origLookup := lookupMergedUserRowByUsernameFn
+		defer func() {
+			getSkillsForUserFn = origGetSkills
+			lookupMergedUserRowByUsernameFn = origLookup
+		}()
+		lookupMergedUserRowByUsernameFn = func(context.Context, string) (*mergedUserRow, error) { return nil, nil }
+		getSkillsForUserFn = func(_ context.Context, _ string) ([]string, error) {
+			return []string{"GO"}, nil
+		}
+
+		fake := &fakeAuth0Users{users: map[string]*management.User{}} // Read() 404s for any ID, which is not retryable
+		cleanup := setupLinkTest(t, fake)
+		defer cleanup()
+
+		retry := handleUserSkillsUpdate(context.Background(), "salesforce-user_skills.abc", map[string]any{"lfid": "jdoe"})
+		if retry {
+			t.Error("expected no retry: 404 on fetch is not a retryable Auth0 error")
+		}
+	})
+
 	t.Run("retryable Auth0 fetch error triggers retry", func(t *testing.T) {
 		origGetSkills := getSkillsForUserFn
 		origLookup := lookupMergedUserRowByUsernameFn
@@ -160,13 +182,13 @@ func TestHandleUserSkillsUpdate(t *testing.T) {
 			return []string{"GO"}, nil
 		}
 
-		fake := &fakeAuth0Users{users: map[string]*management.User{}} // Read() 404s for any ID -> not retryable actually
+		fake := &fakeAuth0Users{readErr: &mgmtError{status: 429, message: "too many requests"}}
 		cleanup := setupLinkTest(t, fake)
 		defer cleanup()
 
 		retry := handleUserSkillsUpdate(context.Background(), "salesforce-user_skills.abc", map[string]any{"lfid": "jdoe"})
-		if retry {
-			t.Error("expected no retry: 404 on fetch is not a retryable Auth0 error")
+		if !retry {
+			t.Error("expected retry: a 429 on fetch is a retryable Auth0 error")
 		}
 	})
 

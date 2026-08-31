@@ -155,7 +155,8 @@ func TestStaleEventGuard(t *testing.T) {
 		<-started
 		time.Sleep(5 * time.Millisecond)
 		// Trigger a sweep from a second key while k1's lock is still held by
-		// the in-flight goroutine above; k1 must survive since TryLock fails.
+		// the in-flight goroutine above; k1 must survive since its refs count
+		// is still > 0 (acquire hasn't released it yet).
 		g.run("k2", time.Unix(100, 0), func() bool { return false })
 
 		g.mu.Lock()

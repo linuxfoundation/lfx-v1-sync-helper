@@ -265,6 +265,12 @@ After updating `meltano/meltano.yml`, regenerate the per-environment ConfigMap, 
 
 Repeat for staging and prod with the matching Kubernetes context, AWS profile, and PostgreSQL credentials. This ConfigMap is intentionally not managed by Helm.
 
+### Exception: `salesforce.user_skills` is WAL-only, no Meltano seed
+
+`user_skills` is registered in step 2 (`values.yaml`) but deliberately **not** in step 1 (`meltano/meltano.yml`): the table has no `lastmodifieddate`/`systemmodstamp` column, so Meltano's `INCREMENTAL` replication key requirement can't be satisfied, and there is no bounded `FULL_TABLE` seed for it either. WAL is the only real-time path (`handleWALUpsert` falls back to `shouldUpdateBasedOnCommitTime` for tables listed in `walTimestamplessTables`), so a KV entry only exists once a row has replicated at least once via WAL after this feature shipped. This is an accepted trade-off, not an oversight — do not add a Meltano entry for this table expecting a working replication key.
+
+Steps 3 and 4 still apply as usual: `salesforce.user_skills` must be added to the `wal-listener` publication (with `REPLICA IDENTITY FULL`, so deletes carry enough of the row for `handleWALDelete`'s fallback tombstone path) in each environment; there is no `tap-postgres-catalog` entry to regenerate for this table since it isn't in `meltano.yml`.
+
 ## One-shot Backfill Commands
 
 ### `ScanSubjectData` — stream scan abstraction for all KV enumeration (`nats_scan.go`)

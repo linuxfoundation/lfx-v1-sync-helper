@@ -3,7 +3,11 @@
 
 package main
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"testing"
+)
 
 func TestWALEventGetSFID(t *testing.T) {
 	tests := []struct {
@@ -86,4 +90,139 @@ func TestWALEventGetSFID(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestShouldUpdateBasedOnCommitTime covers the timestampless-table update
+// decision used by walTimestamplessTables (e.g. user_skills), which has no
+// systemmodstamp/lastmodifieddate columns to compare.
+func TestShouldUpdateBasedOnCommitTime(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		newCommitTime string
+		existingData  map[string]interface{}
+		want          bool
+	}{
+		{
+			name:          "newer commit time updates",
+			newCommitTime: "2024-01-02T00:00:00Z",
+			existingData:  map[string]interface{}{"_sdc_extracted_at": "2024-01-01T00:00:00Z"},
+			want:          true,
+		},
+		{
+			name:          "equal commit time skips",
+			newCommitTime: "2024-01-01T00:00:00Z",
+			existingData:  map[string]interface{}{"_sdc_extracted_at": "2024-01-01T00:00:00Z"},
+			want:          false,
+		},
+		{
+			name:          "older commit time skips",
+			newCommitTime: "2023-12-31T00:00:00Z",
+			existingData:  map[string]interface{}{"_sdc_extracted_at": "2024-01-01T00:00:00Z"},
+			want:          false,
+		},
+		{
+			name:          "unparseable new commit time skips",
+			newCommitTime: "not-a-timestamp",
+			existingData:  map[string]interface{}{"_sdc_extracted_at": "2024-01-01T00:00:00Z"},
+			want:          false,
+		},
+		{
+			name:          "missing existing commit time updates",
+			newCommitTime: "2024-01-01T00:00:00Z",
+			existingData:  map[string]interface{}{},
+			want:          true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldUpdateBasedOnCommitTime(ctx, tt.newCommitTime, tt.existingData, "salesforce-user_skills.usk-1")
+			if got != tt.want {
+				t.Errorf("shouldUpdateBasedOnCommitTime() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHandleWALUpsert_UserSkillsCommitTimeBranch confirms handleWALUpsert
+// routes user_skills (a walTimestamplessTables member) through
+// shouldUpdateBasedOnCommitTime rather than shouldUpdateBasedOnTimestamps: a
+// later CommitTime overwrites the existing KV entry, while an equal or
+// earlier one is skipped.
+func TestHandleWALUpsert_UserSkillsCommitTimeBranch(t *testing.T) {
+	newEvent := func(commitTime string) *WALEvent {
+		return &WALEvent{
+			Schema:     "salesforce",
+			Table:      "user_skills",
+			Action:     "UPDATE",
+			CommitTime: commitTime,
+			Data:       map[string]interface{}{"id": "usk-1", "lfid": "jdoe", "skill_id": "sk-2"},
+		}
+	}
+
+	t.Run("later commit time overwrites the existing entry", func(t *testing.T) {
+		origCfg, origKV := cfg, v1KV
+		cfg = &Config{}
+		fake := newFakeKV()
+		v1KV = fake
+		defer func() {
+			cfg = origCfg
+			v1KV = origKV
+		}()
+
+		key := "salesforce-user_skills.usk-1"
+		existing, _ := json.Marshal(map[string]interface{}{
+			"id": "usk-1", "lfid": "jdoe", "skill_id": "sk-1", "_sdc_extracted_at": "2024-01-01T00:00:00Z",
+		})
+		fake.data[key] = existing
+		fake.rev[key] = 1
+
+		if retry := handleWALUpsert(context.Background(), newEvent("2024-01-02T00:00:00Z")); retry {
+			t.Fatal("expected no retry")
+		}
+		if fake.rev[key] != 2 {
+			t.Fatalf("expected revision to advance to 2, got %d", fake.rev[key])
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal(fake.data[key], &got); err != nil {
+			t.Fatalf("failed to unmarshal updated entry: %v", err)
+		}
+		if got["skill_id"] != "sk-2" {
+			t.Errorf("expected the newer skill_id to overwrite the existing entry, got %v", got["skill_id"])
+		}
+	})
+
+	t.Run("equal or earlier commit time is skipped", func(t *testing.T) {
+		origCfg, origKV := cfg, v1KV
+		cfg = &Config{}
+		fake := newFakeKV()
+		v1KV = fake
+		defer func() {
+			cfg = origCfg
+			v1KV = origKV
+		}()
+
+		key := "salesforce-user_skills.usk-1"
+		existing, _ := json.Marshal(map[string]interface{}{
+			"id": "usk-1", "lfid": "jdoe", "skill_id": "sk-1", "_sdc_extracted_at": "2024-01-02T00:00:00Z",
+		})
+		fake.data[key] = existing
+		fake.rev[key] = 1
+
+		if retry := handleWALUpsert(context.Background(), newEvent("2024-01-02T00:00:00Z")); retry {
+			t.Fatal("expected no retry")
+		}
+		if fake.rev[key] != 1 {
+			t.Errorf("expected revision to stay at 1 (update skipped), got %d", fake.rev[key])
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal(fake.data[key], &got); err != nil {
+			t.Fatalf("failed to unmarshal entry: %v", err)
+		}
+		if got["skill_id"] != "sk-1" {
+			t.Errorf("expected the existing skill_id to be preserved, got %v", got["skill_id"])
+		}
+	})
 }

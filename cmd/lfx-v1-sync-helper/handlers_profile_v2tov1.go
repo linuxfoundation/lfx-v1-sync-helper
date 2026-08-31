@@ -132,6 +132,14 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 	// QueueSubscribe, not JetStream), so the guarded function always reports
 	// "no retry needed": the watermark must advance after every attempt,
 	// successful or not, or a later stale check would never see it.
+	// Note: if reconcileV1SkillsFn fails here, the error is logged but not
+	// retried (see the always-"no retry" comment below), and there is no
+	// backfill job that later re-derives v1's skills from v2's. A transient
+	// failure on a user's last skills edit can therefore leave v1 and v2
+	// permanently diverged for that user until their next v2 skills edit.
+	// This is an accepted trade-off for now, mirroring the asymmetry that
+	// --backfill-profiles only reconciles v1->v2, not v2->v1; revisit if
+	// this proves to matter in practice.
 	_, ran := profileSkillsStaleGuard.run(sfid, event.Timestamp, func() bool {
 		if err := reconcileV1SkillsFn(ctx, sfid, event.Metadata); err != nil {
 			log.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to reconcile v1 skills")
