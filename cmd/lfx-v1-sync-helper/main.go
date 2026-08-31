@@ -511,7 +511,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Subscribe to indexer domain events for bidirectional committee sync.
+	// Subscribe to indexer domain events for bidirectional committee and project sync.
 	// The indexer publishes lfx.{object_type}.{action} after every successful OpenSearch write.
 	indexerEventSubscriptions := map[string]func(*nats.Msg){
 		"lfx.committee.created":        committeeIndexerEventHandler,
@@ -520,6 +520,9 @@ func main() {
 		"lfx.committee_member.created": committeeMemberIndexerEventHandler,
 		"lfx.committee_member.updated": committeeMemberIndexerEventHandler,
 		"lfx.committee_member.deleted": committeeMemberIndexerEventHandler,
+		"lfx.project.created":          projectIndexerEventHandler,
+		"lfx.project.updated":          projectIndexerEventHandler,
+		"lfx.project.deleted":          projectIndexerEventHandler,
 	}
 	for subject, handler := range indexerEventSubscriptions {
 		if _, err = natsConn.QueueSubscribe(subject, natsQueue, handler); err != nil {

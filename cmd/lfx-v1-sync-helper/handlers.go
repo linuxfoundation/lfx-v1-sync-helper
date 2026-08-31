@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -284,12 +285,127 @@ func handleResourceDelete(ctx context.Context, key string, v1Data map[string]any
 	}
 }
 
+// mappingGetMaxAttempts caps the retry loop in getMappingEntryWithRetry.
+// Extracted as a var so tests can shorten it; production code should treat it as
+// read-only. Four attempts give three sleeps at the default 50ms initial
+// backoff (50 + 100 + 200 = 350ms total sleep before returning the final
+// error), which is the intended race window described on
+// getMappingEntryWithRetry.
+var mappingGetMaxAttempts = 4
+
+// mappingGetInitialBackoff is the first sleep in the exponential backoff between
+// getMappingEntryWithRetry attempts.
+var mappingGetInitialBackoff = 50 * time.Millisecond
+
+// getMappingEntryWithRetry does a bounded exponential-backoff Get on the
+// mappings KV. Every error, including jetstream.ErrKeyNotFound, is retried
+// (with a short delay) because the two failure modes this helper is designed
+// to absorb both look the same at the caller:
+//
+//  1. A concurrent v1→v2 handler is about to persist the mapping after
+//     returning from the v2 create (see handlers_projects.go). The indexer
+//     event our subscriber received races that write; a short retry on
+//     ErrKeyNotFound gives the write a chance to land before we treat the
+//     read as final.
+//  2. Two separate NATS core subscriptions (e.g. lfx.project.created and
+//     lfx.project.updated) can be dispatched to different goroutines with no
+//     inter-subject ordering guarantee. An update handler for a project can
+//     race the create handler that is about to write the mapping.
+//
+// Total wait is short by design. The loop makes at most
+// mappingGetMaxAttempts Get calls and sleeps mappingGetMaxAttempts-1 times
+// between them (the final attempt returns immediately). At the defaults —
+// 4 attempts and 50ms initial backoff, doubling each round — that is three
+// sleeps of 50 + 100 + 200 = 350ms of wall time on top of the KV call
+// latency, so the handler goroutine is not held for long. Callers must still
+// interpret the final error:
+//   - nil                         → mapping present, entry is populated
+//   - jetstream.ErrKeyNotFound    → mapping is absent even after retries
+//   - other errors                → transient KV problem; event should be
+//     treated as un-lookable and ops should be alerted
+//
+// Context cancellation is honored immediately for clean shutdown.
+func getMappingEntryWithRetry(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
+	var lastErr error
+	delay := mappingGetInitialBackoff
+	for attempt := 1; attempt <= mappingGetMaxAttempts; attempt++ {
+		entry, err := mappingsKV.Get(ctx, key)
+		if err == nil {
+			return entry, nil
+		}
+		lastErr = err
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		if attempt == mappingGetMaxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
+	return nil, lastErr
+}
+
 // tombstoneMapping stores a tombstone marker in the mapping KV store.
 func tombstoneMapping(ctx context.Context, mappingKey string) error {
 	if _, err := mappingsKV.Put(ctx, mappingKey, []byte(tombstoneMarker)); err != nil {
 		return fmt.Errorf("failed to tombstone mapping %s: %w", mappingKey, err)
 	}
 	return nil
+}
+
+// mappingPutMaxAttempts caps the retry loop in putMappingWithRetry. Extracted as
+// a var (not a const) so tests can shorten it; production code should treat it as
+// read-only.
+var mappingPutMaxAttempts = 5
+
+// mappingPutInitialBackoff is the first sleep in the exponential backoff between
+// putMappingWithRetry attempts. Extracted as a var for the same reason as
+// mappingPutMaxAttempts.
+var mappingPutInitialBackoff = 100 * time.Millisecond
+
+// putMappingWithRetry writes a KV mapping value with bounded exponential backoff.
+//
+// Used on the v2→v1 create success path where losing the mapping produces a
+// permanent inconsistency: the v1 record has been written but the reverse
+// mapping that (a) prevents duplicate creation on replay and (b) resolves the
+// SFID for subsequent update/delete events is missing. Core NATS carries the
+// indexer subjects with no NAK/redelivery, so a terminal failure is an
+// ops-visible incident; the caller escalates at ERROR level and includes the
+// SFID + UID for reconciliation.
+//
+// The retry gives up immediately on context cancellation so shutdown drains
+// cleanly, and returns wrapped errors so callers can errors.Is against
+// context.Canceled / context.DeadlineExceeded or the underlying JetStream KV
+// error class.
+func putMappingWithRetry(ctx context.Context, key string, value []byte) error {
+	var lastErr error
+	delay := mappingPutInitialBackoff
+	for attempt := 1; attempt <= mappingPutMaxAttempts; attempt++ {
+		_, err := mappingsKV.Put(ctx, key, value)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		// Do not retry a context error — the caller has been told to stop.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		if attempt == mappingPutMaxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
+	return fmt.Errorf("mapping put failed after %d attempts: %w", mappingPutMaxAttempts, lastErr)
 }
 
 // isTombstonedMapping checks if a mapping is tombstoned.
