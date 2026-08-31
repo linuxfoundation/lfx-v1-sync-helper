@@ -306,17 +306,25 @@ func TestNormalizeSkillsForAuth0(t *testing.T) {
 		}
 	})
 
+	t.Run("truncates a single item longer than auth0SkillsMaxLength to exactly the cap", func(t *testing.T) {
+		// A single item is well under auth0SkillsMaxCount, so this isolates
+		// the length cap: without it, the result would be longer than want.
+		long := strings.Repeat("a", auth0SkillsMaxLength+500)
+		got := normalizeSkillsForAuth0([]string{long})
+		want := strings.Repeat("a", auth0SkillsMaxLength)
+		if got != want {
+			t.Errorf("got %d runes, want exactly %d runes", len([]rune(got)), len([]rune(want)))
+		}
+	})
+
 	t.Run("caps at auth0SkillsMaxLength runes without a dangling separator", func(t *testing.T) {
-		names := make([]string, 0, 300)
-		for i := 0; i < 300; i++ {
-			names = append(names, fmt.Sprintf("skill-name-number-%d", i))
-		}
-		got := normalizeSkillsForAuth0(names)
-		if runes := []rune(got); len(runes) > auth0SkillsMaxLength {
-			t.Errorf("got %d runes, want <= %d", len(runes), auth0SkillsMaxLength)
-		}
-		if strings.HasSuffix(got, ",") || strings.HasSuffix(got, ", ") {
-			t.Errorf("expected no dangling separator, got suffix of %q", got)
+		// The first item's length is chosen so the rune-2000 cut lands
+		// exactly inside the following ", " separator, forcing the
+		// trailing-separator trim to actually engage.
+		first := strings.Repeat("a", auth0SkillsMaxLength-1)
+		got := normalizeSkillsForAuth0([]string{first, "second"})
+		if got != first {
+			t.Errorf("got %q, want %q (separator trimmed at truncation boundary)", got, first)
 		}
 	})
 
