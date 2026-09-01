@@ -58,9 +58,9 @@ spec:
           # Find the current prod image with:
           #   kubectl --context lfx-v2-prod -n v1-sync-helper get deployment \
           #     -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'
-          image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:latest
+          image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:0.14.6
           imagePullPolicy: IfNotPresent
-          args: ["--backfill-committee-member-names"]
+          args: ["--backfill-committee-member-names", "--dry-run"]
           env:
             # --- actually used by this backfill ---
             - name: NATS_URL
@@ -70,47 +70,47 @@ spec:
             - name: HEIMDALL_JWKS_URL
               value: "http://lfx-platform-heimdall.lfx.svc.cluster.local:4457/.well-known/jwks"
             - name: HEIMDALL_KEY_ID
-              value: "dev-rsa-2025-12-12-001"      # prod: prod-rsa-2025-12-12-001
+              value: "prod-rsa-2025-12-12-001"
             - name: HEIMDALL_CLIENT_ID
-              value: "8gSjc7t9rvxxqPkZINM48bKch74RZ8AW"  # prod: get from running deployment
+              value: "N36DA2hiUeMHN4XuaSggrJH3ELA2Ss31"
             - name: USE_MSGPACK
               value: "1"
             - name: HEIMDALL_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
-                  key: key.pem                       # prod: signer.pem in heimdall-signer-cert
-                  name: heimdall-signer-cert-ad-hoc  # prod: heimdall-signer-cert
+                  key: signer.pem
+                  name: heimdall-signer-cert
             # v1 platform database — needed to read merged_user rows for names.
             - name: V1_DB_HOST
               valueFrom:
                 secretKeyRef:
                   key: host
-                  name: postgres-credentials-ad-hoc  # prod: v1-platform-db-credentials
+                  name: v1-platform-db-credentials
             - name: V1_DB_USER
               valueFrom:
                 secretKeyRef:
                   key: username
-                  name: postgres-credentials-ad-hoc  # prod: v1-platform-db-credentials
+                  name: v1-platform-db-credentials
             - name: V1_DB_PASSWORD
               valueFrom:
                 secretKeyRef:
                   key: password
-                  name: postgres-credentials-ad-hoc  # prod: v1-platform-db-credentials
+                  name: v1-platform-db-credentials
             # --- required by LoadConfig() but not used by this backfill ---
             - name: PROJECT_SERVICE_URL
               value: "http://lfx-v2-project-service.project-service.svc.cluster.local:8080"
             - name: AUTH0_TENANT
-              value: "linuxfoundation-dev"           # prod: linuxfoundation
+              value: "linuxfoundation"
             - name: AUTH0_CLIENT_ID
               valueFrom:
                 secretKeyRef:
                   key: client_id
-                  name: v1-sync-helper-secrets       # prod: v1-sync-helper-auth0-credentials
+                  name: v1-sync-helper-auth0-credentials
             - name: AUTH0_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
                   key: client_private_key
-                  name: v1-sync-helper-secrets       # prod: v1-sync-helper-auth0-credentials
+                  name: v1-sync-helper-auth0-credentials
             # Optional: raise if logs show scan-timeout warnings. Defaults to 2m.
             # - name: NATS_FETCH_MAX_WAIT
             #   value: "2m"
