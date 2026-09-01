@@ -78,24 +78,24 @@ spec:
             - name: HEIMDALL_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
-                  key: signer.pem
-                  name: heimdall-signer-cert
+                  key: key.pem
+                  name: heimdall-signer-cert-ad-hoc
             # v1 platform database — needed to read merged_user rows for names.
             - name: V1_DB_HOST
               valueFrom:
                 secretKeyRef:
                   key: host
-                  name: v1-platform-db-credentials
+                  name: v1-sync-helper-secrets
             - name: V1_DB_USER
               valueFrom:
                 secretKeyRef:
                   key: username
-                  name: v1-platform-db-credentials
+                  name: v1-sync-helper-secrets
             - name: V1_DB_PASSWORD
               valueFrom:
                 secretKeyRef:
                   key: password
-                  name: v1-platform-db-credentials
+                  name: v1-sync-helper-secrets
             # --- required by LoadConfig() but not used by this backfill ---
             - name: PROJECT_SERVICE_URL
               value: "http://lfx-v2-project-service.project-service.svc.cluster.local:8080"
@@ -105,12 +105,12 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: client_id
-                  name: v1-sync-helper-auth0-credentials
+                  name: v1-sync-helper-secrets
             - name: AUTH0_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
                   key: client_private_key
-                  name: v1-sync-helper-auth0-credentials
+                  name: v1-sync-helper-secrets
             # Optional: raise if logs show scan-timeout warnings. Defaults to 2m.
             # - name: NATS_FETCH_MAX_WAIT
             #   value: "2m"
