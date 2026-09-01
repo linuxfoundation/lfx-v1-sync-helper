@@ -85,22 +85,19 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: host
-                  name: v1-sync-helper-secrets
+                  name: postgres-credentials-ad-hoc
             - name: V1_DB_USER
               valueFrom:
                 secretKeyRef:
                   key: username
-                  name: v1-sync-helper-secrets
+                  name: postgres-credentials-ad-hoc
             - name: V1_DB_PASSWORD
               valueFrom:
                 secretKeyRef:
                   key: password
-                  name: v1-sync-helper-secrets
+                  name: postgres-credentials-ad-hoc
             - name: V1_DB_NAME
-              valueFrom:
-                secretKeyRef:
-                  key: dbname
-                  name: v1-sync-helper-secrets
+              value: "sfdc"
             # --- required by LoadConfig() but not used by this backfill ---
             - name: PROJECT_SERVICE_URL
               value: "http://lfx-v2-project-service.project-service.svc.cluster.local:8080"
