@@ -154,8 +154,18 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 	// delivery for this user then converges on close to the same live
 	// snapshot instead of racing on however-stale a payload each event
 	// happened to carry.
-	skillsMetadata := resolveSkillsMetadataFn(ctx, log, sfid, event)
+	//
+	// That re-read must happen *inside* the guarded closure, after the
+	// per-key lock is held, not before: profileSkillsStaleGuard.run
+	// serializes concurrent deliveries for sfid, but a snapshot resolved
+	// before acquiring that lock can go stale while this call waits on it.
+	// E.g. callback A resolves snapshot A, then blocks on the lock while
+	// callback B (holding it) reconciles a newer snapshot B; if A read its
+	// snapshot before acquiring, A would overwrite B's result with stale
+	// state A once it finally runs. Resolving inside the closure means A
+	// re-reads only after B has released the lock, converging on B's result.
 	_, ran := profileSkillsStaleGuard.run(sfid, event.Timestamp, func() bool {
+		skillsMetadata := resolveSkillsMetadataFn(ctx, log, sfid, event)
 		if err := reconcileV1SkillsFn(ctx, sfid, skillsMetadata); err != nil {
 			log.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to reconcile v1 skills")
 		}
