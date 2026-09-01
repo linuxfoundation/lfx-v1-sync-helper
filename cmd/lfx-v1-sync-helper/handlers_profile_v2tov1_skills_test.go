@@ -207,6 +207,61 @@ func TestReconcileV1Skills_SuppressesRemovalWhenDesiredAtCap(t *testing.T) {
 	}
 }
 
+// TestReconcileV1Skills_SuppressesRemovalWhenDesiredAtLengthCap confirms that
+// removals are also suppressed when the joined skills string is at (or near)
+// auth0SkillsMaxLength runes, even though the item count is far below
+// auth0SkillsMaxCount. A handful of long skill names can trip the length cap
+// well before the item-count cap, so the truncated tail must not be read as
+// real v1-side removals.
+func TestReconcileV1Skills_SuppressesRemovalWhenDesiredAtLengthCap(t *testing.T) {
+	// Two long names joined by ", " land right at the auth0SkillsMaxLength
+	// boundary, well under auth0SkillsMaxCount items.
+	first := strings.Repeat("a", auth0SkillsMaxLength/2)
+	second := strings.Repeat("b", auth0SkillsMaxLength/2-2) // account for ", "
+	metadata := map[string]any{"skills": first + ", " + second}
+
+	// v1 has a skill not present in the (possibly truncated) desired set.
+	current := []userSkillEntry{
+		{ID: "legacy", Name: "legacy-skill"},
+	}
+
+	var gotAdded []string
+	var gotRemoved []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(current)
+		case http.MethodPost:
+			var posted []string
+			_ = json.NewDecoder(r.Body).Decode(&posted)
+			gotAdded = append(gotAdded, posted...)
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodDelete:
+			gotRemoved = append(gotRemoved, lastPathSegment(r.URL.Path))
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}))
+	defer srv.Close()
+
+	setupFetchTestGlobals(t, srv.URL)
+
+	if err := reconcileV1Skills(context.Background(), "sfid1", metadata); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(gotRemoved) != 0 {
+		t.Errorf("expected no removals when desired string is at the length cap, got %v", gotRemoved)
+	}
+	if len(gotAdded) != 2 {
+		t.Errorf("expected 2 additions, got %d: %v", len(gotAdded), gotAdded)
+	}
+}
+
 // TestResolveSkillsMetadata covers the re-read-vs-fallback behavior used by
 // handleUserProfileUpdated to pick the metadata reconcileV1Skills diffs
 // against.

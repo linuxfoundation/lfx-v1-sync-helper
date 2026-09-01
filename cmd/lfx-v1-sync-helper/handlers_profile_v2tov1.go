@@ -338,16 +338,27 @@ func reconcileV1Skills(ctx context.Context, sfid string, metadata map[string]any
 	}
 
 	// The v2 skills field is a lossy, capped projection of v1 (see
-	// auth0SkillsMaxCount): auth-service's own sanitizer, and this repo's
-	// normalizeSkillsForAuth0, both truncate at auth0SkillsMaxCount items.
-	// When the desired set is at that cap, a v1 skill absent from it may
-	// simply be past the truncation boundary rather than actually removed
-	// in v2, so treating it as a deletion here could destroy data that was
-	// never really removed. Suppress removals in that case; the surplus
-	// stays in v1 until the desired set drops back under the cap.
-	if len(desired) >= auth0SkillsMaxCount {
-		logger.With("sfid", sfid, "desired_count", len(desired)).
-			WarnContext(ctx, "v2 skills field is at the cap, suppressing v1 skill removals to avoid deleting truncated (not actually removed) skills")
+	// auth0SkillsMaxCount / auth0SkillsMaxLength): auth-service's own
+	// sanitizer, and this repo's normalizeSkillsForAuth0, both truncate at
+	// auth0SkillsMaxCount items AND at auth0SkillsMaxLength runes of the
+	// joined string — whichever limit is hit first. A handful of long skill
+	// names can trip the length cap well before the item-count cap, so both
+	// signals must be checked: relying on len(desired) alone misses
+	// length-truncation and would misread the cut-off tail as real
+	// removals. normalizeSkillsForAuth0 trims to exactly auth0SkillsMaxLength
+	// runes and then TrimRight(", ") a single dangling separator, so a joined
+	// string within one separator's width of the cap is treated as possibly
+	// truncated. When either cap may have been hit, a v1 skill absent from
+	// the desired set may simply be past the truncation boundary rather than
+	// actually removed in v2, so treating it as a deletion here could
+	// destroy data that was never really removed. Suppress removals in that
+	// case; the surplus stays in v1 until the desired set drops back under
+	// both caps.
+	skillsRuneLen := len([]rune(skillsStr))
+	atCap := len(desired) >= auth0SkillsMaxCount || skillsRuneLen >= auth0SkillsMaxLength-len(", ")
+	if atCap {
+		logger.With("sfid", sfid, "desired_count", len(desired), "skills_rune_len", skillsRuneLen).
+			WarnContext(ctx, "v2 skills field may be truncated (item-count or rune-length cap), suppressing v1 skill removals to avoid deleting truncated (not actually removed) skills")
 		if len(toAdd) == 0 {
 			return nil
 		}
