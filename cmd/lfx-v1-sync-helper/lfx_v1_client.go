@@ -815,6 +815,13 @@ func deleteV1Committee(ctx context.Context, projectSFID, committeeSFID string) e
 	respBody, _ := io.ReadAll(resp.Body)
 	logger.DebugContext(ctx, "deleteV1Committee response", "status", resp.StatusCode, "body", string(respBody))
 
+	// Treat 404 as already-deleted (idempotent — safe for JetStream redelivery when V1
+	// completed the delete but its response was lost).
+	if resp.StatusCode == http.StatusNotFound {
+		logger.With("project_sfid", projectSFID, "committee_sfid", committeeSFID).
+			InfoContext(ctx, "v1 committee already absent on delete, treating as success")
+		return nil
+	}
 	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("project service returned status %d deleting committee %s for project %s: %s", resp.StatusCode, committeeSFID, projectSFID, string(respBody))
 	}
@@ -1157,6 +1164,13 @@ func deleteV1CommitteeMember(ctx context.Context, projectSFID, committeeSFID, me
 	respBody, _ := io.ReadAll(resp.Body)
 	logger.DebugContext(ctx, "deleteV1CommitteeMember response", "status", resp.StatusCode, "body", string(respBody))
 
+	// Treat 404 as already-deleted (idempotent — safe for JetStream redelivery when V1
+	// completed the delete but its response was lost).
+	if resp.StatusCode == http.StatusNotFound {
+		logger.With("project_sfid", projectSFID, "committee_sfid", committeeSFID, "member_sfid", memberSFID).
+			InfoContext(ctx, "v1 committee member already absent on delete, treating as success")
+		return nil
+	}
 	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("project service returned status %d deleting member %s from committee %s: %s", resp.StatusCode, memberSFID, committeeSFID, string(respBody))
 	}
