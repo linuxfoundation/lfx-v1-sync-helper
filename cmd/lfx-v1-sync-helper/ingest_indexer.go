@@ -70,14 +70,14 @@ func processCommitteeIndexingEvent(ctx context.Context, subject string, data []b
 				WarnContext(ctx, "no project_uid in committee event body, skipping")
 			return nil // permanent: required field absent
 		}
-		projectEntry, err := mappingsKV.Get(ctx, "project.uid."+projectUID)
+		projectEntry, err := getMappingEntryWithRetry(ctx, "project.uid."+projectUID)
 		if err != nil {
-			if err == jetstream.ErrKeyNotFound || err == jetstream.ErrKeyDeleted {
+			if errors.Is(err, jetstream.ErrKeyNotFound) {
 				logger.With("project_uid", projectUID, "committee_uid", event.ObjectID).
-					WarnContext(ctx, "no project mapping for project UID, skipping")
+					WarnContext(ctx, "no project mapping for project UID after bounded retry, skipping")
 				return nil // permanent: project not tracked in v1
 			}
-			return err // transient: KV unavailable
+			return err // transient: KV unavailable, redeliver
 		}
 		if isTombstonedMapping(projectEntry.Value()) {
 			logger.With("project_uid", projectUID, "committee_uid", event.ObjectID).

@@ -44,6 +44,8 @@ func newCommitteeEventsIngestHandler(committeeProc, memberProc committeeEventPro
 		}
 
 		if procErr != nil {
+			// Log before NAKing so the failure is visible even after MaxDeliver exhausts.
+			logger.With(errKey, procErr, "subject", subject).WarnContext(ctx, "transient processing error, NAKing committee-events message for retry")
 			// Transient failure: NAK so JetStream redelivers up to MaxDeliver times.
 			if err := msg.Nak(); err != nil {
 				logger.With(errKey, err, "subject", subject).ErrorContext(ctx, "failed to NAK committee-events message after processing error")
