@@ -182,8 +182,14 @@ var resolveSkillsMetadataFn = resolveSkillsMetadata
 // re-reads the user's current Auth0 metadata via the Management API and
 // prefers that live snapshot. If the re-read fails, it falls back to the
 // event's embedded metadata rather than skipping reconciliation outright.
+// Bound with auth0CallTimeout, matching the other live Auth0 Management API
+// paths (see handlers_users.go): this handler is dispatched via a core NATS
+// QueueSubscribe callback with no deadline of its own, so an unbounded read
+// here could block that callback indefinitely on a stalled Auth0 request.
 func resolveSkillsMetadata(ctx context.Context, log *slog.Logger, sfid string, event userProfileUpdatedEvent) map[string]any {
-	primaryUser, err := fetchAuth0User(ctx, event.UserID)
+	readCtx, cancel := context.WithTimeout(ctx, auth0CallTimeout)
+	defer cancel()
+	primaryUser, err := fetchAuth0User(readCtx, event.UserID)
 	if err != nil {
 		log.With(errKey, err, "sfid", sfid).WarnContext(ctx, "failed to re-read canonical Auth0 metadata for skills reconciliation, falling back to event snapshot")
 		return event.Metadata

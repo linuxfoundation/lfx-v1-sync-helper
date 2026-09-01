@@ -276,7 +276,7 @@ func TestResolveSkillsMetadata(t *testing.T) {
 	}
 
 	t.Run("re-read succeeds, prefers live Auth0 metadata over the event snapshot", func(t *testing.T) {
-		auth0Users = &fakeAuth0Users{
+		fake := &fakeAuth0Users{
 			users: map[string]*management.User{
 				"auth0|alice": {
 					ID:           auth0.String("auth0|alice"),
@@ -284,10 +284,22 @@ func TestResolveSkillsMetadata(t *testing.T) {
 				},
 			},
 		}
+		auth0Users = fake
 
 		got := resolveSkillsMetadata(context.Background(), log, "sfid1", event)
 		if got["skills"] != "live-value" {
 			t.Errorf("skills = %v, want live-value", got["skills"])
+		}
+
+		// This handler runs off a core NATS callback with no deadline of its
+		// own (context.Background() at the call site), so resolveSkillsMetadata
+		// must bind the Auth0 read to auth0CallTimeout itself, or a stalled
+		// Auth0 request could block that callback indefinitely.
+		if fake.readCtx == nil {
+			t.Fatal("fetchAuth0User was not called")
+		}
+		if _, ok := fake.readCtx.Deadline(); !ok {
+			t.Error("expected the context passed to fetchAuth0User to carry a deadline")
 		}
 	})
 

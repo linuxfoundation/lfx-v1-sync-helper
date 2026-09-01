@@ -45,6 +45,9 @@ type fakeAuth0Users struct {
 	// readErr, when non-nil, is returned by Read instead of the default
 	// not-found behavior.
 	readErr error
+	// readCtx captures the context passed to the most recent Read call, so
+	// tests can assert callers bound it with a deadline.
+	readCtx context.Context
 
 	// createErr is returned by Create. If nil and the user already exists
 	// (based on email), a 409 is returned.
@@ -72,7 +75,8 @@ type linkCall struct {
 	primaryID, provider, userID string
 }
 
-func (f *fakeAuth0Users) Read(_ context.Context, id string, _ ...management.RequestOption) (*management.User, error) {
+func (f *fakeAuth0Users) Read(ctx context.Context, id string, _ ...management.RequestOption) (*management.User, error) {
+	f.readCtx = ctx
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
