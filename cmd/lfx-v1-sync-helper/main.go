@@ -65,6 +65,7 @@ func main() {
 	var doBackfillProfiles = flag.Bool("backfill-profiles", false, "backfill v1 profile fields to Auth0 user_metadata, then exit")
 	var doBackfillWorkspaces = flag.Bool("backfill-workspaces", false, "backfill legacy workspaces into v2 member-service, then exit")
 	var doBackfillCommitteeMemberMappings = flag.Bool("backfill-committee-member-mappings", false, "repair committee-member reverse mappings that store the record sfid instead of the contact SFID, then exit")
+	var doBackfillCommitteeMemberNames = flag.Bool("backfill-committee-member-names", false, "populate first_name/last_name on V2 committee members that have no name (members without an LFX account at sync time), then exit")
 	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
 	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-* and --sync-user)")
 	var backfillLimit = flag.Int("limit", 1000, "maximum number of users to process per backfill run (applicable with --backfill-alternate-emails and --backfill-profiles)")
@@ -77,13 +78,13 @@ func main() {
 
 	// Enforce mutual exclusion across all one-shot flags.
 	oneShotCount := 0
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doBackfillCommitteeMemberMappings} {
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames} {
 		if b {
 			oneShotCount++
 		}
 	}
 	if oneShotCount > 1 {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, and --sync-user are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --backfill-committee-member-names, and --sync-user are mutually exclusive")
 		os.Exit(2)
 	}
 
@@ -357,6 +358,28 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Handle --backfill-committee-member-names flag: populate first_name/last_name
+	// on V2 committee members whose name fields are empty because the member had no
+	// LFX account at sync time (linuxfoundation/lfx-self-serve-ops#3), then exit.
+	if *doBackfillCommitteeMemberNames {
+		logger.With("dry_run", *dryRun).Info("starting committee-member name backfill")
+		res, err := backfillCommitteeMemberNames(ctx, *dryRun)
+		if err != nil {
+			logger.With(errKey, err).Error("error during committee-member name backfill")
+			os.Exit(1)
+		}
+		logger.With(
+			"inspected", res.inspected,
+			"skipped", res.skipped,
+			"no_mapping", res.noMapping,
+			"no_name", res.noName,
+			"updated", res.updated,
+			"dry_run", res.dryRun,
+			"errored", res.errored,
+		).Info("committee-member name backfill completed successfully")
+		os.Exit(0)
+	}
+
 	// Initialize the distributed sync singleton backed by the mappings KV bucket.
 	distributedSync = newKVMappingLocker(mappingsKV,
 		withLockerOptionMaxRetries(mappingLockRetryAttempts),
@@ -530,6 +553,15 @@ func main() {
 	defer committeeEventsConsumerCtx.Stop()
 
 	logger.With("stream", committeeEventsStreamName, "consumer", committeeEventsConsumerName).Info("committee-events consumer started")
+
+	// Subscribe to project indexer events via core NATS for bidirectional project sync.
+	// The indexer publishes lfx.project.{action} after every successful OpenSearch write.
+	for _, subject := range []string{"lfx.project.created", "lfx.project.updated", "lfx.project.deleted"} {
+		if _, err = natsConn.QueueSubscribe(subject, natsQueue, projectIndexerEventHandler); err != nil {
+			logger.With(errKey, err, "subject", subject).Error("error subscribing to project indexer event subject")
+			os.Exit(1)
+		}
+	}
 
 	// This next line blocks until SIGINT or SIGTERM is received, or NATS disconnects.
 	<-done

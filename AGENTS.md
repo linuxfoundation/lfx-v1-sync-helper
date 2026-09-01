@@ -341,7 +341,11 @@ Iterates Auth0 users (same connection filter and sort), syncs v1 profile fields 
 
 ### `--sync-user <username> [--dry-run]` (`backfill_email_profile.go`)
 
-Performs a full sync (profile + alternate emails) for a single user identified by their Auth0 username (the part after `auth0|`). Useful for debugging or targeted re-sync without a full backfill run.
+Performs a full sync (profile + alternate emails) for a single user identified by their Auth0 username. Useful for debugging or targeted re-sync without a full backfill run.
+
+> **The username is not the part after `auth0|`.** An Auth0 `user_id` of the form `auth0|<suffix>` is minted by the LDAP REST Proxy (the custom component fronting LDAP and Drupal for Auth0), which sanitizes the LDAP uid so the resulting identifier is within Auth0's spec. For uids that need no sanitizing the suffix happens to equal the username, which makes the two look interchangeable — but any uid that did need sanitizing (for example one containing a space, or a UTF-8 symbol, which may be present from historical, less-conservative signup requirements) is replaced by an opaque hash. Deriving a username by stripping the `auth0|` prefix has never been safe.
+>
+> When a username must be recovered from Auth0 logs, read the `user_name` field, which carries the real uid.
 
 ### 4. `cmd/lfx-v1-sync-helper/handlers.go` — suppress unknown-object warnings (optional)
 
