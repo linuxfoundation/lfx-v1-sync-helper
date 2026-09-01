@@ -265,6 +265,12 @@ After updating `meltano/meltano.yml`, regenerate the per-environment ConfigMap, 
 
 Repeat for staging and prod with the matching Kubernetes context, AWS profile, and PostgreSQL credentials. This ConfigMap is intentionally not managed by Helm.
 
+### Exception: `salesforce.user_skills` is WAL-only, no Meltano seed
+
+`user_skills` is registered in step 2 (`values.yaml`) but deliberately **not** in step 1 (`meltano/meltano.yml`): the table has no `lastmodifieddate`/`systemmodstamp` column, so Meltano's `INCREMENTAL` replication key requirement can't be satisfied, and there is no bounded `FULL_TABLE` seed for it either. WAL is the only real-time path (`handleWALUpsert` falls back to `shouldUpdateBasedOnCommitTime` for tables listed in `walTimestamplessTables`), so a KV entry only exists once a row has replicated at least once via WAL after this feature shipped. This is an accepted trade-off, not an oversight — do not add a Meltano entry for this table expecting a working replication key.
+
+Step 3 still applies as usual: `salesforce.user_skills` must be added to the `wal-listener` publication (with `REPLICA IDENTITY FULL`, so deletes carry enough of the row for `handleWALDelete`'s fallback tombstone path) in each environment. Step 4 (`tap-postgres-catalog` regeneration) is intentionally skipped for this table, since it has no `meltano.yml` entry to produce a catalog stream from.
+
 ## One-shot Backfill Commands
 
 ### `ScanSubjectData` — stream scan abstraction for all KV enumeration (`nats_scan.go`)
@@ -331,9 +337,9 @@ Iterates Auth0 users (Username-Password-Authentication connection only), sorted 
 
 ### `--backfill-profiles [--limit N] [--dry-run]` (`backfill_email_profile.go`)
 
-Iterates Auth0 users (same connection filter and sort), syncs v1 profile fields (name, title, address, org, etc.) to Auth0 `user_metadata` via `syncProfileToAuth0`. No-ops when nothing has changed.
+Iterates Auth0 users (same connection filter and sort), syncs v1 profile fields (name, title, address, org, skills, etc.) to Auth0 `user_metadata` via `syncProfileToAuth0`. No-ops when nothing has changed.
 
-- **Cursor**: stored at `v1-mappings` key `backfill.profiles.cursor`. Same inclusive-cursor behavior as `--backfill-alternate-emails`.
+- **Cursor**: stored at `v1-mappings` key `backfill.profiles.cursor.v2`. Same inclusive-cursor behavior as `--backfill-alternate-emails`. Versioned to `.v2` when skills were added to this backfill: `user_skills` is WAL-only with no other path into Auth0 for historical rows, so reusing the pre-skills cursor would silently skip backfilling skills for users a prior run already passed. The old `backfill.profiles.cursor` key is left in place, unused.
 - **`--limit N`** (default 1000): caps users processed per run.
 - **Summary log fields**: `users_processed`, `users_updated`, `users_skipped`, `errors`.
 - **Manifest**: `manifests/backfill-profiles-job.yaml`.

@@ -1,0 +1,13 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+
+# Grype vulnerability scan configuration.
+# See: https://github.com/anchore/grype#configuration
+
+ignore:
+  # GO-2026-5932 flags golang.org/x/crypto/openpgp as "unmaintained, unsafe by
+  # design" for every version of the module (no fixed version exists). This
+  # repo does not import the openpgp subpackage; x/crypto is only present as
+  # an indirect transitive dependency.
+  # @link https://pkg.go.dev/vuln/GO-2026-5932
+  - vulnerability: GO-2026-5932

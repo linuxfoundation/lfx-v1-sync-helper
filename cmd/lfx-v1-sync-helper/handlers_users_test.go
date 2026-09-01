@@ -106,8 +106,10 @@ func TestSyncMergedUserProfile(t *testing.T) {
 			cfg = &Config{}
 
 			var called bool
-			syncProfileToAuth0Fn = func(_ context.Context, _ string, _ *management.User, _ map[string]any, _ bool) (bool, error) {
+			var gotIncludeSkills bool
+			syncProfileToAuth0Fn = func(_ context.Context, _ string, _ *management.User, _ map[string]any, includeSkills, _ bool) (bool, error) {
 				called = true
+				gotIncludeSkills = includeSkills
 				return tt.syncErr == nil, tt.syncErr
 			}
 
@@ -118,6 +120,9 @@ func TestSyncMergedUserProfile(t *testing.T) {
 			}
 			if called != tt.wantCalled {
 				t.Errorf("sync called = %v, want %v", called, tt.wantCalled)
+			}
+			if called && gotIncludeSkills {
+				t.Error("expected the live merged_user path to call syncProfileToAuth0Fn with includeSkills=false, to avoid racing handleUserSkillsUpdate's own live write of that field")
 			}
 		})
 	}

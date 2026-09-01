@@ -148,6 +148,8 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 		return handleMergedUserUpdate(ctx, key, v1Data)
 	case "salesforce-alternate_email__c":
 		return handleAlternateEmailUpdate(ctx, key, v1Data)
+	case "salesforce-user_skills":
+		return handleUserSkillsUpdate(ctx, key, v1Data)
 	case "salesforce_b2b-Account",
 		"salesforce_b2b-Asset",
 		"salesforce_b2b-Product2",
@@ -230,6 +232,8 @@ func handleResourceDelete(ctx context.Context, key string, v1Data map[string]any
 		return handleMergedUserDelete(ctx, key, sfid, v1Data)
 	case "salesforce-alternate_email__c":
 		return handleAlternateEmailDelete(ctx, key, sfid, v1Data)
+	case "salesforce-user_skills":
+		return handleUserSkillsDelete(ctx, key, sfid, v1Data)
 	case "itx-zoom-meetings-v2",
 		"itx-zoom-meetings-registrants-v2",
 		"itx-zoom-past-meetings-attendees",
