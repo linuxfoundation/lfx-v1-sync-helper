@@ -62,6 +62,7 @@ spec:
           imagePullPolicy: IfNotPresent
           args: ["--backfill-committee-member-names"]
           env:
+            # --- actually used by this backfill ---
             - name: NATS_URL
               value: "nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
             - name: COMMITTEE_SERVICE_URL
@@ -72,18 +73,12 @@ spec:
               value: "prod-rsa-2025-12-12-001"
             - name: USE_MSGPACK
               value: "1"
-            # Before applying: replace this value with the HEIMDALL_CLIENT_ID from the
-            # running deployment (it is not stored in a Secret):
-            #   kubectl --context lfx-v2-prod -n v1-sync-helper get deployment \
-            #     -o jsonpath='{.items[0].spec.template.spec.containers[0].env[?(@.name=="HEIMDALL_CLIENT_ID")].value}'
-            - name: HEIMDALL_CLIENT_ID
-              value: ""
             - name: HEIMDALL_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
                   key: signer.pem
                   name: heimdall-signer-cert
-            # v1 platform database connection — needed to read merged_user rows.
+            # v1 platform database — needed to read merged_user rows for names.
             - name: V1_DB_HOST
               valueFrom:
                 secretKeyRef:
@@ -99,6 +94,21 @@ spec:
                 secretKeyRef:
                   key: password
                   name: v1-platform-db-credentials
+            # --- required by LoadConfig() but not used by this backfill ---
+            - name: PROJECT_SERVICE_URL
+              value: "http://lfx-v2-project-service.project-service.svc.cluster.local:8080"
+            - name: AUTH0_TENANT
+              value: "linuxfoundation"
+            - name: AUTH0_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  key: client_id
+                  name: v1-sync-helper-auth0-credentials
+            - name: AUTH0_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: client_private_key
+                  name: v1-sync-helper-auth0-credentials
             # Optional: raise if logs show scan-timeout warnings. Defaults to 2m.
             # - name: NATS_FETCH_MAX_WAIT
             #   value: "2m"
