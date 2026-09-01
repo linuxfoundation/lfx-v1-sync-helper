@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/nats-io/nats.go/jetstream"
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 )
 
@@ -29,11 +30,21 @@ type backfillCommitteeMemberNamesResult struct {
 // merged_user had no username for them, so the name fields were silently
 // dropped from the sync payload.
 //
+// Prerequisites: run --backfill-committee-member-mappings first so that any
+// old-format "poisoned" reverse mappings (whose third field is the record UUID
+// rather than the contact SFID) are repaired. This backfill additionally
+// falls back to resolving the contact SFID from the v1-objects KV bucket for
+// entries that could not be repaired by that pass, mirroring the logic in
+// backfill_committee_member_mappings.go.
+//
 // For each forward mapping (committee_member.sfid.*) the backfill:
 //  1. Parses committeeUID and memberUID from the mapping value.
 //  2. Fetches the V2 member record; skips it if either name field is already set.
 //  3. Looks up the contact SFID from the reverse mapping
 //     (committee_member.uid.<memberUID> → projectSFID:committeeSFID:contactSFID).
+//     For old-format "poisoned" entries where the third field is a UUID,
+//     resolves the contact SFID from the v1-objects record via the record SFID
+//     stored in committeeMemberRecordSFIDKey.
 //  4. Reads first_name/last_name directly from salesforce.merged_user via
 //     the contact SFID — no username required.
 //  5. Calls UpdateCommitteeMember with SkipEnrichment=true so the committee
@@ -45,8 +56,9 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 
 		// forwardSubject is the subject filter for all forward committee-member
 		// mappings: committee_member.sfid.<recordSFID> → committeeUID:memberUID.
-		forwardSubject = "$KV.v1-mappings.committee_member.sfid.*"
-		forwardPrefix  = "$KV.v1-mappings.committee_member.sfid."
+		forwardSubject    = "$KV.v1-mappings.committee_member.sfid.*"
+		forwardPrefix     = "$KV.v1-mappings.committee_member.sfid."
+		v1ObjectKeyPrefix = "platform-community__c."
 	)
 
 	opTimeout := cfg.NATSFetchMaxWait
@@ -77,7 +89,7 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 		parts := strings.SplitN(string(data), ":", 2)
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			logger.With("subject", subject, "value", string(data)).
-				WarnContext(ctx, "skipping malformed committee member forward mapping")
+				WarnContext(ctx, "backfill: skipping malformed committee member forward mapping")
 			res.skipped++
 			continue
 		}
@@ -98,28 +110,31 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 			continue
 		}
 
-		// Look up the contact SFID from the reverse mapping.
-		reverseKey := "committee_member.uid." + memberUID
-		reverseEntry, kvErr := mappingsKV.Get(ctx, reverseKey)
-		if kvErr != nil || isTombstonedMapping(reverseEntry.Value()) {
-			logger.With("member_uid", memberUID, "committee_uid", committeeUID).
-				WarnContext(ctx, "backfill: no usable reverse mapping for member, cannot resolve contact SFID")
-			res.noMapping++
+		// Resolve the contact SFID needed to look up the name in merged_user.
+		contactSFID, resolveErr := resolveContactSFIDForMember(ctx, memberUID, v1ObjectKeyPrefix)
+		if resolveErr != nil {
+			logger.With(errKey, resolveErr, "member_uid", memberUID, "committee_uid", committeeUID).
+				WarnContext(ctx, "backfill: failed to resolve contact SFID, skipping")
+			res.errored++
 			continue
 		}
-
-		_, _, _, contactSFID, ok := parseCommitteeMemberReverseMapping(string(reverseEntry.Value()))
-		if !ok || contactSFID == "" {
-			logger.With("member_uid", memberUID, "reverse_value", string(reverseEntry.Value())).
-				WarnContext(ctx, "backfill: reverse mapping has no contact SFID (may be an old-format or poisoned entry)")
+		if contactSFID == "" {
+			logger.With("member_uid", memberUID, "committee_uid", committeeUID).
+				WarnContext(ctx, "backfill: no usable contact SFID for member, cannot resolve name")
 			res.noMapping++
 			continue
 		}
 
 		// Read first_name/last_name from the V1 merged_user row directly.
 		row, rowErr := dbLookupMergedUserRowBySFID(ctx, contactSFID)
-		if rowErr != nil || row == nil {
-			logger.With("member_uid", memberUID, "contact_sfid", contactSFID).
+		if rowErr != nil {
+			logger.With(errKey, rowErr, "member_uid", memberUID).
+				WarnContext(ctx, "backfill: error looking up merged_user row")
+			res.errored++
+			continue
+		}
+		if row == nil {
+			logger.With("member_uid", memberUID).
 				WarnContext(ctx, "backfill: no merged_user row found for contact SFID")
 			res.noName++
 			continue
@@ -128,7 +143,7 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 		firstName := row.FirstName.String
 		lastName := row.LastName.String
 		if firstName == "" && lastName == "" {
-			logger.With("member_uid", memberUID, "contact_sfid", contactSFID).
+			logger.With("member_uid", memberUID).
 				WarnContext(ctx, "backfill: merged_user row has no first or last name")
 			res.noName++
 			continue
@@ -138,9 +153,9 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 			logger.With(
 				"committee_uid", committeeUID,
 				"member_uid", memberUID,
-				"first_name", firstName,
-				"last_name", lastName,
-			).Info("backfill: dry-run — would update committee member name")
+				"has_first_name", firstName != "",
+				"has_last_name", lastName != "",
+			).InfoContext(ctx, "backfill: dry-run — would update committee member name")
 			res.dryRun++
 			continue
 		}
@@ -177,31 +192,79 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 		logger.With(
 			"committee_uid", committeeUID,
 			"member_uid", memberUID,
-			"first_name", firstName,
-			"last_name", lastName,
-		).Info("backfill: updated committee member name")
+			"has_first_name", firstName != "",
+			"has_last_name", lastName != "",
+		).InfoContext(ctx, "backfill: updated committee member name")
 		res.updated++
 	}
 
 	return res, nil
 }
 
+// resolveContactSFIDForMember returns the contact SFID (contact_name__c) for a
+// V2 committee member UID. It reads the reverse mapping
+// (committee_member.uid.<memberUID>) and returns the contact SFID directly when
+// present. For old-format "poisoned" entries whose third field is a record UUID
+// rather than a contact SFID (parseCommitteeMemberReverseMapping returns
+// recordSFID!="", contactSFID==""), it resolves the contact SFID from the
+// v1-objects KV record. Returns ("", nil) when the contact SFID cannot be
+// determined but no transient error occurred.
+func resolveContactSFIDForMember(ctx context.Context, memberUID, v1ObjectKeyPrefix string) (string, error) {
+	reverseKey := "committee_member.uid." + memberUID
+	reverseEntry, kvErr := mappingsKV.Get(ctx, reverseKey)
+	if kvErr != nil {
+		if kvErr == jetstream.ErrKeyNotFound || kvErr == jetstream.ErrKeyDeleted {
+			return "", nil
+		}
+		return "", fmt.Errorf("reading reverse mapping: %w", kvErr)
+	}
+	if isTombstonedMapping(reverseEntry.Value()) {
+		return "", nil
+	}
+
+	_, _, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(reverseEntry.Value()))
+	if !ok {
+		// Malformed mapping — cannot resolve.
+		return "", nil
+	}
+	if contactSFID != "" {
+		// Happy path: reverse mapping already contains the contact SFID.
+		return contactSFID, nil
+	}
+
+	// Poisoned entry: third field is the record UUID. Resolve the contact SFID
+	// from the v1-objects record, mirroring backfill_committee_member_mappings.go.
+	if recordSFID == "" {
+		return "", nil
+	}
+	obj, found, err := getV1ObjectData(ctx, v1ObjectKeyPrefix+recordSFID)
+	if err != nil {
+		return "", fmt.Errorf("reading v1 object for record sfid %s: %w", recordSFID, err)
+	}
+	if !found {
+		return "", nil
+	}
+	resolved, _ := obj["contact_name__c"].(string)
+	return strings.TrimSpace(resolved), nil
+}
+
 // memberToUpdatePayload builds an UpdateCommitteeMemberPayload from a fetched
-// CommitteeMemberFullWithReadonlyAttributes, preserving all existing fields so
+// CommitteeMemberFullWithReadonlyAttributes, preserving all mutable fields so
 // the update does not unintentionally clear any data.
 func memberToUpdatePayload(m *committeeservice.CommitteeMemberFullWithReadonlyAttributes, committeeUID, memberUID, etag string) *committeeservice.UpdateCommitteeMemberPayload {
 	p := &committeeservice.UpdateCommitteeMemberPayload{
-		UID:         committeeUID,
-		MemberUID:   memberUID,
-		Version:     "1",
-		IfMatch:     stringToStringPtr(etag),
-		Username:    m.Username,
-		Email:       stringPtrToString(m.Email),
-		FirstName:   m.FirstName,
-		LastName:    m.LastName,
-		JobTitle:    m.JobTitle,
-		AppointedBy: m.AppointedBy,
-		Status:      m.Status,
+		UID:             committeeUID,
+		MemberUID:       memberUID,
+		Version:         "1",
+		IfMatch:         stringToStringPtr(etag),
+		Username:        m.Username,
+		Email:           stringPtrToString(m.Email),
+		FirstName:       m.FirstName,
+		LastName:        m.LastName,
+		JobTitle:        m.JobTitle,
+		LinkedinProfile: m.LinkedinProfile,
+		AppointedBy:     m.AppointedBy,
+		Status:          m.Status,
 	}
 
 	if m.Role != nil {
