@@ -337,9 +337,9 @@ Iterates Auth0 users (Username-Password-Authentication connection only), sorted 
 
 ### `--backfill-profiles [--limit N] [--dry-run]` (`backfill_email_profile.go`)
 
-Iterates Auth0 users (same connection filter and sort), syncs v1 profile fields (name, title, address, org, etc.) to Auth0 `user_metadata` via `syncProfileToAuth0`. No-ops when nothing has changed.
+Iterates Auth0 users (same connection filter and sort), syncs v1 profile fields (name, title, address, org, skills, etc.) to Auth0 `user_metadata` via `syncProfileToAuth0`. No-ops when nothing has changed.
 
-- **Cursor**: stored at `v1-mappings` key `backfill.profiles.cursor`. Same inclusive-cursor behavior as `--backfill-alternate-emails`.
+- **Cursor**: stored at `v1-mappings` key `backfill.profiles.cursor.v2`. Same inclusive-cursor behavior as `--backfill-alternate-emails`. Versioned to `.v2` when skills were added to this backfill: `user_skills` is WAL-only with no other path into Auth0 for historical rows, so reusing the pre-skills cursor would silently skip backfilling skills for users a prior run already passed. The old `backfill.profiles.cursor` key is left in place, unused.
 - **`--limit N`** (default 1000): caps users processed per run.
 - **Summary log fields**: `users_processed`, `users_updated`, `users_skipped`, `errors`.
 - **Manifest**: `manifests/backfill-profiles-job.yaml`.

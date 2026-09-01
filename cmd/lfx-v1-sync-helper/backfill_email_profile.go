@@ -21,8 +21,12 @@ package main
 //
 //   --backfill-profiles [--limit N] [--dry-run]
 //     Same Auth0-user-centric iteration, but syncs v1 profile fields
-//     (name, title, address, etc.) to Auth0 user_metadata instead.
-//     Cursor stored at "backfill.profiles.cursor".
+//     (name, title, address, etc., plus skills) to Auth0 user_metadata
+//     instead.
+//     Cursor stored at "backfill.profiles.cursor.v2" (versioned when skills
+//     were added to this backfill, so the first post-upgrade run revisits
+//     every user rather than resuming past ones a prior run already synced
+//     without skills).
 //     Same inclusive-cursor behavior as --backfill-alternate-emails.
 //     Replaces the legacy PROFILE_SYNC_BACKFILL env-var approach.
 //
@@ -48,7 +52,15 @@ const (
 
 	// backfillProfilesCursorKey is the v1-mappings KV key used to store the
 	// profiles backfill cursor.
-	backfillProfilesCursorKey = "backfill.profiles.cursor"
+	//
+	// Versioned "v2" (was "backfill.profiles.cursor"): this backfill now also
+	// syncs skills (see syncProfileToAuth0's includeSkills), and user_skills
+	// is WAL-only with no other path into Auth0 for historical rows. A prior
+	// completed run's cursor already sits past most users, so reusing that
+	// key would silently skip backfilling skills for everyone before it.
+	// Bumping the key forces this deploy's first run to start from scratch
+	// and revisit every user; the old key is left in place, unused.
+	backfillProfilesCursorKey = "backfill.profiles.cursor.v2"
 
 	// backfillAuth0Connection is the Auth0 connection filter for backfill iteration.
 	// Only Username-Password-Authentication users have v1 platform SFID mappings.
