@@ -44,7 +44,7 @@ type backfillCommitteeMemberNamesResult struct {
 //     (committee_member.uid.<memberUID> → projectSFID:committeeSFID:contactSFID).
 //     For old-format "poisoned" entries where the third field is a UUID,
 //     resolves the contact SFID from the v1-objects record via the record SFID
-//     stored in committeeMemberRecordSFIDKey.
+//     extracted directly from that third field of the reverse mapping.
 //  4. Reads first_name/last_name directly from salesforce.merged_user via
 //     the contact SFID — no username required.
 //  5. Calls UpdateCommitteeMember with SkipEnrichment=true so the committee

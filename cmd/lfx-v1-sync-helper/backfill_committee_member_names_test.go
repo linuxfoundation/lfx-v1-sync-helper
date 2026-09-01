@@ -250,7 +250,7 @@ func TestResolveContactSFIDForMember(t *testing.T) {
 			kvGet: func(_ context.Context, _ string) ([]byte, error) {
 				return []byte(poisonedMapping), nil
 			},
-			v1ObjectLookup: func(_ context.Context, key string) (map[string]any, bool, error) {
+			v1ObjectLookup: func(_ context.Context, _ string) (map[string]any, bool, error) {
 				return map[string]any{"contact_name__c": resolvedContactSFID}, true, nil
 			},
 			wantSFID: resolvedContactSFID,
