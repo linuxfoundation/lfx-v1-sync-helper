@@ -166,7 +166,18 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 	// re-reads only after B has released the lock, converging on B's result.
 	_, ran := profileSkillsStaleGuard.run(sfid, event.Timestamp, func() bool {
 		skillsMetadata := resolveSkillsMetadataFn(ctx, log, sfid, event)
-		if err := reconcileV1SkillsFn(ctx, sfid, skillsMetadata); err != nil {
+
+		// reconcileV1SkillsFn can issue up to one GET plus one POST plus one
+		// DELETE per removed skill, all sequential, over v1HTTPClient (which
+		// has no client-level timeout). This handler is dispatched via a core
+		// NATS QueueSubscribe callback with no deadline of its own, and this
+		// call runs while profileSkillsStaleGuard's per-sfid lock is held, so
+		// a single stalled user-service request here would block not just
+		// this callback but every other delivery for the same sfid
+		// indefinitely. Bound the entire reconciliation, not just one request.
+		reconcileCtx, cancel := context.WithTimeout(ctx, v1SkillsCallTimeout)
+		defer cancel()
+		if err := reconcileV1SkillsFn(reconcileCtx, sfid, skillsMetadata); err != nil {
 			log.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to reconcile v1 skills")
 		}
 		return false
@@ -180,6 +191,12 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 // delivery for the skills-reconcile step. See the ordering note above
 // handleUserProfileUpdated's guard check.
 var profileSkillsStaleGuard staleEventGuard
+
+// v1SkillsCallTimeout bounds the whole reconcileV1Skills call (one GET plus
+// one POST plus up to one DELETE per removed skill, all sequential over
+// v1HTTPClient, which has no client-level timeout of its own), matching
+// auth0CallTimeout's role for the Auth0 side of this same handler.
+const v1SkillsCallTimeout = 20 * time.Second
 
 // resolveSkillsMetadataFn is injectable for tests.
 var resolveSkillsMetadataFn = resolveSkillsMetadata
