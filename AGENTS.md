@@ -182,11 +182,83 @@ lfx-v1-sync-helper/
 - Follow standard Go conventions
 - Use structured JSON logging
 
+### Go Toolchain Version
+
+Freely bump `go.mod`'s `go` directive to the latest available *patch*
+release (e.g. `1.X.Y` → `1.X.{Y+1}`) to pick up security fixes. Do **not**
+bump the *minor* version (e.g. `1.X.x` → `1.{X+1}.x`) unless the user
+explicitly asks for it, **and** you've validated it against the Go version
+MegaLinter itself bundles -- MegaLinter's `golangci-lint` and `govulncheck`
+(pulled in via its `osv-scanner` check) are guaranteed to lag behind the
+latest Go release by some amount (their binaries are built against
+whatever Go version was current when that MegaLinter flavor tag was cut),
+and a `go.mod` directive newer than what they were built with breaks them
+outright. This is a hard ceiling with no environment-variable workaround --
+`GOTOOLCHAIN: auto` only affects invocations of the `go` command itself
+and does nothing for these precompiled binaries' own internal version
+checks (confirmed empirically: setting it in both the workflow and
+`.mega-linter.yml` still failed).
+
+To find MegaLinter's bundled Go version:
+
+```bash
+# 1. Find the MegaLinter flavor and pinned version tag used in CI.
+grep -A1 'oxsecurity/megalinter' .github/workflows/*.yml
+# e.g. "uses: oxsecurity/megalinter/flavors/<flavor>@<sha>  # <tag>"
+
+# 2. Fetch that flavor's Dockerfile and read its GO_ALPINE_VERSION build
+#    arg -- this is what the final image installs as `go`, not
+#    GO_IMAGE_VERSION (which only applies to an intermediate builder
+#    stage).
+curl -s "https://raw.githubusercontent.com/oxsecurity/megalinter/<tag>/flavors/<flavor>/Dockerfile" \
+  | grep -i 'GO_ALPINE_VERSION'
+```
+
+`go.mod`'s `go` directive must never exceed that bundled version. Staying
+one minor version behind it (rather than matching its minor *and* patch
+exactly) leaves room to always take the latest patch release for security
+fixes without ever being blocked by MegaLinter's own bundled patch version
+lagging a newly disclosed vulnerability.
+
+There's no built-in `go` subcommand to look up the latest patch release for
+a given minor version -- query the official `go.dev/dl` JSON feed instead:
+
+```bash
+# Find the latest patch release for the minor version pinned in go.mod.
+MINOR=$(grep '^go ' go.mod | awk '{print $2}' | cut -d. -f1,2)
+curl -s "https://go.dev/dl/?mode=json&include=all" \
+  | jq -r --arg m "go${MINOR}." '.[].version | select(startswith($m))' \
+  | sort -V | tail -1
+```
+
 ### Python Code Standards
 - Use `uv` for dependency management
 - Follow Meltano best practices
 - Maintain `pyproject.toml` and `uv.lock` consistency
 - Environment-based configuration
+
+### Python Upgrade Policy
+
+Keep Python upgrades conservative, mirroring the Go toolchain policy above:
+
+- **Patch releases**: freely bump the pinned Python *patch* version (e.g.
+  `pyproject.toml`'s `requires-python = ">=3.12,<3.13"` stays on the `3.12`
+  minor, but the interpreter/base image patch level, e.g.
+  `docker/Dockerfile.meltano`'s Python base image tag, can always move to the
+  latest `3.12.x` patch). Do **not** bump the *minor* version (e.g.
+  `3.12` → `3.13`) unless the user explicitly asks for it — Meltano and its
+  plugin ecosystem lag behind new Python minors.
+- **Insecure packages**: before pushing, run `uv audit` as a local pre-check
+  for known vulnerabilities in `uv.lock`. For any finding, upgrade **only
+  that package** to its fixed version, via the narrowest possible constraint
+  (direct dependency: `pyproject.toml`'s `dependencies` list; transitive/
+  build-env dependency such as `pip` or `uv`: `[tool.uv].constraint-dependencies`),
+  then regenerate the lockfile with `uv lock`. Do not perform a broader
+  `uv sync -U` / full dependency upgrade in response to a vulnerability
+  finding — that's a separate, deliberate decision.
+- **Everything else** (Meltano itself, extractor/loader plugins, dev
+  tooling): leave alone unless the user explicitly asks for an upgrade or a
+  vulnerability finding specifically names that package.
 
 ### Data Serialization
 - **target-nats-kv** supports both JSON and MessagePack encoding
