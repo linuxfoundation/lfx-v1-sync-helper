@@ -14,40 +14,20 @@ import (
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 )
 
-// committeeMemberKVRecord is the subset of fields we need from the
+// committeeMemberKVRecord is the minimal set of fields read from the
 // committee-members KV bucket (JSON-encoded by the committee service).
+// Unknown fields are ignored by encoding/json; keep only what this backfill uses.
 type committeeMemberKVRecord struct {
 	UID          string `json:"uid"`
 	CommitteeUID string `json:"committee_uid"`
-	Email        string `json:"email"`
-	Username     string `json:"username"`
 	FirstName    string `json:"first_name"`
 	LastName     string `json:"last_name"`
-	JobTitle     string `json:"job_title"`
-	LinkedIn     string `json:"linkedin_profile"`
-	AppointedBy  string `json:"appointed_by"`
-	Status       string `json:"status"`
-	Role         struct {
-		Name      string `json:"name"`
-		StartDate string `json:"start_date"`
-		EndDate   string `json:"end_date"`
-	} `json:"role"`
-	Voting struct {
-		Status    string `json:"status"`
-		StartDate string `json:"start_date"`
-		EndDate   string `json:"end_date"`
-	} `json:"voting"`
-	Organization struct {
-		ID      string `json:"id"`
-		Name    string `json:"name"`
-		Website string `json:"website"`
-	} `json:"organization"`
 }
 
 // backfillCommitteeMemberNamesResult summarizes a backfill run.
 type backfillCommitteeMemberNamesResult struct {
 	inspected int
-	skipped   int // already have a name, or lookup-index key
+	skipped   int // already have a name, missing uid/committee_uid, or name set concurrently
 	noMapping int // no usable reverse mapping to resolve the contact SFID
 	noName    int // contact SFID found but merged_user row has no name
 	updated   int // successfully patched
@@ -88,15 +68,24 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 		return nil, fmt.Errorf("failed to open %s KV bucket: %w", committeeMembersBucket, err)
 	}
 
+	// Drain all primary keys into a slice before processing. Holding a lister
+	// open while doing slow blocking work (DB queries, API calls) can cause
+	// missed heartbeats that silently truncate or restart the consumer, producing
+	// an incomplete backfill. See nats_scan.go for the documented hazard.
 	lister, err := membersKV.ListKeys(ctx, jetstream.IgnoreDeletes())
 	if err != nil {
 		return nil, fmt.Errorf("failed to list committee-member keys: %w", err)
 	}
-	defer func() {
-		if stopErr := lister.Stop(); stopErr != nil {
-			logger.With(errKey, stopErr).WarnContext(ctx, "backfill: error stopping key lister")
+	var memberKeys []string
+	for key := range lister.Keys() {
+		if !strings.HasPrefix(key, "lookup/") {
+			memberKeys = append(memberKeys, key)
 		}
-	}()
+	}
+	if stopErr := lister.Stop(); stopErr != nil {
+		logger.With(errKey, stopErr).WarnContext(ctx, "backfill: error stopping key lister")
+	}
+	logger.With("total_keys", len(memberKeys)).InfoContext(ctx, "backfill: enumerated committee-member keys")
 
 	kvGetFn := func(ctx context.Context, key string) ([]byte, error) {
 		entry, err := mappingsKV.Get(ctx, key)
@@ -108,11 +97,7 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 
 	res := &backfillCommitteeMemberNamesResult{}
 
-	for key := range lister.Keys() {
-		// Skip secondary-index entries (e.g. "lookup/committee-members-by-committee/…").
-		if strings.HasPrefix(key, "lookup/") {
-			continue
-		}
+	for _, key := range memberKeys {
 		res.inspected++
 
 		entry, getErr := membersKV.Get(ctx, key)
