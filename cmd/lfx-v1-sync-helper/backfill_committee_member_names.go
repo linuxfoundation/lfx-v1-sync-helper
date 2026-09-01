@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -13,15 +14,45 @@ import (
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 )
 
+// committeeMemberKVRecord is the subset of fields we need from the
+// committee-members KV bucket (JSON-encoded by the committee service).
+type committeeMemberKVRecord struct {
+	UID          string `json:"uid"`
+	CommitteeUID string `json:"committee_uid"`
+	Email        string `json:"email"`
+	Username     string `json:"username"`
+	FirstName    string `json:"first_name"`
+	LastName     string `json:"last_name"`
+	JobTitle     string `json:"job_title"`
+	LinkedIn     string `json:"linkedin_profile"`
+	AppointedBy  string `json:"appointed_by"`
+	Status       string `json:"status"`
+	Role         struct {
+		Name      string `json:"name"`
+		StartDate string `json:"start_date"`
+		EndDate   string `json:"end_date"`
+	} `json:"role"`
+	Voting struct {
+		Status    string `json:"status"`
+		StartDate string `json:"start_date"`
+		EndDate   string `json:"end_date"`
+	} `json:"voting"`
+	Organization struct {
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		Website string `json:"website"`
+	} `json:"organization"`
+}
+
 // backfillCommitteeMemberNamesResult summarizes a backfill run.
 type backfillCommitteeMemberNamesResult struct {
-	inspected  int
-	skipped    int // already have a name, or tombstoned/malformed mapping
-	noMapping  int // no usable reverse mapping to resolve the contact SFID
-	noName     int // contact SFID found but merged_user row has no name
-	updated    int // successfully patched
-	dryRun     int // would have patched (dry-run mode)
-	errored    int // fetch or update failed
+	inspected int
+	skipped   int // already have a name, or lookup-index key
+	noMapping int // no usable reverse mapping to resolve the contact SFID
+	noName    int // contact SFID found but merged_user row has no name
+	updated   int // successfully patched
+	dryRun    int // would have patched (dry-run mode)
+	errored   int // fetch or update failed
 }
 
 // backfillCommitteeMemberNames patches V2 committee member records whose
@@ -30,94 +61,92 @@ type backfillCommitteeMemberNamesResult struct {
 // merged_user had no username for them, so the name fields were silently
 // dropped from the sync payload.
 //
-// Prerequisites: run --backfill-committee-member-mappings first so that any
-// old-format "poisoned" reverse mappings (whose third field is the record UUID
-// rather than the contact SFID) are repaired. This backfill additionally
-// falls back to resolving the contact SFID from the v1-objects KV bucket for
-// entries that could not be repaired by that pass, mirroring the logic in
-// backfill_committee_member_mappings.go.
+// Instead of scanning the entire v1-mappings stream, this implementation
+// iterates the committee-members KV bucket directly (owned by the committee
+// service, JSON-encoded, keyed by memberUID). Only members with both name
+// fields empty proceed to the V1 DB lookup — the committee service API is
+// never called just to check whether names are present.
 //
-// For each forward mapping (committee_member.sfid.*) the backfill:
-//  1. Parses committeeUID and memberUID from the mapping value.
-//  2. Fetches the V2 member record; skips it if either name field is already set.
-//  3. Looks up the contact SFID from the reverse mapping
+// For each nameless member the backfill:
+//  1. Looks up the contact SFID from the v1-mappings reverse mapping
 //     (committee_member.uid.<memberUID> → projectSFID:committeeSFID:contactSFID).
 //     For old-format "poisoned" entries where the third field is a UUID,
-//     resolves the contact SFID from the v1-objects record via the record SFID
-//     extracted directly from that third field of the reverse mapping.
-//  4. Reads first_name/last_name directly from salesforce.merged_user via
+//     resolves the contact SFID from the v1-objects record.
+//  2. Reads first_name/last_name directly from salesforce.merged_user via
 //     the contact SFID — no username required.
-//  5. Calls UpdateCommitteeMember with SkipEnrichment=true so the committee
+//  3. Calls UpdateCommitteeMember with SkipEnrichment=true so the committee
 //     service stores the supplied names as-is without attempting another
 //     username / auth-service lookup (which would fail again for these members).
 func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCommitteeMemberNamesResult, error) {
 	const (
-		kvMappingsStream = "KV_v1-mappings"
-
-		// forwardSubject is the subject filter for all forward committee-member
-		// mappings: committee_member.sfid.<recordSFID> → committeeUID:memberUID.
-		forwardSubject    = "$KV.v1-mappings.committee_member.sfid.*"
-		forwardPrefix     = "$KV.v1-mappings.committee_member.sfid."
-		v1ObjectKeyPrefix = "platform-community__c."
+		committeeMembersBucket = "committee-members"
+		v1ObjectKeyPrefix      = "platform-community__c."
 	)
 
-	opTimeout := cfg.NATSFetchMaxWait
-	if opTimeout <= 0 {
-		opTimeout = defaultNATSFetchMaxWait
+	membersKV, err := jsContext.KeyValue(ctx, committeeMembersBucket)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open %s KV bucket: %w", committeeMembersBucket, err)
 	}
 
-	subjectData, err := ScanSubjectData(ctx, jsContext, kvMappingsStream, forwardSubject, opTimeout)
+	lister, err := membersKV.ListKeys(ctx, jetstream.IgnoreDeletes())
 	if err != nil {
-		return nil, fmt.Errorf("failed to scan committee member forward mappings: %w", err)
+		return nil, fmt.Errorf("failed to list committee-member keys: %w", err)
+	}
+	defer func() {
+		if stopErr := lister.Stop(); stopErr != nil {
+			logger.With(errKey, stopErr).WarnContext(ctx, "backfill: error stopping key lister")
+		}
+	}()
+
+	kvGetFn := func(ctx context.Context, key string) ([]byte, error) {
+		entry, err := mappingsKV.Get(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		return entry.Value(), nil
 	}
 
 	res := &backfillCommitteeMemberNamesResult{}
 
-	for subject, data := range subjectData {
-		if !strings.HasPrefix(subject, forwardPrefix) {
+	for key := range lister.Keys() {
+		// Skip secondary-index entries (e.g. "lookup/committee-members-by-committee/…").
+		if strings.HasPrefix(key, "lookup/") {
 			continue
 		}
 		res.inspected++
 
-		// Skip tombstoned entries.
-		if isTombstonedMapping(data) {
-			res.skipped++
+		entry, getErr := membersKV.Get(ctx, key)
+		if getErr != nil {
+			logger.With(errKey, getErr, "key", key).
+				WarnContext(ctx, "backfill: failed to get committee-member KV entry, skipping")
+			res.errored++
 			continue
 		}
 
-		// Parse committeeUID:memberUID from the mapping value.
-		parts := strings.SplitN(string(data), ":", 2)
-		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			logger.With("subject", subject, "value", string(data)).
-				WarnContext(ctx, "backfill: skipping malformed committee member forward mapping")
-			res.skipped++
-			continue
-		}
-		committeeUID, memberUID := parts[0], parts[1]
-
-		// Fetch the current V2 member record.
-		member, etag, fetchErr := fetchCommitteeMember(ctx, committeeUID, memberUID)
-		if fetchErr != nil {
-			logger.With(errKey, fetchErr, "committee_uid", committeeUID, "member_uid", memberUID).
-				WarnContext(ctx, "backfill: failed to fetch committee member, skipping")
+		var rec committeeMemberKVRecord
+		if unmarshalErr := json.Unmarshal(entry.Value(), &rec); unmarshalErr != nil {
+			logger.With(errKey, unmarshalErr, "key", key).
+				WarnContext(ctx, "backfill: failed to decode committee-member record, skipping")
 			res.errored++
 			continue
 		}
 
 		// Skip if either name field is already populated.
-		if stringPtrToString(member.FirstName) != "" || stringPtrToString(member.LastName) != "" {
+		if rec.FirstName != "" || rec.LastName != "" {
+			res.skipped++
+			continue
+		}
+
+		memberUID := rec.UID
+		committeeUID := rec.CommitteeUID
+		if memberUID == "" || committeeUID == "" {
+			logger.With("key", key).
+				WarnContext(ctx, "backfill: record missing uid or committee_uid, skipping")
 			res.skipped++
 			continue
 		}
 
 		// Resolve the contact SFID needed to look up the name in merged_user.
-		kvGetFn := func(ctx context.Context, key string) ([]byte, error) {
-			entry, err := mappingsKV.Get(ctx, key)
-			if err != nil {
-				return nil, err
-			}
-			return entry.Value(), nil
-		}
 		contactSFID, resolveErr := resolveContactSFIDForMember(ctx, memberUID, v1ObjectKeyPrefix, kvGetFn, getV1ObjectData)
 		if resolveErr != nil {
 			logger.With(errKey, resolveErr, "member_uid", memberUID, "committee_uid", committeeUID).
@@ -164,6 +193,21 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 				"has_last_name", lastName != "",
 			).InfoContext(ctx, "backfill: dry-run — would update committee member name")
 			res.dryRun++
+			continue
+		}
+
+		// Fetch the live record to get an ETag for the conditional update.
+		member, etag, fetchErr := fetchCommitteeMember(ctx, committeeUID, memberUID)
+		if fetchErr != nil {
+			logger.With(errKey, fetchErr, "committee_uid", committeeUID, "member_uid", memberUID).
+				WarnContext(ctx, "backfill: failed to fetch committee member for update, skipping")
+			res.errored++
+			continue
+		}
+
+		// Re-check after fetch — another process may have set the name already.
+		if stringPtrToString(member.FirstName) != "" || stringPtrToString(member.LastName) != "" {
+			res.skipped++
 			continue
 		}
 
