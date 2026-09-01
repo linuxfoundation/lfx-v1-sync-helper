@@ -782,14 +782,7 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 			// (no username in merged_user). Fall back to the raw DB row so we can
 			// still populate first_name/last_name even without a username.
 			if row, rowErr := dbLookupMergedUserRowBySFID(ctx, contactNameV1); rowErr == nil && row != nil {
-				if row.FirstName.String != "" {
-					fn := row.FirstName.String
-					payload.FirstName = &fn
-				}
-				if row.LastName.String != "" {
-					ln := row.LastName.String
-					payload.LastName = &ln
-				}
+				applyRowNames(row, &payload.FirstName, &payload.LastName)
 			}
 		} else {
 			payload.Username = &user.Username
@@ -935,6 +928,20 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 	return payload, nil
 }
 
+// applyRowNames sets FirstName and LastName on the pointed-to *string values
+// from a merged_user row when they are non-empty. Used as the no-LFX-account
+// fallback when lookupMergedUser fails (no username in merged_user).
+func applyRowNames(row *mergedUserRow, firstName, lastName **string) {
+	if row.FirstName.String != "" {
+		fn := row.FirstName.String
+		*firstName = &fn
+	}
+	if row.LastName.String != "" {
+		ln := row.LastName.String
+		*lastName = &ln
+	}
+}
+
 // mapV1DataToCommitteeMemberUpdatePayload converts v1 platform-community__c data to an UpdateCommitteeMemberPayload.
 func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID string, memberUID string, v1Data map[string]any) (*committeeservice.UpdateCommitteeMemberPayload, error) {
 	// Extract email field (already validated by caller).
@@ -960,14 +967,7 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID s
 			// (no username in merged_user). Fall back to the raw DB row so we can
 			// still populate first_name/last_name even without a username.
 			if row, rowErr := dbLookupMergedUserRowBySFID(ctx, contactNameV1); rowErr == nil && row != nil {
-				if row.FirstName.String != "" {
-					fn := row.FirstName.String
-					payload.FirstName = &fn
-				}
-				if row.LastName.String != "" {
-					ln := row.LastName.String
-					payload.LastName = &ln
-				}
+				applyRowNames(row, &payload.FirstName, &payload.LastName)
 			}
 		} else {
 			payload.Username = &user.Username

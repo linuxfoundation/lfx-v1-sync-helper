@@ -4,8 +4,12 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"testing"
+
+	"github.com/nats-io/nats.go/jetstream"
 
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 )
@@ -138,18 +142,11 @@ func TestMemberToUpdatePayload_NilOptionalFields(t *testing.T) {
 	}
 }
 
-// TestMergedUserRowNames_FallbackPopulatesNamesWithoutUsername verifies the
-// fallback behaviour added for no-LFX-account members: when lookupMergedUser
-// fails (because merged_user has no username__c for the contact) the handler
-// falls back to the raw DB row. A row that has FirstName/LastName but no
-// Username__c must still produce a populated FirstName/LastName on the payload
-// while leaving Username nil.
-//
-// This test exercises the logic directly via the mergedUserRow type (the same
-// struct the fallback block reads). It cannot call mapV1DataToCommitteeMemberCreatePayload
-// directly because that function calls the database; instead it validates the
-// conditional assignment logic in isolation.
-func TestMergedUserRowNames_FallbackPopulatesNamesWithoutUsername(t *testing.T) {
+// TestApplyRowNames verifies the shared applyRowNames helper that both handler
+// fallback branches call when lookupMergedUser fails for a no-LFX-account member.
+// The test calls the real production function so regressions (e.g. assigning a
+// username, inverting a condition) are caught directly.
+func TestApplyRowNames(t *testing.T) {
 	cases := []struct {
 		name      string
 		row       mergedUserRow
@@ -161,7 +158,7 @@ func TestMergedUserRowNames_FallbackPopulatesNamesWithoutUsername(t *testing.T) 
 			row: mergedUserRow{
 				FirstName: sql.NullString{String: "Serena", Valid: true},
 				LastName:  sql.NullString{String: "Ferrari", Valid: true},
-				// Username intentionally left empty — simulates no-LFX-account member.
+				// Username intentionally empty — simulates a no-LFX-account member.
 			},
 			wantFirst: "Serena",
 			wantLast:  "Ferrari",
@@ -175,7 +172,7 @@ func TestMergedUserRowNames_FallbackPopulatesNamesWithoutUsername(t *testing.T) 
 			wantLast:  "",
 		},
 		{
-			name:      "both empty",
+			name:      "both empty — no-op",
 			row:       mergedUserRow{},
 			wantFirst: "",
 			wantLast:  "",
@@ -185,16 +182,7 @@ func TestMergedUserRowNames_FallbackPopulatesNamesWithoutUsername(t *testing.T) 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var firstName, lastName *string
-
-			// Replicate the exact fallback assignment from handlers_committees.go.
-			if tc.row.FirstName.String != "" {
-				fn := tc.row.FirstName.String
-				firstName = &fn
-			}
-			if tc.row.LastName.String != "" {
-				ln := tc.row.LastName.String
-				lastName = &ln
-			}
+			applyRowNames(&tc.row, &firstName, &lastName)
 
 			gotFirst := ""
 			if firstName != nil {
@@ -211,10 +199,119 @@ func TestMergedUserRowNames_FallbackPopulatesNamesWithoutUsername(t *testing.T) 
 			if gotLast != tc.wantLast {
 				t.Errorf("lastName: got %q, want %q", gotLast, tc.wantLast)
 			}
-			// Username must remain nil — the fallback path must not set a username.
-			// (In the handler the payload.Username field is only set from user.Username
-			// in the non-error branch, so a nil username here means the payload's
-			// Username field is never touched by the fallback.)
+			// applyRowNames must never set a username — that only happens in the
+			// non-error (successful lookupMergedUser) branch of the handler.
+		})
+	}
+}
+
+// TestResolveContactSFIDForMember exercises all five branches of resolveContactSFIDForMember
+// using injected fake kvGet and v1ObjectLookup functions so no live NATS/KV is needed.
+func TestResolveContactSFIDForMember(t *testing.T) {
+	ctx := context.Background()
+	const prefix = "platform-community__c."
+
+	// tombstone marker used by isTombstonedMapping.
+	tombstone := []byte(tombstoneMarker)
+
+	// valid reverse mapping value: projectSFID:committeeSFID:contactSFID
+	// 18-char alphanumeric Salesforce ID (passes sfid.IsValid, no checksum required).
+	const validContactSFID = "003000000000000AAA"
+	const validMapping = "proj001:comm001:" + validContactSFID
+
+	// poisoned reverse mapping value: projectSFID:committeeSFID:<recordUUID>
+	const recordUUID = "a1b2c3d4-1234-5678-abcd-ef0123456789"
+	const poisonedMapping = "proj001:comm001:" + recordUUID
+
+	// resolved contact SFID returned by the v1 object for the poisoned case.
+	const resolvedContactSFID = "003000000000001BBB"
+
+	noOpV1Lookup := func(_ context.Context, _ string) (map[string]any, bool, error) {
+		return nil, false, nil
+	}
+
+	cases := []struct {
+		name           string
+		kvGet          func(ctx context.Context, key string) ([]byte, error)
+		v1ObjectLookup func(ctx context.Context, key string) (map[string]any, bool, error)
+		wantSFID       string
+		wantErr        bool
+	}{
+		{
+			name: "happy path — contact SFID already in reverse mapping",
+			kvGet: func(_ context.Context, _ string) ([]byte, error) {
+				return []byte(validMapping), nil
+			},
+			v1ObjectLookup: noOpV1Lookup,
+			wantSFID:       validContactSFID,
+		},
+		{
+			name: "poisoned entry resolved via v1 object",
+			kvGet: func(_ context.Context, _ string) ([]byte, error) {
+				return []byte(poisonedMapping), nil
+			},
+			v1ObjectLookup: func(_ context.Context, key string) (map[string]any, bool, error) {
+				return map[string]any{"contact_name__c": resolvedContactSFID}, true, nil
+			},
+			wantSFID: resolvedContactSFID,
+		},
+		{
+			name: "poisoned entry — v1 object not found",
+			kvGet: func(_ context.Context, _ string) ([]byte, error) {
+				return []byte(poisonedMapping), nil
+			},
+			v1ObjectLookup: noOpV1Lookup,
+			wantSFID:       "",
+		},
+		{
+			name: "ErrKeyNotFound → (empty, nil)",
+			kvGet: func(_ context.Context, _ string) ([]byte, error) {
+				return nil, jetstream.ErrKeyNotFound
+			},
+			v1ObjectLookup: noOpV1Lookup,
+			wantSFID:       "",
+		},
+		{
+			name: "ErrKeyDeleted → (empty, nil)",
+			kvGet: func(_ context.Context, _ string) ([]byte, error) {
+				return nil, jetstream.ErrKeyDeleted
+			},
+			v1ObjectLookup: noOpV1Lookup,
+			wantSFID:       "",
+		},
+		{
+			name: "transient KV error → propagated as error",
+			kvGet: func(_ context.Context, _ string) ([]byte, error) {
+				return nil, fmt.Errorf("nats: connection timeout")
+			},
+			v1ObjectLookup: noOpV1Lookup,
+			wantErr:        true,
+		},
+		{
+			name: "tombstoned entry → (empty, nil)",
+			kvGet: func(_ context.Context, _ string) ([]byte, error) {
+				return tombstone, nil
+			},
+			v1ObjectLookup: noOpV1Lookup,
+			wantSFID:       "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveContactSFIDForMember(ctx, "member-uid-1", prefix, tc.kvGet, tc.v1ObjectLookup)
+			if tc.wantErr {
+				if err == nil {
+					t.Error("expected an error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if got != tc.wantSFID {
+				t.Errorf("contactSFID: got %q, want %q", got, tc.wantSFID)
+			}
 		})
 	}
 }

@@ -111,7 +111,14 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 		}
 
 		// Resolve the contact SFID needed to look up the name in merged_user.
-		contactSFID, resolveErr := resolveContactSFIDForMember(ctx, memberUID, v1ObjectKeyPrefix)
+		kvGetFn := func(ctx context.Context, key string) ([]byte, error) {
+			entry, err := mappingsKV.Get(ctx, key)
+			if err != nil {
+				return nil, err
+			}
+			return entry.Value(), nil
+		}
+		contactSFID, resolveErr := resolveContactSFIDForMember(ctx, memberUID, v1ObjectKeyPrefix, kvGetFn, getV1ObjectData)
 		if resolveErr != nil {
 			logger.With(errKey, resolveErr, "member_uid", memberUID, "committee_uid", committeeUID).
 				WarnContext(ctx, "backfill: failed to resolve contact SFID, skipping")
@@ -209,20 +216,29 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 // recordSFID!="", contactSFID==""), it resolves the contact SFID from the
 // v1-objects KV record. Returns ("", nil) when the contact SFID cannot be
 // determined but no transient error occurred.
-func resolveContactSFIDForMember(ctx context.Context, memberUID, v1ObjectKeyPrefix string) (string, error) {
+//
+// kvGet fetches a raw value from the mappings KV (nil, ErrKeyNotFound means
+// absent). v1ObjectLookup reads a V1 WAL object by key; (nil, false, nil) means
+// not found. Both are injected to allow unit testing without live NATS/KV.
+func resolveContactSFIDForMember(
+	ctx context.Context,
+	memberUID, v1ObjectKeyPrefix string,
+	kvGet func(ctx context.Context, key string) ([]byte, error),
+	v1ObjectLookup func(ctx context.Context, key string) (map[string]any, bool, error),
+) (string, error) {
 	reverseKey := "committee_member.uid." + memberUID
-	reverseEntry, kvErr := mappingsKV.Get(ctx, reverseKey)
+	val, kvErr := kvGet(ctx, reverseKey)
 	if kvErr != nil {
 		if kvErr == jetstream.ErrKeyNotFound || kvErr == jetstream.ErrKeyDeleted {
 			return "", nil
 		}
 		return "", fmt.Errorf("reading reverse mapping: %w", kvErr)
 	}
-	if isTombstonedMapping(reverseEntry.Value()) {
+	if isTombstonedMapping(val) {
 		return "", nil
 	}
 
-	_, _, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(reverseEntry.Value()))
+	_, _, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(val))
 	if !ok {
 		// Malformed mapping — cannot resolve.
 		return "", nil
@@ -237,7 +253,7 @@ func resolveContactSFIDForMember(ctx context.Context, memberUID, v1ObjectKeyPref
 	if recordSFID == "" {
 		return "", nil
 	}
-	obj, found, err := getV1ObjectData(ctx, v1ObjectKeyPrefix+recordSFID)
+	obj, found, err := v1ObjectLookup(ctx, v1ObjectKeyPrefix+recordSFID)
 	if err != nil {
 		return "", fmt.Errorf("reading v1 object for record sfid %s: %w", recordSFID, err)
 	}
