@@ -7,10 +7,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
+
+	"github.com/auth0/go-auth0"
+	"github.com/auth0/go-auth0/management"
 )
 
 // TestReconcileV1Skills covers the set-diff logic against a fake user-service.
@@ -58,6 +64,16 @@ func TestReconcileV1Skills(t *testing.T) {
 			name:        "non-string skills value is a no-op",
 			metadata:    map[string]any{"skills": 123},
 			current:     []userSkillEntry{{ID: "1", Name: "Go"}},
+			wantNoCalls: true,
+		},
+		{
+			// Σ (capital sigma) and ς (final sigma) are case-equivalent under
+			// Unicode case folding but lowercase differently under
+			// strings.ToLower, so this only causes no churn if the diff uses
+			// cases.Fold() consistently on both sides.
+			name:        "unicode case-fold match causes no churn",
+			metadata:    map[string]any{"skills": "Σ"},
+			current:     []userSkillEntry{{ID: "1", Name: "ς"}},
 			wantNoCalls: true,
 		},
 	}
@@ -133,6 +149,101 @@ func TestReconcileV1Skills_GetError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+}
+
+// TestReconcileV1Skills_SuppressesRemovalWhenDesiredAtCap confirms that when
+// the v2 skills field has auth0SkillsMaxCount entries (the same cap
+// normalizeSkillsForAuth0 and auth-service's own sanitizer apply), v1 skills
+// absent from that set are NOT deleted — they may simply be past the
+// truncation boundary rather than actually removed in v2 — while new skills
+// still get added.
+func TestReconcileV1Skills_SuppressesRemovalWhenDesiredAtCap(t *testing.T) {
+	names := make([]string, 0, auth0SkillsMaxCount)
+	for i := 0; i < auth0SkillsMaxCount; i++ {
+		names = append(names, fmt.Sprintf("skill-%d", i))
+	}
+	metadata := map[string]any{"skills": strings.Join(names, ", ")}
+
+	// v1 already has one skill that isn't in the capped set ("legacy-skill")
+	// plus one that is ("skill-0", to prove adds are still computed).
+	current := []userSkillEntry{
+		{ID: "legacy", Name: "legacy-skill"},
+	}
+
+	var gotAdded []string
+	var gotRemoved []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(current)
+		case http.MethodPost:
+			var posted []string
+			_ = json.NewDecoder(r.Body).Decode(&posted)
+			gotAdded = append(gotAdded, posted...)
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodDelete:
+			gotRemoved = append(gotRemoved, lastPathSegment(r.URL.Path))
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}))
+	defer srv.Close()
+
+	setupFetchTestGlobals(t, srv.URL)
+
+	if err := reconcileV1Skills(context.Background(), "sfid1", metadata); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(gotRemoved) != 0 {
+		t.Errorf("expected no removals when desired set is at the cap, got %v", gotRemoved)
+	}
+	if len(gotAdded) != auth0SkillsMaxCount {
+		t.Errorf("expected %d additions, got %d: %v", auth0SkillsMaxCount, len(gotAdded), gotAdded)
+	}
+}
+
+// TestResolveSkillsMetadata covers the re-read-vs-fallback behavior used by
+// handleUserProfileUpdated to pick the metadata reconcileV1Skills diffs
+// against.
+func TestResolveSkillsMetadata(t *testing.T) {
+	origAuth0Users := auth0Users
+	t.Cleanup(func() { auth0Users = origAuth0Users })
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	event := userProfileUpdatedEvent{
+		UserID:   "auth0|alice",
+		Metadata: map[string]any{"skills": "stale-event-value"},
+	}
+
+	t.Run("re-read succeeds, prefers live Auth0 metadata over the event snapshot", func(t *testing.T) {
+		auth0Users = &fakeAuth0Users{
+			users: map[string]*management.User{
+				"auth0|alice": {
+					ID:           auth0.String("auth0|alice"),
+					UserMetadata: &map[string]any{"skills": "live-value"},
+				},
+			},
+		}
+
+		got := resolveSkillsMetadata(context.Background(), log, "sfid1", event)
+		if got["skills"] != "live-value" {
+			t.Errorf("skills = %v, want live-value", got["skills"])
+		}
+	})
+
+	t.Run("re-read fails, falls back to the event snapshot", func(t *testing.T) {
+		auth0Users = &fakeAuth0Users{readErr: &mgmtError{status: http.StatusInternalServerError, message: "boom"}}
+
+		got := resolveSkillsMetadata(context.Background(), log, "sfid1", event)
+		if got["skills"] != "stale-event-value" {
+			t.Errorf("skills = %v, want stale-event-value (fallback)", got["skills"])
+		}
+	})
 }
 
 // lastPathSegment returns the final "/"-delimited segment of a URL path.
