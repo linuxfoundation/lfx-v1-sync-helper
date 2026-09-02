@@ -58,6 +58,9 @@ func classifyCommitteeMemberKey(key string, value []byte) (rec committeeMemberKV
 	return rec, false, needsBackfill, nil
 }
 
+// lookupNamesFromAuthServiceFn is injectable for tests.
+var lookupNamesFromAuthServiceFn = lookupNamesFromAuthService
+
 // backfillCommitteeMemberNames patches V2 committee member records whose
 // first_name and last_name are both empty. This affects members who had no
 // LFX account at sync time — lookupMergedUser returned an error because
@@ -177,14 +180,15 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 		// auth service — it stores given_name/family_name in Auth0 user_metadata
 		// for members who created an LFX account after the initial sync.
 		if firstName == "" && lastName == "" && rec.Username != "" {
-			authFirst, authLast, authErr := lookupNamesFromAuthService(ctx, rec.Username)
+			authFirst, authLast, authErr := lookupNamesFromAuthServiceFn(ctx, rec.Username)
 			if authErr != nil {
 				logger.With(errKey, authErr, "member_uid", memberUID, "username", rec.Username).
 					WarnContext(ctx, "backfill: error querying auth service for name")
-			} else {
-				firstName = authFirst
-				lastName = authLast
+				res.errored++
+				continue
 			}
+			firstName = authFirst
+			lastName = authLast
 		}
 
 		if firstName == "" && lastName == "" {

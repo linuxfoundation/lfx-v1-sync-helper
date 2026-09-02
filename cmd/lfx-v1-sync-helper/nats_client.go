@@ -47,6 +47,22 @@ type authServiceMetadataResponse struct {
 	} `json:"data"`
 }
 
+// parseAuthServiceResponse decodes the JSON payload from
+// lfx.auth-service.user_metadata.read and returns given_name / family_name.
+// Returns empty strings (no error) when the response is successful but
+// neither name field is populated. Returns an error for malformed JSON or
+// when the service signals failure (success=false).
+func parseAuthServiceResponse(data []byte) (firstName, lastName string, err error) {
+	var parsed authServiceMetadataResponse
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return "", "", fmt.Errorf("decoding auth service response: %w", err)
+	}
+	if !parsed.Success {
+		return "", "", fmt.Errorf("auth service returned success=false")
+	}
+	return strings.TrimSpace(parsed.Data.GivenName), strings.TrimSpace(parsed.Data.FamilyName), nil
+}
+
 // lookupNamesFromAuthService queries the auth service via NATS for the
 // given_name and family_name stored in Auth0 user_metadata for the given
 // LFX username. Returns empty strings (no error) when the user exists but
@@ -59,14 +75,5 @@ func lookupNamesFromAuthService(ctx context.Context, username string) (firstName
 	if err != nil {
 		return "", "", fmt.Errorf("auth service NATS request for %s: %w", username, err)
 	}
-
-	var parsed authServiceMetadataResponse
-	if decodeErr := json.Unmarshal(resp.Data, &parsed); decodeErr != nil {
-		return "", "", fmt.Errorf("decoding auth service response for %s: %w", username, decodeErr)
-	}
-	if !parsed.Success {
-		return "", "", fmt.Errorf("auth service returned success=false for %s", username)
-	}
-
-	return strings.TrimSpace(parsed.Data.GivenName), strings.TrimSpace(parsed.Data.FamilyName), nil
+	return parseAuthServiceResponse(resp.Data)
 }
