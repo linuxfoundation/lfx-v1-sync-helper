@@ -6,12 +6,12 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"testing"
 
-	"github.com/nats-io/nats.go/jetstream"
-
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // TestMemberToUpdatePayload_PreservesAllMutableFields verifies that
@@ -311,6 +311,126 @@ func TestResolveContactSFIDForMember(t *testing.T) {
 			}
 			if got != tc.wantSFID {
 				t.Errorf("contactSFID: got %q, want %q", got, tc.wantSFID)
+			}
+		})
+	}
+}
+
+// TestClassifyCommitteeMemberKVRecord exercises the JSON decode + per-key
+// classification logic that backfillCommitteeMemberNames applies to each entry
+// from the committee-members KV bucket. Tests the four cases: lookup-index key
+// (skip without inspecting), named record (skip), nameless record with both IDs
+// (needs backfill), and a record missing uid/committee_uid (skip with warn).
+func TestClassifyCommitteeMemberKVRecord(t *testing.T) {
+	mustJSON := func(v any) []byte {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		return b
+	}
+
+	cases := []struct {
+		name          string
+		key           string
+		value         []byte
+		wantLookup    bool // key is a lookup-index entry — skipped before inspected++
+		wantSkip      bool // inspected but name already set or missing uid
+		wantNeedsOp   bool // nameless, has uid + committee_uid → should proceed to SFID lookup
+		wantErrDecode bool
+	}{
+		{
+			name:       "lookup-index key is skipped without counting",
+			key:        "lookup/committee-members-by-committee/uid-abc.uid-def",
+			wantLookup: true,
+		},
+		{
+			name: "named record — first_name set",
+			key:  "uid-1",
+			value: mustJSON(committeeMemberKVRecord{
+				UID:          "uid-1",
+				CommitteeUID: "comm-1",
+				FirstName:    "Alice",
+				LastName:     "",
+			}),
+			wantSkip: true,
+		},
+		{
+			name: "named record — last_name set",
+			key:  "uid-2",
+			value: mustJSON(committeeMemberKVRecord{
+				UID:          "uid-2",
+				CommitteeUID: "comm-1",
+				FirstName:    "",
+				LastName:     "Smith",
+			}),
+			wantSkip: true,
+		},
+		{
+			name: "nameless record with uid and committee_uid — needs backfill",
+			key:  "uid-3",
+			value: mustJSON(committeeMemberKVRecord{
+				UID:          "uid-3",
+				CommitteeUID: "comm-1",
+				FirstName:    "",
+				LastName:     "",
+			}),
+			wantNeedsOp: true,
+		},
+		{
+			name: "nameless record missing uid — skipped with warn",
+			key:  "uid-4",
+			value: mustJSON(committeeMemberKVRecord{
+				CommitteeUID: "comm-1",
+			}),
+			wantSkip: true,
+		},
+		{
+			name: "nameless record missing committee_uid — skipped with warn",
+			key:  "uid-5",
+			value: mustJSON(committeeMemberKVRecord{
+				UID: "uid-5",
+			}),
+			wantSkip: true,
+		},
+		{
+			name:          "malformed JSON — decode error",
+			key:           "uid-6",
+			value:         []byte(`{not valid json`),
+			wantErrDecode: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, isLookup, needsBackfill, err := classifyCommitteeMemberKey(tc.key, tc.value)
+
+			if isLookup != tc.wantLookup {
+				t.Errorf("isLookup: got %v, want %v", isLookup, tc.wantLookup)
+			}
+			if isLookup {
+				return
+			}
+
+			if tc.wantErrDecode {
+				if err == nil {
+					t.Error("expected decode error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected decode error: %v", err)
+			}
+
+			named := rec.FirstName != "" || rec.LastName != ""
+			missingIDs := rec.UID == "" || rec.CommitteeUID == ""
+			gotSkip := named || missingIDs
+
+			if gotSkip != tc.wantSkip {
+				t.Errorf("skip: got %v, want %v (named=%v missingIDs=%v)", gotSkip, tc.wantSkip, named, missingIDs)
+			}
+			if needsBackfill != tc.wantNeedsOp {
+				t.Errorf("needsBackfill: got %v, want %v", needsBackfill, tc.wantNeedsOp)
 			}
 		})
 	}
