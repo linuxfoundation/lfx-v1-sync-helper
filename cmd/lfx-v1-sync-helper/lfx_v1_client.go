@@ -150,6 +150,16 @@ func initV1Client(cfg *Config) error {
 	return nil
 }
 
+// errV1UserNotFound, errV1UserHasNoUsername, and errV1UserInvalidUsername are
+// sentinel errors returned by lookupMergedUser / mergedUserRowToV1User. They
+// carry no Salesforce contact SFID so the caller can safely log them without
+// emitting a linked pseudonym on the general application logger.
+var (
+	errV1UserNotFound        = errors.New("user not found or is deleted in v1 platform database")
+	errV1UserHasNoUsername   = errors.New("user has no username in merged_user record")
+	errV1UserInvalidUsername = errors.New("user has an invalid username in merged_user record")
+)
+
 // lookupMergedUser fetches user information live from the v1 platform
 // database (salesforce.merged_user), including the primary email from
 // salesforce.alternate_email__c.
@@ -159,7 +169,7 @@ func lookupMergedUser(ctx context.Context, platformID string) (*V1User, error) {
 		return nil, fmt.Errorf("failed to get user data: %w", err)
 	}
 	if row == nil {
-		return nil, fmt.Errorf("user %s not found or is deleted in v1 platform database", platformID)
+		return nil, errV1UserNotFound
 	}
 	return mergedUserRowToV1User(ctx, row)
 }
@@ -179,10 +189,10 @@ func mergedUserRowToV1User(ctx context.Context, row *mergedUserRow) (*V1User, er
 	// auditor lists, etc.).
 	username := row.Username.String
 	if username == "" {
-		return nil, fmt.Errorf("user %s has no username in merged_user record", row.SFID)
+		return nil, errV1UserHasNoUsername
 	}
 	if strings.ContainsAny(username, " @") {
-		return nil, fmt.Errorf("user %s has an invalid username in merged_user record", row.SFID)
+		return nil, errV1UserInvalidUsername
 	}
 	user.Username = username
 	user.FirstName = row.FirstName.String

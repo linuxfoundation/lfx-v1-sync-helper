@@ -153,6 +153,7 @@ The WAL listener monitors the following PostgreSQL tables by default (matching t
 - `project__c` (salesforce schema)
 - `alternate_email__c` (salesforce schema)
 - `merged_user` (salesforce schema)
+- `contact` (salesforce schema — read for name fallback on members without an LFX account; DB role requires `SELECT`)
 
 To disable the WAL listener:
 ```yaml

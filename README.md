@@ -114,7 +114,7 @@ Payload: <email>
 
 **Notes:**
 
-- Lookups query `salesforce.merged_user` and `salesforce.alternate_email__c` directly with case-insensitive, whitespace-trimmed matching
+- Lookups query `salesforce.merged_user`, `salesforce.alternate_email__c`, and `salesforce.contact` directly (`salesforce.contact` is used as a name fallback for contacts who have no LFX account; the DB role must have `SELECT` on all three tables)
 - If a username/email does not resolve to a live (non-deleted) record, the lookup returns an empty string (miss)
 - Callers send raw UTF-8 usernames and emails; the service normalizes (trim, lowercase, NFC) internally
 

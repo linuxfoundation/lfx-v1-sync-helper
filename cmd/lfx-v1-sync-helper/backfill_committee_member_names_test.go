@@ -199,11 +199,10 @@ func TestResolveContactNames(t *testing.T) {
 			wantContactCalls: 0,
 		},
 		{
-			name:             "contact error — propagates",
-			muResult:         nil,
-			cErr:             errors.New("connection reset"),
-			wantErr:          true,
-			wantContactCalls: 1,
+			name:      "contact error — best-effort, returns empty (merged_user also missed)",
+			muResult:  nil,
+			cErr:      errors.New("connection reset"),
+			wantFirst: "", wantLast: "", wantContactCalls: 1,
 		},
 	}
 

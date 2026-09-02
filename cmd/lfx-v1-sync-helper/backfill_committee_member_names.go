@@ -77,9 +77,9 @@ func classifyCommitteeMemberKey(key string, value []byte) (rec committeeMemberKV
 //  2. Reads first_name/last_name via the contact SFID: tries
 //     salesforce.merged_user first (contacts with or without an LFX account),
 //     then falls back to salesforce.contact (all Salesforce contacts).
-//  3. Calls UpdateCommitteeMember with SkipEnrichment=true so the committee
-//     service stores the supplied names as-is without attempting another
-//     username / auth-service lookup (which would fail again for these members).
+//  3. Calls UpdateCommitteeMember with the resolved names. SkipEnrichment is
+//     NOT set: enrichMember cannot overwrite non-empty names, and leaving it
+//     enabled preserves email→username resolution and avatar population.
 func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCommitteeMemberNamesResult, error) {
 	const (
 		committeeMembersStream     = "KV_committee-members"
@@ -160,13 +160,13 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 		// merged_user first, then falls back per-field to salesforce.contact.
 		firstName, lastName, nameErr := resolveContactNames(ctx, contactSFID)
 		if nameErr != nil {
-			logger.With(errKey, nameErr, "committee_uid", committeeUID).
+			logger.With(errKey, nameErr, "committee_uid", committeeUID, "member_uid", memberUID).
 				WarnContext(ctx, "backfill: error looking up contact names from DB")
 			res.errored++
 			continue
 		}
 		if firstName == "" && lastName == "" {
-			logger.With("committee_uid", committeeUID).
+			logger.With("committee_uid", committeeUID, "member_uid", memberUID).
 				WarnContext(ctx, "backfill: no name found in merged_user or contact for member")
 			res.noName++
 			continue
@@ -207,9 +207,10 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 			payload.LastName = &lastName
 		}
 		// SkipEnrichment tells the committee service to store the names as-is
-		// without attempting another auth-service/username lookup, which would
-		// fail the same way for members who have no LFX account.
-		payload.SkipEnrichment = true
+		// SkipEnrichment is intentionally not set: enrichMember only fills name
+		// fields when they are empty, so it cannot overwrite the names we
+		// supply, and leaving enrichment enabled preserves email→username
+		// resolution and avatar population for these members.
 
 		token, tokenErr := generateCachedJWTToken(ctx, committeeServiceAudience, "")
 		if tokenErr != nil {

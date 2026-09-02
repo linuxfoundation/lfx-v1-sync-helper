@@ -967,10 +967,12 @@ func resolveContactNames(ctx context.Context, sfid string) (firstName, lastName 
 		lastName = mu.LastName.String
 	}
 	// Check per field: a merged_user row with only one name populated can get
-	// the missing half from salesforce.contact.
+	// the missing half from salesforce.contact. The contact query is best-effort:
+	// an error is logged and the merged_user name (if any) is returned rather
+	// than propagating the error and discarding a name already in hand.
 	if firstName == "" || lastName == "" {
 		if c, cErr := resolveNamesFromContact(ctx, sfid); cErr != nil {
-			return "", "", cErr
+			logger.With(errKey, cErr).WarnContext(ctx, "salesforce.contact fallback lookup failed; using merged_user name if available")
 		} else if c != nil {
 			if firstName == "" {
 				firstName = c.FirstName.String
