@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -142,65 +143,101 @@ func TestMemberToUpdatePayload_NilOptionalFields(t *testing.T) {
 	}
 }
 
-// TestApplyRowNames verifies the shared applyRowNames helper that both handler
-// fallback branches call when lookupMergedUser fails for a no-LFX-account member.
-// The test calls the real production function so regressions (e.g. assigning a
-// username, inverting a condition) are caught directly.
-func TestApplyRowNames(t *testing.T) {
+// TestResolveContactNames verifies the resolveContactNames helper: merged_user
+// hit, contact fallback, per-field partial fill, both miss, and error paths.
+// Stubs are injected via the package-level resolveNamesFromMergedUser /
+// resolveNamesFromContact vars so no live database is required.
+func TestResolveContactNames(t *testing.T) {
+	ctx := context.Background()
+
 	cases := []struct {
-		name      string
-		row       mergedUserRow
-		wantFirst string
-		wantLast  string
+		name        string
+		muResult    *mergedUserRow
+		muErr       error
+		cResult     *contactRow
+		cErr        error
+		wantFirst   string
+		wantLast    string
+		wantErr     bool
+		wantSkipEnr bool // whether caller should set SkipEnrichment (both names non-empty)
 	}{
 		{
-			name: "both names set",
-			row: mergedUserRow{
-				FirstName: sql.NullString{String: "Serena", Valid: true},
-				LastName:  sql.NullString{String: "Ferrari", Valid: true},
-				// Username intentionally empty — simulates a no-LFX-account member.
-			},
-			wantFirst: "Serena",
-			wantLast:  "Ferrari",
-		},
-		{
-			name: "only first name",
-			row: mergedUserRow{
+			name: "merged_user hit — full name, no contact call needed",
+			muResult: &mergedUserRow{
 				FirstName: sql.NullString{String: "Alice", Valid: true},
+				LastName:  sql.NullString{String: "Smith", Valid: true},
 			},
-			wantFirst: "Alice",
-			wantLast:  "",
+			wantFirst: "Alice", wantLast: "Smith", wantSkipEnr: true,
 		},
 		{
-			name:      "both empty — no-op",
-			row:       mergedUserRow{},
-			wantFirst: "",
-			wantLast:  "",
+			name:     "merged_user miss, contact hit",
+			muResult: nil,
+			cResult: &contactRow{
+				FirstName: sql.NullString{String: "Bob", Valid: true},
+				LastName:  sql.NullString{String: "Jones", Valid: true},
+			},
+			wantFirst: "Bob", wantLast: "Jones", wantSkipEnr: true,
+		},
+		{
+			name: "partial merged_user (first only), contact fills last",
+			muResult: &mergedUserRow{
+				FirstName: sql.NullString{String: "Carol", Valid: true},
+			},
+			cResult: &contactRow{
+				LastName: sql.NullString{String: "Williams", Valid: true},
+			},
+			wantFirst: "Carol", wantLast: "Williams", wantSkipEnr: true,
+		},
+		{
+			name:      "both miss — empty strings, nil error, no SkipEnrichment",
+			wantFirst: "", wantLast: "", wantSkipEnr: false,
+		},
+		{
+			name:    "merged_user error — propagates, contact not attempted",
+			muErr:   errors.New("db timeout"),
+			wantErr: true,
+		},
+		{
+			name:     "contact error — propagates",
+			muResult: nil,
+			cErr:     errors.New("connection reset"),
+			wantErr:  true,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var firstName, lastName *string
-			applyRowNames(&tc.row, &firstName, &lastName)
+			orig1, orig2 := resolveNamesFromMergedUser, resolveNamesFromContact
+			t.Cleanup(func() {
+				resolveNamesFromMergedUser = orig1
+				resolveNamesFromContact = orig2
+			})
 
-			gotFirst := ""
-			if firstName != nil {
-				gotFirst = *firstName
+			resolveNamesFromMergedUser = func(_ context.Context, _ string) (*mergedUserRow, error) {
+				return tc.muResult, tc.muErr
 			}
-			gotLast := ""
-			if lastName != nil {
-				gotLast = *lastName
+			resolveNamesFromContact = func(_ context.Context, _ string) (*contactRow, error) {
+				return tc.cResult, tc.cErr
 			}
 
+			gotFirst, gotLast, err := resolveContactNames(ctx, "0034000000AbcDEF")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err != nil {
+				return
+			}
 			if gotFirst != tc.wantFirst {
 				t.Errorf("firstName: got %q, want %q", gotFirst, tc.wantFirst)
 			}
 			if gotLast != tc.wantLast {
 				t.Errorf("lastName: got %q, want %q", gotLast, tc.wantLast)
 			}
-			// applyRowNames must never set a username — that only happens in the
-			// non-error (successful lookupMergedUser) branch of the handler.
+			// Callers must set SkipEnrichment only when at least one name resolved.
+			gotSkip := gotFirst != "" || gotLast != ""
+			if gotSkip != tc.wantSkipEnr {
+				t.Errorf("SkipEnrichment condition: got %v, want %v", gotSkip, tc.wantSkipEnr)
+			}
 		})
 	}
 }

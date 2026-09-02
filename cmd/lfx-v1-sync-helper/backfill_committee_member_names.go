@@ -156,35 +156,14 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 			continue
 		}
 
-		// Read first_name/last_name from V1. Try merged_user first (LFX-account
-		// members); fall back to salesforce.contact for contacts who never created
-		// an LFX account and therefore have no merged_user row.
-		var firstName, lastName string
-		muRow, rowErr := dbLookupMergedUserRowBySFID(ctx, contactSFID)
-		if rowErr != nil {
-			logger.With(errKey, rowErr, "member_uid", memberUID).
-				WarnContext(ctx, "backfill: error looking up merged_user row")
+		// Read first_name/last_name from V1 via the shared resolver: tries
+		// merged_user first, then falls back per-field to salesforce.contact.
+		firstName, lastName, nameErr := resolveContactNames(ctx, contactSFID)
+		if nameErr != nil {
+			logger.With(errKey, nameErr, "member_uid", memberUID).
+				WarnContext(ctx, "backfill: error looking up contact names from DB")
 			res.errored++
 			continue
-		}
-		if muRow != nil {
-			firstName = muRow.FirstName.String
-			lastName = muRow.LastName.String
-		}
-		if firstName == "" && lastName == "" {
-			// merged_user had no row or no name — try salesforce.contact, which
-			// contains ALL contacts regardless of LFX account status.
-			cRow, cErr := dbLookupContactBySFID(ctx, contactSFID)
-			if cErr != nil {
-				logger.With(errKey, cErr, "member_uid", memberUID).
-					WarnContext(ctx, "backfill: error looking up contact row")
-				res.errored++
-				continue
-			}
-			if cRow != nil {
-				firstName = cRow.FirstName.String
-				lastName = cRow.LastName.String
-			}
 		}
 		if firstName == "" && lastName == "" {
 			logger.With("member_uid", memberUID).
