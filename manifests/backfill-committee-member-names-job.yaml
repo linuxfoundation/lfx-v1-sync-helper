@@ -62,7 +62,7 @@ spec:
           # Find the current prod image with:
           #   kubectl --context lfx-v2-prod -n v1-sync-helper get deployment \
           #     -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'
-          image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:0.15.0
+          image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:0.15.1
           imagePullPolicy: IfNotPresent
           args: ["--backfill-committee-member-names", "--dry-run"]
           env:
