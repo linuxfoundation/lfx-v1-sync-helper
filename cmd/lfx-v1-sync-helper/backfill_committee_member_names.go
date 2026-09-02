@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/nats-io/nats.go/jetstream"
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // committeeMemberKVRecord is the minimal set of fields read from the
@@ -33,6 +33,28 @@ type backfillCommitteeMemberNamesResult struct {
 	updated   int // successfully patched
 	dryRun    int // would have patched (dry-run mode)
 	errored   int // fetch or update failed
+}
+
+// classifyCommitteeMemberKey decodes and classifies a single entry from the
+// committee-members KV bucket.
+//
+// isLookup is true when the key is a secondary-index entry (prefix "lookup/")
+// that must be skipped without counting toward the inspected total.
+// needsBackfill is true when the record has both name fields empty and both
+// uid / committee_uid present — the only case that proceeds to the SFID lookup.
+// err is non-nil when the JSON payload cannot be decoded.
+// When isLookup is true the other return values are zero/false.
+func classifyCommitteeMemberKey(key string, value []byte) (rec committeeMemberKVRecord, isLookup bool, needsBackfill bool, err error) {
+	if strings.HasPrefix(key, "lookup/") {
+		return rec, true, false, nil
+	}
+	if decodeErr := json.Unmarshal(value, &rec); decodeErr != nil {
+		return rec, false, false, decodeErr
+	}
+	named := rec.FirstName != "" || rec.LastName != ""
+	missingIDs := rec.UID == "" || rec.CommitteeUID == ""
+	needsBackfill = !named && !missingIDs
+	return rec, false, needsBackfill, nil
 }
 
 // backfillCommitteeMemberNames patches V2 committee member records whose
@@ -57,34 +79,12 @@ type backfillCommitteeMemberNamesResult struct {
 //  3. Calls UpdateCommitteeMember with SkipEnrichment=true so the committee
 //     service stores the supplied names as-is without attempting another
 //     username / auth-service lookup (which would fail again for these members).
-// classifyCommitteeMemberKey decodes and classifies a single entry from the
-// committee-members KV bucket.
-//
-// isLookup is true when the key is a secondary-index entry (prefix "lookup/")
-// that must be skipped without counting toward the inspected total.
-// needsBackfill is true when the record has both name fields empty and both
-// uid / committee_uid present — the only case that proceeds to the SFID lookup.
-// err is non-nil when the JSON payload cannot be decoded.
-// When isLookup is true the other return values are zero/false.
-func classifyCommitteeMemberKey(key string, value []byte) (rec committeeMemberKVRecord, isLookup bool, needsBackfill bool, err error) {
-	if strings.HasPrefix(key, "lookup/") {
-		return rec, true, false, nil
-	}
-	if decodeErr := json.Unmarshal(value, &rec); decodeErr != nil {
-		return rec, false, false, decodeErr
-	}
-	named := rec.FirstName != "" || rec.LastName != ""
-	missingIDs := rec.UID == "" || rec.CommitteeUID == ""
-	needsBackfill = !named && !missingIDs
-	return rec, false, needsBackfill, nil
-}
-
 func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCommitteeMemberNamesResult, error) {
 	const (
-		committeeMembersStream       = "KV_committee-members"
-		committeeMembersSubject      = "$KV.committee-members.*"
-		committeeMembersSubjectPfx   = "$KV.committee-members."
-		v1ObjectKeyPrefix            = "platform-community__c."
+		committeeMembersStream     = "KV_committee-members"
+		committeeMembersSubject    = "$KV.committee-members.*"
+		committeeMembersSubjectPfx = "$KV.committee-members."
+		v1ObjectKeyPrefix          = "platform-community__c."
 	)
 
 	opTimeout := cfg.NATSFetchMaxWait

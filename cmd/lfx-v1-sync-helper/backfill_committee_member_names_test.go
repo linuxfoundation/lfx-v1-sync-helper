@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/nats-io/nats.go/jetstream"
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // TestMemberToUpdatePayload_PreservesAllMutableFields verifies that
