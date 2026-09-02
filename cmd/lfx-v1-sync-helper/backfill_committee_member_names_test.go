@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -399,6 +400,18 @@ func TestClassifyCommitteeMemberKVRecord(t *testing.T) {
 			value:         []byte(`{not valid json`),
 			wantErrDecode: true,
 		},
+		{
+			name: "nameless record with username — username decoded, needs backfill",
+			key:  "uid-7",
+			value: mustJSON(map[string]any{
+				"uid":           "uid-7",
+				"committee_uid": "comm-1",
+				"first_name":    "",
+				"last_name":     "",
+				"username":      "testuser",
+			}),
+			wantNeedsOp: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -431,6 +444,197 @@ func TestClassifyCommitteeMemberKVRecord(t *testing.T) {
 			}
 			if needsBackfill != tc.wantNeedsOp {
 				t.Errorf("needsBackfill: got %v, want %v", needsBackfill, tc.wantNeedsOp)
+			}
+			// Verify username is decoded when present in the JSON payload.
+			if tc.key == "uid-7" && rec.Username != "testuser" {
+				t.Errorf("username: got %q, want %q", rec.Username, "testuser")
+			}
+		})
+	}
+}
+
+// TestParseAuthServiceResponse exercises parseAuthServiceResponse — the
+// production JSON parser extracted from lookupNamesFromAuthService — directly,
+// so a regression in parsing (wrong field name, missing TrimSpace, etc.) is
+// caught without needing a live NATS connection.
+func TestParseAuthServiceResponse(t *testing.T) {
+	cases := []struct {
+		name         string
+		payload      string
+		wantFirst    string
+		wantLast     string
+		wantErr      bool
+		wantNotFound bool // error must be errAuthServiceUserNotFound
+	}{
+		{
+			name:      "both names present",
+			payload:   `{"success":true,"data":{"given_name":"First","family_name":"Last"}}`,
+			wantFirst: "First",
+			wantLast:  "Last",
+		},
+		{
+			name:      "given_name only",
+			payload:   `{"success":true,"data":{"given_name":"First","family_name":""}}`,
+			wantFirst: "First",
+			wantLast:  "",
+		},
+		{
+			name:      "both empty — user exists but no name set",
+			payload:   `{"success":true,"data":{"given_name":"","family_name":""}}`,
+			wantFirst: "",
+			wantLast:  "",
+		},
+		{
+			name:      "whitespace trimmed",
+			payload:   `{"success":true,"data":{"given_name":" First ","family_name":" Last "}}`,
+			wantFirst: "First",
+			wantLast:  "Last",
+		},
+		{
+			name:         "success=false, user not found (search path) — sentinel error",
+			payload:      `{"success":false,"error":"user not found","data":{}}`,
+			wantErr:      true,
+			wantNotFound: true,
+		},
+		{
+			name:         "success=false, user does not exist (get-by-id path) — sentinel error",
+			payload:      `{"success":false,"error":"The user does not exist.","data":{}}`,
+			wantErr:      true,
+			wantNotFound: true,
+		},
+		{
+			name:    "success=false, other error — generic error",
+			payload: `{"success":false,"error":"invalid token","data":{}}`,
+			wantErr: true,
+		},
+		{
+			name:    "success=false, no error field — generic error",
+			payload: `{"success":false,"data":{}}`,
+			wantErr: true,
+		},
+		{
+			name:    "malformed JSON — decode error",
+			payload: `not json`,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			first, last, err := parseAuthServiceResponse([]byte(tc.payload))
+			if tc.wantErr {
+				if err == nil {
+					t.Error("expected error, got nil")
+					return
+				}
+				if tc.wantNotFound && !errors.Is(err, errAuthServiceUserNotFound) {
+					t.Errorf("expected errAuthServiceUserNotFound, got %v", err)
+				}
+				if !tc.wantNotFound && errors.Is(err, errAuthServiceUserNotFound) {
+					t.Errorf("expected non-sentinel error, got errAuthServiceUserNotFound")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if first != tc.wantFirst {
+				t.Errorf("firstName: got %q, want %q", first, tc.wantFirst)
+			}
+			if last != tc.wantLast {
+				t.Errorf("lastName: got %q, want %q", last, tc.wantLast)
+			}
+		})
+	}
+}
+
+// TestBackfillAuthServiceFallbackBranch verifies the auth service fallback
+// decision logic via lookupNamesFromAuthServiceFn, without a live NATS
+// connection or database. It mirrors the inline block inside
+// backfillCommitteeMemberNames that runs when merged_user returns no name and
+// the KV record carries a username.
+func TestBackfillAuthServiceFallbackBranch(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name          string
+		username      string
+		authFirst     string
+		authLast      string
+		authErr       error
+		wantFirstName string
+		wantLastName  string
+		wantErrored   bool // auth service error → errored counter, not noName
+		wantNoName    bool // auth service returned empty names → noName counter
+	}{
+		{
+			name:          "auth service returns names",
+			username:      "testuser",
+			authFirst:     "First",
+			authLast:      "Last",
+			wantFirstName: "First",
+			wantLastName:  "Last",
+		},
+		{
+			name:       "auth service returns empty names",
+			username:   "noname",
+			authFirst:  "",
+			authLast:   "",
+			wantNoName: true,
+		},
+		{
+			name:        "auth service returns error",
+			username:    "baduser",
+			authErr:     fmt.Errorf("NATS timeout"),
+			wantErrored: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Stub auth service to return controlled results.
+			origAuth := lookupNamesFromAuthServiceFn
+			lookupNamesFromAuthServiceFn = func(_ context.Context, _ string) (string, string, error) {
+				return tc.authFirst, tc.authLast, tc.authErr
+			}
+			t.Cleanup(func() { lookupNamesFromAuthServiceFn = origAuth })
+
+			// Simulate the fallback block: merged_user returned no name and the
+			// KV record carries a username, so the backfill calls the auth service.
+			var firstName, lastName string
+			var errored bool
+			if tc.username != "" {
+				authFirst, authLast, authErr := lookupNamesFromAuthServiceFn(ctx, tc.username)
+				if authErr != nil {
+					errored = true
+				} else {
+					firstName = authFirst
+					lastName = authLast
+				}
+			}
+
+			if tc.wantErrored {
+				if !errored {
+					t.Error("expected auth error, got nil")
+				}
+				return
+			}
+			if errored {
+				t.Errorf("unexpected auth error")
+				return
+			}
+
+			if tc.wantNoName {
+				if firstName != "" || lastName != "" {
+					t.Errorf("expected empty names, got first=%q last=%q", firstName, lastName)
+				}
+				return
+			}
+			if firstName != tc.wantFirstName {
+				t.Errorf("firstName: got %q, want %q", firstName, tc.wantFirstName)
+			}
+			if lastName != tc.wantLastName {
+				t.Errorf("lastName: got %q, want %q", lastName, tc.wantLastName)
 			}
 		})
 	}

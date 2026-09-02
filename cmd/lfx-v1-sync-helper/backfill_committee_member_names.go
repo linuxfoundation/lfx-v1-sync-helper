@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -22,6 +23,7 @@ type committeeMemberKVRecord struct {
 	CommitteeUID string `json:"committee_uid"`
 	FirstName    string `json:"first_name"`
 	LastName     string `json:"last_name"`
+	Username     string `json:"username"`
 }
 
 // backfillCommitteeMemberNamesResult summarizes a backfill run.
@@ -29,7 +31,7 @@ type backfillCommitteeMemberNamesResult struct {
 	inspected int
 	skipped   int // already have a name, missing uid/committee_uid, or name set concurrently
 	noMapping int // no usable reverse mapping to resolve the contact SFID
-	noName    int // contact SFID found but merged_user row has no name
+	noName    int // contact SFID found but no name in merged_user or auth service
 	updated   int // successfully patched
 	dryRun    int // would have patched (dry-run mode)
 	errored   int // fetch or update failed
@@ -57,6 +59,9 @@ func classifyCommitteeMemberKey(key string, value []byte) (rec committeeMemberKV
 	return rec, false, needsBackfill, nil
 }
 
+// lookupNamesFromAuthServiceFn is injectable for tests.
+var lookupNamesFromAuthServiceFn = lookupNamesFromAuthService
+
 // backfillCommitteeMemberNames patches V2 committee member records whose
 // first_name and last_name are both empty. This affects members who had no
 // LFX account at sync time — lookupMergedUser returned an error because
@@ -74,11 +79,13 @@ func classifyCommitteeMemberKey(key string, value []byte) (rec committeeMemberKV
 //     (committee_member.uid.<memberUID> → projectSFID:committeeSFID:contactSFID).
 //     For old-format "poisoned" entries where the third field is a UUID,
 //     resolves the contact SFID from the v1-objects record.
-//  2. Reads first_name/last_name directly from salesforce.merged_user via
-//     the contact SFID — no username required.
-//  3. Calls UpdateCommitteeMember with SkipEnrichment=true so the committee
+//  2. Reads first_name/last_name from salesforce.merged_user via the contact SFID.
+//  3. If merged_user has no name AND the KV record carries a username, falls back
+//     to the auth service (lfx.auth-service.user_metadata.read) which returns the
+//     name stored in Auth0 user_metadata.
+//  4. Calls UpdateCommitteeMember with SkipEnrichment=true so the committee
 //     service stores the supplied names as-is without attempting another
-//     username / auth-service lookup (which would fail again for these members).
+//     username / auth-service lookup.
 func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCommitteeMemberNamesResult, error) {
 	const (
 		committeeMembersStream     = "KV_committee-members"
@@ -163,18 +170,47 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 			res.errored++
 			continue
 		}
-		if row == nil {
-			logger.With("member_uid", memberUID).
-				WarnContext(ctx, "backfill: no merged_user row found for contact SFID")
-			res.noName++
-			continue
+
+		var firstName, lastName string
+		if row != nil {
+			firstName = row.FirstName.String
+			lastName = row.LastName.String
 		}
 
-		firstName := row.FirstName.String
-		lastName := row.LastName.String
+		// If merged_user has no name, fall back to the auth service.
+		// Prefer the live username from merged_user (username__c) over the
+		// potentially stale copy in the KV record — members who created an LFX
+		// account after the initial sync often have an empty KV username while
+		// merged_user.username__c is already populated.
 		if firstName == "" && lastName == "" {
-			logger.With("member_uid", memberUID).
-				WarnContext(ctx, "backfill: merged_user row has no first or last name")
+			username := rec.Username
+			if row != nil && row.Username.Valid && row.Username.String != "" {
+				username = row.Username.String
+			}
+			if username != "" {
+				authFirst, authLast, authErr := lookupNamesFromAuthServiceFn(ctx, username)
+				switch {
+				case authErr == nil:
+					firstName = authFirst
+					lastName = authLast
+				case errors.Is(authErr, errAuthServiceUserNotFound):
+					// Permanent miss — user does not exist in Auth0; count as noName.
+					logger.With("member_uid", memberUID, "username", username).
+						WarnContext(ctx, "backfill: auth service reports user not found")
+					res.noName++
+					continue
+				default:
+					logger.With(errKey, authErr, "member_uid", memberUID, "username", username).
+						WarnContext(ctx, "backfill: error querying auth service for name")
+					res.errored++
+					continue
+				}
+			}
+		}
+
+		if firstName == "" && lastName == "" {
+			logger.With("member_uid", memberUID, "has_username", rec.Username != "").
+				WarnContext(ctx, "backfill: no name found in merged_user or auth service")
 			res.noName++
 			continue
 		}
