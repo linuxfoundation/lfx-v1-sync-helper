@@ -165,7 +165,7 @@ func TestReconcileProjectsDoesNotCachePartialProjectFailures(t *testing.T) {
 // project in a bulk-add succeeds and another fails, the successful add is
 // still counted (updated, projectsAdded) but the project-set cache is not
 // persisted — a re-run must recompute the delta rather than trust a partial
-// apply. mappingsKV is left nil by setupMembersTestGlobals, so a stray
+// apply. mappingStore is left nil by setupMembersTestGlobals, so a stray
 // putWorkspaceCacheEntry call here would panic.
 func TestReconcileProjectsDoesNotCacheOnPartialSuccess(t *testing.T) {
 	setupMembersTestGlobals(t)
@@ -229,7 +229,7 @@ func TestReconcileProjectsDoesNotCacheOnPartialSuccess(t *testing.T) {
 // sends each slug to member-service only once, instead of a duplicate
 // bulk-add entry per repeated desiredSlugs value. The response reports the
 // slug as failed (rather than succeeded) so the assertion can be made
-// without exercising the project-set cache write, which needs a mappingsKV
+// without exercising the project-set cache write, which needs a mappingStore
 // that setupMembersTestGlobals does not provide (see
 // TestReconcileProjectsDoesNotCacheOnPartialSuccess).
 func TestReconcileProjectsDedupesDuplicateDesiredSlugs(t *testing.T) {

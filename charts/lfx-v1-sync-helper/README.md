@@ -130,6 +130,24 @@ The following environment variables for the custom app component have defaults c
 
 For a complete list of all supported environment variables, including required ones like `AUTH0_TENANT`, see the [v1-sync-helper README](../../cmd/lfx-v1-sync-helper/README.md#environment-variables).
 
+### v1-mappings Postgres store (LFXV2-2985)
+
+The chart provisions the Postgres backing store used by the `MappingStore` port introduced in LFXV2-2985. Select the provisioning strategy via `database.mode`:
+
+| Mode               | What the chart renders                                                                                            | When to use                                            |
+|--------------------|-------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------|
+| `external`         | Nothing; the app reads `V1_MAPPINGS_DATABASE_URL` (or the `V1_MAPPINGS_PG*` quintuple) from a Secret.              | You already have Postgres (RDS via ExternalSecrets, an umbrella-chart-managed CNPG cluster, etc.). |
+| `database`         | A `postgresql.cnpg.io/v1` `Database` CR only.                                                                     | Umbrella deployments where the CNPG Cluster is provisioned by the umbrella chart. |
+| `cluster+database` | Both a `postgresql.cnpg.io/v1` `Cluster` and `Database` CR.                                                       | Standalone deployments without an umbrella chart.      |
+
+In `database` and `cluster+database` modes the CNPG operator auto-creates a `<clusterName>-app` Secret with `host` / `port` / `username` / `password` keys. The chart's app deployment forwards those as `V1_MAPPINGS_PGHOST` / `V1_MAPPINGS_PGPORT` / `V1_MAPPINGS_PGUSER` / `V1_MAPPINGS_PGPASSWORD` env vars (plus a static `V1_MAPPINGS_PGDATABASE` from `database.cloudNativePG.databaseName`) and the service composes the libpq DSN in-process via `Config.ResolveV1MappingsDatabaseURL`. This is deliberate — passing the DSN as a literal env-var value would expose the password via `kubectl describe pod`. The `V1_MAPPINGS_*` prefix keeps these vars distinct from `V1_DB_*` (the read-only Salesforce replica).
+
+In `external` mode with `database.external.shape=url` (the default) the deployment reads a single-key Secret as `V1_MAPPINGS_DATABASE_URL`. In `external` mode with `shape=fields`, the deployment reads the `host` / `port` / `username` / `password` / `dbname` keys individually (compatible with the AWS RDS-via-ExternalSecrets pattern that surfaces each JSON field as its own Secret key).
+
+**Runtime mode selection.** The app also honors `V1_MAPPINGS_STORE_MODE` (unset, `kv`, `dual`, or `postgres`) — set in `app.environment` to control the read/write routing independently from the chart-time provisioning. **Default is `kv`** while LFXV2-2985 is WIP. When `database.mode=external` with no `secretName` set, the chart also emits `V1_MAPPINGS_STORE_MODE=kv` automatically so the app boots on clusters that haven't wired Postgres yet. Setting `app.environment.V1_MAPPINGS_STORE_MODE.value` overrides this safety fallback.
+
+**Backfill.** Once the release is deployed and the CNPG cluster is ready, run `manifests/backfill-v1-mappings-to-postgres-job.yaml` to copy the KV bucket into `v1_mappings`. Then flip `V1_MAPPINGS_STORE_MODE` to `dual`; verify no drift for a soak period; run the diff scan (follow-up ticket); flip to `postgres`. See the mapping_store_dual.go type doc for the KV-authoritative dual-write semantics.
+
 ### WAL Listener Component
 
 The chart includes an optional PostgreSQL WAL (Write-Ahead Log) listener component that provides real-time streaming of database changes to NATS. This component is enabled by default and can be configured or disabled as needed.
