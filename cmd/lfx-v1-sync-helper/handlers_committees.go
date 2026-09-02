@@ -6,12 +6,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	sfidvalidator "github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // allowedCommitteeCategories defines the valid values for type__c mapping to category.
@@ -135,10 +135,15 @@ func mapTypeToCategory(ctx context.Context, typeVal, committeeName string) *stri
 }
 
 // handleCommitteeUpdate processes a committee update from the KV bucket.
-func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]any) {
+// Returns true when the message should be nack'd for redelivery — that
+// is, when a *transient* mapping-store error prevented us from
+// distinguishing "no existing v2 committee" from "we cannot tell right
+// now". Treating a transient error as "no v2 committee" would create a
+// duplicate resource on the next handler run.
+func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
-		return
+		return false
 	}
 
 	// Extract v1Principal from v1 data for JWT generation.
@@ -148,7 +153,7 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 	sfid, ok := v1Data["sfid"].(string)
 	if !ok || sfid == "" {
 		logger.With("key", key).ErrorContext(ctx, "no SFID found in committee data")
-		return
+		return false
 	}
 
 	// Extract project SFID from v1 data for use in project checks and reverse mapping.
@@ -157,17 +162,26 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		projectSFID = projSFID
 	}
 
-	// Check if we have an existing mapping.
-	// Check if we have an existing mapping using SFID.
+	// Check if we have an existing mapping using SFID. On a transient
+	// store error we MUST NACK — treating it as "no mapping" would send
+	// the create-path below and produce a duplicate v2 committee.
 	mappingKey := fmt.Sprintf("committee.sfid.%s", sfid)
 	existingUID := ""
 
-	if entry, err := mappingsKV.Get(ctx, mappingKey); err == nil {
-		if isTombstonedMapping(entry.Value()) {
+	entry, mapErr := mappingStore.Get(ctx, mappingKey)
+	switch {
+	case mapErr == nil:
+		if isTombstonedMapping(entry.Value) {
 			logger.With("sfid", sfid).WarnContext(ctx, "skipping committee upsert - mapping is tombstoned (previously deleted)")
-			return
+			return false
 		}
-		existingUID = string(entry.Value())
+		existingUID = string(entry.Value)
+	case errors.Is(mapErr, ErrKeyNotFound):
+		// Genuine miss — fall through to create path.
+	default:
+		logger.With(errKey, mapErr, "sfid", sfid).
+			ErrorContext(ctx, "transient mapping-store failure resolving committee SFID; redelivering to avoid duplicate v2 create")
+		return true
 	}
 
 	var uid string
@@ -188,23 +202,36 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		uid = existingUID
 	} else {
 		// Check if parent project exists in mappings before creating new committee.
+		// On transient error we NACK to avoid creating a committee whose parent
+		// project we could not verify.
 		if projectSFID != "" {
 			projectMappingKey := fmt.Sprintf("project.sfid.%s", projectSFID)
-			if _, err := mappingsKV.Get(ctx, projectMappingKey); err != nil {
+			_, projErr := mappingStore.Get(ctx, projectMappingKey)
+			switch {
+			case projErr == nil:
+				// parent found — proceed
+			case errors.Is(projErr, ErrKeyNotFound):
 				logger.With("project_sfid", projectSFID, "committee_sfid", sfid).InfoContext(ctx, "skipping committee creation - parent project not found in mappings")
-				return
+				return false
+			default:
+				logger.With(errKey, projErr, "project_sfid", projectSFID, "committee_sfid", sfid).
+					ErrorContext(ctx, "transient mapping-store failure resolving parent project SFID; redelivering")
+				return true
 			}
 		}
 
 		// Create new committee.
 		logger.With("sfid", sfid).InfoContext(ctx, "creating new committee")
 
-		// Map v1 data to create payload.
+		// Map v1 data to create payload. A transient mapping-store
+		// failure inside the mapper (parent project lookup) is
+		// redeliverable; permanent failures (missing/invalid data)
+		// are ACK'd.
 		var payload *committeeservice.CreateCommitteePayload
 		payload, err = mapV1DataToCommitteeCreatePayload(ctx, v1Data)
 		if err != nil {
 			logger.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to map v1 data to create payload")
-			return
+			return isTransientStoreErr(err)
 		}
 
 		var response *committeeservice.CommitteeFullWithReadonlyAttributes
@@ -219,7 +246,11 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 
 	if err != nil {
 		logger.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to sync committee")
-		return
+		// A transient mapping-store failure inside updateCommittee ->
+		// mapV1DataToCommitteeUpdateBasePayload propagates via the
+		// isTransientStoreErr sentinel; NACK so the message is
+		// redelivered rather than silently dropped.
+		return isTransientStoreErr(err)
 	}
 
 	// Store the SFID mapping and reverse mapping before the writeback PATCH.
@@ -227,14 +258,14 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 	// the reverse mapping the indexer would see no committee.uid.* entry and
 	// attempt a duplicate v2 create.
 	if uid != "" {
-		if _, err := mappingsKV.Put(ctx, mappingKey, []byte(uid)); err != nil {
+		if _, err := mappingStore.Put(ctx, mappingKey, []byte(uid)); err != nil {
 			logger.With(errKey, err, "sfid", sfid, "uid", uid).WarnContext(ctx, "failed to store committee mapping")
 		}
 
 		// Store reverse mapping (v2 UID -> v1 project:committee SFID).
 		reverseMappingKey := fmt.Sprintf("committee.uid.%s", uid)
 		reverseMappingValue := fmt.Sprintf("%s:%s", projectSFID, sfid)
-		if _, err := mappingsKV.Put(ctx, reverseMappingKey, []byte(reverseMappingValue)); err != nil {
+		if _, err := mappingStore.Put(ctx, reverseMappingKey, []byte(reverseMappingValue)); err != nil {
 			logger.With(errKey, err, "committee_uid", uid, "sfid", sfid).WarnContext(ctx, "failed to store committee reverse mapping")
 		}
 	}
@@ -251,6 +282,7 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 	}
 
 	logger.With("committee_uid", uid, "sfid", sfid).InfoContext(ctx, "successfully synced committee")
+	return false
 }
 
 // handleCommitteeMemberDelete processes a committee member deletion.
@@ -258,9 +290,9 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 func handleCommitteeMemberDelete(ctx context.Context, key string, sfid string, v1Principal string) bool {
 	// Check if we have an existing mapping using SFID.
 	mappingKey := fmt.Sprintf("committee_member.sfid.%s", sfid)
-	entry, err := mappingsKV.Get(ctx, mappingKey)
+	entry, err := mappingStore.Get(ctx, mappingKey)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, ErrKeyNotFound) {
 			logger.With("sfid", sfid, "key", key).InfoContext(ctx, "committee member mapping not found, nothing to delete")
 			return false
 		}
@@ -268,8 +300,8 @@ func handleCommitteeMemberDelete(ctx context.Context, key string, sfid string, v
 		return true // Retry on error.
 	}
 
-	mappingValue := string(entry.Value())
-	if mappingValue == "" || isTombstonedMapping(entry.Value()) {
+	mappingValue := string(entry.Value)
+	if mappingValue == "" || isTombstonedMapping(entry.Value) {
 		logger.With("sfid", sfid, "key", key).InfoContext(ctx, "committee member mapping empty or tombstoned, nothing to delete")
 		return false
 	}
@@ -326,9 +358,9 @@ func handleCommitteeMemberDelete(ctx context.Context, key string, sfid string, v
 func handleCommitteeDelete(ctx context.Context, key string, sfid string, v1Principal string) bool {
 	// Check if we have an existing mapping using SFID.
 	mappingKey := fmt.Sprintf("committee.sfid.%s", sfid)
-	entry, err := mappingsKV.Get(ctx, mappingKey)
+	entry, err := mappingStore.Get(ctx, mappingKey)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, ErrKeyNotFound) {
 			logger.With("sfid", sfid, "key", key).WarnContext(ctx, "committee mapping not found, nothing to delete")
 			return false
 		}
@@ -336,8 +368,8 @@ func handleCommitteeDelete(ctx context.Context, key string, sfid string, v1Princ
 		return true // Retry on error.
 	}
 
-	existingUID := string(entry.Value())
-	if existingUID == "" || isTombstonedMapping(entry.Value()) {
+	existingUID := string(entry.Value)
+	if existingUID == "" || isTombstonedMapping(entry.Value) {
 		logger.With("sfid", sfid, "key", key).InfoContext(ctx, "committee mapping empty or tombstoned, nothing to delete")
 		return false
 	}
@@ -376,13 +408,22 @@ func mapV1DataToCommitteeCreatePayload(ctx context.Context, v1Data map[string]an
 
 	projectUID := ""
 	if projectSFID, ok := v1Data["project_name__c"].(string); ok && projectSFID != "" {
-		// Look up the project's V2 UID from SFID mappings.
+		// Look up the project's V2 UID from SFID mappings. A transient
+		// mapping-store failure MUST propagate as *errTransientStore so
+		// the outer handler NACKs instead of collapsing to
+		// projectUID="" and treating the resulting "missing required
+		// fields" error as permanent — that would silently drop a
+		// legitimate committee create under a Postgres blip.
 		projectMappingKey := fmt.Sprintf("project.sfid.%s", projectSFID)
-		if entry, err := mappingsKV.Get(ctx, projectMappingKey); err == nil {
-			projectUID = string(entry.Value())
+		entry, err := mappingStore.Get(ctx, projectMappingKey)
+		switch {
+		case err == nil:
+			projectUID = string(entry.Value)
 			logger.With("project_sfid", projectSFID, "project_uid", projectUID).DebugContext(ctx, "found project UID from SFID mapping for committee")
-		} else {
-			logger.With("project_sfid", projectSFID, errKey, err).WarnContext(ctx, "could not find project UID in mappings for committee")
+		case errors.Is(err, ErrKeyNotFound):
+			logger.With("project_sfid", projectSFID).WarnContext(ctx, "could not find project UID in mappings for committee")
+		default:
+			return nil, wrapTransientStoreErr(fmt.Errorf("resolving project UID for committee create (project_sfid=%s): %w", projectSFID, err))
 		}
 	}
 
@@ -470,13 +511,20 @@ func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID str
 
 	projectUID := ""
 	if projectSFID, ok := v1Data["project_name__c"].(string); ok && projectSFID != "" {
-		// Look up the project's V2 UID from SFID mappings.
+		// Look up the project's V2 UID from SFID mappings. Same
+		// transient-vs-permanent distinction as the create-payload
+		// builder above: a Postgres blip must propagate as
+		// *errTransientStore so the outer handler NACKs.
 		projectMappingKey := fmt.Sprintf("project.sfid.%s", projectSFID)
-		if entry, err := mappingsKV.Get(ctx, projectMappingKey); err == nil {
-			projectUID = string(entry.Value())
+		entry, err := mappingStore.Get(ctx, projectMappingKey)
+		switch {
+		case err == nil:
+			projectUID = string(entry.Value)
 			logger.With("project_sfid", projectSFID, "project_uid", projectUID).DebugContext(ctx, "found project UID from SFID mapping for committee")
-		} else {
-			logger.With("project_sfid", projectSFID, errKey, err).WarnContext(ctx, "could not find project UID in mappings for committee")
+		case errors.Is(err, ErrKeyNotFound):
+			logger.With("project_sfid", projectSFID).WarnContext(ctx, "could not find project UID in mappings for committee")
+		default:
+			return nil, wrapTransientStoreErr(fmt.Errorf("resolving project UID for committee update (project_sfid=%s): %w", projectSFID, err))
 		}
 	}
 
@@ -570,10 +618,10 @@ func overlayV1CommitteeUpdatePayload(ctx context.Context, payload *committeeserv
 }
 
 // handleCommitteeMemberUpdate processes a committee member update from platform-community__c records.
-func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[string]any) {
+func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
-		return
+		return false
 	}
 
 	// Extract v1Principal from v1 data for JWT generation.
@@ -583,7 +631,7 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 	sfid, ok := v1Data["sfid"].(string)
 	if !ok || sfid == "" {
 		logger.With("key", key).ErrorContext(ctx, "no SFID found in committee member data")
-		return
+		return false
 	}
 
 	// Extract the contact SFID (contact_name__c). This is the identifier the v1
@@ -613,40 +661,53 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 	}
 	if email == "" {
 		logger.With("sfid", sfid).WarnContext(ctx, "skipping committee member with blank email")
-		return
+		return false
 	}
 
 	// Extract collaboration_name__c to get committee UID.
 	collaborationNameV1, ok := v1Data["collaboration_name__c"].(string)
 	if !ok || collaborationNameV1 == "" {
 		logger.With("key", key, "sfid", sfid).ErrorContext(ctx, "no collaboration_name__c found in committee member data")
-		return
+		return false
 	}
 
-	// Check if parent committee exists in mappings before proceeding.
+	// Check if parent committee exists in mappings. On transient
+	// error we NACK — treating it as "no committee" would skip the
+	// sync and drop the event silently.
 	committeeMappingKey := fmt.Sprintf("committee.sfid.%s", collaborationNameV1)
-	committeeEntry, committeeLookupErr := mappingsKV.Get(ctx, committeeMappingKey)
-	if committeeLookupErr != nil {
+	committeeEntry, committeeLookupErr := mappingStore.Get(ctx, committeeMappingKey)
+	switch {
+	case committeeLookupErr == nil:
+		// proceed
+	case errors.Is(committeeLookupErr, ErrKeyNotFound):
 		logger.With("collaboration_sfid", collaborationNameV1, "member_sfid", sfid).InfoContext(ctx, "skipping committee member sync - parent committee not found in mappings")
-		return
+		return false
+	default:
+		logger.With(errKey, committeeLookupErr, "collaboration_sfid", collaborationNameV1, "member_sfid", sfid).
+			ErrorContext(ctx, "transient mapping-store failure resolving parent committee SFID; redelivering")
+		return true
 	}
 
 	// Look up committee UID from collaboration_name__c mapping.
 	// Note: collaboration_name__c points to the v1 SFID of the committee.
-	committeeUID := string(committeeEntry.Value())
+	committeeUID := string(committeeEntry.Value)
 	logger.With("collaboration_sfid", collaborationNameV1, "committee_uid", committeeUID).DebugContext(ctx, "found committee UID from committee SFID mapping")
 
-	// Check if we have an existing mapping.
+	// Check if we have an existing mapping. On transient error we
+	// NACK — treating it as "no mapping" would send the create-path
+	// and produce a duplicate v2 member.
 	memberMappingKey := fmt.Sprintf("committee_member.sfid.%s", sfid)
 	existingMemberUID := ""
 	needsFormatUpgrade := false
 
-	if entry, err := mappingsKV.Get(ctx, memberMappingKey); err == nil {
-		if isTombstonedMapping(entry.Value()) {
+	entry, memErr := mappingStore.Get(ctx, memberMappingKey)
+	switch {
+	case memErr == nil:
+		if isTombstonedMapping(entry.Value) {
 			logger.With("sfid", sfid).WarnContext(ctx, "skipping committee member upsert - mapping is tombstoned (previously deleted)")
-			return
+			return false
 		}
-		mappingValue := string(entry.Value())
+		mappingValue := string(entry.Value)
 		// Check if it's new format (committee:member) or old format (just member).
 		if strings.Contains(mappingValue, ":") {
 			// New format: "{committee_uuid}:{member_uuid}".
@@ -659,6 +720,12 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 			existingMemberUID = mappingValue
 			needsFormatUpgrade = true
 		}
+	case errors.Is(memErr, ErrKeyNotFound):
+		// Genuine miss — fall through to create path.
+	default:
+		logger.With(errKey, memErr, "sfid", sfid).
+			ErrorContext(ctx, "transient mapping-store failure resolving committee member SFID; redelivering to avoid duplicate v2 create")
+		return true
 	}
 
 	var memberUID string
@@ -673,7 +740,7 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 		payload, err = mapV1DataToCommitteeMemberUpdatePayload(ctx, committeeUID, existingMemberUID, v1Data)
 		if err != nil {
 			logger.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to map v1 data to committee member update payload")
-			return
+			return isTransientStoreErr(err)
 		}
 
 		err = updateCommitteeMember(ctx, payload, v1Principal)
@@ -687,7 +754,7 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 		payload, err = mapV1DataToCommitteeMemberCreatePayload(ctx, committeeUID, v1Data)
 		if err != nil {
 			logger.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to map v1 data to committee member create payload")
-			return
+			return isTransientStoreErr(err)
 		}
 
 		var response *committeeservice.CommitteeMemberFullWithReadonlyAttributes
@@ -699,14 +766,14 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 
 	if err != nil {
 		logger.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to sync committee member")
-		return
+		return isTransientStoreErr(err)
 	}
 
 	// Store the member mapping.
 	// Store the mapping in new format: "{committee_uuid}:{member_uuid}".
 	if memberUID != "" {
 		newMappingValue := fmt.Sprintf("%s:%s", committeeUID, memberUID)
-		if _, err := mappingsKV.Put(ctx, memberMappingKey, []byte(newMappingValue)); err != nil {
+		if _, err := mappingStore.Put(ctx, memberMappingKey, []byte(newMappingValue)); err != nil {
 			logger.With(errKey, err, "sfid", sfid, "member_uid", memberUID).WarnContext(ctx, "failed to store committee member mapping")
 		} else if needsFormatUpgrade {
 			logger.With("sfid", sfid, "member_uid", memberUID, "committee_uid", committeeUID).InfoContext(ctx, "upgraded committee member mapping to new format")
@@ -741,13 +808,13 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 			// failed to write here would never get repaired. If this write fails,
 			// skip the reverse mapping write too so it isn't left inconsistent —
 			// the next update event for this v1 record will retry both.
-			if _, err := mappingsKV.Put(ctx, committeeMemberRecordSFIDKey(memberUID), []byte(sfid)); err != nil {
+			if _, err := mappingStore.Put(ctx, committeeMemberRecordSFIDKey(memberUID), []byte(sfid)); err != nil {
 				logger.With(errKey, err, "committee_uid", committeeUID, "member_uid", memberUID).
 					WarnContext(ctx, "failed to store committee member record sfid mapping, skipping reverse mapping write to avoid publishing it without a companion")
 			} else {
 				reverseMappingKey := fmt.Sprintf("committee_member.uid.%s", memberUID)
 				reverseMappingValue := fmt.Sprintf("%s:%s:%s", projectSFID, collaborationNameV1, contactSFID)
-				if _, err := mappingsKV.Put(ctx, reverseMappingKey, []byte(reverseMappingValue)); err != nil {
+				if _, err := mappingStore.Put(ctx, reverseMappingKey, []byte(reverseMappingValue)); err != nil {
 					logger.With(errKey, err, "committee_uid", committeeUID, "member_uid", memberUID).WarnContext(ctx, "failed to store committee member reverse mapping")
 				}
 			}
@@ -755,6 +822,7 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 	}
 
 	logger.With("member_uid", memberUID, "sfid", sfid, "committee_uid", committeeUID).InfoContext(ctx, "successfully synced committee member")
+	return false
 }
 
 // mapV1DataToCommitteeMemberCreatePayload converts v1 platform-community__c data to a CreateCommitteeMemberPayload.

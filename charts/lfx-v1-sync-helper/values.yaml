@@ -225,6 +225,27 @@ app:
     # Accepts truthy values: "true", "yes", "t", "y", "1" (case-insensitive).
     COMMITTEE_SKIP_MEMBER_NOTIFICATIONS:
       value: "true"
+    # V1_MAPPINGS_STORE_MODE selects the backing store for the v1-mappings
+    # data set (LFXV2-2985). Values:
+    #   "kv"       — read+write only the jetstream.KeyValue bucket
+    #                (pre-migration behaviour; safest rollback target;
+    #                the default while LFXV2-2985 is WIP).
+    #   "dual"     — KV-authoritative reads and CAS. Every mutation
+    #                writes KV first (under a per-key mutex, with a
+    #                short PG mirror timeout) then mirrors to Postgres
+    #                best-effort. Postgres is a shadow that operators
+    #                must validate with a diff scan before flipping to
+    #                "postgres". Requires a working database.*
+    #                configuration in this chart.
+    #   "postgres" — read+write only Postgres (final state once the KV
+    #                bucket is decommissioned; only flip after a diff
+    #                scan confirms PG matches KV row-for-row).
+    # Unset (empty string) defaults to "kv" inside the binary while
+    # LFXV2-2985 is WIP so a chart install without Postgres wiring
+    # still boots. Uncomment and set to "dual" to opt into dual-write
+    # after this deployment has database.* wired.
+    # V1_MAPPINGS_STORE_MODE:
+    #   value: "kv"
   # heimdall is the configuration for JWT impersonation of Heimdall-authorized
   # principals for v1 data ingest.
   heimdall:
@@ -712,3 +733,82 @@ meltano:
         key: catalog.json
         # mountPath is where to mount the catalog file in the container
         mountPath: /catalogs/tap-dynamodb
+
+# database is the configuration for the Postgres backing store used by the
+# v1-mappings port introduced in LFXV2-2985. The service always composes a
+# libpq DSN in-process (either from V1_MAPPINGS_DATABASE_URL directly or from
+# the V1_MAPPINGS_PGHOST / V1_MAPPINGS_PGPORT / V1_MAPPINGS_PGUSER /
+# V1_MAPPINGS_PGPASSWORD / V1_MAPPINGS_PGDATABASE quintuple) so passwords stay
+# as Secret-typed env vars and never appear as literal strings in the rendered
+# pod spec. The V1_MAPPINGS_* prefix keeps these vars distinct from V1_DB_*
+# (the read-only Salesforce replica DSN).
+database:
+  # mode selects the database provider. Only paths in "dual" and "postgres"
+  # V1_MAPPINGS_STORE_MODE require a working configuration here; a chart
+  # deployed with mode="external" and V1_MAPPINGS_STORE_MODE unset in the app
+  # environment will still boot and stay on KV-fallback reads until the
+  # operator flips V1_MAPPINGS_STORE_MODE to "dual" or "postgres".
+  #
+  # Modes:
+  #   "external"         — connect to an existing PostgreSQL via a Kubernetes
+  #                        Secret. Use when the cluster is provisioned outside
+  #                        this chart (e.g. RDS via ExternalSecrets, or a
+  #                        CloudNativePG Cluster owned by an umbrella chart).
+  #   "database"         — create a CloudNativePG Database CR against an
+  #                        already-existing Cluster (e.g. one provisioned by
+  #                        an umbrella chart). This is the typical umbrella
+  #                        deployment mode.
+  #   "cluster+database" — create both a CloudNativePG Cluster and a Database
+  #                        CR. Use when deploying the chart standalone.
+  mode: external
+
+  # cloudNativePG configures access to a CloudNativePG Cluster (modes:
+  # "database" and "cluster+database").
+  cloudNativePG:
+    # clusterName is the name of the CloudNativePG Cluster resource. The
+    # operator auto-creates <clusterName>-app and <clusterName>-superuser
+    # secrets; the app-secret is referenced from the deployment via the
+    # lfx-v1-sync-helper.cloudNativePGAppSecret helper.
+    clusterName: ""
+    # databaseName is the PostgreSQL database within the Cluster that the
+    # service connects to. The operator runs
+    # CREATE DATABASE <databaseName> OWNER app when the Database CR is
+    # reconciled.
+    databaseName: v1_mappings
+    # cluster is used only in "cluster+database" mode to configure the
+    # CloudNativePG Cluster resource provisioned by this chart. The current
+    # v1-mappings target scale (~5.8 GiB / ~38M rows in prod as of
+    # LFXV2-2985) fits well inside a single 25 GiB volume with room to
+    # grow; adjust when running against a materially different snapshot
+    # size.
+    cluster:
+      instances: 1
+      storage:
+        size: 25Gi
+
+  # external configures an existing PostgreSQL connection (mode: external only).
+  external:
+    # secretName is the name of the Kubernetes Secret to read the DSN from.
+    secretName: ""
+    # shape selects how the DSN is read from the secret:
+    #   "url"    — read a single V1_MAPPINGS_DATABASE_URL env var from
+    #              `secretKey` (default). Use when the secret has a single
+    #              key holding a libpq URL.
+    #   "fields" — read host/port/username/password/dbname as separate
+    #              V1_MAPPINGS_PGHOST/V1_MAPPINGS_PGPORT/V1_MAPPINGS_PGUSER/
+    #              V1_MAPPINGS_PGPASSWORD/V1_MAPPINGS_PGDATABASE env vars
+    #              from the keys mapping below. Use with the LFX
+    #              RDS-via-ESO pattern where AWS Secrets Manager provides
+    #              one key per JSON field.
+    shape: "url"
+    # secretKey is the secret key holding the libpq URL (shape: url only).
+    secretKey: "url"
+    # keys maps each DSN field to a secret key (shape: fields only). Defaults
+    # match the AWS RDS standard JSON layout produced by the
+    # SecretsManagerRDSPostgreSQLRotationSingleUser rotation Lambda.
+    keys:
+      host: host
+      port: port
+      username: username
+      password: password
+      dbname: dbname

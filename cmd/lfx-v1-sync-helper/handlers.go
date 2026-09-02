@@ -113,14 +113,11 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 	// Determine the object type based on the key prefix.
 	switch prefix {
 	case "salesforce-project__c":
-		handleProjectUpdate(ctx, key, v1Data)
-		return false
+		return handleProjectUpdate(ctx, key, v1Data)
 	case "platform-collaboration__c":
-		handleCommitteeUpdate(ctx, key, v1Data)
-		return false
+		return handleCommitteeUpdate(ctx, key, v1Data)
 	case "platform-community__c":
-		handleCommitteeMemberUpdate(ctx, key, v1Data)
-		return false
+		return handleCommitteeMemberUpdate(ctx, key, v1Data)
 	case "itx-poll", "itx-poll-vote", "itx-poll-results":
 		// Voting records are handled by lfx-v2-voting-service.
 		logger.With("key", key).DebugContext(ctx, "voting record, handled by lfx-v2-voting-service")
@@ -302,7 +299,7 @@ var mappingGetMaxAttempts = 4
 var mappingGetInitialBackoff = 50 * time.Millisecond
 
 // getMappingEntryWithRetry does a bounded exponential-backoff Get on the
-// mappings KV. Every error, including jetstream.ErrKeyNotFound, is retried
+// mappings store. Every error, including ErrKeyNotFound, is retried
 // (with a short delay) because the two failure modes this helper is designed
 // to absorb both look the same at the caller:
 //
@@ -320,46 +317,79 @@ var mappingGetInitialBackoff = 50 * time.Millisecond
 // mappingGetMaxAttempts Get calls and sleeps mappingGetMaxAttempts-1 times
 // between them (the final attempt returns immediately). At the defaults —
 // 4 attempts and 50ms initial backoff, doubling each round — that is three
-// sleeps of 50 + 100 + 200 = 350ms of wall time on top of the KV call
+// sleeps of 50 + 100 + 200 = 350ms of wall time on top of the store call
 // latency, so the handler goroutine is not held for long. Callers must still
 // interpret the final error:
-//   - nil                         → mapping present, entry is populated
-//   - jetstream.ErrKeyNotFound    → mapping is absent even after retries
-//   - other errors                → transient KV problem; event should be
+//   - nil                → mapping present, entry is populated
+//   - ErrKeyNotFound     → mapping is absent even after retries
+//   - other errors       → transient store problem; event should be
 //     treated as un-lookable and ops should be alerted
 //
 // Context cancellation is honored immediately for clean shutdown.
-func getMappingEntryWithRetry(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
+func getMappingEntryWithRetry(ctx context.Context, key string) (MappingEntry, error) {
 	var lastErr error
 	delay := mappingGetInitialBackoff
 	for attempt := 1; attempt <= mappingGetMaxAttempts; attempt++ {
-		entry, err := mappingsKV.Get(ctx, key)
+		entry, err := mappingStore.Get(ctx, key)
 		if err == nil {
 			return entry, nil
 		}
 		lastErr = err
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
+			return MappingEntry{}, err
 		}
 		if attempt == mappingGetMaxAttempts {
 			break
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return MappingEntry{}, ctx.Err()
 		case <-time.After(delay):
 		}
 		delay *= 2
 	}
-	return nil, lastErr
+	return MappingEntry{}, lastErr
 }
 
-// tombstoneMapping stores a tombstone marker in the mapping KV store.
+// tombstoneMapping stores a tombstone marker in the mapping store.
+// Routes through the process-wide mappingStore so the write goes to the
+// backend selected by V1_MAPPINGS_STORE_MODE (kv / dual / postgres).
 func tombstoneMapping(ctx context.Context, mappingKey string) error {
-	if _, err := mappingsKV.Put(ctx, mappingKey, []byte(tombstoneMarker)); err != nil {
+	if _, err := mappingStore.Put(ctx, mappingKey, []byte(tombstoneMarker)); err != nil {
 		return fmt.Errorf("failed to tombstone mapping %s: %w", mappingKey, err)
 	}
 	return nil
+}
+
+// errTransientStore wraps a transient mapping-store failure. Payload
+// builders in handlers_projects.go / handlers_committees.go return an
+// error of this type when a parent-lookup fails for a reason OTHER
+// than ErrKeyNotFound, so the outer handler can distinguish "parent
+// legitimately missing" (permanent, ACK) from "we could not tell right
+// now" (transient, NACK for redelivery to avoid dropping the sync).
+//
+// Callers do not construct this directly: they use wrapTransientStoreErr.
+type errTransientStore struct{ err error }
+
+func (e *errTransientStore) Error() string { return "transient mapping-store failure: " + e.err.Error() }
+func (e *errTransientStore) Unwrap() error { return e.err }
+
+// wrapTransientStoreErr classifies a mappingStore error: ErrKeyNotFound
+// stays a plain error (treated as permanent by callers), everything
+// else becomes an *errTransientStore. Returns nil unchanged.
+func wrapTransientStoreErr(err error) error {
+	if err == nil || errors.Is(err, ErrKeyNotFound) {
+		return err
+	}
+	return &errTransientStore{err: err}
+}
+
+// isTransientStoreErr reports whether err was wrapped by
+// wrapTransientStoreErr. Outer handlers use this to decide whether to
+// nack the message.
+func isTransientStoreErr(err error) bool {
+	var t *errTransientStore
+	return errors.As(err, &t)
 }
 
 // mappingPutMaxAttempts caps the retry loop in putMappingWithRetry. Extracted as
@@ -372,7 +402,7 @@ var mappingPutMaxAttempts = 5
 // mappingPutMaxAttempts.
 var mappingPutInitialBackoff = 100 * time.Millisecond
 
-// putMappingWithRetry writes a KV mapping value with bounded exponential backoff.
+// putMappingWithRetry writes a mapping value with bounded exponential backoff.
 //
 // Used on the v2→v1 create success path where losing the mapping produces a
 // permanent inconsistency: the v1 record has been written but the reverse
@@ -384,13 +414,13 @@ var mappingPutInitialBackoff = 100 * time.Millisecond
 //
 // The retry gives up immediately on context cancellation so shutdown drains
 // cleanly, and returns wrapped errors so callers can errors.Is against
-// context.Canceled / context.DeadlineExceeded or the underlying JetStream KV
+// context.Canceled / context.DeadlineExceeded or the underlying store
 // error class.
 func putMappingWithRetry(ctx context.Context, key string, value []byte) error {
 	var lastErr error
 	delay := mappingPutInitialBackoff
 	for attempt := 1; attempt <= mappingPutMaxAttempts; attempt++ {
-		_, err := mappingsKV.Put(ctx, key, value)
+		_, err := mappingStore.Put(ctx, key, value)
 		if err == nil {
 			return nil
 		}
@@ -410,6 +440,17 @@ func putMappingWithRetry(ctx context.Context, key string, value []byte) error {
 		delay *= 2
 	}
 	return fmt.Errorf("mapping put failed after %d attempts: %w", mappingPutMaxAttempts, lastErr)
+}
+
+// deleteIndexKey removes a secondary-index key from the mapping store.
+// Unlike tombstoneMapping, this does not leave a "!del" marker — secondary
+// indexes have no resurrection-prevention requirement, so a native delete
+// is sufficient. Routes through mappingStore for backend selection.
+func deleteIndexKey(ctx context.Context, mappingKey string) error {
+	if err := mappingStore.Delete(ctx, mappingKey); err != nil {
+		return fmt.Errorf("failed to delete index key %s: %w", mappingKey, err)
+	}
+	return nil
 }
 
 // isTombstonedMapping checks if a mapping is tombstoned.

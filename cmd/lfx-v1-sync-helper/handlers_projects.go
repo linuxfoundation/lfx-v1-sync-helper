@@ -6,11 +6,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // isValidURL checks if a URL value is non-empty and not "nil".
@@ -69,10 +69,18 @@ func mapAdminCategoryToCategory(adminCategory string) *string {
 }
 
 // handleProjectUpdate processes a project update from the KV bucket.
-func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any) {
+// Returns true when the message should be nack'd for redelivery — that
+// is, when a *transient* mapping-store error prevented us from
+// distinguishing "no existing v2 project" from "we cannot tell right
+// now". Silently treating a transient store error as "no v2 project
+// exists" would create a duplicate resource on the next handler run
+// and then fail to persist its mapping. False (ack) covers success,
+// permanent classification failures (bad payload, invalid data), and
+// tombstoned mappings (already deleted, must not resurrect).
+func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
-		return
+		return false
 	}
 
 	// Extract v1Principal from v1 data for JWT generation.
@@ -82,22 +90,32 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 	sfid, ok := v1Data["sfid"].(string)
 	if !ok || sfid == "" {
 		logger.With("key", key).ErrorContext(ctx, "no SFID found in project data")
-		return
+		return false
 	}
 
 	// Extract project slug for additional mapping.
 	slug, _ := v1Data["slug__c"].(string)
 
-	// Check if we have an existing mapping using SFID.
+	// Check if we have an existing mapping using SFID. On a transient
+	// store error we MUST NACK — treating it as "no mapping" would
+	// send the create-path below and produce a duplicate v2 project.
 	mappingKey := fmt.Sprintf("project.sfid.%s", sfid)
 	existingUID := ""
 
-	if entry, err := mappingsKV.Get(ctx, mappingKey); err == nil {
-		if isTombstonedMapping(entry.Value()) {
+	entry, mapErr := mappingStore.Get(ctx, mappingKey)
+	switch {
+	case mapErr == nil:
+		if isTombstonedMapping(entry.Value) {
 			logger.With("sfid", sfid, "slug", slug).WarnContext(ctx, "skipping project upsert - mapping is tombstoned (previously deleted)")
-			return
+			return false
 		}
-		existingUID = string(entry.Value())
+		existingUID = string(entry.Value)
+	case errors.Is(mapErr, ErrKeyNotFound):
+		// Genuine miss — fall through to create path.
+	default:
+		logger.With(errKey, mapErr, "sfid", sfid, "slug", slug).
+			ErrorContext(ctx, "transient mapping-store failure resolving project SFID; redelivering to avoid duplicate v2 create")
+		return true
 	}
 
 	var uid string
@@ -107,12 +125,14 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 		// Update existing project - always allow updates for mapped projects.
 		logger.With("project_uid", existingUID, "sfid", sfid, "slug", slug).InfoContext(ctx, "updating existing project")
 
-		// Map v1 data to update payload.
+		// Map v1 data to update payload. A transient mapping-store
+		// failure inside the mapper (parent lookups) is redeliverable;
+		// permanent failures (bad data) are ACK'd.
 		var payload *projectservice.UpdateProjectBasePayload
 		payload, err = mapV1DataToProjectUpdateBasePayload(ctx, existingUID, v1Data)
 		if err != nil {
 			logger.With(errKey, err, "sfid", sfid, "slug", slug).ErrorContext(ctx, "failed to map v1 data to update payload")
-			return
+			return isTransientStoreErr(err)
 		}
 
 		// Map v1 data to settings payload.
@@ -120,7 +140,7 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 		settingsPayload, err = mapV1DataToProjectUpdateSettingsPayload(ctx, existingUID, v1Data)
 		if err != nil {
 			logger.With(errKey, err, "sfid", sfid, "slug", slug).ErrorContext(ctx, "failed to map v1 data to settings payload")
-			return
+			return isTransientStoreErr(err)
 		}
 
 		err = updateProject(ctx, payload, settingsPayload, v1Principal)
@@ -129,12 +149,14 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 		// Create new project.
 		logger.With("sfid", sfid, "slug", slug).InfoContext(ctx, "creating new project")
 
-		// Map v1 data to create payload.
+		// Map v1 data to create payload. A transient mapping-store
+		// failure inside the mapper (parent lookups) is redeliverable;
+		// permanent failures (bad data) are ACK'd.
 		var payload *projectservice.CreateProjectPayload
 		payload, err = mapV1DataToProjectCreatePayload(ctx, v1Data)
 		if err != nil {
 			logger.With(errKey, err, "sfid", sfid, "slug", slug).ErrorContext(ctx, "failed to map v1 data to create payload")
-			return
+			return isTransientStoreErr(err)
 		}
 
 		var response *projectservice.ProjectFull
@@ -146,23 +168,27 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 
 	if err != nil {
 		logger.With(errKey, err, "sfid", sfid, "slug", slug).ErrorContext(ctx, "failed to sync project")
-		return
+		// updateProject / createProject can bubble a transient
+		// mapping-store failure from the payload mappers'
+		// parent lookups; NACK so it's redelivered rather than lost.
+		return isTransientStoreErr(err)
 	}
 
 	// Store the SFID mapping and reverse mapping.
 	if uid != "" {
-		if _, err := mappingsKV.Put(ctx, mappingKey, []byte(uid)); err != nil {
+		if _, err := mappingStore.Put(ctx, mappingKey, []byte(uid)); err != nil {
 			logger.With(errKey, err, "sfid", sfid, "uid", uid).WarnContext(ctx, "failed to store project mapping")
 		}
 
 		// Store reverse mapping (v2 UID -> v1 SFID).
 		reverseMappingKey := fmt.Sprintf("project.uid.%s", uid)
-		if _, err := mappingsKV.Put(ctx, reverseMappingKey, []byte(sfid)); err != nil {
+		if _, err := mappingStore.Put(ctx, reverseMappingKey, []byte(sfid)); err != nil {
 			logger.With(errKey, err, "project_uid", uid, "sfid", sfid).WarnContext(ctx, "failed to store project reverse mapping")
 		}
 	}
 
 	logger.With("project_uid", uid, "sfid", sfid, "slug", slug).InfoContext(ctx, "successfully synced project")
+	return false
 }
 
 // handleProjectDelete processes a project deletion.
@@ -170,9 +196,9 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 func handleProjectDelete(ctx context.Context, key string, sfid string, v1Principal string) bool {
 	// Check if we have an existing mapping using SFID.
 	mappingKey := fmt.Sprintf("project.sfid.%s", sfid)
-	entry, err := mappingsKV.Get(ctx, mappingKey)
+	entry, err := mappingStore.Get(ctx, mappingKey)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, ErrKeyNotFound) {
 			logger.With("sfid", sfid, "key", key).InfoContext(ctx, "project mapping not found, nothing to delete")
 			return false
 		}
@@ -180,8 +206,8 @@ func handleProjectDelete(ctx context.Context, key string, sfid string, v1Princip
 		return true // Retry on error.
 	}
 
-	existingUID := string(entry.Value())
-	if existingUID == "" || isTombstonedMapping(entry.Value()) {
+	existingUID := string(entry.Value)
+	if existingUID == "" || isTombstonedMapping(entry.Value) {
 		logger.With("sfid", sfid, "key", key).InfoContext(ctx, "project mapping empty or tombstoned, nothing to delete")
 		return false
 	}
@@ -312,17 +338,16 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any)
 		parentEntityID = strings.TrimSpace(parentEntityID)
 		// Look up the parent entity's V2 UID from SFID mappings.
 		parentEntityMappingKey := fmt.Sprintf("project.sfid.%s", parentEntityID)
-		if entry, err := mappingsKV.Get(ctx, parentEntityMappingKey); err == nil {
-			legalParentUID := string(entry.Value())
+		entry, err := mappingStore.Get(ctx, parentEntityMappingKey)
+		switch {
+		case err == nil:
+			legalParentUID := string(entry.Value)
 			payload.LegalParentUID = &legalParentUID
 			logger.With("parent_entity_sfid", parentEntityID, "legal_parent_uid", legalParentUID).DebugContext(ctx, "found legal parent UID from SFID mapping")
-		} else {
-			// We cannot sync this if the legal parent's v2 UID is not found in
-			// mappings.  Return an error. Ordinarily, we expect updates to come "in
-			// order". In v1 you cannot set a legal parent to a project you haven't
-			// created yet!  On the other hand, this may cause problems for our
-			// *initial data backfill*, as we cannot guarantee load order.
+		case errors.Is(err, ErrKeyNotFound):
 			return nil, fmt.Errorf("could not find legal parent UID in mappings for SFID %s", parentEntityID)
+		default:
+			return nil, wrapTransientStoreErr(fmt.Errorf("resolving legal parent UID for SFID %s: %w", parentEntityID, err))
 		}
 	}
 
@@ -356,17 +381,16 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any)
 	if parentProjectID != "" {
 		// Project has a parent in v1, look up the parent's V2 UID from SFID mappings.
 		parentMappingKey := fmt.Sprintf("project.sfid.%s", parentProjectID)
-		if entry, err := mappingsKV.Get(ctx, parentMappingKey); err == nil {
-			payload.ParentUID = string(entry.Value())
+		entry, err := mappingStore.Get(ctx, parentMappingKey)
+		switch {
+		case err == nil:
+			payload.ParentUID = string(entry.Value)
 			checkPublicParentUID = payload.ParentUID
 			logger.With("parent_project_sfid", parentProjectID, "parent_uid", payload.ParentUID).DebugContext(ctx, "found parent project UID from SFID mapping")
-		} else {
-			// We cannot sync this if the parent project's v2 UID is not found in
-			// mappings. Return an error. Ordinarily, we expect updates to come "in
-			// order". In v1 you cannot set a parent to a project you haven't created
-			// yet! On the other hand, this may cause problems for our *initial data
-			// backfill*, as we cannot guarantee load order.
+		case errors.Is(err, ErrKeyNotFound):
 			return nil, fmt.Errorf("could not find project parent UID in mappings for SFID %s", parentProjectID)
+		default:
+			return nil, wrapTransientStoreErr(fmt.Errorf("resolving parent project UID for SFID %s: %w", parentProjectID, err))
 		}
 	} else {
 		// Project has no parent in v1, so it should be a child of ROOT in V2.
@@ -496,17 +520,16 @@ func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string,
 		parentEntityID = strings.TrimSpace(parentEntityID)
 		// Look up the parent entity's V2 UID from SFID mappings.
 		parentEntityMappingKey := fmt.Sprintf("project.sfid.%s", parentEntityID)
-		if entry, err := mappingsKV.Get(ctx, parentEntityMappingKey); err == nil {
-			legalParentUID := string(entry.Value())
+		entry, err := mappingStore.Get(ctx, parentEntityMappingKey)
+		switch {
+		case err == nil:
+			legalParentUID := string(entry.Value)
 			payload.LegalParentUID = &legalParentUID
 			logger.With("parent_entity_sfid", parentEntityID, "legal_parent_uid", legalParentUID).DebugContext(ctx, "found legal parent UID from SFID mapping")
-		} else {
-			// We cannot sync this if the legal parent's v2 UID is not found in
-			// mappings.  Return an error. Ordinarily, we expect updates to come "in
-			// order". In v1 you cannot set a legal parent to a project you haven't
-			// created yet!  On the other hand, this may cause problems for our
-			// *initial data backfill*, as we cannot guarantee load order.
+		case errors.Is(err, ErrKeyNotFound):
 			return nil, fmt.Errorf("could not find legal parent UID in mappings for SFID %s", parentEntityID)
+		default:
+			return nil, wrapTransientStoreErr(fmt.Errorf("resolving legal parent UID for SFID %s: %w", parentEntityID, err))
 		}
 	}
 
@@ -523,17 +546,16 @@ func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string,
 	if parentProjectID != "" {
 		// Project has a parent in v1, look up the parent's V2 UID from SFID mappings.
 		parentMappingKey := fmt.Sprintf("project.sfid.%s", parentProjectID)
-		if entry, err := mappingsKV.Get(ctx, parentMappingKey); err == nil {
-			payload.ParentUID = string(entry.Value())
+		entry, err := mappingStore.Get(ctx, parentMappingKey)
+		switch {
+		case err == nil:
+			payload.ParentUID = string(entry.Value)
 			checkPublicParentUID = payload.ParentUID
 			logger.With("parent_project_sfid", parentProjectID, "parent_uid", payload.ParentUID).DebugContext(ctx, "found parent project UID from SFID mapping")
-		} else {
-			// We cannot sync this if the parent project's v2 UID is not found in
-			// mappings. Return an error. Ordinarily, we expect updates to come "in
-			// order". In v1 you cannot set a parent to a project you haven't created
-			// yet! On the other hand, this may cause problems for our *initial data
-			// backfill*, as we cannot guarantee load order.
+		case errors.Is(err, ErrKeyNotFound):
 			return nil, fmt.Errorf("could not find project parent UID in mappings for SFID %s", parentProjectID)
+		default:
+			return nil, wrapTransientStoreErr(fmt.Errorf("resolving parent project UID for SFID %s: %w", parentProjectID, err))
 		}
 	} else {
 		// Project has no parent in v1, so it should be a child of ROOT in V2.
