@@ -65,7 +65,10 @@ func parseAuthServiceResponse(data []byte) (firstName, lastName string, err erro
 		return "", "", fmt.Errorf("decoding auth service response: %w", err)
 	}
 	if !parsed.Success {
-		if strings.EqualFold(parsed.Error, "user not found") {
+		// Recognize both documented not-found forms: the search-path reply
+		// ("user not found") and the get-by-id reply ("The user does not exist.").
+		errMsg := strings.TrimRight(strings.TrimSpace(parsed.Error), ".")
+		if strings.EqualFold(errMsg, "user not found") || strings.EqualFold(errMsg, "The user does not exist") {
 			return "", "", errAuthServiceUserNotFound
 		}
 		if parsed.Error != "" {

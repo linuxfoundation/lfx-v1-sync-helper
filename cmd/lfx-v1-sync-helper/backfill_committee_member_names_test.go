@@ -491,9 +491,15 @@ func TestParseAuthServiceResponse(t *testing.T) {
 			wantLast:  "Last",
 		},
 		{
-			name:    "success=false, user not found — sentinel error",
-			payload: `{"success":false,"error":"user not found","data":{}}`,
-			wantErr: true,
+			name:         "success=false, user not found (search path) — sentinel error",
+			payload:      `{"success":false,"error":"user not found","data":{}}`,
+			wantErr:      true,
+			wantNotFound: true,
+		},
+		{
+			name:         "success=false, user does not exist (get-by-id path) — sentinel error",
+			payload:      `{"success":false,"error":"The user does not exist.","data":{}}`,
+			wantErr:      true,
 			wantNotFound: true,
 		},
 		{
