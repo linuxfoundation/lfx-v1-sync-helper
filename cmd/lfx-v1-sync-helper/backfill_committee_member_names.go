@@ -57,35 +57,52 @@ type backfillCommitteeMemberNamesResult struct {
 //  3. Calls UpdateCommitteeMember with SkipEnrichment=true so the committee
 //     service stores the supplied names as-is without attempting another
 //     username / auth-service lookup (which would fail again for these members).
+// classifyCommitteeMemberKey decodes and classifies a single entry from the
+// committee-members KV bucket.
+//
+// isLookup is true when the key is a secondary-index entry (prefix "lookup/")
+// that must be skipped without counting toward the inspected total.
+// needsBackfill is true when the record has both name fields empty and both
+// uid / committee_uid present — the only case that proceeds to the SFID lookup.
+// err is non-nil when the JSON payload cannot be decoded.
+// When isLookup is true the other return values are zero/false.
+func classifyCommitteeMemberKey(key string, value []byte) (rec committeeMemberKVRecord, isLookup bool, needsBackfill bool, err error) {
+	if strings.HasPrefix(key, "lookup/") {
+		return rec, true, false, nil
+	}
+	if decodeErr := json.Unmarshal(value, &rec); decodeErr != nil {
+		return rec, false, false, decodeErr
+	}
+	named := rec.FirstName != "" || rec.LastName != ""
+	missingIDs := rec.UID == "" || rec.CommitteeUID == ""
+	needsBackfill = !named && !missingIDs
+	return rec, false, needsBackfill, nil
+}
+
 func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCommitteeMemberNamesResult, error) {
 	const (
-		committeeMembersBucket = "committee-members"
-		v1ObjectKeyPrefix      = "platform-community__c."
+		committeeMembersStream       = "KV_committee-members"
+		committeeMembersSubject      = "$KV.committee-members.*"
+		committeeMembersSubjectPfx   = "$KV.committee-members."
+		v1ObjectKeyPrefix            = "platform-community__c."
 	)
 
-	membersKV, err := jsContext.KeyValue(ctx, committeeMembersBucket)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open %s KV bucket: %w", committeeMembersBucket, err)
+	opTimeout := cfg.NATSFetchMaxWait
+	if opTimeout <= 0 {
+		opTimeout = defaultNATSFetchMaxWait
 	}
 
-	// Drain all primary keys into a slice before processing. Holding a lister
-	// open while doing slow blocking work (DB queries, API calls) can cause
-	// missed heartbeats that silently truncate or restart the consumer, producing
-	// an incomplete backfill. See nats_scan.go for the documented hazard.
-	lister, err := membersKV.ListKeys(ctx, jetstream.IgnoreDeletes())
+	// Use ScanSubjectData instead of KeyValue.ListKeys so that enumeration
+	// errors are propagated rather than silently causing an incomplete result.
+	// ListKeys drives a push consumer whose channel closure cannot distinguish
+	// normal stream-end from a missed heartbeat, risking silent truncation on
+	// high-latency connections. ScanSubjectData uses sequential GetMsg calls
+	// with per-call context deadlines and propagates every non-ErrMsgNotFound
+	// error to the caller. See nats_scan.go for the full analysis.
+	subjectMap, err := ScanSubjectData(ctx, jsContext, committeeMembersStream, committeeMembersSubject, opTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list committee-member keys: %w", err)
+		return nil, fmt.Errorf("failed to enumerate %s: %w", committeeMembersStream, err)
 	}
-	var memberKeys []string
-	for key := range lister.Keys() {
-		if !strings.HasPrefix(key, "lookup/") {
-			memberKeys = append(memberKeys, key)
-		}
-	}
-	if stopErr := lister.Stop(); stopErr != nil {
-		logger.With(errKey, stopErr).WarnContext(ctx, "backfill: error stopping key lister")
-	}
-	logger.With("total_keys", len(memberKeys)).InfoContext(ctx, "backfill: enumerated committee-member keys")
 
 	kvGetFn := func(ctx context.Context, key string) ([]byte, error) {
 		entry, err := mappingsKV.Get(ctx, key)
@@ -97,39 +114,31 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 
 	res := &backfillCommitteeMemberNamesResult{}
 
-	for _, key := range memberKeys {
-		res.inspected++
+	for subject, value := range subjectMap {
+		key := strings.TrimPrefix(subject, committeeMembersSubjectPfx)
 
-		entry, getErr := membersKV.Get(ctx, key)
-		if getErr != nil {
-			logger.With(errKey, getErr, "key", key).
-				WarnContext(ctx, "backfill: failed to get committee-member KV entry, skipping")
-			res.errored++
+		rec, isLookup, needsBackfill, classErr := classifyCommitteeMemberKey(key, value)
+		if isLookup {
 			continue
 		}
-
-		var rec committeeMemberKVRecord
-		if unmarshalErr := json.Unmarshal(entry.Value(), &rec); unmarshalErr != nil {
-			logger.With(errKey, unmarshalErr, "key", key).
+		res.inspected++
+		if classErr != nil {
+			logger.With(errKey, classErr, "key", key).
 				WarnContext(ctx, "backfill: failed to decode committee-member record, skipping")
 			res.errored++
 			continue
 		}
-
-		// Skip if either name field is already populated.
-		if rec.FirstName != "" || rec.LastName != "" {
+		if !needsBackfill {
+			if rec.UID == "" || rec.CommitteeUID == "" {
+				logger.With("key", key).
+					WarnContext(ctx, "backfill: record missing uid or committee_uid, skipping")
+			}
 			res.skipped++
 			continue
 		}
 
 		memberUID := rec.UID
 		committeeUID := rec.CommitteeUID
-		if memberUID == "" || committeeUID == "" {
-			logger.With("key", key).
-				WarnContext(ctx, "backfill: record missing uid or committee_uid, skipping")
-			res.skipped++
-			continue
-		}
 
 		// Resolve the contact SFID needed to look up the name in merged_user.
 		contactSFID, resolveErr := resolveContactSFIDForMember(ctx, memberUID, v1ObjectKeyPrefix, kvGetFn, getV1ObjectData)

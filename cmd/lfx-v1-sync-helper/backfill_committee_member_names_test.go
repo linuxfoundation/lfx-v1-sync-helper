@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
-
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 )
 
@@ -332,12 +331,12 @@ func TestClassifyCommitteeMemberKVRecord(t *testing.T) {
 	}
 
 	cases := []struct {
-		name         string
-		key          string
-		value        []byte
-		wantLookup   bool // key is a lookup-index entry — skipped before inspected++
-		wantSkip     bool // inspected but name already set or missing uid
-		wantNeedsOp  bool // nameless, has uid + committee_uid → should proceed to SFID lookup
+		name          string
+		key           string
+		value         []byte
+		wantLookup    bool // key is a lookup-index entry — skipped before inspected++
+		wantSkip      bool // inspected but name already set or missing uid
+		wantNeedsOp   bool // nameless, has uid + committee_uid → should proceed to SFID lookup
 		wantErrDecode bool
 	}{
 		{
@@ -404,17 +403,15 @@ func TestClassifyCommitteeMemberKVRecord(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Mirror the classification logic from backfillCommitteeMemberNames.
-			isLookup := len(tc.key) > 7 && tc.key[:7] == "lookup/"
+			rec, isLookup, needsBackfill, err := classifyCommitteeMemberKey(tc.key, tc.value)
+
 			if isLookup != tc.wantLookup {
-				t.Errorf("lookup detection: got %v, want %v", isLookup, tc.wantLookup)
+				t.Errorf("isLookup: got %v, want %v", isLookup, tc.wantLookup)
 			}
 			if isLookup {
 				return
 			}
 
-			var rec committeeMemberKVRecord
-			err := json.Unmarshal(tc.value, &rec)
 			if tc.wantErrDecode {
 				if err == nil {
 					t.Error("expected decode error, got nil")
@@ -427,15 +424,13 @@ func TestClassifyCommitteeMemberKVRecord(t *testing.T) {
 
 			named := rec.FirstName != "" || rec.LastName != ""
 			missingIDs := rec.UID == "" || rec.CommitteeUID == ""
-
 			gotSkip := named || missingIDs
-			gotNeedsOp := !named && !missingIDs
 
 			if gotSkip != tc.wantSkip {
 				t.Errorf("skip: got %v, want %v (named=%v missingIDs=%v)", gotSkip, tc.wantSkip, named, missingIDs)
 			}
-			if gotNeedsOp != tc.wantNeedsOp {
-				t.Errorf("needsOp: got %v, want %v", gotNeedsOp, tc.wantNeedsOp)
+			if needsBackfill != tc.wantNeedsOp {
+				t.Errorf("needsBackfill: got %v, want %v", needsBackfill, tc.wantNeedsOp)
 			}
 		})
 	}
