@@ -204,6 +204,14 @@ func TestResolveContactNames(t *testing.T) {
 			cErr:      errors.New("connection reset"),
 			wantFirst: "", wantLast: "", wantContactCalls: 1,
 		},
+		{
+			name: "contact error — best-effort, returns partial merged_user name",
+			muResult: &mergedUserRow{
+				FirstName: sql.NullString{String: "Dana", Valid: true},
+			},
+			cErr:      errors.New("select timeout"),
+			wantFirst: "Dana", wantLast: "", wantContactCalls: 1,
+		},
 	}
 
 	for _, tc := range cases {

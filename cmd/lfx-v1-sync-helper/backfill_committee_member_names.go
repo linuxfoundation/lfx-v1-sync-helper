@@ -77,9 +77,11 @@ func classifyCommitteeMemberKey(key string, value []byte) (rec committeeMemberKV
 //  2. Reads first_name/last_name via the contact SFID: tries
 //     salesforce.merged_user first (contacts with or without an LFX account),
 //     then falls back to salesforce.contact (all Salesforce contacts).
-//  3. Calls UpdateCommitteeMember with the resolved names. SkipEnrichment is
-//     NOT set: enrichMember cannot overwrite non-empty names, and leaving it
-//     enabled preserves email→username resolution and avatar population.
+//  3. Calls UpdateCommitteeMember with SkipEnrichment=true to prevent
+//     enrichMember from clearing a stored username: enrichMember clears
+//     member.Username before the email-based lookup and returns early on any
+//     failure, which would erase an LFID on a member who has one. Names we
+//     supply are safe: enrichMember only fills name fields when they are empty.
 func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCommitteeMemberNamesResult, error) {
 	const (
 		committeeMembersStream     = "KV_committee-members"
@@ -206,11 +208,12 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 		if lastName != "" {
 			payload.LastName = &lastName
 		}
-		// SkipEnrichment tells the committee service to store the names as-is
-		// SkipEnrichment is intentionally not set: enrichMember only fills name
-		// fields when they are empty, so it cannot overwrite the names we
-		// supply, and leaving enrichment enabled preserves email→username
-		// resolution and avatar population for these members.
+		// SkipEnrichment=true: enrichMember unconditionally clears member.Username
+		// before the lookup and returns early on any failure, which would erase a
+		// stored LFID. The backfill targets members with no names; some of those
+		// have usernames we must not clear. Names we supply survive enrichment
+		// because enrichMember only fills name fields when they are already empty.
+		payload.SkipEnrichment = true
 
 		token, tokenErr := generateCachedJWTToken(ctx, committeeServiceAudience, "")
 		if tokenErr != nil {
