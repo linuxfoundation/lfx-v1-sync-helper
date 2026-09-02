@@ -29,7 +29,7 @@ type backfillCommitteeMemberNamesResult struct {
 	inspected int
 	skipped   int // already have a name, missing uid/committee_uid, or name set concurrently
 	noMapping int // no usable reverse mapping to resolve the contact SFID
-	noName    int // contact SFID found but merged_user row has no name
+	noName    int // contact SFID found but neither merged_user nor salesforce.contact has a name
 	updated   int // successfully patched
 	dryRun    int // would have patched (dry-run mode)
 	errored   int // fetch or update failed
@@ -74,8 +74,9 @@ func classifyCommitteeMemberKey(key string, value []byte) (rec committeeMemberKV
 //     (committee_member.uid.<memberUID> → projectSFID:committeeSFID:contactSFID).
 //     For old-format "poisoned" entries where the third field is a UUID,
 //     resolves the contact SFID from the v1-objects record.
-//  2. Reads first_name/last_name directly from salesforce.merged_user via
-//     the contact SFID — no username required.
+//  2. Reads first_name/last_name via the contact SFID: tries
+//     salesforce.merged_user first (contacts with or without an LFX account),
+//     then falls back to salesforce.contact (all Salesforce contacts).
 //  3. Calls UpdateCommitteeMember with SkipEnrichment=true so the committee
 //     service stores the supplied names as-is without attempting another
 //     username / auth-service lookup (which would fail again for these members).

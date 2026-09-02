@@ -778,16 +778,24 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 		user, err := lookupMergedUser(ctx, contactNameV1)
 		if err != nil {
 			logger.With(errKey, err, "contact_name_sfid", contactNameV1).WarnContext(ctx, "failed to lookup user from v1 API, falling back to name-only lookup")
-			// The lookup fails for members who have not yet created an LFX account
-			// (no username in merged_user). Fall back to the raw DB row so we can
-			// still populate first_name/last_name even without a username.
-			if row, rowErr := dbLookupMergedUserRowBySFID(ctx, contactNameV1); rowErr == nil && row != nil {
-				applyRowNames(row, &payload.FirstName, &payload.LastName)
+			// The lookup fails for members who have not yet created an LFX account.
+			// Fall back to merged_user (name-only rows) then salesforce.contact (all
+			// contacts regardless of LFX account status).
+			firstName, lastName, nameErr := resolveContactNames(ctx, contactNameV1)
+			if nameErr != nil {
+				logger.With(errKey, nameErr, "contact_name_sfid", contactNameV1).WarnContext(ctx, "failed to resolve contact names from DB")
+			} else if firstName != "" || lastName != "" {
+				if firstName != "" {
+					payload.FirstName = &firstName
+				}
+				if lastName != "" {
+					payload.LastName = &lastName
+				}
+				// SkipEnrichment prevents the committee service from overwriting the
+				// names we set here with empty values via another auth-service lookup,
+				// which would fail identically for non-LFX-account members.
+				payload.SkipEnrichment = true
 			}
-			// SkipEnrichment prevents the committee service from overwriting the
-			// names we set here with empty values via another auth-service lookup,
-			// which would fail the same way for non-LFX-account members.
-			payload.SkipEnrichment = true
 		} else {
 			payload.Username = &user.Username
 			if user.FirstName != "" {
@@ -932,6 +940,30 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 	return payload, nil
 }
 
+// resolveContactNames fetches first/last name for a Salesforce contact SFID
+// when lookupMergedUser has failed (member has no LFX account). It tries
+// salesforce.merged_user first (has username-less rows for some contacts),
+// then falls back to salesforce.contact (contains ALL Salesforce contacts
+// regardless of LFX account status). Returns empty strings when neither table
+// has a row.
+func resolveContactNames(ctx context.Context, sfid string) (firstName, lastName string, err error) {
+	if mu, muErr := dbLookupMergedUserRowBySFID(ctx, sfid); muErr != nil {
+		return "", "", muErr
+	} else if mu != nil {
+		firstName = mu.FirstName.String
+		lastName = mu.LastName.String
+	}
+	if firstName == "" && lastName == "" {
+		if c, cErr := dbLookupContactBySFID(ctx, sfid); cErr != nil {
+			return "", "", cErr
+		} else if c != nil {
+			firstName = c.FirstName.String
+			lastName = c.LastName.String
+		}
+	}
+	return firstName, lastName, nil
+}
+
 // applyRowNames sets FirstName and LastName on the pointed-to *string values
 // from a merged_user row when they are non-empty. Used as the no-LFX-account
 // fallback when lookupMergedUser fails (no username in merged_user).
@@ -967,16 +999,24 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID s
 		user, err := lookupMergedUser(ctx, contactNameV1)
 		if err != nil {
 			logger.With(errKey, err, "contact_name_sfid", contactNameV1).WarnContext(ctx, "failed to lookup user from v1 API, falling back to name-only lookup")
-			// The lookup fails for members who have not yet created an LFX account
-			// (no username in merged_user). Fall back to the raw DB row so we can
-			// still populate first_name/last_name even without a username.
-			if row, rowErr := dbLookupMergedUserRowBySFID(ctx, contactNameV1); rowErr == nil && row != nil {
-				applyRowNames(row, &payload.FirstName, &payload.LastName)
+			// The lookup fails for members who have not yet created an LFX account.
+			// Fall back to merged_user (name-only rows) then salesforce.contact (all
+			// contacts regardless of LFX account status).
+			firstName, lastName, nameErr := resolveContactNames(ctx, contactNameV1)
+			if nameErr != nil {
+				logger.With(errKey, nameErr, "contact_name_sfid", contactNameV1).WarnContext(ctx, "failed to resolve contact names from DB")
+			} else if firstName != "" || lastName != "" {
+				if firstName != "" {
+					payload.FirstName = &firstName
+				}
+				if lastName != "" {
+					payload.LastName = &lastName
+				}
+				// SkipEnrichment prevents the committee service from overwriting the
+				// names we set here with empty values via another auth-service lookup,
+				// which would fail identically for non-LFX-account members.
+				payload.SkipEnrichment = true
 			}
-			// SkipEnrichment prevents the committee service from overwriting the
-			// names we set here with empty values via another auth-service lookup,
-			// which would fail the same way for non-LFX-account members.
-			payload.SkipEnrichment = true
 		} else {
 			payload.Username = &user.Username
 			if user.FirstName != "" {

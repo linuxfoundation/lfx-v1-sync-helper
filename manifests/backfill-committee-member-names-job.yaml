@@ -8,10 +8,15 @@
 #
 # The job reads each forward mapping (committee_member.sfid.*), skips members
 # that already have a name, resolves the contact SFID from the reverse mapping
-# (handling old "poisoned" entries via v1-objects), reads first/last name
-# directly from salesforce.merged_user, then patches V2 with SkipEnrichment=true
-# so the committee service stores the names as-is without another auth-service
+# (handling old "poisoned" entries via v1-objects), reads first/last name from
+# salesforce.merged_user (falling back to salesforce.contact for members who
+# never created an LFX account), then patches V2 with SkipEnrichment=true so
+# the committee service stores the names as-is without another auth-service
 # lookup.
+#
+# Prerequisites: the v1 DB role must have SELECT on salesforce.contact in
+# addition to salesforce.merged_user (confirm with:
+#   SELECT has_table_privilege('<role>', 'salesforce.contact', 'SELECT')).
 #
 # Idempotent: records that already have a name are skipped. Safe to re-run.
 #
