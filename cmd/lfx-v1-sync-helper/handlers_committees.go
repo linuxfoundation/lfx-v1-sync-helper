@@ -784,6 +784,10 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 			if row, rowErr := dbLookupMergedUserRowBySFID(ctx, contactNameV1); rowErr == nil && row != nil {
 				applyRowNames(row, &payload.FirstName, &payload.LastName)
 			}
+			// SkipEnrichment prevents the committee service from overwriting the
+			// names we set here with empty values via another auth-service lookup,
+			// which would fail the same way for non-LFX-account members.
+			payload.SkipEnrichment = true
 		} else {
 			payload.Username = &user.Username
 			if user.FirstName != "" {
@@ -969,6 +973,10 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID s
 			if row, rowErr := dbLookupMergedUserRowBySFID(ctx, contactNameV1); rowErr == nil && row != nil {
 				applyRowNames(row, &payload.FirstName, &payload.LastName)
 			}
+			// SkipEnrichment prevents the committee service from overwriting the
+			// names we set here with empty values via another auth-service lookup,
+			// which would fail the same way for non-LFX-account members.
+			payload.SkipEnrichment = true
 		} else {
 			payload.Username = &user.Username
 			if user.FirstName != "" {

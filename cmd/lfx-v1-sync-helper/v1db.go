@@ -67,6 +67,42 @@ type alternateEmailRow struct {
 	LastModifiedDate sql.NullTime   `bun:"lastmodifieddate"`
 }
 
+// contactRow maps the first/last name columns from salesforce.contact. This
+// table contains ALL Salesforce contacts, including those who have never
+// created an LFX account and therefore have no row in salesforce.merged_user.
+// Used as a fallback name source when merged_user returns no row.
+type contactRow struct {
+	bun.BaseModel `bun:"table:salesforce.contact,alias:c"`
+
+	SFID      string         `bun:"sfid"`
+	FirstName sql.NullString `bun:"firstname"`
+	LastName  sql.NullString `bun:"lastname"`
+	IsDeleted sql.NullBool   `bun:"isdeleted"`
+}
+
+// dbLookupContactBySFID fetches the first/last name from salesforce.contact
+// for a given contact SFID. Returns (nil, nil) on miss (including deleted rows).
+func dbLookupContactBySFID(ctx context.Context, sfid string) (*contactRow, error) {
+	if sfid == "" {
+		return nil, nil
+	}
+	row := &contactRow{}
+	qCtx, cancel := withQueryTimeout(ctx)
+	defer cancel()
+	err := v1DB.NewSelect().Model(row).
+		Where("c.sfid = ?", sfid).
+		Where("c.isdeleted IS NOT TRUE").
+		Limit(1).
+		Scan(qCtx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to query contact by sfid: %w", err)
+	}
+	return row, nil
+}
+
 // userSkillRow maps the columns we need from salesforce.user_skills joined to
 // salesforce.skills. It is keyed by lfid, not sfid: user_skills is a plain
 // platform table, not a Salesforce __c object.
