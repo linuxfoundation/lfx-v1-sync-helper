@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -34,4 +35,38 @@ func getProjectUIDBySlug(ctx context.Context, slug string) (string, error) {
 
 	logger.With("project_uid", projectUID).With("slug", slug).DebugContext(ctx, "successfully retrieved project UID")
 	return projectUID, nil
+}
+
+// authServiceMetadataResponse is the minimal shape of the response from
+// lfx.auth-service.user_metadata.read used to extract name fields.
+type authServiceMetadataResponse struct {
+	Success bool `json:"success"`
+	Data    struct {
+		GivenName  string `json:"given_name"`
+		FamilyName string `json:"family_name"`
+	} `json:"data"`
+}
+
+// lookupNamesFromAuthService queries the auth service via NATS for the
+// given_name and family_name stored in Auth0 user_metadata for the given
+// LFX username. Returns empty strings (no error) when the user exists but
+// has no name set. The subject accepts a raw username as its payload.
+func lookupNamesFromAuthService(ctx context.Context, username string) (firstName, lastName string, err error) {
+	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	resp, err := natsConn.RequestWithContext(requestCtx, "lfx.auth-service.user_metadata.read", []byte(username))
+	if err != nil {
+		return "", "", fmt.Errorf("auth service NATS request for %s: %w", username, err)
+	}
+
+	var parsed authServiceMetadataResponse
+	if decodeErr := json.Unmarshal(resp.Data, &parsed); decodeErr != nil {
+		return "", "", fmt.Errorf("decoding auth service response for %s: %w", username, decodeErr)
+	}
+	if !parsed.Success {
+		return "", "", fmt.Errorf("auth service returned success=false for %s", username)
+	}
+
+	return strings.TrimSpace(parsed.Data.GivenName), strings.TrimSpace(parsed.Data.FamilyName), nil
 }

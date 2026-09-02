@@ -22,6 +22,7 @@ type committeeMemberKVRecord struct {
 	CommitteeUID string `json:"committee_uid"`
 	FirstName    string `json:"first_name"`
 	LastName     string `json:"last_name"`
+	Username     string `json:"username"`
 }
 
 // backfillCommitteeMemberNamesResult summarizes a backfill run.
@@ -29,7 +30,7 @@ type backfillCommitteeMemberNamesResult struct {
 	inspected int
 	skipped   int // already have a name, missing uid/committee_uid, or name set concurrently
 	noMapping int // no usable reverse mapping to resolve the contact SFID
-	noName    int // contact SFID found but merged_user row has no name
+	noName    int // contact SFID found but no name in merged_user or auth service
 	updated   int // successfully patched
 	dryRun    int // would have patched (dry-run mode)
 	errored   int // fetch or update failed
@@ -74,11 +75,13 @@ func classifyCommitteeMemberKey(key string, value []byte) (rec committeeMemberKV
 //     (committee_member.uid.<memberUID> → projectSFID:committeeSFID:contactSFID).
 //     For old-format "poisoned" entries where the third field is a UUID,
 //     resolves the contact SFID from the v1-objects record.
-//  2. Reads first_name/last_name directly from salesforce.merged_user via
-//     the contact SFID — no username required.
-//  3. Calls UpdateCommitteeMember with SkipEnrichment=true so the committee
+//  2. Reads first_name/last_name from salesforce.merged_user via the contact SFID.
+//  3. If merged_user has no name AND the KV record carries a username, falls back
+//     to the auth service (lfx.auth-service.user_metadata.read) which returns the
+//     name stored in Auth0 user_metadata.
+//  4. Calls UpdateCommitteeMember with SkipEnrichment=true so the committee
 //     service stores the supplied names as-is without attempting another
-//     username / auth-service lookup (which would fail again for these members).
+//     username / auth-service lookup.
 func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCommitteeMemberNamesResult, error) {
 	const (
 		committeeMembersStream     = "KV_committee-members"
@@ -163,18 +166,30 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 			res.errored++
 			continue
 		}
-		if row == nil {
-			logger.With("member_uid", memberUID).
-				WarnContext(ctx, "backfill: no merged_user row found for contact SFID")
-			res.noName++
-			continue
+
+		var firstName, lastName string
+		if row != nil {
+			firstName = row.FirstName.String
+			lastName = row.LastName.String
 		}
 
-		firstName := row.FirstName.String
-		lastName := row.LastName.String
+		// If merged_user has no name and the KV record has a username, try the
+		// auth service — it stores given_name/family_name in Auth0 user_metadata
+		// for members who created an LFX account after the initial sync.
+		if firstName == "" && lastName == "" && rec.Username != "" {
+			authFirst, authLast, authErr := lookupNamesFromAuthService(ctx, rec.Username)
+			if authErr != nil {
+				logger.With(errKey, authErr, "member_uid", memberUID, "username", rec.Username).
+					WarnContext(ctx, "backfill: error querying auth service for name")
+			} else {
+				firstName = authFirst
+				lastName = authLast
+			}
+		}
+
 		if firstName == "" && lastName == "" {
-			logger.With("member_uid", memberUID).
-				WarnContext(ctx, "backfill: merged_user row has no first or last name")
+			logger.With("member_uid", memberUID, "has_username", rec.Username != "").
+				WarnContext(ctx, "backfill: no name found in merged_user or auth service")
 			res.noName++
 			continue
 		}
