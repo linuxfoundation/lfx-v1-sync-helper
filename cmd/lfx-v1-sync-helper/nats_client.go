@@ -40,7 +40,8 @@ func getProjectUIDBySlug(ctx context.Context, slug string) (string, error) {
 // authServiceMetadataResponse is the minimal shape of the response from
 // lfx.auth-service.user_metadata.read used to extract name fields.
 type authServiceMetadataResponse struct {
-	Success bool `json:"success"`
+	Success bool   `json:"success"`
+	Error   string `json:"error"` // populated when success=false (e.g. "user not found", "invalid token")
 	Data    struct {
 		GivenName  string `json:"given_name"`
 		FamilyName string `json:"family_name"`
@@ -58,6 +59,9 @@ func parseAuthServiceResponse(data []byte) (firstName, lastName string, err erro
 		return "", "", fmt.Errorf("decoding auth service response: %w", err)
 	}
 	if !parsed.Success {
+		if parsed.Error != "" {
+			return "", "", fmt.Errorf("auth service returned success=false: %s", parsed.Error)
+		}
 		return "", "", fmt.Errorf("auth service returned success=false")
 	}
 	return strings.TrimSpace(parsed.Data.GivenName), strings.TrimSpace(parsed.Data.FamilyName), nil

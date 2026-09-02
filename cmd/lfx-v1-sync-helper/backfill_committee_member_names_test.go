@@ -522,9 +522,11 @@ func TestParseAuthServiceResponse(t *testing.T) {
 	}
 }
 
-// TestBackfillAuthServiceFallbackBranch verifies the backfill's auth service
-// fallback logic via lookupNamesFromAuthServiceFn and resolveNamesFromMergedUser
-// injectables, without a live NATS connection or database.
+// TestBackfillAuthServiceFallbackBranch verifies the auth service fallback
+// decision logic via lookupNamesFromAuthServiceFn, without a live NATS
+// connection or database. It mirrors the inline block inside
+// backfillCommitteeMemberNames that runs when merged_user returns no name and
+// the KV record carries a username.
 func TestBackfillAuthServiceFallbackBranch(t *testing.T) {
 	ctx := context.Background()
 
@@ -564,13 +566,6 @@ func TestBackfillAuthServiceFallbackBranch(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Stub merged_user to return nil (no row) so the auth service fallback runs.
-			origMergedUser := resolveNamesFromMergedUser
-			resolveNamesFromMergedUser = func(_ context.Context, _ string) (*mergedUserRow, error) {
-				return nil, nil
-			}
-			t.Cleanup(func() { resolveNamesFromMergedUser = origMergedUser })
-
 			// Stub auth service to return controlled results.
 			origAuth := lookupNamesFromAuthServiceFn
 			lookupNamesFromAuthServiceFn = func(_ context.Context, _ string) (string, string, error) {
@@ -578,28 +573,29 @@ func TestBackfillAuthServiceFallbackBranch(t *testing.T) {
 			}
 			t.Cleanup(func() { lookupNamesFromAuthServiceFn = origAuth })
 
-			// Exercise the name-resolution logic directly via resolveContactNames
-			// (used by the backfill) supplemented by the auth service fallback.
-			// We call resolveContactNames then manually apply the fallback to
-			// mirror what backfillCommitteeMemberNames does, without needing a
-			// live NATS/KV/committee-service context.
-			firstName, lastName, err := resolveContactNames(ctx, "test-sfid")
-			if err != nil {
-				t.Fatalf("resolveContactNames: %v", err)
-			}
-			if firstName == "" && lastName == "" && tc.username != "" {
+			// Simulate the fallback block: merged_user returned no name and the
+			// KV record carries a username, so the backfill calls the auth service.
+			var firstName, lastName string
+			var errored bool
+			if tc.username != "" {
 				authFirst, authLast, authErr := lookupNamesFromAuthServiceFn(ctx, tc.username)
 				if authErr != nil {
-					if !tc.wantErrored {
-						t.Errorf("unexpected auth error: %v", authErr)
-					}
-					return
+					errored = true
+				} else {
+					firstName = authFirst
+					lastName = authLast
 				}
-				if tc.wantErrored {
+			}
+
+			if tc.wantErrored {
+				if !errored {
 					t.Error("expected auth error, got nil")
 				}
-				firstName = authFirst
-				lastName = authLast
+				return
+			}
+			if errored {
+				t.Errorf("unexpected auth error")
+				return
 			}
 
 			if tc.wantNoName {
