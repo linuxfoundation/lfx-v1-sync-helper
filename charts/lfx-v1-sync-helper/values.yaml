@@ -367,6 +367,12 @@ walListener:
             - insert
             - update
             - delete
+          # salesforce.user_skills (keyed by id, not sfid; requires
+          # REPLICA IDENTITY FULL so deletes carry lfid/skill_id)
+          user_skills:
+            - insert
+            - update
+            - delete
           # salesforce_b2b.User
           User:
             - insert
