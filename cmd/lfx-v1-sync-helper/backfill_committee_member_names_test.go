@@ -144,22 +144,22 @@ func TestMemberToUpdatePayload_NilOptionalFields(t *testing.T) {
 }
 
 // TestResolveContactNames verifies the resolveContactNames helper: merged_user
-// hit, contact fallback, per-field partial fill, both miss, and error paths.
-// Stubs are injected via the package-level resolveNamesFromMergedUser /
-// resolveNamesFromContact vars so no live database is required.
+// hit, contact fallback, per-field partial fill, both miss, short-circuit on
+// merged_user error, and contact error. Stubs are injected via the package-level
+// resolveNamesFromMergedUser / resolveNamesFromContact vars; no live DB needed.
 func TestResolveContactNames(t *testing.T) {
 	ctx := context.Background()
 
 	cases := []struct {
-		name        string
-		muResult    *mergedUserRow
-		muErr       error
-		cResult     *contactRow
-		cErr        error
-		wantFirst   string
-		wantLast    string
-		wantErr     bool
-		wantSkipEnr bool // whether caller should set SkipEnrichment (both names non-empty)
+		name             string
+		muResult         *mergedUserRow
+		muErr            error
+		cResult          *contactRow
+		cErr             error
+		wantFirst        string
+		wantLast         string
+		wantErr          bool
+		wantContactCalls int // expected salesforce.contact lookup count
 	}{
 		{
 			name: "merged_user hit — full name, no contact call needed",
@@ -167,7 +167,7 @@ func TestResolveContactNames(t *testing.T) {
 				FirstName: sql.NullString{String: "Alice", Valid: true},
 				LastName:  sql.NullString{String: "Smith", Valid: true},
 			},
-			wantFirst: "Alice", wantLast: "Smith", wantSkipEnr: true,
+			wantFirst: "Alice", wantLast: "Smith", wantContactCalls: 0,
 		},
 		{
 			name:     "merged_user miss, contact hit",
@@ -176,7 +176,7 @@ func TestResolveContactNames(t *testing.T) {
 				FirstName: sql.NullString{String: "Bob", Valid: true},
 				LastName:  sql.NullString{String: "Jones", Valid: true},
 			},
-			wantFirst: "Bob", wantLast: "Jones", wantSkipEnr: true,
+			wantFirst: "Bob", wantLast: "Jones", wantContactCalls: 1,
 		},
 		{
 			name: "partial merged_user (first only), contact fills last",
@@ -186,22 +186,24 @@ func TestResolveContactNames(t *testing.T) {
 			cResult: &contactRow{
 				LastName: sql.NullString{String: "Williams", Valid: true},
 			},
-			wantFirst: "Carol", wantLast: "Williams", wantSkipEnr: true,
+			wantFirst: "Carol", wantLast: "Williams", wantContactCalls: 1,
 		},
 		{
-			name:      "both miss — empty strings, nil error, no SkipEnrichment",
-			wantFirst: "", wantLast: "", wantSkipEnr: false,
+			name:      "both miss — returns empty strings, nil error",
+			wantFirst: "", wantLast: "", wantContactCalls: 1,
 		},
 		{
-			name:    "merged_user error — propagates, contact not attempted",
-			muErr:   errors.New("db timeout"),
-			wantErr: true,
+			name:             "merged_user error — propagates, contact not attempted",
+			muErr:            errors.New("db timeout"),
+			wantErr:          true,
+			wantContactCalls: 0,
 		},
 		{
-			name:     "contact error — propagates",
-			muResult: nil,
-			cErr:     errors.New("connection reset"),
-			wantErr:  true,
+			name:             "contact error — propagates",
+			muResult:         nil,
+			cErr:             errors.New("connection reset"),
+			wantErr:          true,
+			wantContactCalls: 1,
 		},
 	}
 
@@ -216,13 +218,18 @@ func TestResolveContactNames(t *testing.T) {
 			resolveNamesFromMergedUser = func(_ context.Context, _ string) (*mergedUserRow, error) {
 				return tc.muResult, tc.muErr
 			}
+			contactCalls := 0
 			resolveNamesFromContact = func(_ context.Context, _ string) (*contactRow, error) {
+				contactCalls++
 				return tc.cResult, tc.cErr
 			}
 
 			gotFirst, gotLast, err := resolveContactNames(ctx, "0034000000AbcDEF")
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if contactCalls != tc.wantContactCalls {
+				t.Errorf("contact lookups: got %d, want %d", contactCalls, tc.wantContactCalls)
 			}
 			if err != nil {
 				return
@@ -232,11 +239,6 @@ func TestResolveContactNames(t *testing.T) {
 			}
 			if gotLast != tc.wantLast {
 				t.Errorf("lastName: got %q, want %q", gotLast, tc.wantLast)
-			}
-			// Callers must set SkipEnrichment only when at least one name resolved.
-			gotSkip := gotFirst != "" || gotLast != ""
-			if gotSkip != tc.wantSkipEnr {
-				t.Errorf("SkipEnrichment condition: got %v, want %v", gotSkip, tc.wantSkipEnr)
 			}
 		})
 	}

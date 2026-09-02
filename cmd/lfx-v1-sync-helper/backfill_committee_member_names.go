@@ -160,13 +160,13 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 		// merged_user first, then falls back per-field to salesforce.contact.
 		firstName, lastName, nameErr := resolveContactNames(ctx, contactSFID)
 		if nameErr != nil {
-			logger.With(errKey, nameErr, "member_uid", memberUID).
+			logger.With(errKey, nameErr, "committee_uid", committeeUID).
 				WarnContext(ctx, "backfill: error looking up contact names from DB")
 			res.errored++
 			continue
 		}
 		if firstName == "" && lastName == "" {
-			logger.With("member_uid", memberUID).
+			logger.With("committee_uid", committeeUID).
 				WarnContext(ctx, "backfill: no name found in merged_user or contact for member")
 			res.noName++
 			continue
