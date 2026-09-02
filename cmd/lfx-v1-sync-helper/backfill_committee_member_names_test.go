@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -458,11 +459,12 @@ func TestClassifyCommitteeMemberKVRecord(t *testing.T) {
 // caught without needing a live NATS connection.
 func TestParseAuthServiceResponse(t *testing.T) {
 	cases := []struct {
-		name      string
-		payload   string
-		wantFirst string
-		wantLast  string
-		wantErr   bool
+		name         string
+		payload      string
+		wantFirst    string
+		wantLast     string
+		wantErr      bool
+		wantNotFound bool // error must be errAuthServiceUserNotFound
 	}{
 		{
 			name:      "both names present",
@@ -489,7 +491,18 @@ func TestParseAuthServiceResponse(t *testing.T) {
 			wantLast:  "Last",
 		},
 		{
-			name:    "success=false — treated as error",
+			name:    "success=false, user not found — sentinel error",
+			payload: `{"success":false,"error":"user not found","data":{}}`,
+			wantErr: true,
+			wantNotFound: true,
+		},
+		{
+			name:    "success=false, other error — generic error",
+			payload: `{"success":false,"error":"invalid token","data":{}}`,
+			wantErr: true,
+		},
+		{
+			name:    "success=false, no error field — generic error",
 			payload: `{"success":false,"data":{}}`,
 			wantErr: true,
 		},
@@ -506,6 +519,13 @@ func TestParseAuthServiceResponse(t *testing.T) {
 			if tc.wantErr {
 				if err == nil {
 					t.Error("expected error, got nil")
+					return
+				}
+				if tc.wantNotFound && !errors.Is(err, errAuthServiceUserNotFound) {
+					t.Errorf("expected errAuthServiceUserNotFound, got %v", err)
+				}
+				if !tc.wantNotFound && errors.Is(err, errAuthServiceUserNotFound) {
+					t.Errorf("expected non-sentinel error, got errAuthServiceUserNotFound")
 				}
 				return
 			}

@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -176,19 +177,35 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 			lastName = row.LastName.String
 		}
 
-		// If merged_user has no name and the KV record has a username, try the
-		// auth service — it stores given_name/family_name in Auth0 user_metadata
-		// for members who created an LFX account after the initial sync.
-		if firstName == "" && lastName == "" && rec.Username != "" {
-			authFirst, authLast, authErr := lookupNamesFromAuthServiceFn(ctx, rec.Username)
-			if authErr != nil {
-				logger.With(errKey, authErr, "member_uid", memberUID, "username", rec.Username).
-					WarnContext(ctx, "backfill: error querying auth service for name")
-				res.errored++
-				continue
+		// If merged_user has no name, fall back to the auth service.
+		// Prefer the live username from merged_user (username__c) over the
+		// potentially stale copy in the KV record — members who created an LFX
+		// account after the initial sync often have an empty KV username while
+		// merged_user.username__c is already populated.
+		if firstName == "" && lastName == "" {
+			username := rec.Username
+			if row != nil && row.Username.Valid && row.Username.String != "" {
+				username = row.Username.String
 			}
-			firstName = authFirst
-			lastName = authLast
+			if username != "" {
+				authFirst, authLast, authErr := lookupNamesFromAuthServiceFn(ctx, username)
+				switch {
+				case authErr == nil:
+					firstName = authFirst
+					lastName = authLast
+				case errors.Is(authErr, errAuthServiceUserNotFound):
+					// Permanent miss — user does not exist in Auth0; count as noName.
+					logger.With("member_uid", memberUID, "username", username).
+						WarnContext(ctx, "backfill: auth service reports user not found")
+					res.noName++
+					continue
+				default:
+					logger.With(errKey, authErr, "member_uid", memberUID, "username", username).
+						WarnContext(ctx, "backfill: error querying auth service for name")
+					res.errored++
+					continue
+				}
+			}
 		}
 
 		if firstName == "" && lastName == "" {
