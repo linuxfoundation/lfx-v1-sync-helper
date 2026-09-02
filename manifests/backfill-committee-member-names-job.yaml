@@ -20,9 +20,13 @@
 # before this pass (the names backfill also handles unrepaired entries via
 # v1-objects, but cleaner if mappings are repaired first).
 #
-# Dry run: add "--dry-run" to args before applying. Remove it for the live run.
+# Dry run (default): "--dry-run" is already in args — apply as-is to do a dry run.
+# Live run: remove "--dry-run" from args before applying.
 #
 # Deploy with:
+#   # If the Job already exists (e.g. from a prior dry run), delete it first —
+#   # a completed Job's pod template is immutable and re-applying will fail:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-committee-member-names --ignore-not-found
 #   kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-committee-member-names-job.yaml
 #
 # Monitor:
