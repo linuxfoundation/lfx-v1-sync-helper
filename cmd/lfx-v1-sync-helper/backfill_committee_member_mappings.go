@@ -6,11 +6,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // backfillCommitteeMemberMappingsResult summarizes a backfill run.
@@ -170,9 +170,9 @@ func backfillCommitteeMemberMappings(ctx context.Context, dryRun bool) (backfill
 		}
 
 		reverseKey := "committee_member.uid." + memberUID
-		entry, getErr := mappingsKV.Get(ctx, reverseKey)
+		entry, getErr := mappingStore.Get(ctx, reverseKey)
 		if getErr != nil {
-			if getErr == jetstream.ErrKeyNotFound || getErr == jetstream.ErrKeyDeleted {
+			if errors.Is(getErr, ErrKeyNotFound) {
 				// The mapping was deleted (e.g. tombstoned by live sync) since the scan
 				// read it; nothing to repair.
 				res.conflicted++
@@ -184,7 +184,7 @@ func backfillCommitteeMemberMappings(ctx context.Context, dryRun bool) (backfill
 			// silently skipping a mapping that still needs repair.
 			return res, fmt.Errorf("failed to re-read committee member reverse mapping %s: %w", reverseKey, getErr)
 		}
-		if string(entry.Value()) != string(data) {
+		if string(entry.Value) != string(data) {
 			// The mapping was changed by the live sync-helper since the scan read it;
 			// skip rather than overwrite the newer value. A later run will re-evaluate it.
 			res.conflicted++
@@ -200,9 +200,9 @@ func backfillCommitteeMemberMappings(ctx context.Context, dryRun bool) (backfill
 		// reaches it is "companion absent") rather than a blind Put, and is rolled
 		// back if the reverse-mapping Update below loses a race.
 		companionKey := committeeMemberRecordSFIDKey(memberUID)
-		companionEntry, companionGetErr := mappingsKV.Get(ctx, companionKey)
+		companionEntry, companionGetErr := mappingStore.Get(ctx, companionKey)
 		companionExisted := companionGetErr == nil
-		if companionGetErr != nil && companionGetErr != jetstream.ErrKeyNotFound && companionGetErr != jetstream.ErrKeyDeleted {
+		if companionGetErr != nil && !errors.Is(companionGetErr, ErrKeyNotFound) {
 			return res, fmt.Errorf("failed to read committee member record sfid mapping %s: %w", companionKey, companionGetErr)
 		}
 
@@ -211,9 +211,9 @@ func backfillCommitteeMemberMappings(ctx context.Context, dryRun bool) (backfill
 			companionWritten  bool
 		)
 		switch {
-		case companionExisted && string(companionEntry.Value()) == recordSFID:
+		case companionExisted && string(companionEntry.Value) == recordSFID:
 			// Already holds the value we'd write; nothing to change.
-		case companionExisted && string(companionEntry.Value()) == tombstoneMarker:
+		case companionExisted && string(companionEntry.Value) == tombstoneMarker:
 			// The live delete path (syncCommitteeMemberDeleteToV1, ingest_indexer.go)
 			// tombstones this companion before the reverse mapping, so a tombstoned
 			// companion here means a delete is likely racing us, in flight between
@@ -228,13 +228,13 @@ func backfillCommitteeMemberMappings(ctx context.Context, dryRun bool) (backfill
 			// to point at a different record. Don't blindly overwrite a value we
 			// don't understand.
 			res.conflicted++
-			log.With("companion_value", string(companionEntry.Value())).
+			log.With("companion_value", string(companionEntry.Value)).
 				WarnContext(ctx, "committee member record sfid mapping holds an unexpected value, skipping")
 			continue
 		default:
-			rev, err := mappingsKV.Create(ctx, companionKey, []byte(recordSFID))
+			rev, err := mappingStore.Create(ctx, companionKey, []byte(recordSFID))
 			if err != nil {
-				if isRevisionMismatchError(err) || err == jetstream.ErrKeyExists {
+				if errors.Is(err, ErrRevisionMismatch) || errors.Is(err, ErrKeyExists) {
 					res.conflicted++
 					log.With(errKey, err).WarnContext(ctx, "committee member record sfid mapping created concurrently, skipping")
 					continue
@@ -245,7 +245,7 @@ func backfillCommitteeMemberMappings(ctx context.Context, dryRun bool) (backfill
 			companionWritten = true
 		}
 
-		if _, err := mappingsKV.Update(ctx, reverseKey, []byte(newVal), entry.Revision()); err != nil {
+		if _, err := mappingStore.Update(ctx, reverseKey, []byte(newVal), entry.Revision); err != nil {
 			rollbackCompanion := func() {
 				// Only the "companion absent" case above ever writes it, so only that
 				// case needs a rollback; the tombstone is revision-guarded so a
@@ -254,12 +254,12 @@ func backfillCommitteeMemberMappings(ctx context.Context, dryRun bool) (backfill
 				if !companionWritten {
 					return
 				}
-				if _, rbErr := mappingsKV.Update(ctx, companionKey, []byte(tombstoneMarker), companionRevision); rbErr != nil {
+				if _, rbErr := mappingStore.Update(ctx, companionKey, []byte(tombstoneMarker), companionRevision); rbErr != nil {
 					log.With(errKey, rbErr).WarnContext(ctx, "failed to roll back committee member record sfid mapping after reverse mapping conflict")
 				}
 			}
 
-			if isRevisionMismatchError(err) {
+			if errors.Is(err, ErrRevisionMismatch) {
 				// The CAS was rejected outright, so the write definitely did not
 				// apply: safe to roll back unconditionally.
 				rollbackCompanion()
@@ -274,15 +274,15 @@ func backfillCommitteeMemberMappings(ctx context.Context, dryRun bool) (backfill
 			// blindly rolling back here could strand a mapping that was actually
 			// fixed without its companion, and the next backfill run would then
 			// skip it as alreadyOK and never repair it.
-			reReadEntry, reReadErr := mappingsKV.Get(ctx, reverseKey)
+			reReadEntry, reReadErr := mappingStore.Get(ctx, reverseKey)
 			switch {
-			case reReadErr == nil && string(reReadEntry.Value()) == newVal:
+			case reReadErr == nil && string(reReadEntry.Value) == newVal:
 				// Confirmed committed: keep the companion.
 				log.With(errKey, err).WarnContext(ctx, "reverse mapping update reported an error but the write committed; keeping companion")
 				log.InfoContext(ctx, "rewrote committee member reverse mapping to include contact SFID")
 				res.fixed++
 				continue
-			case reReadErr == nil, reReadErr == jetstream.ErrKeyNotFound, reReadErr == jetstream.ErrKeyDeleted:
+			case reReadErr == nil, errors.Is(reReadErr, ErrKeyNotFound):
 				// Confirmed absent (holds something else, or gone): the write did
 				// not apply, safe to roll back.
 				rollbackCompanion()

@@ -233,3 +233,96 @@ func TestLoadConfig_EmptyDatabaseURLWhenNoV1DBHost(t *testing.T) {
 		t.Errorf("DatabaseURL = %q, want empty when neither DATABASE_URL nor V1_DB_HOST is set", cfg.DatabaseURL)
 	}
 }
+
+func TestParseIntEnvClamped(t *testing.T) {
+	tests := []struct {
+		name    string
+		envVal  string
+		def     int
+		minV    int
+		maxV    int
+		want    int
+		wantEnv bool // when true, set env var; when false, unset
+	}{
+		{name: "unset returns default", def: 8, minV: 1, maxV: 64, want: 8, wantEnv: false},
+		{name: "valid within range", envVal: "16", def: 8, minV: 1, maxV: 64, want: 16, wantEnv: true},
+		{name: "clamp low", envVal: "-5", def: 8, minV: 1, maxV: 64, want: 1, wantEnv: true},
+		{name: "clamp high", envVal: "99999", def: 8, minV: 1, maxV: 64, want: 64, wantEnv: true},
+		{name: "invalid falls back to default", envVal: "abc", def: 8, minV: 1, maxV: 64, want: 8, wantEnv: true},
+		{name: "empty falls back to default", envVal: "", def: 8, minV: 1, maxV: 64, want: 8, wantEnv: false},
+		{name: "whitespace-only falls back to default", envVal: "   ", def: 8, minV: 1, maxV: 64, want: 8, wantEnv: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const name = "TEST_PARSE_INT_ENV_CLAMPED"
+			if err := os.Unsetenv(name); err != nil {
+				t.Fatalf("Unsetenv: %v", err)
+			}
+			if tt.wantEnv {
+				t.Setenv(name, tt.envVal)
+			}
+			got := parseIntEnvClamped(name, tt.def, tt.minV, tt.maxV)
+			if got != tt.want {
+				t.Errorf("parseIntEnvClamped(%q, %d, %d, %d) = %d, want %d", tt.envVal, tt.def, tt.minV, tt.maxV, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveV1MappingsDatabaseURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "explicit V1_MAPPINGS_DATABASE_URL wins",
+			cfg:  Config{V1MappingsDatabaseURL: "postgres://u:p@h:5432/d?sslmode=disable", V1MappingsPGHost: "ignored", V1MappingsPGUser: "ignored", V1MappingsPGPassword: "ignored", V1MappingsPGDatabase: "ignored"},
+			want: "postgres://u:p@h:5432/d?sslmode=disable",
+		},
+		{
+			name: "compose from V1_MAPPINGS_PG* fields",
+			cfg:  Config{V1MappingsPGHost: "pg.local", V1MappingsPGUser: "app", V1MappingsPGPassword: "secret", V1MappingsPGDatabase: "mydb"},
+			want: "postgres://app:secret@pg.local:5432/mydb",
+		},
+		{
+			name: "compose with custom port",
+			cfg:  Config{V1MappingsPGHost: "pg.local", V1MappingsPGPort: "5433", V1MappingsPGUser: "app", V1MappingsPGPassword: "secret", V1MappingsPGDatabase: "mydb"},
+			want: "postgres://app:secret@pg.local:5433/mydb",
+		},
+		{
+			name: "password with special chars is percent-encoded",
+			cfg:  Config{V1MappingsPGHost: "pg.local", V1MappingsPGUser: "app", V1MappingsPGPassword: "p@ss:word/#!", V1MappingsPGDatabase: "mydb"},
+			// Assembled via concatenation so secretlint's PostgreSQL
+			// connection-string heuristic does not flag the literal.
+			want: "postgres" + "://app:p%40ss%3Aword%2F%23%21@pg.local:5432/mydb",
+		},
+		{
+			name:    "no V1_MAPPINGS_DATABASE_URL and no V1_MAPPINGS_PG* fields errors",
+			cfg:     Config{},
+			wantErr: true,
+		},
+		{
+			name:    "missing V1_MAPPINGS_PGPASSWORD errors",
+			cfg:     Config{V1MappingsPGHost: "pg.local", V1MappingsPGUser: "app", V1MappingsPGDatabase: "mydb"},
+			wantErr: true,
+		},
+		{
+			name: "top-level DatabaseURL (v1 SFDC DSN) is NOT used as v1-mappings DSN",
+			cfg:  Config{DatabaseURL: "postgres://sfdc:x@sfdc-host:5432/sfdc", V1MappingsPGHost: "pg.local", V1MappingsPGUser: "app", V1MappingsPGPassword: "secret", V1MappingsPGDatabase: "mappings"},
+			want: "postgres://app:secret@pg.local:5432/mappings",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.cfg.ResolveV1MappingsDatabaseURL()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ResolveV1MappingsDatabaseURL() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("ResolveV1MappingsDatabaseURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

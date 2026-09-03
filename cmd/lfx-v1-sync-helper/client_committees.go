@@ -58,7 +58,6 @@ func createCommittee(ctx context.Context, payload *committeeservice.CreateCommit
 // The mapper is called with currentBase as the default seed so that absent V1 keys
 // do not clobber existing V2 values with the Go zero value for plain-bool payload
 // fields (EnableVoting, SsoGroupEnabled, Public).
-//
 func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string]any, v1Principal string) (*committeeservice.CommitteeBaseWithReadonlyAttributes, error) {
 	// Fetch current committee base + ETag.
 	currentBase, baseETag, err := fetchCommitteeBase(ctx, committeeUID)

@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -43,6 +44,30 @@ var (
 	v1KV       jetstream.KeyValue
 	mappingsKV jetstream.KeyValue
 
+	// mappingStore is the abstract v1-mappings backing store used by
+	// every online (non-backfill) code path and by the one-shot
+	// backfills that read/write mappings.
+	//
+	// Two-phase initialisation (see main below):
+	//
+	//   1. Immediately after the v1-mappings KV bucket handle is
+	//      opened, mappingStore is wired to a KV-backed adapter
+	//      (newKVMappingStore) so one-shot flags dispatched next in
+	//      main can safely call mappingStore.Get/Put/etc. This is
+	//      NOT gated on V1_MAPPINGS_STORE_MODE — every one-shot runs
+	//      against the KV backend regardless of the runtime mode
+	//      because Postgres is not part of the one-shot contract.
+	//   2. If the process is on the long-running service path (no
+	//      one-shot flag fired), initMappingStore reassigns
+	//      mappingStore to the mode-configured backend (kv | dual |
+	//      postgres). Dual mode wraps KV in dualMappingStore which
+	//      spawns the async mirror worker; graceful shutdown
+	//      type-asserts and calls Close() to drain pending mirrors.
+	//
+	// See mapping_store.go for the port and V1MappingsStoreMode
+	// selection.
+	mappingStore MappingStore
+
 	// distributedSync is the singleton mappingLocker used to serialise
 	// concurrent read-modify-write operations on shared mapping state.
 	// Callers pass fully-qualified lock keys (including any namespace prefix).
@@ -66,6 +91,7 @@ func main() {
 	var doBackfillWorkspaces = flag.Bool("backfill-workspaces", false, "backfill legacy workspaces into v2 member-service, then exit")
 	var doBackfillCommitteeMemberMappings = flag.Bool("backfill-committee-member-mappings", false, "repair committee-member reverse mappings that store the record sfid instead of the contact SFID, then exit")
 	var doBackfillCommitteeMemberNames = flag.Bool("backfill-committee-member-names", false, "populate first_name/last_name on V2 committee members that have no name (members without an LFX account at sync time), then exit")
+	var doBackfillV1MappingsToPG = flag.Bool("backfill-v1-mappings-to-postgres", false, "copy the v1-mappings NATS KV bucket into the Postgres v1_mappings table, then exit (LFXV2-2985)")
 	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
 	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-* and --sync-user)")
 	var backfillLimit = flag.Int("limit", 1000, "maximum number of users to process per backfill run (applicable with --backfill-alternate-emails and --backfill-profiles)")
@@ -78,13 +104,13 @@ func main() {
 
 	// Enforce mutual exclusion across all one-shot flags.
 	oneShotCount := 0
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames} {
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doBackfillV1MappingsToPG} {
 		if b {
 			oneShotCount++
 		}
 	}
 	if oneShotCount > 1 {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --backfill-committee-member-names, and --sync-user are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --backfill-committee-member-names, --backfill-v1-mappings-to-postgres, and --sync-user are mutually exclusive")
 		os.Exit(2)
 	}
 
@@ -92,11 +118,12 @@ func main() {
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}))
 	slog.SetDefault(logger)
 
-	// --backfill-committee-member-mappings only needs NATS KV; skip full
+	// --backfill-committee-member-mappings and --backfill-v1-mappings-to-postgres
+	// only need NATS KV (plus Postgres for the v1-mappings backfill); skip full
 	// config and API client init.
 	// --backfill-acs-project and --backfill-acs-org require full config and API client init.
 	var err error
-	if *doBackfillCommitteeMemberMappings {
+	if *doBackfillCommitteeMemberMappings || *doBackfillV1MappingsToPG {
 		cfg = LoadMinimalConfig()
 	} else {
 		cfg, err = LoadConfig()
@@ -159,7 +186,7 @@ func main() {
 	})
 
 	// Basic health check.
-	http.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+	http.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		if natsConn == nil {
 			http.Error(w, "no NATS connection", http.StatusServiceUnavailable)
 			return
@@ -167,6 +194,21 @@ func main() {
 		if !natsConn.IsConnected() || natsConn.IsDraining() {
 			http.Error(w, "NATS connection not ready", http.StatusServiceUnavailable)
 			return
+		}
+		// In postgres-only mode the pod cannot serve any mapping
+		// read/write without a live Postgres connection, so a
+		// dead-pool pod must fail readiness so the Service stops
+		// routing to it. Dual mode is deliberately NATS-authoritative
+		// (Postgres is a best-effort shadow) so a PG outage does NOT
+		// affect readiness there; the diff-scan tooling catches the
+		// resulting drift before cutover.
+		if cfg != nil && cfg.V1MappingsStoreMode == V1MappingsStoreModePostgres && pgPool != nil {
+			pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			defer cancel()
+			if err := pgPool.Ping(pingCtx); err != nil {
+				http.Error(w, "Postgres not ready: "+err.Error(), http.StatusServiceUnavailable)
+				return
+			}
 		}
 		fmt.Fprintf(w, "OK\n") //nolint:errcheck
 	})
@@ -197,9 +239,16 @@ func main() {
 	// closing) a connection.
 	gracefulCloseWG := sync.WaitGroup{}
 
-	// Support graceful shutdown.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Support graceful shutdown. signal.NotifyContext wires SIGINT /
+	// SIGTERM directly to the process-wide context — this way the
+	// one-shot backfills (which run long-running scans and exit
+	// before the normal `<-done>` service loop is reached) observe a
+	// kubectl-driven cancellation and clean up on their own,
+	// including the deferred staging-table DROP in
+	// backfill_v1_mappings_pg.go. The long-running service path also
+	// exits when ctx is cancelled via the shared done channel.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
@@ -259,6 +308,17 @@ func main() {
 		logger.With(errKey, err).Error("error accessing v1-mappings KV bucket")
 		os.Exit(1)
 	}
+
+	// Initialize a KV-backed mappingStore immediately so one-shot backfills
+	// that read/write mappings do not hit a nil interface. The
+	// mode-configured mappingStore for the long-running service path (which
+	// may open a Postgres pool for dual/postgres modes) is set later, after
+	// all one-shot branches have exited. This intentionally keeps every
+	// one-shot on the KV backend regardless of V1_MAPPINGS_STORE_MODE:
+	// Postgres is not part of the one-shot contract yet, and the migration
+	// story assumes the KV bucket stays authoritative for the offline
+	// backfill window (LFXV2-2985).
+	mappingStore = newKVMappingStore(mappingsKV)
 
 	// Handle --backfill-acs-project flag: populate v2 project settings from ACS grants, then exit.
 	if *doBackfillACSProject {
@@ -380,12 +440,71 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Handle --backfill-v1-mappings-to-postgres flag: copy the v1-mappings NATS
+	// KV bucket into the Postgres v1_mappings table, then exit (LFXV2-2985).
+	if *doBackfillV1MappingsToPG {
+		logger.With("dry_run", *dryRun).Info("starting v1-mappings Postgres backfill")
+		// --dry-run needs Postgres credentials only when it will
+		// actually connect; the backfill itself no-ops COPY/upsert
+		// in dry-run mode, so open a pool WITHOUT running schema DDL
+		// (that would fail on a read-only replica or without a
+		// working DSN, which is exactly the case a dry-run should
+		// tolerate). Non-dry-run uses initPGPoolWithSchema so the
+		// v1_mappings table is created before the first COPY.
+		var pool *pgxpool.Pool
+		if *dryRun {
+			pool, err = initPGPool(ctx, cfg)
+		} else {
+			pool, err = initPGPoolWithSchema(ctx, cfg)
+		}
+		if err != nil {
+			logger.With(errKey, err).Error("error initializing Postgres pool for v1-mappings backfill")
+			os.Exit(1)
+		}
+		defer pool.Close()
+		res, err := backfillV1MappingsToPostgres(ctx, pool, *dryRun)
+		fields := []any{
+			"visits", res.visits,
+			"live", res.live,
+			"tombstoned", res.tombstoned,
+			"empty", res.empty,
+			"native_del", res.nativeDel,
+			"staged", res.staged,
+			"inserted_rows", res.insertedRows,
+			"batches", res.batches,
+			"workers", res.workers,
+			"max_seq", res.maxSeq,
+			"elapsed", res.elapsed.String(),
+			"dry_run", res.dryRun,
+		}
+		if err != nil {
+			logger.With(append(fields, errKey, err)...).Error("error during v1-mappings Postgres backfill")
+			os.Exit(1)
+		}
+		logger.With(fields...).Info("v1-mappings Postgres backfill completed successfully")
+		os.Exit(0)
+	}
+
 	// Initialize the distributed sync singleton backed by the mappings KV bucket.
 	distributedSync = newKVMappingLocker(mappingsKV,
 		withLockerOptionMaxRetries(mappingLockRetryAttempts),
 		withLockerOptionRetryInterval(mappingLockRetryInterval),
 		withLockerOptionTimeout(mappingLockTimeout),
 	)
+
+	// Wire the online MappingStore based on V1_MAPPINGS_STORE_MODE.
+	// This is the runtime port that all non-backfill callers use to
+	// read/write v1-mappings state. In "kv" mode the store is a thin
+	// adapter over mappingsKV so behaviour is unchanged; in "dual" or
+	// "postgres" mode a pgxpool is opened and the embedded schema is
+	// applied idempotently before the store is exposed. See
+	// mapping_store.go for the interface and semantic contract.
+	mappingStore, err = initMappingStore(ctx, cfg, mappingsKV)
+	if err != nil {
+		logger.With(errKey, err, "mode", string(cfg.V1MappingsStoreMode)).Error("error initializing v1-mappings store")
+		os.Exit(1)
+	}
+	logger.With("mode", string(cfg.V1MappingsStoreMode)).Info("v1-mappings store initialized")
 
 	// Create or get the JetStream pull consumer for v1 objects KV bucket
 	// This replaces the KV Watch() method to enable horizontal scaling
@@ -578,8 +697,11 @@ func main() {
 		dynamodbConsumerCtx.Drain()
 	}
 
-	// Cancel the background context.
-	cancel()
+	// Cancel the background context. signal.NotifyContext also cancels
+	// ctx on SIGTERM, so this defensive cancel is idempotent when the
+	// shutdown was signal-driven; it is required when the shutdown was
+	// triggered by the NATS ClosedHandler synthesising an interrupt.
+	stop()
 
 	// Drain the connection, which will drain all remaining subscriptions, then
 	// close the connection when complete (including the consumer draining).
@@ -595,6 +717,25 @@ func main() {
 	logger.Debug("waiting for graceful shutdown steps to complete")
 	gracefulCloseWG.Wait()
 	logger.Debug("graceful shutdown steps completed")
+
+	// Drain the online MappingStore's async mirror queue before we
+	// close the Postgres pool. Only dualMappingStore has a background
+	// worker; kv- and postgres-only modes are no-ops here (they don't
+	// implement Closer).
+	if closer, ok := mappingStore.(interface{ Close() error }); ok {
+		logger.Debug("draining dual-store mirror queue")
+		if err := closer.Close(); err != nil {
+			logger.With(errKey, err).Warn("error draining mapping store on shutdown")
+		}
+	}
+
+	// Close the Postgres pool if the online MappingStore backend
+	// opened one (dual or postgres mode). Kv-only mode never allocates
+	// pgPool so this is a no-op.
+	if pgPool != nil {
+		logger.Debug("closing Postgres pool")
+		pgPool.Close()
+	}
 
 	// Immediately close the HTTP server after graceful shutdown has finished.
 	if err = httpServer.Close(); err != nil {
