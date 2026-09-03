@@ -95,11 +95,11 @@ func processCommitteeIndexingEvent(ctx context.Context, subject string, data []b
 		return syncCommitteeCreateToV1(ctx, event.ObjectID, projectSFID, body.Data)
 
 	case "updated":
-		entry, err := mappingsKV.Get(ctx, "committee.uid."+event.ObjectID)
+		entry, err := getMappingEntryWithRetry(ctx, "committee.uid."+event.ObjectID)
 		if err != nil {
-			if err == jetstream.ErrKeyNotFound || err == jetstream.ErrKeyDeleted {
+			if errors.Is(err, jetstream.ErrKeyNotFound) {
 				logger.With("committee_uid", event.ObjectID).
-					WarnContext(ctx, "no reverse mapping for committee UID, skipping update")
+					WarnContext(ctx, "no reverse mapping for committee UID after bounded retry, skipping update")
 				return nil // permanent: committee has no v1 counterpart
 			}
 			return err // transient: KV unavailable
@@ -115,11 +115,11 @@ func processCommitteeIndexingEvent(ctx context.Context, subject string, data []b
 		return syncCommitteeUpdateToV1(ctx, event.ObjectID, projectSFID, committeeSFID, body.Data)
 
 	case "deleted":
-		entry, err := mappingsKV.Get(ctx, "committee.uid."+event.ObjectID)
+		entry, err := getMappingEntryWithRetry(ctx, "committee.uid."+event.ObjectID)
 		if err != nil {
-			if err == jetstream.ErrKeyNotFound || err == jetstream.ErrKeyDeleted {
+			if errors.Is(err, jetstream.ErrKeyNotFound) {
 				logger.With("committee_uid", event.ObjectID).
-					WarnContext(ctx, "no reverse mapping for committee UID, skipping delete")
+					WarnContext(ctx, "no reverse mapping for committee UID after bounded retry, skipping delete")
 				return nil // permanent: committee has no v1 counterpart
 			}
 			return err // transient: KV unavailable
@@ -201,11 +201,11 @@ func processCommitteeMemberIndexingEvent(ctx context.Context, subject string, da
 
 	case "updated":
 		reverseMappingKey := "committee_member.uid." + event.ObjectID
-		entry, err := mappingsKV.Get(ctx, reverseMappingKey)
+		entry, err := getMappingEntryWithRetry(ctx, reverseMappingKey)
 		if err != nil {
-			if err == jetstream.ErrKeyNotFound || err == jetstream.ErrKeyDeleted {
+			if errors.Is(err, jetstream.ErrKeyNotFound) {
 				logger.With("member_uid", event.ObjectID, "subject", subject).
-					WarnContext(ctx, "no reverse mapping for committee member UID, cannot sync to v1")
+					WarnContext(ctx, "no reverse mapping for committee member UID after bounded retry, cannot sync to v1")
 				return nil // permanent: member has no v1 counterpart
 			}
 			return err // transient: KV unavailable
@@ -228,11 +228,11 @@ func processCommitteeMemberIndexingEvent(ctx context.Context, subject string, da
 
 	case "deleted":
 		reverseMappingKey := "committee_member.uid." + event.ObjectID
-		entry, err := mappingsKV.Get(ctx, reverseMappingKey)
+		entry, err := getMappingEntryWithRetry(ctx, reverseMappingKey)
 		if err != nil {
-			if err == jetstream.ErrKeyNotFound || err == jetstream.ErrKeyDeleted {
+			if errors.Is(err, jetstream.ErrKeyNotFound) {
 				logger.With("member_uid", event.ObjectID, "subject", subject).
-					WarnContext(ctx, "no reverse mapping for committee member UID, cannot sync to v1")
+					WarnContext(ctx, "no reverse mapping for committee member UID after bounded retry, cannot sync to v1")
 				return nil // permanent: member has no v1 counterpart
 			}
 			return err // transient: KV unavailable
@@ -466,17 +466,21 @@ func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID,
 			payload.VotingEndDate = ved
 		}
 	}
-	if orgID, err := resolveOrgIDFromEventData(ctx, data); err != nil {
-		log.With(errKey, err).WarnContext(ctx, "failed to resolve organization ID, proceeding without org")
-	} else if orgID != "" {
+	orgID, err := resolveOrgIDFromEventData(ctx, data)
+	if err != nil {
+		return err // transient: org-service unavailable, redeliver
+	}
+	if orgID != "" {
 		payload.OrganizationID = orgID
 	}
 
 	// Attempt to resolve the v1 user SFID by email to populate MemberID.
 	// This links the committee member to an existing v1 platform user if one exists.
-	if userSFID, err := ResolveV1UserSFIDByEmail(ctx, email); err != nil {
-		log.With(errKey, err, "email", email).WarnContext(ctx, "failed to resolve user SFID by email, proceeding without MemberID")
-	} else if userSFID != "" {
+	userSFID, err := ResolveV1UserSFIDByEmail(ctx, email)
+	if err != nil {
+		return err // transient: database unavailable, redeliver
+	}
+	if userSFID != "" {
 		payload.MemberID = userSFID
 		log.With("member_id", userSFID, "email", email).DebugContext(ctx, "resolved user SFID for committee member")
 	}
@@ -543,9 +547,11 @@ func syncCommitteeMemberUpdateToV1(ctx context.Context, memberUID, projectSFID, 
 			payload.VotingEndDate = ved
 		}
 	}
-	if orgID, err := resolveOrgIDFromEventData(ctx, data); err != nil {
-		log.With(errKey, err).WarnContext(ctx, "failed to resolve organization ID, proceeding without org")
-	} else if orgID != "" {
+	orgID, err := resolveOrgIDFromEventData(ctx, data)
+	if err != nil {
+		return err // transient: org-service unavailable, redeliver
+	}
+	if orgID != "" {
 		payload.OrganizationID = orgID
 	}
 
