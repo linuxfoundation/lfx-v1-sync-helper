@@ -111,6 +111,35 @@ natsResources:
     # compression can be "s2" or "none" (s2 is default)
     compression: s2
 
+  # stream_committee_events is the configuration for the JetStream stream that captures
+  # lfx.committee.* and lfx.committee_member.* events published by the indexer service.
+  # Owned here (v1-sync-helper chart) until the indexer service chart declares it.
+  stream_committee_events:
+    # creation is a boolean to determine if the JetStream stream should be created via the helm chart.
+    creation: true
+    # keep ensures the stream (and its buffered messages) survives helm uninstall.
+    keep: true
+    # name is the NATS stream name
+    name: committee_events
+    # subjects captured by this stream
+    subjects:
+      - lfx.committee.>
+      - lfx.committee_member.>
+    # storage is the storage type for the stream
+    storage: file
+    # retention is the retention policy type
+    retention: limits
+    # maxAge is the maximum age of messages in the stream (2 weeks)
+    maxAge: 336h
+    # maxBytes is the maximum number of bytes in the stream (-1 for unlimited)
+    maxBytes: -1
+    # maxMsgs is the maximum number of messages in the stream (-1 for unlimited)
+    maxMsgs: -1
+    # replicas is the number of replicas for the stream
+    replicas: 1
+    # compression can be "s2" or "none"
+    compression: s2
+
   # stream_wal_listener is the configuration for the JetStream stream for wal-listener events
   stream_wal_listener:
     # creation is a boolean to determine if the JetStream stream should be created via the helm chart.

@@ -511,22 +511,54 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Subscribe to indexer domain events for bidirectional committee and project sync.
-	// The indexer publishes lfx.{object_type}.{action} after every successful OpenSearch write.
-	indexerEventSubscriptions := map[string]func(*nats.Msg){
-		"lfx.committee.created":        committeeIndexerEventHandler,
-		"lfx.committee.updated":        committeeIndexerEventHandler,
-		"lfx.committee.deleted":        committeeIndexerEventHandler,
-		"lfx.committee_member.created": committeeMemberIndexerEventHandler,
-		"lfx.committee_member.updated": committeeMemberIndexerEventHandler,
-		"lfx.committee_member.deleted": committeeMemberIndexerEventHandler,
-		"lfx.project.created":          projectIndexerEventHandler,
-		"lfx.project.updated":          projectIndexerEventHandler,
-		"lfx.project.deleted":          projectIndexerEventHandler,
+	// Subscribe to indexer domain events for bidirectional committee sync via a durable
+	// JetStream consumer on the committee-events stream. The stream captures
+	// lfx.committee.> and lfx.committee_member.> subjects published by the indexer service
+	// after every successful OpenSearch write. Using JetStream gives at-least-once delivery,
+	// replacing the at-most-once core NATS QueueSubscribe that could silently drop events.
+	committeeEventsStreamName := "committee_events"
+	committeeEventsConsumerName := "v1-sync-helper-committee-events-consumer"
+
+	committeeEventsConsumer, err := jsContext.CreateOrUpdateConsumer(ctx, committeeEventsStreamName, jetstream.ConsumerConfig{
+		Name:    committeeEventsConsumerName,
+		Durable: committeeEventsConsumerName,
+		// DeliverNewPolicy: only deliver messages published after this consumer is first created.
+		// The old QueueSubscribe only processed events after subscription; replaying stream history
+		// on first start would flood V1 with redundant updates. The durable name ensures the
+		// consumer resumes from its last ACKed position on restarts, so no events are dropped
+		// after the initial connection.
+		DeliverPolicy: jetstream.DeliverNewPolicy,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		FilterSubjects: []string{
+			"lfx.committee.>",
+			"lfx.committee_member.>",
+		},
+		MaxDeliver:    3,
+		AckWait:       30 * time.Second,
+		MaxAckPending: 100,
+		Description:   "Indexer committee/committee-member event consumer for v1-sync-helper",
+	})
+	if err != nil {
+		logger.With(errKey, err, "consumer", committeeEventsConsumerName, "stream", committeeEventsStreamName).Error("error creating committee-events consumer")
+		os.Exit(1)
 	}
-	for subject, handler := range indexerEventSubscriptions {
-		if _, err = natsConn.QueueSubscribe(subject, natsQueue, handler); err != nil {
-			logger.With(errKey, err, "subject", subject).Error("error subscribing to indexer event subject")
+
+	committeeEventsConsumerCtx, err := committeeEventsConsumer.Consume(committeeEventsIngestHandler, jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
+		logger.With(errKey, err).Error("committee-events consumer error encountered")
+	}))
+	if err != nil {
+		logger.With(errKey, err, "consumer", committeeEventsConsumerName).Error("error starting committee-events consumer")
+		os.Exit(1)
+	}
+	defer committeeEventsConsumerCtx.Stop()
+
+	logger.With("stream", committeeEventsStreamName, "consumer", committeeEventsConsumerName).Info("committee-events consumer started")
+
+	// Subscribe to project indexer events via core NATS for bidirectional project sync.
+	// The indexer publishes lfx.project.{action} after every successful OpenSearch write.
+	for _, subject := range []string{"lfx.project.created", "lfx.project.updated", "lfx.project.deleted"} {
+		if _, err = natsConn.QueueSubscribe(subject, natsQueue, projectIndexerEventHandler); err != nil {
+			logger.With(errKey, err, "subject", subject).Error("error subscribing to project indexer event subject")
 			os.Exit(1)
 		}
 	}
@@ -541,6 +573,7 @@ func main() {
 	// errors in the ConsumeErrHandler.
 	kvConsumerCtx.Drain()
 	walConsumerCtx.Drain()
+	committeeEventsConsumerCtx.Drain()
 	if dynamodbConsumerCtx != nil {
 		dynamodbConsumerCtx.Drain()
 	}
