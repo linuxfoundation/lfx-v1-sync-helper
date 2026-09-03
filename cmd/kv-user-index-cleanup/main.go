@@ -133,9 +133,11 @@ func scanAndPurgePrefix(
 				} else {
 					res.purged++
 				}
-			}
-			if deleteDelay > 0 {
-				time.Sleep(deleteDelay)
+				// Only throttle when a purge was actually attempted; in dry-run
+				// mode there is no write load to protect the server from.
+				if deleteDelay > 0 {
+					time.Sleep(deleteDelay)
+				}
 			}
 		}
 
@@ -144,7 +146,7 @@ func scanAndPurgePrefix(
 		}
 
 		now := time.Now()
-		if res.revisions%progressEvery == 0 || now.Sub(lastReport) > 15*time.Second {
+		if (progressEvery > 0 && res.revisions%progressEvery == 0) || now.Sub(lastReport) > 15*time.Second {
 			elapsed := now.Sub(start).Seconds()
 			rate := 0.0
 			if elapsed > 0 {
@@ -251,6 +253,11 @@ func run(ctx context.Context, cfg config) int {
 				"targeted scan/delete alongside other consumers of this stream.\n",
 			stream, info.State.Consumers,
 		)
+		return 1
+	}
+
+	if cfg.progressEvery <= 0 {
+		fmt.Fprintf(os.Stderr, "Invalid --progress-every value %d. Must be a positive integer.\n", cfg.progressEvery)
 		return 1
 	}
 
