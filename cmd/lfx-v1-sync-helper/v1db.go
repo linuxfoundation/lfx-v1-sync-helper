@@ -67,6 +67,16 @@ type alternateEmailRow struct {
 	LastModifiedDate sql.NullTime   `bun:"lastmodifieddate"`
 }
 
+// userSkillRow maps the columns we need from salesforce.user_skills joined to
+// salesforce.skills. It is keyed by lfid, not sfid: user_skills is a plain
+// platform table, not a Salesforce __c object.
+type userSkillRow struct {
+	bun.BaseModel `bun:"table:salesforce.user_skills,alias:usk"`
+
+	ID   string `bun:"id"`
+	Name string `bun:"sk_name"`
+}
+
 // initV1DB opens a pgx connection pool against the v1 platform database and
 // wires bun on top of it. The DSN comes from cfg.DatabaseURL (DATABASE_URL).
 func initV1DB(ctx context.Context, cfg *Config) error {
@@ -144,6 +154,9 @@ func dbLookupMergedUserRowByUsername(ctx context.Context, username string) (*mer
 	return row, nil
 }
 
+// lookupMergedUserRowByUsernameFn is injectable for tests.
+var lookupMergedUserRowByUsernameFn = dbLookupMergedUserRowByUsername
+
 // dbLookupMergedUserRowBySFID fetches the live merged_user row for an SFID.
 // Returns (nil, nil) on miss (including deleted rows).
 func dbLookupMergedUserRowBySFID(ctx context.Context, sfid string) (*mergedUserRow, error) {
@@ -213,6 +226,35 @@ func dbGetAlternateEmailsForUser(ctx context.Context, userSfid string) ([]altern
 		return nil, fmt.Errorf("failed to query alternate_email__c by user: %w", err)
 	}
 	return rows, nil
+}
+
+// dbGetSkillsForUser returns the names of every skill a v1 user has, ordered
+// alphabetically by name. v1's own query (GetUserSkills, user-service) has no
+// ORDER BY, which would otherwise make the resulting Auth0 write nondeterministic
+// and cause churn on every sync.
+func dbGetSkillsForUser(ctx context.Context, lfid string) ([]string, error) {
+	normalized := normalizeUserIdentifier(lfid)
+	if normalized == "" {
+		return nil, nil
+	}
+	var rows []userSkillRow
+	qCtx, cancel := withQueryTimeout(ctx)
+	defer cancel()
+	err := v1DB.NewSelect().Model(&rows).
+		ColumnExpr("usk.id AS id").
+		ColumnExpr(`sk."name" AS sk_name`).
+		Join(`JOIN salesforce.skills AS sk ON sk.id = usk.skill_id`).
+		Where("LOWER(usk.lfid) = ?", normalized).
+		OrderExpr(`sk."name" ASC`).
+		Scan(qCtx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query user_skills by lfid: %w", err)
+	}
+	names := make([]string, 0, len(rows))
+	for _, row := range rows {
+		names = append(names, row.Name)
+	}
+	return names, nil
 }
 
 // emailRowIsActive reports whether an alternate email row is usable: active

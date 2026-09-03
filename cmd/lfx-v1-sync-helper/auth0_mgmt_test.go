@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/auth0/go-auth0"
@@ -26,7 +27,7 @@ func TestSyncProfileToAuth0Blocked(t *testing.T) {
 	cleanup := setupLinkTest(t, fake)
 	defer cleanup()
 
-	updated, err := syncProfileToAuth0(context.Background(), "auth0|blocked", fake.users["auth0|blocked"], map[string]any{"title": "Engineer"}, false)
+	updated, err := syncProfileToAuth0(context.Background(), "auth0|blocked", fake.users["auth0|blocked"], map[string]any{"title": "Engineer"}, true, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -44,6 +45,7 @@ func TestBuildAuth0Metadata(t *testing.T) {
 		existing        map[string]interface{}
 		v1Data          map[string]any
 		orgName         string
+		skills          *string
 		wantEmpty       bool              // true when no changes are expected (patch should be empty)
 		wantFieldChecks map[string]string // key -> expected value in patch
 		wantAbsent      []string          // keys that must NOT appear in patch
@@ -160,11 +162,43 @@ func TestBuildAuth0Metadata(t *testing.T) {
 			// Name fields are absent from the patch (Auth0 PATCH preserves them).
 			wantAbsent: []string{"given_name", "family_name", "name"},
 		},
+		{
+			name:       "skills nil leaves field untouched",
+			existing:   map[string]interface{}{"skills": "Go, Python"},
+			v1Data:     map[string]any{},
+			skills:     nil,
+			wantAbsent: []string{"skills"},
+		},
+		{
+			name:     "skills populated and changed",
+			existing: map[string]interface{}{},
+			v1Data:   map[string]any{},
+			skills:   auth0.String("GO, Python"),
+			wantFieldChecks: map[string]string{
+				"skills": "GO, Python",
+			},
+		},
+		{
+			name:       "skills unchanged causes no patch entry",
+			existing:   map[string]interface{}{"skills": "GO, Python"},
+			v1Data:     map[string]any{},
+			skills:     auth0.String("GO, Python"),
+			wantAbsent: []string{"skills"},
+		},
+		{
+			name:     "empty skills clears existing value",
+			existing: map[string]interface{}{"skills": "GO, Python"},
+			v1Data:   map[string]any{},
+			skills:   auth0.String(""),
+			wantFieldChecks: map[string]string{
+				"skills": "",
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			patch := buildAuth0Metadata(tt.existing, tt.v1Data, tt.orgName)
+			patch := buildAuth0Metadata(tt.existing, tt.v1Data, tt.orgName, tt.skills)
 
 			if tt.wantEmpty && len(patch) != 0 {
 				t.Errorf("expected empty patch, got %v", patch)
@@ -225,4 +259,79 @@ func TestIsRetryableAuth0Error(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNormalizeSkillsForAuth0(t *testing.T) {
+	t.Run("trims and joins", func(t *testing.T) {
+		got := normalizeSkillsForAuth0([]string{" Go ", "Python", " Rust"})
+		want := "Go, Python, Rust"
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("drops empty items after trimming", func(t *testing.T) {
+		got := normalizeSkillsForAuth0([]string{"Go", "  ", "", "Python"})
+		want := "Go, Python"
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("case-fold deduplicates, keeping the first-seen casing", func(t *testing.T) {
+		got := normalizeSkillsForAuth0([]string{"GO", "Python", "go", "PYTHON"})
+		want := "GO, Python"
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("caps at auth0SkillsMaxCount items", func(t *testing.T) {
+		names := make([]string, auth0SkillsMaxCount+10)
+		for i := range names {
+			names[i] = fmt.Sprintf("skill-%d", i)
+		}
+		got := normalizeSkillsForAuth0(names)
+		count := 1
+		for _, r := range got {
+			if r == ',' {
+				count++
+			}
+		}
+		if count != auth0SkillsMaxCount {
+			t.Errorf("got %d items, want %d", count, auth0SkillsMaxCount)
+		}
+		if !strings.HasPrefix(got, "skill-0, ") {
+			t.Errorf("expected original order preserved, got prefix of %q", got)
+		}
+	})
+
+	t.Run("truncates a single item longer than auth0SkillsMaxLength to exactly the cap", func(t *testing.T) {
+		// A single item is well under auth0SkillsMaxCount, so this isolates
+		// the length cap: without it, the result would be longer than want.
+		long := strings.Repeat("a", auth0SkillsMaxLength+500)
+		got := normalizeSkillsForAuth0([]string{long})
+		want := strings.Repeat("a", auth0SkillsMaxLength)
+		if got != want {
+			t.Errorf("got %d runes, want exactly %d runes", len([]rune(got)), len([]rune(want)))
+		}
+	})
+
+	t.Run("caps at auth0SkillsMaxLength runes without a dangling separator", func(t *testing.T) {
+		// The first item's length is chosen so the rune-2000 cut lands
+		// exactly inside the following ", " separator, forcing the
+		// trailing-separator trim to actually engage.
+		first := strings.Repeat("a", auth0SkillsMaxLength-1)
+		got := normalizeSkillsForAuth0([]string{first, "second"})
+		if got != first {
+			t.Errorf("got %q, want %q (separator trimmed at truncation boundary)", got, first)
+		}
+	})
+
+	t.Run("empty input yields empty string", func(t *testing.T) {
+		got := normalizeSkillsForAuth0(nil)
+		if got != "" {
+			t.Errorf("got %q, want empty string", got)
+		}
+	})
 }
