@@ -333,7 +333,18 @@ func TestHandleUserProfileUpdatedSkillsResolveHappensInsideLock(t *testing.T) {
 	defer func() { cfg = origCfg }()
 
 	const sfid = "SFID-shared-lock-order-test"
-	resolveV1UserSFIDByUsernameFn = func(context.Context, string) (string, error) {
+
+	// bReachedSFIDResolve fires when B's goroutine has resolved its SFID -
+	// the step immediately before it enters profileSkillsStaleGuard.run and
+	// attempts the per-sfid lock A is holding. Waiting for this signal
+	// (rather than a bare wall-clock sleep) before asserting B is blocked
+	// means the assertion can't pass vacuously just because B's goroutine
+	// hadn't been scheduled yet under a slow or loaded runtime.
+	bReachedSFIDResolve := make(chan struct{})
+	resolveV1UserSFIDByUsernameFn = func(_ context.Context, username string) (string, error) {
+		if username == "user-B" {
+			close(bReachedSFIDResolve)
+		}
 		return sfid, nil
 	}
 
@@ -422,6 +433,15 @@ func TestHandleUserProfileUpdatedSkillsResolveHappensInsideLock(t *testing.T) {
 		defer close(bDone)
 		handleUserProfileUpdated(newEvent("B", now.Add(time.Second)))
 	}()
+
+	// Wait for B to actually reach the point where it is about to attempt
+	// the per-sfid lock, so the check below isn't vacuously true because B's
+	// goroutine simply hasn't run yet.
+	select {
+	case <-bReachedSFIDResolve:
+	case <-time.After(2 * time.Second):
+		t.Fatal("B never reached SFID resolution")
+	}
 
 	// The invariant under test: B must not be able to run
 	// resolveSkillsMetadataFn while A still holds the sfid lock. If resolve

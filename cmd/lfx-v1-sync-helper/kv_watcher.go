@@ -64,9 +64,17 @@ var kvConsumerHeartbeatInterval = 15 * time.Second
 // being worked on, resetting its AckWait deadline without counting as a
 // redelivery. Returns a stop function that must be called once processing
 // finishes (successfully or not) to stop the heartbeat goroutine.
+//
+// The returned stop function blocks until the heartbeat goroutine has
+// actually exited, not just until it has been told to. Closing done alone
+// only requests a stop: if the ticker case has already been selected when
+// done is closed, InProgress() can still run after stop returns, racing the
+// caller's subsequent Ack/NAK. Waiting for stopped closes that window.
 func startInProgressHeartbeat(msg jetstream.Msg, key string) func() {
 	done := make(chan struct{})
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		ticker := time.NewTicker(kvConsumerHeartbeatInterval)
 		defer ticker.Stop()
 		for {
@@ -80,7 +88,10 @@ func startInProgressHeartbeat(msg jetstream.Msg, key string) func() {
 			}
 		}
 	}()
-	return func() { close(done) }
+	return func() {
+		close(done)
+		<-stopped
+	}
 }
 
 // kvMessageHandler processes KV update messages from the consumer.
