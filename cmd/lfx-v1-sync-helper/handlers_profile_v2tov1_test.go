@@ -4,8 +4,15 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"log/slog"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	nats "github.com/nats-io/nats.go"
 )
 
 func TestResolveV1UsernameFromV2UserID(t *testing.T) {
@@ -299,6 +306,162 @@ func TestMapMetadataToV1Payload(t *testing.T) {
 			t.Errorf("expected empty payload, got %v", got)
 		}
 	})
+}
+
+// TestHandleUserProfileUpdatedSkillsResolveHappensInsideLock pins the
+// "resolve inside the lock" ordering invariant documented above
+// handleUserProfileUpdated's skills-reconcile guard (see the comment above
+// the profileSkillsStaleGuard.run call): resolveSkillsMetadataFn must run
+// only after profileSkillsStaleGuard has acquired the per-sfid lock, never
+// before. If a future refactor hoisted that call above
+// profileSkillsStaleGuard.run, a blocked caller (B below) could resolve its
+// snapshot concurrently with an in-flight caller (A) instead of waiting for
+// A to finish, and would then overwrite A's newer reconcile result with a
+// stale read.
+func TestHandleUserProfileUpdatedSkillsResolveHappensInsideLock(t *testing.T) {
+	origResolveSFID := resolveV1UserSFIDByUsernameFn
+	origResolveSkills := resolveSkillsMetadataFn
+	origReconcile := reconcileV1SkillsFn
+	defer func() {
+		resolveV1UserSFIDByUsernameFn = origResolveSFID
+		resolveSkillsMetadataFn = origResolveSkills
+		reconcileV1SkillsFn = origReconcile
+	}()
+
+	origCfg := cfg
+	cfg = &Config{Auth0ClientID: "test-client-id"}
+	defer func() { cfg = origCfg }()
+
+	const sfid = "SFID-shared-lock-order-test"
+	resolveV1UserSFIDByUsernameFn = func(context.Context, string) (string, error) {
+		return sfid, nil
+	}
+
+	// state simulates the "current" live Auth0 metadata that a real
+	// resolveSkillsMetadata re-read would observe: each reconcile call
+	// advances it, and each resolve call reads whatever is current at the
+	// moment it actually runs.
+	var mu sync.Mutex
+	state := "initial"
+
+	aResolving := make(chan struct{})
+	releaseA := make(chan struct{})
+	bResolved := make(chan struct{})
+
+	resolveSkillsMetadataFn = func(_ context.Context, _ *slog.Logger, gotSFID string, event userProfileUpdatedEvent) map[string]any {
+		if gotSFID != sfid {
+			t.Errorf("resolveSkillsMetadataFn sfid = %q, want %q", gotSFID, sfid)
+		}
+		tag, _ := event.Metadata["tag"].(string)
+
+		if tag == "A" {
+			// Signal that A is now inside the guarded closure (holding the
+			// per-sfid lock), then hold it open until the test has confirmed
+			// B is blocked waiting for that same lock rather than racing
+			// ahead to resolve its own snapshot.
+			close(aResolving)
+			<-releaseA
+		}
+
+		mu.Lock()
+		snapshot := state
+		mu.Unlock()
+
+		if tag == "B" {
+			close(bResolved)
+		}
+		return map[string]any{"skills": snapshot, "tag": tag}
+	}
+
+	var reconcileOrder []string
+	reconcileV1SkillsFn = func(_ context.Context, gotSFID string, metadata map[string]any) error {
+		if gotSFID != sfid {
+			t.Errorf("reconcileV1SkillsFn sfid = %q, want %q", gotSFID, sfid)
+		}
+		tag, _ := metadata["tag"].(string)
+		snapshot, _ := metadata["skills"].(string)
+
+		mu.Lock()
+		reconcileOrder = append(reconcileOrder, tag+":"+snapshot)
+		state = "written-by-" + tag
+		mu.Unlock()
+		return nil
+	}
+
+	newEvent := func(tag string, ts time.Time) *nats.Msg {
+		data, err := json.Marshal(userProfileUpdatedEvent{
+			UserID:    "user-" + tag,
+			Principal: "user-" + tag,
+			Metadata:  map[string]any{"tag": tag},
+			Timestamp: ts,
+		})
+		if err != nil {
+			t.Fatalf("failed to marshal event %s: %v", tag, err)
+		}
+		return &nats.Msg{Subject: "lfx.user_profile.updated", Data: data}
+	}
+
+	now := time.Now()
+
+	aDone := make(chan struct{})
+	go func() {
+		defer close(aDone)
+		handleUserProfileUpdated(newEvent("A", now))
+	}()
+
+	select {
+	case <-aResolving:
+	case <-time.After(2 * time.Second):
+		t.Fatal("A never reached resolveSkillsMetadataFn")
+	}
+
+	// B is a newer event for the same sfid, dispatched while A still holds
+	// the per-sfid lock inside resolveSkillsMetadataFn.
+	bDone := make(chan struct{})
+	go func() {
+		defer close(bDone)
+		handleUserProfileUpdated(newEvent("B", now.Add(time.Second)))
+	}()
+
+	// The invariant under test: B must not be able to run
+	// resolveSkillsMetadataFn while A still holds the sfid lock. If resolve
+	// were hoisted above profileSkillsStaleGuard.run, B would resolve here
+	// immediately instead of blocking on the lock.
+	select {
+	case <-bResolved:
+		t.Fatal("B's resolveSkillsMetadataFn ran while A still held the per-sfid lock; " +
+			"resolveSkillsMetadataFn must only run inside profileSkillsStaleGuard's guarded closure")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(releaseA)
+
+	select {
+	case <-aDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("A's handleUserProfileUpdated never returned")
+	}
+	select {
+	case <-bDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("B's handleUserProfileUpdated never returned")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	wantOrder := []string{"A:initial", "B:written-by-A"}
+	if len(reconcileOrder) != len(wantOrder) {
+		t.Fatalf("reconcileOrder = %v, want %v", reconcileOrder, wantOrder)
+	}
+	for i, want := range wantOrder {
+		if reconcileOrder[i] != want {
+			t.Errorf("reconcileOrder[%d] = %q, want %q", i, reconcileOrder[i], want)
+		}
+	}
+	if state != "written-by-B" {
+		t.Errorf("final state = %q, want %q (B's fresh re-read must not be overwritten by a stale snapshot from A)", state, "written-by-B")
+	}
 }
 
 func TestPrincipalLoopPrevention(t *testing.T) {
