@@ -30,6 +30,16 @@ spec:
         component: app
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name | default .Chart.Name }}
+      # terminationGracePeriodSeconds must cover the sum of the NATS
+      # drain budget (main.go's gracefulShutdownSeconds, 25s) plus the
+      # dual-store mirror drain (mapping_store_dual.go's
+      # defaultDualMirrorDrainTimeout, 5s) plus a safety margin for
+      # HTTP/pgxpool teardown. 60s leaves comfortable headroom without
+      # unnecessarily delaying pod deletion under normal operation.
+      # Kubernetes default (30s) is too short — a SIGKILL mid-drain
+      # would abandon in-flight PG shadow writes and leave the mirror
+      # worker's queue partially applied.
+      terminationGracePeriodSeconds: {{ .Values.app.terminationGracePeriodSeconds | default 60 }}
       containers:
         - name: app
           image: "{{ .Values.app.image.repository }}:{{ .Values.app.image.tag | default .Chart.AppVersion }}"
@@ -87,6 +97,92 @@ spec:
                 key: {{ .Values.app.database.secret.passwordKey }}
           - name: V1_DB_SSLMODE
             value: {{ .Values.app.database.sslMode | quote }}
+          {{- if or (eq .Values.database.mode "database") (eq .Values.database.mode "cluster+database") }}
+          # Forward the CloudNativePG app-secret fields and the per-service
+          # database name; the app composes V1_MAPPINGS_DATABASE_URL in-process
+          # via Config.ResolveV1MappingsDatabaseURL. This avoids embedding the
+          # cluster-app password as a literal substring of an env-var value in
+          # the pod spec — env-var interpolation would resolve
+          # $(V1_MAPPINGS_PGPASSWORD) and make the password visible via
+          # `kubectl describe pod` even though the source is a Secret. The
+          # V1_MAPPINGS_* prefix disambiguates from V1_DB_* (the read-only
+          # Salesforce replica). See LFXV2-2985.
+          - name: V1_MAPPINGS_PGHOST
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "lfx-v1-sync-helper.cloudNativePGAppSecret" . }}
+                key: host
+          - name: V1_MAPPINGS_PGPORT
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "lfx-v1-sync-helper.cloudNativePGAppSecret" . }}
+                key: port
+          - name: V1_MAPPINGS_PGUSER
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "lfx-v1-sync-helper.cloudNativePGAppSecret" . }}
+                key: username
+          - name: V1_MAPPINGS_PGPASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "lfx-v1-sync-helper.cloudNativePGAppSecret" . }}
+                key: password
+          - name: V1_MAPPINGS_PGDATABASE
+            value: {{ .Values.database.cloudNativePG.databaseName | quote }}
+          {{- else if and .Values.database.external.secretName (eq (default "url" .Values.database.external.shape) "fields") }}
+          # External Postgres referenced by a multi-key Secret (e.g. an
+          # ExternalSecret pulling /cloudops/rds-managed/lfx-v2/<service> from
+          # AWS Secrets Manager and exposing each JSON field as its own Secret
+          # key). Same rationale as the CNPG path: compose
+          # V1_MAPPINGS_DATABASE_URL in-process from Secret-typed env vars.
+          #
+          # Gated on a non-empty secretName so a shape=fields install with
+          # no Secret wired falls through to the safety fallback (KV mode)
+          # instead of rendering invalid Deployment secretKeyRefs with
+          # empty `name: ""` entries.
+          - name: V1_MAPPINGS_PGHOST
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.database.external.secretName }}
+                key: {{ default "host" .Values.database.external.keys.host }}
+          - name: V1_MAPPINGS_PGPORT
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.database.external.secretName }}
+                key: {{ default "port" .Values.database.external.keys.port }}
+          - name: V1_MAPPINGS_PGUSER
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.database.external.secretName }}
+                key: {{ default "username" .Values.database.external.keys.username }}
+          - name: V1_MAPPINGS_PGPASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.database.external.secretName }}
+                key: {{ default "password" .Values.database.external.keys.password }}
+          - name: V1_MAPPINGS_PGDATABASE
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.database.external.secretName }}
+                key: {{ default "dbname" .Values.database.external.keys.dbname }}
+          {{- else if .Values.database.external.secretName }}
+          # External Postgres referenced by a single-key Secret whose value is
+          # a libpq URL (shape: url, the default).
+          - name: V1_MAPPINGS_DATABASE_URL
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.database.external.secretName }}
+                key: {{ .Values.database.external.secretKey }}
+          {{- else if not (hasKey (default dict .Values.app.environment) "V1_MAPPINGS_STORE_MODE") }}
+          # Safety fallback: no Postgres wiring was rendered (external mode
+          # with no secretName), so force V1_MAPPINGS_STORE_MODE=kv to
+          # prevent the app from crashing on boot with a DSN-resolution
+          # error. Operators wire this explicitly via app.environment when
+          # they want a different mode; otherwise this keeps the chart
+          # installable on clusters that haven't yet provisioned Postgres.
+          - name: V1_MAPPINGS_STORE_MODE
+            value: "kv"
+          {{- end }}
           ports:
             - containerPort: 8080
               name: web

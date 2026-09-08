@@ -265,7 +265,7 @@ func TestResolveContactSFIDForMember(t *testing.T) {
 			wantSFID:       "",
 		},
 		{
-			name: "ErrKeyNotFound → (empty, nil)",
+			name: "jetstream.ErrKeyNotFound → (empty, nil)",
 			kvGet: func(_ context.Context, _ string) ([]byte, error) {
 				return nil, jetstream.ErrKeyNotFound
 			},
@@ -273,9 +273,21 @@ func TestResolveContactSFIDForMember(t *testing.T) {
 			wantSFID:       "",
 		},
 		{
-			name: "ErrKeyDeleted → (empty, nil)",
+			name: "jetstream.ErrKeyDeleted → (empty, nil)",
 			kvGet: func(_ context.Context, _ string) ([]byte, error) {
 				return nil, jetstream.ErrKeyDeleted
+			},
+			v1ObjectLookup: noOpV1Lookup,
+			wantSFID:       "",
+		},
+		{
+			name: "port ErrKeyNotFound → (empty, nil)",
+			kvGet: func(_ context.Context, _ string) ([]byte, error) {
+				// This is what mappingStore.Get returns for a normal miss —
+				// resolveContactSFIDForMember must recognise it as
+				// "no mapping, not an error" so runs against the port
+				// don't over-count errored.
+				return nil, ErrKeyNotFound
 			},
 			v1ObjectLookup: noOpV1Lookup,
 			wantSFID:       "",

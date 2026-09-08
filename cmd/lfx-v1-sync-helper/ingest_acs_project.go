@@ -83,7 +83,7 @@ func backfillACSProjectGrants(ctx context.Context, dryRun bool) error {
 		logger.InfoContext(ctx, "running ACS project grants backfill in dry-run mode — no changes will be written")
 	}
 
-	// Collect all project.sfid.* mapping keys from mappingsKV.
+	// Collect all project.sfid.* mapping keys via the v1-mappings store.
 	mappings, err := collectProjectSFIDMappings(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to collect project SFID mappings: %w", err)
@@ -128,7 +128,7 @@ func backfillACSProjectGrants(ctx context.Context, dryRun bool) error {
 // of an ephemeral consumer. KV_v1-mappings in prod has 34M sequences; a
 // DeliverAllPolicy consumer saturates NATS server CPU and causes heartbeat
 // failures. ScanSubjectData returns payloads directly so no separate
-// mappingsKV.Get per subject is needed.
+// mappingStore.Get per subject is needed.
 func collectProjectSFIDMappings(ctx context.Context) (map[string]string, error) {
 	const (
 		// kvMappingsStream is the JetStream stream backing the v1-mappings KV
