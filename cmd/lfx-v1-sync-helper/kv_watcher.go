@@ -45,6 +45,44 @@ func (e *kvEntry) Revision() uint64 {
 	return 0
 }
 
+// kvConsumerHeartbeatInterval bounds how often startInProgressHeartbeat pings
+// JetStream while a KV entry is being processed. It must stay safely below
+// the "v1-sync-helper-kv-consumer" consumer's AckWait (see main.go) so a
+// still-processing delivery is never mistaken for an abandoned one.
+// handleUserSkillsUpdate is the main reason this matters: it can run two
+// sequential v1 DB queries (each up to v1DBQueryTimeout) plus Auth0 calls
+// (up to auth0CallTimeout), all while holding the destructive per-lfid
+// userSkillsStaleGuard lock, and those bounds don't share a budget - their
+// worst-case sum can approach or exceed AckWait. If JetStream redelivers a
+// still-in-flight message, it can land on another replica, where the
+// in-memory userSkillsStaleGuard cannot serialize the two.
+// var, not const, so tests can shrink it rather than waiting on real
+// wall-clock time.
+var kvConsumerHeartbeatInterval = 15 * time.Second
+
+// startInProgressHeartbeat periodically tells JetStream that msg is still
+// being worked on, resetting its AckWait deadline without counting as a
+// redelivery. Returns a stop function that must be called once processing
+// finishes (successfully or not) to stop the heartbeat goroutine.
+func startInProgressHeartbeat(msg jetstream.Msg, key string) func() {
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(kvConsumerHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := msg.InProgress(); err != nil {
+					logger.With(errKey, err, "key", key).Warn("failed to send InProgress heartbeat for KV JetStream message")
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
 // kvMessageHandler processes KV update messages from the consumer.
 func kvMessageHandler(msg jetstream.Msg) {
 	// Parse the message as a KV entry.
@@ -75,8 +113,12 @@ func kvMessageHandler(msg jetstream.Msg) {
 		operation: operation,
 	}
 
-	// Process the KV entry and check if retry is needed.
+	// Process the KV entry and check if retry is needed. A heartbeat keeps
+	// JetStream's AckWait from expiring underneath a long-running handler
+	// (see kvConsumerHeartbeatInterval).
+	stopHeartbeat := startInProgressHeartbeat(msg, key)
 	shouldRetry := kvHandler(entry)
+	stopHeartbeat()
 
 	// Handle message acknowledgment based on retry decision.
 	if shouldRetry {
