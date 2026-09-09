@@ -126,10 +126,20 @@ func kvMessageHandler(msg jetstream.Msg) {
 
 	// Process the KV entry and check if retry is needed. A heartbeat keeps
 	// JetStream's AckWait from expiring underneath a long-running handler
-	// (see kvConsumerHeartbeatInterval).
+	// (see kvConsumerHeartbeatInterval). stopHeartbeat is deferred inside
+	// this immediately-invoked closure - rather than called inline after
+	// kvHandler, or deferred at the top of kvMessageHandler - so it still
+	// runs if kvHandler panics or an early return is added later, while
+	// still completing before the Ack/NAK below: startInProgressHeartbeat's
+	// stop function blocks until the heartbeat goroutine has exited, and
+	// that must happen before Ack/NAK, not merely before kvMessageHandler
+	// returns, or a still-running heartbeat could race them.
 	stopHeartbeat := startInProgressHeartbeat(msg, key)
-	shouldRetry := kvHandler(entry)
-	stopHeartbeat()
+	var shouldRetry bool
+	func() {
+		defer stopHeartbeat()
+		shouldRetry = kvHandler(entry)
+	}()
 
 	// Handle message acknowledgment based on retry decision.
 	if shouldRetry {
