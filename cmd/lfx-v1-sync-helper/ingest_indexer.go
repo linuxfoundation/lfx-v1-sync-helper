@@ -114,6 +114,22 @@ func processCommitteeIndexingEvent(ctx context.Context, subject string, data []b
 		return syncCommitteeUpdateToV1(ctx, event.ObjectID, projectSFID, committeeSFID, body.Data)
 
 	case "deleted":
+		// Suppress the indexer echo of our own v1→v2 DELETE at the
+		// EARLIEST point in the dispatch — before the reverse-mapping
+		// lookup. handleCommitteeDelete tombstones committee.uid.<uid>
+		// AFTER the v2 API call succeeds; if that tombstone lands
+		// before the indexer event arrives here, splitTwoParts("!del")
+		// below returns empty SFIDs and the branch returns nil without
+		// ever calling syncCommitteeDeleteToV1 — leaking the marker
+		// forever (PR #170 review). Consuming at the dispatch top
+		// converges every tombstone-vs-echo race outcome to a consumed
+		// marker.
+		if consumePendingMarker(ctx, markerV1ToV2, markerOpDelete, markerResourceCommittee, event.ObjectID) {
+			logger.With("committee_uid", event.ObjectID).
+				InfoContext(ctx, "skipping indexer echo of v1-originated committee delete (fresh v1_to_v2 pending marker); mappings already tombstoned by v1→v2 handler")
+			return nil
+		}
+
 		entry, err := getMappingEntryWithRetry(ctx, "committee.uid."+event.ObjectID)
 		if err != nil {
 			if errors.Is(err, ErrKeyNotFound) {
@@ -226,6 +242,22 @@ func processCommitteeMemberIndexingEvent(ctx context.Context, subject string, da
 		return syncCommitteeMemberUpdateToV1(ctx, event.ObjectID, projectSFID, committeeSFID, memberSFID, body.Data)
 
 	case "deleted":
+		// Suppress the indexer echo of our own v1→v2 DELETE at the
+		// EARLIEST point in the dispatch — before the reverse-mapping
+		// lookup. handleCommitteeMemberDelete tombstones
+		// committee_member.uid.<uid> AFTER the v2 API call succeeds;
+		// if that tombstone lands before the indexer event arrives
+		// here, parseCommitteeMemberReverseMapping("!del") returns
+		// ok=false and the branch returns nil without ever calling
+		// syncCommitteeMemberDeleteToV1 — leaking the marker forever
+		// (PR #170 review). Consuming at the dispatch top converges
+		// every tombstone-vs-echo race outcome to a consumed marker.
+		if consumePendingMarker(ctx, markerV1ToV2, markerOpDelete, markerResourceCommitteeMember, event.ObjectID) {
+			logger.With("member_uid", event.ObjectID).
+				InfoContext(ctx, "skipping indexer echo of v1-originated committee member delete (fresh v1_to_v2 pending marker); mappings already tombstoned by v1→v2 handler")
+			return nil
+		}
+
 		reverseMappingKey := "committee_member.uid." + event.ObjectID
 		entry, err := getMappingEntryWithRetry(ctx, reverseMappingKey)
 		if err != nil {
@@ -367,6 +399,15 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 func syncCommitteeUpdateToV1(ctx context.Context, committeeUID, projectSFID, committeeSFID string, data map[string]any) error {
 	log := logger.With("committee_uid", committeeUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID)
 
+	// Suppress the indexer echo of our own v1→v2 UPDATE. See
+	// syncProjectUpdateToV1 for the full rationale — same shape,
+	// same failure mode without the check
+	// (linuxfoundation/lfx-self-serve#2007).
+	if consumePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceCommittee, committeeUID) {
+		log.InfoContext(ctx, "skipping indexer echo of v1-originated committee update (fresh v1_to_v2 pending marker)")
+		return nil
+	}
+
 	payload := projectServiceCommitteeUpdate{}
 	name, _ := data["name"].(string)
 	if name != "" {
@@ -404,10 +445,29 @@ func syncCommitteeUpdateToV1(ctx context.Context, committeeUID, projectSFID, com
 }
 
 // syncCommitteeDeleteToV1 deletes a v1 committee that was deleted in v2.
+//
+// The v1_to_v2.delete marker is consumed by the dispatcher
+// (processCommitteeIndexingEvent case "deleted") BEFORE reaching this
+// function, so any v1-originated echo is short-circuited there. See
+// the dispatcher for why the consume cannot live here.
 func syncCommitteeDeleteToV1(ctx context.Context, committeeUID, projectSFID, committeeSFID string) error {
 	log := logger.With("committee_uid", committeeUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID)
 
+	// Record that we're about to delete the v1 committee so the
+	// resulting WAL soft-delete event can identify itself as our own
+	// round-trip echo. See syncProjectDeleteToV1 for the equivalent
+	// block. Keyed by v1 SFID so handleCommitteeDelete can consume
+	// BEFORE mapping lookup — the tombstones written below can
+	// complete before the WAL echo arrives.
+	writePendingMarker(ctx, markerV2ToV1, markerOpDelete, markerResourceCommittee, committeeSFID)
+
 	if err := deleteV1Committee(ctx, projectSFID, committeeSFID); err != nil {
+		// v1 DELETE failed. Roll back the marker so an unrelated
+		// v1-originated WAL soft-delete for the same committee SFID
+		// within the freshness window is not silenced by
+		// handleCommitteeDelete. See syncProjectDeleteToV1 for the
+		// equivalent block.
+		deletePendingMarker(ctx, markerV2ToV1, markerOpDelete, markerResourceCommittee, committeeSFID)
 		log.With(errKey, err).ErrorContext(ctx, "failed to delete committee in v1")
 		return err // transient: trigger redeliver
 	}
@@ -557,6 +617,14 @@ func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID,
 func syncCommitteeMemberUpdateToV1(ctx context.Context, memberUID, projectSFID, committeeSFID, memberSFID string, data map[string]any) error {
 	log := logger.With("member_uid", memberUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID, "member_sfid", memberSFID)
 
+	// Suppress the indexer echo of our own v1→v2 UPDATE. See
+	// syncProjectUpdateToV1 for the full rationale
+	// (linuxfoundation/lfx-self-serve#2007).
+	if consumePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceCommitteeMember, memberUID) {
+		log.InfoContext(ctx, "skipping indexer echo of v1-originated committee member update (fresh v1_to_v2 pending marker)")
+		return nil
+	}
+
 	payload := projectServiceCommitteeMemberUpdate{}
 	if email, ok := data["email"].(string); ok {
 		payload.Email = email
@@ -624,10 +692,44 @@ func syncCommitteeMemberUpdateToV1(ctx context.Context, memberUID, projectSFID, 
 // actually exists and its value points back at this same memberUID — otherwise the
 // forward tombstone is skipped rather than risk tombstoning an unrelated mapping
 // (or a no-op) while the real v1-originated forward mapping stays live.
+//
+// The v1_to_v2.delete marker is consumed by the dispatcher
+// (processCommitteeMemberIndexingEvent case "deleted") BEFORE reaching
+// this function, so any v1-originated echo is short-circuited there.
+// See the dispatcher for why the consume cannot live here.
 func syncCommitteeMemberDeleteToV1(ctx context.Context, memberUID, projectSFID, committeeSFID, memberSFID, recordSFID string) error {
 	log := logger.With("member_uid", memberUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID, "member_sfid", memberSFID, "record_sfid", recordSFID)
 
+	// Record that we're about to delete the v1 committee member so the
+	// resulting WAL soft-delete event can identify itself as our own
+	// round-trip echo. See syncProjectDeleteToV1 for the equivalent
+	// block.
+	//
+	// Keyed by the platform-community__c record SFID — the key the WAL
+	// emits its soft-delete under and the sfid parameter that
+	// handleCommitteeMemberDelete receives before it consumes the
+	// marker BEFORE mapping lookup.
+	//
+	// Skipped when recordSFID is empty (v2-originated member with no
+	// record-sfid companion). In that narrow case the WAL echo falls
+	// back to the pre-fix retry-until-tombstone-lands cycle in
+	// handleCommitteeMemberDelete — an accepted degradation for an
+	// already-corrupted mapping state, not the common path.
+	if recordSFID != "" {
+		writePendingMarker(ctx, markerV2ToV1, markerOpDelete, markerResourceCommitteeMember, recordSFID)
+	} else {
+		log.WarnContext(ctx, "no record SFID available; skipping v2_to_v1 delete marker write — WAL echo may trigger the pre-fix retry-until-tombstone cycle")
+	}
+
 	if err := deleteV1CommitteeMember(ctx, projectSFID, committeeSFID, memberSFID); err != nil {
+		// v1 DELETE failed. Roll back the marker (if written) so an
+		// unrelated v1-originated WAL soft-delete for the same record
+		// SFID within the freshness window is not silenced by
+		// handleCommitteeMemberDelete. deletePendingMarker is a no-op
+		// on empty identifier, so the guard above is preserved.
+		if recordSFID != "" {
+			deletePendingMarker(ctx, markerV2ToV1, markerOpDelete, markerResourceCommitteeMember, recordSFID)
+		}
 		log.With(errKey, err).ErrorContext(ctx, "failed to delete committee member in v1")
 		return err // transient: trigger redeliver
 	}
@@ -697,11 +799,28 @@ func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string
 //   - updated: patch the mapped v1 project.
 //   - deleted: delete the mapped v1 project and tombstone both mappings.
 //
-// The loop with the v1→v2 direction is broken on the v1 side by shouldSkipSync
-// (handlers.go): when the WAL re-emits our own v1 write, lastmodifiedbyid matches
-// our service's Auth0 client ID and handleProjectUpdate returns early. The create
-// path additionally uses the presence of a non-tombstoned reverse mapping as a
-// v1-origination signal to skip the write entirely.
+// The v1↔v2 write loop is closed on two axes:
+//
+//   - v2-originated UPDATE WAL echo: shouldSkipSync (handlers.go)
+//     catches the v1 PATCH we just issued when the WAL re-emits it —
+//     lastmodifiedbyid matches our service's Auth0 client ID and
+//     handleProjectUpdate returns early.
+//
+//   - v1-originated UPDATE indexer echo, v1-originated DELETE indexer
+//     echo, and v2-originated DELETE WAL echo (which bypasses
+//     shouldSkipSync on the handleKVPut soft-delete branch): pending
+//     operation markers under the "pending.*" namespace in v1-mappings
+//     (see pending_markers.go). The v1→v2 handler writes a marker
+//     before its v2 API call; syncProjectUpdateToV1 /
+//     syncProjectDeleteToV1 consume it before the v1 API call. In the
+//     opposite direction, syncProjectDeleteToV1 writes a marker keyed
+//     by v1 SFID before its v1 DELETE; handleProjectDelete consumes it
+//     BEFORE mapping lookup so a tombstone that races the WAL echo
+//     does not leak the marker.
+//
+// The create path additionally uses the presence of a non-tombstoned
+// reverse mapping as a v1-origination signal to skip the write
+// entirely.
 //
 // This handler covers the ProjectBase fields only. Settings-only fields
 // (mission_statement, announcement_date, executive_director, program_manager,
@@ -750,6 +869,22 @@ func projectIndexerEventHandler(msg *nats.Msg) {
 		syncProjectUpdateToV1(ctx, event.ObjectID, projectSFID, body.Data)
 
 	case "deleted":
+		// Suppress the indexer echo of our own v1→v2 DELETE at the
+		// EARLIEST point in the dispatch — before the reverse-mapping
+		// lookup. handleProjectDelete tombstones project.uid.<uid>
+		// AFTER the v2 API call succeeds; if that tombstone lands
+		// before the indexer event arrives here,
+		// lookupV1ProjectSFIDForEvent returns a "mapping tombstoned"
+		// error and the branch returns without ever calling
+		// syncProjectDeleteToV1 — leaking the marker forever
+		// (PR #170 review). Consuming at the dispatch top converges
+		// every tombstone-vs-echo race outcome to a consumed marker.
+		if consumePendingMarker(ctx, markerV1ToV2, markerOpDelete, markerResourceProject, event.ObjectID) {
+			logger.With("project_uid", event.ObjectID).
+				InfoContext(ctx, "skipping indexer echo of v1-originated project delete (fresh v1_to_v2 pending marker); mappings already tombstoned by v1→v2 handler")
+			return
+		}
+
 		projectSFID, err := lookupV1ProjectSFIDForEvent(ctx, event.ObjectID)
 		if err != nil {
 			return
@@ -866,11 +1001,31 @@ func syncProjectCreateToV1(ctx context.Context, projectUID string, data map[stri
 func syncProjectUpdateToV1(ctx context.Context, projectUID, projectSFID string, data map[string]any) {
 	log := logger.With("project_uid", projectUID, "project_sfid", projectSFID)
 
+	// Suppress the indexer echo of our own v1→v2 UPDATE. handleProjectUpdate
+	// writes this marker before it calls the v2 project-service PATCH; the
+	// v2 side then publishes an indexer event that routes here.
+	// Without this check we PATCH v1 back with the same values we just
+	// received from it, overwriting v1 lastmodifiedbyid with the sync-helper's
+	// own client id and destroying the provenance of the human who made the
+	// original v1 change. See linuxfoundation/lfx-self-serve#2007.
+	if consumePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceProject, projectUID) {
+		log.InfoContext(ctx, "skipping indexer echo of v1-originated project update (fresh v1_to_v2 pending marker)")
+		return
+	}
+
 	payload, err := mapV2DataToV1ProjectUpdatePayload(ctx, data)
 	if err != nil {
 		log.With(errKey, err).ErrorContext(ctx, "failed to map v2 project data to v1 update payload, skipping")
 		return
 	}
+
+	// NB: no v2_to_v1 update marker is written here. The WAL echo of
+	// this PATCH is caught by shouldSkipSync (handlers.go) via
+	// lastmodifiedbyid — the v1 project-service records
+	// <our-client>@clients on the row, which handleKVPut skips at the
+	// update-branch shouldSkipSync check before dispatching to
+	// handleProjectUpdate. Only the delete path needs a symmetric marker
+	// because handleKVPut's soft-delete branch bypasses shouldSkipSync.
 
 	if err := updateV1Project(ctx, projectSFID, *payload); err != nil {
 		log.With(errKey, err).ErrorContext(ctx, "failed to update project in v1")
@@ -881,10 +1036,37 @@ func syncProjectUpdateToV1(ctx context.Context, projectUID, projectSFID string, 
 }
 
 // syncProjectDeleteToV1 deletes a v1 project that was deleted in v2.
+//
+// The v1_to_v2.delete marker is consumed by the dispatcher
+// (projectIndexerEventHandler case "deleted") BEFORE reaching this
+// function, so any v1-originated echo is short-circuited there. See
+// the dispatcher for why the consume cannot live here.
 func syncProjectDeleteToV1(ctx context.Context, projectUID, projectSFID string) {
 	log := logger.With("project_uid", projectUID, "project_sfid", projectSFID)
 
+	// Record that we're about to delete the v1 project so the resulting
+	// WAL soft-delete event (which will fan out to handleProjectDelete
+	// via handleResourceDelete) can identify itself as our own
+	// round-trip echo. handleKVPut's shouldSkipSync check is bypassed
+	// on the soft-delete branch, so this marker is the only mechanism
+	// that closes the loop for v2-originated deletes.
+	//
+	// Keyed by v1 SFID (not v2 UID) so handleProjectDelete can consume
+	// the marker BEFORE mapping lookup. The mapping tombstones written
+	// below can complete before the WAL echo arrives, in which case
+	// handleProjectDelete would otherwise bail at the tombstoned-mapping
+	// check without ever reaching the marker consume — and the marker
+	// would leak forever with no consumer to clean it up.
+	writePendingMarker(ctx, markerV2ToV1, markerOpDelete, markerResourceProject, projectSFID)
+
 	if err := deleteV1Project(ctx, projectSFID); err != nil {
+		// v1 DELETE failed. Roll back the marker so an unrelated
+		// v1-originated WAL soft-delete for the same SFID within the
+		// freshness window is not silenced by handleProjectDelete. The
+		// tombstones below are skipped by the early return, so the
+		// mapping stays live and a legitimate v1-originated delete
+		// must still be able to drive the v2 DELETE.
+		deletePendingMarker(ctx, markerV2ToV1, markerOpDelete, markerResourceProject, projectSFID)
 		log.With(errKey, err).ErrorContext(ctx, "failed to delete project in v1")
 		return
 	}

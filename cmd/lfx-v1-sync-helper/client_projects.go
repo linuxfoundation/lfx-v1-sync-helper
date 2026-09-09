@@ -75,11 +75,20 @@ func createProject(ctx context.Context, payload *projectservice.CreateProjectPay
 }
 
 // updateProject updates a project by separately handling base and settings if there are changes.
-func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjectBasePayload, settingsPayload *projectservice.UpdateProjectSettingsPayload, v1Principal string) error {
+//
+// Returns mutated=true iff UpdateProjectBase was actually issued. Settings-only
+// changes (which route via a separate lfx.project_settings.updated indexer
+// subject the sync-helper does not subscribe to) do not count — callers using
+// this return value to gate a pending indexer-echo marker on the
+// lfx.project.updated subject must treat a settings-only update as "no base
+// mutation" so they clean the marker up. If neither base nor settings changed
+// the function returns (false, nil) so callers can distinguish a genuine no-op
+// from a successful mutating call.
+func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjectBasePayload, settingsPayload *projectservice.UpdateProjectSettingsPayload, v1Principal string) (bool, error) {
 	// Fetch current project base.
 	currentBase, baseETag, err := fetchProjectBase(ctx, *basePayload.UID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch current project base: %w", err)
+		return false, fmt.Errorf("failed to fetch current project base: %w", err)
 	}
 
 	// Create updated base for comparison.
@@ -113,10 +122,11 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 	// Check if base has changes.
 	baseChanged := !projectBasesEqual(currentBase, updatedBase)
 
+	baseMutated := false
 	if baseChanged {
 		token, err := generateCachedJWTToken(ctx, projectServiceAudience, v1Principal)
 		if err != nil {
-			return fmt.Errorf("failed to generate token for base update: %w", err)
+			return false, fmt.Errorf("failed to generate token for base update: %w", err)
 		}
 
 		basePayload.BearerToken = &token
@@ -124,8 +134,9 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 
 		_, err = projectClient.UpdateProjectBase(ctx, basePayload)
 		if err != nil {
-			return fmt.Errorf("failed to update project base: %w", err)
+			return false, fmt.Errorf("failed to update project base: %w", err)
 		}
+		baseMutated = true
 	}
 
 	// Handle settings update if provided.
@@ -133,7 +144,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 		// Fetch current project settings.
 		currentSettings, settingsETag, err := fetchProjectSettings(ctx, *basePayload.UID)
 		if err != nil {
-			return fmt.Errorf("failed to fetch current project settings: %w", err)
+			return baseMutated, fmt.Errorf("failed to fetch current project settings: %w", err)
 		}
 
 		// Preserve existing values for fields not being updated.
@@ -168,7 +179,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 		if settingsChanged {
 			token, err := generateCachedJWTToken(ctx, projectServiceAudience, v1Principal)
 			if err != nil {
-				return fmt.Errorf("failed to generate token for settings update: %w", err)
+				return baseMutated, fmt.Errorf("failed to generate token for settings update: %w", err)
 			}
 
 			settingsPayload.BearerToken = &token
@@ -176,12 +187,12 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 
 			_, err = projectClient.UpdateProjectSettings(ctx, settingsPayload)
 			if err != nil {
-				return fmt.Errorf("failed to update project settings: %w", err)
+				return baseMutated, fmt.Errorf("failed to update project settings: %w", err)
 			}
 		}
 	}
 
-	return nil
+	return baseMutated, nil
 }
 
 // deleteProject deletes a project by UID.

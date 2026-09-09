@@ -143,7 +143,30 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 			return isTransientStoreErr(err)
 		}
 
-		err = updateProject(ctx, payload, settingsPayload, v1Principal)
+		// Record that we're about to write the v2 project so the
+		// resulting indexer event (which will fan out to
+		// syncProjectUpdateToV1) can identify itself as our own
+		// round-trip echo and skip the redundant v1 PATCH that would
+		// otherwise overwrite lastmodifiedbyid with our client ID.
+		// See pending_markers.go for the full contract.
+		//
+		// If updateProject reports no base mutation (change-detection
+		// short-circuit, a settings-only change routed via the separate
+		// lfx.project_settings subject, or a pre-mutation error like a
+		// fetchProjectBase / JWT / API failure) we delete the marker
+		// below — regardless of err. A no-mutation outcome means no
+		// lfx.project.updated indexer event will fire, so the marker
+		// has no consumer and would otherwise sit as garbage and
+		// silence a genuine v2 update within the freshness window. On
+		// a NACK+redeliver, the retry re-writes the marker before its
+		// next v2 API attempt.
+		writePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceProject, existingUID)
+
+		var baseMutated bool
+		baseMutated, err = updateProject(ctx, payload, settingsPayload, v1Principal)
+		if !baseMutated {
+			deletePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceProject, existingUID)
+		}
 		uid = existingUID
 	} else {
 		// Create new project.
@@ -194,6 +217,28 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 // handleProjectDelete processes a project deletion.
 // Returns true if the operation should be retried, false otherwise.
 func handleProjectDelete(ctx context.Context, key string, sfid string, v1Principal string) bool {
+	// Suppress the WAL echo of our own v2→v1 DELETE. syncProjectDeleteToV1
+	// writes this marker (keyed by v1 SFID) before it calls the v1
+	// project-service DELETE; the v1 side then emits a soft-delete WAL
+	// event that routes here via handleResourceDelete. handleKVPut's
+	// shouldSkipSync check (handlers.go:104) is bypassed on the
+	// soft-delete branch, so this marker is the only mechanism that
+	// closes the loop for v2-originated deletes. Without it,
+	// deleteProject below hits fetchProjectBase → 404 → return true
+	// (retry), producing a bounded retry cycle and an ERROR log per
+	// event (linuxfoundation/lfx-self-serve#2007).
+	//
+	// The check runs BEFORE mapping lookup so the WAL echo is caught
+	// whether or not the writer has already tombstoned the mapping —
+	// the alternative (keying by v2 UID, requiring the mapping lookup
+	// first) leaks the marker forever whenever tombstoning wins the
+	// race against WAL emission.
+	if consumePendingMarker(ctx, markerV2ToV1, markerOpDelete, markerResourceProject, sfid) {
+		logger.With("sfid", sfid, "key", key).
+			InfoContext(ctx, "skipping WAL echo of v2-originated project delete (fresh v2_to_v1 pending marker)")
+		return false
+	}
+
 	// Check if we have an existing mapping using SFID.
 	mappingKey := fmt.Sprintf("project.sfid.%s", sfid)
 	entry, err := mappingStore.Get(ctx, mappingKey)
@@ -215,8 +260,21 @@ func handleProjectDelete(ctx context.Context, key string, sfid string, v1Princip
 	// Delete the project using provided v1Principal or v1-sync-helper service credentials.
 	logger.With("project_uid", existingUID, "sfid", sfid, "key", key, "v1_principal", v1Principal).InfoContext(ctx, "deleting project")
 
+	// Record that we're about to delete the v2 project so the
+	// resulting indexer event (which will fan out to
+	// syncProjectDeleteToV1) can identify itself as our own round-trip
+	// echo and skip the redundant v1 DELETE. Keyed by v2 UID since the
+	// consumer has the UID directly from the indexer event's ObjectID.
+	writePendingMarker(ctx, markerV1ToV2, markerOpDelete, markerResourceProject, existingUID)
+
 	err = deleteProject(ctx, existingUID, v1Principal)
 	if err != nil {
+		// v2 DELETE failed. Roll back the marker so it does not
+		// suppress an unrelated genuine v2-native project.deleted
+		// event for the same UID within the freshness window. On
+		// NACK+redeliver, the retry re-writes the marker before its
+		// next v2 API attempt.
+		deletePendingMarker(ctx, markerV1ToV2, markerOpDelete, markerResourceProject, existingUID)
 		logger.With(errKey, err, "project_uid", existingUID, "sfid", sfid, "key", key).ErrorContext(ctx, "failed to delete project")
 		return true // Retry on error.
 	}

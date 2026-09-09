@@ -194,8 +194,30 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		// current values), and only issues the API call when a synced field differs.
 		logger.With("committee_uid", existingUID, "sfid", sfid).InfoContext(ctx, "updating existing committee")
 
+		// Record that we're about to write the v2 committee so the
+		// resulting indexer event (which will fan out to
+		// syncCommitteeUpdateToV1) can identify itself as our own
+		// round-trip echo and skip the redundant v1 PATCH that would
+		// otherwise overwrite lastmodifiedbyid with our client ID.
+		// See pending_markers.go for the full contract.
+		//
+		// If updateCommittee reports no mutation (change-detection
+		// short-circuit at client_committees.go, or a pre-mutation
+		// error like a fetchCommitteeBase / JWT / API failure) we
+		// delete the marker below — regardless of err. A no-mutation
+		// outcome means no lfx.committee.updated indexer event will
+		// fire, so the marker has no consumer and would otherwise
+		// silence a genuine v2 update within the freshness window. On
+		// a NACK+redeliver, the retry re-writes the marker before its
+		// next v2 API attempt.
+		writePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceCommittee, existingUID)
+
+		var mutated bool
 		var updateResult *committeeservice.CommitteeBaseWithReadonlyAttributes
-		updateResult, err = updateCommittee(ctx, existingUID, v1Data, v1Principal)
+		mutated, updateResult, err = updateCommittee(ctx, existingUID, v1Data, v1Principal)
+		if !mutated {
+			deletePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceCommittee, existingUID)
+		}
 		if updateResult != nil && updateResult.SsoGroupName != nil {
 			v2SSOGroupName = *updateResult.SsoGroupName
 		}
@@ -288,6 +310,30 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 // handleCommitteeMemberDelete processes a committee member deletion.
 // Returns true if the operation should be retried, false otherwise.
 func handleCommitteeMemberDelete(ctx context.Context, key string, sfid string, v1Principal string) bool {
+	// Suppress the WAL echo of our own v2→v1 DELETE. syncCommitteeMemberDeleteToV1
+	// writes this marker (keyed by the platform-community__c record
+	// SFID) before it calls the v1 project-service DELETE; the v1 side
+	// then emits a soft-delete WAL event that routes here via
+	// handleResourceDelete with the record SFID as its key. handleKVPut's
+	// shouldSkipSync check is bypassed on the soft-delete branch, so
+	// this marker is the only mechanism that closes the loop for
+	// v2-originated deletes. Runs BEFORE mapping lookup so the WAL
+	// echo is caught whether or not the writer has already tombstoned
+	// the mapping — see linuxfoundation/lfx-self-serve#2007 for the
+	// retry-until-tombstone failure mode without it.
+	//
+	// Edge case: when syncCommitteeMemberDeleteToV1's recordSFID is
+	// empty (v2-originated member with no record-sfid companion), the
+	// marker isn't written and this consume misses. The tombstone
+	// check below then catches the echo if tombstoning has landed;
+	// otherwise the pre-fix retry-until-tombstone-lands noise applies
+	// for that specific case.
+	if consumePendingMarker(ctx, markerV2ToV1, markerOpDelete, markerResourceCommitteeMember, sfid) {
+		logger.With("sfid", sfid, "key", key).
+			InfoContext(ctx, "skipping WAL echo of v2-originated committee member delete (fresh v2_to_v1 pending marker)")
+		return false
+	}
+
 	// Check if we have an existing mapping using SFID.
 	mappingKey := fmt.Sprintf("committee_member.sfid.%s", sfid)
 	entry, err := mappingStore.Get(ctx, mappingKey)
@@ -323,9 +369,21 @@ func handleCommitteeMemberDelete(ctx context.Context, key string, sfid string, v
 	// Delete the committee member using the API.
 	logger.With("committee_uid", committeeUID, "member_uid", memberUID, "sfid", sfid, "key", key, "v1_principal", v1Principal).InfoContext(ctx, "deleting committee member")
 
+	// Record that we're about to delete the v2 committee member so the
+	// resulting indexer event can identify itself as our own round-trip
+	// echo and skip the redundant v1 DELETE. Keyed by v2 UID since the
+	// consumer has the UID directly from the indexer event's ObjectID.
+	writePendingMarker(ctx, markerV1ToV2, markerOpDelete, markerResourceCommitteeMember, memberUID)
+
 	skipNotification := cfg != nil && cfg.CommitteeSkipMemberNotifications
 	err = deleteCommitteeMember(ctx, committeeUID, memberUID, v1Principal, skipNotification)
 	if err != nil {
+		// v2 DELETE failed. Roll back the marker so it does not
+		// suppress an unrelated genuine v2-native
+		// committee_member.deleted event for the same UID within the
+		// freshness window. See handleProjectDelete for the equivalent
+		// block.
+		deletePendingMarker(ctx, markerV1ToV2, markerOpDelete, markerResourceCommitteeMember, memberUID)
 		logger.With(errKey, err, "committee_uid", committeeUID, "member_uid", memberUID, "sfid", sfid, "key", key).ErrorContext(ctx, "failed to delete committee member")
 		return true // Retry on error.
 	}
@@ -356,6 +414,22 @@ func handleCommitteeMemberDelete(ctx context.Context, key string, sfid string, v
 // handleCommitteeDelete processes a committee deletion.
 // Returns true if the operation should be retried, false otherwise.
 func handleCommitteeDelete(ctx context.Context, key string, sfid string, v1Principal string) bool {
+	// Suppress the WAL echo of our own v2→v1 DELETE. syncCommitteeDeleteToV1
+	// writes this marker (keyed by v1 SFID) before it calls the v1
+	// project-service DELETE; handleKVPut's shouldSkipSync check is
+	// bypassed on the soft-delete branch so this marker is the only
+	// mechanism that closes the loop for v2-originated deletes. See
+	// handlers_projects.go handleProjectDelete for the equivalent block
+	// and linuxfoundation/lfx-self-serve#2007 for the failure mode
+	// without it. Runs BEFORE mapping lookup for the same reason —
+	// tombstoning the mapping may race the WAL echo, and a marker
+	// keyed by v2 UID would leak whenever tombstoning wins.
+	if consumePendingMarker(ctx, markerV2ToV1, markerOpDelete, markerResourceCommittee, sfid) {
+		logger.With("sfid", sfid, "key", key).
+			InfoContext(ctx, "skipping WAL echo of v2-originated committee delete (fresh v2_to_v1 pending marker)")
+		return false
+	}
+
 	// Check if we have an existing mapping using SFID.
 	mappingKey := fmt.Sprintf("committee.sfid.%s", sfid)
 	entry, err := mappingStore.Get(ctx, mappingKey)
@@ -377,8 +451,19 @@ func handleCommitteeDelete(ctx context.Context, key string, sfid string, v1Princ
 	// Delete the committee using provided v1Principal or v1-sync-helper service credentials.
 	logger.With("committee_uid", existingUID, "sfid", sfid, "key", key, "v1_principal", v1Principal).InfoContext(ctx, "deleting committee")
 
+	// Record that we're about to delete the v2 committee so the
+	// resulting indexer event can identify itself as our own round-trip
+	// echo and skip the redundant v1 DELETE. Keyed by v2 UID since the
+	// consumer has the UID directly from the indexer event's ObjectID.
+	writePendingMarker(ctx, markerV1ToV2, markerOpDelete, markerResourceCommittee, existingUID)
+
 	err = deleteCommittee(ctx, existingUID, v1Principal)
 	if err != nil {
+		// v2 DELETE failed. Roll back the marker so it does not
+		// suppress an unrelated genuine v2-native committee.deleted
+		// event for the same UID within the freshness window. See
+		// handleProjectDelete for the equivalent block.
+		deletePendingMarker(ctx, markerV1ToV2, markerOpDelete, markerResourceCommittee, existingUID)
 		logger.With(errKey, err, "committee_uid", existingUID, "sfid", sfid, "key", key).ErrorContext(ctx, "failed to delete committee")
 		return true // Retry on error.
 	}
@@ -743,7 +828,29 @@ func handleCommitteeMemberUpdate(ctx context.Context, key string, v1Data map[str
 			return isTransientStoreErr(err)
 		}
 
-		err = updateCommitteeMember(ctx, payload, v1Principal)
+		// Record that we're about to write the v2 committee member so
+		// the resulting indexer event (which will fan out to
+		// syncCommitteeMemberUpdateToV1) can identify itself as our own
+		// round-trip echo and skip the redundant v1 PATCH that would
+		// otherwise overwrite lastmodifiedbyid with our client ID.
+		// See pending_markers.go for the full contract.
+		//
+		// If updateCommitteeMember reports no mutation (change-detection
+		// short-circuit, or a pre-mutation error like a
+		// fetchCommitteeMember / JWT / API failure) we delete the
+		// marker below — regardless of err. A no-mutation outcome means
+		// no lfx.committee_member.updated indexer event will fire, so
+		// the marker has no consumer and would otherwise silence a
+		// genuine v2 update within the freshness window. On a
+		// NACK+redeliver, the retry re-writes the marker before its
+		// next v2 API attempt.
+		writePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceCommitteeMember, existingMemberUID)
+
+		var memberMutated bool
+		memberMutated, err = updateCommitteeMember(ctx, payload, v1Principal)
+		if !memberMutated {
+			deletePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceCommitteeMember, existingMemberUID)
+		}
 		memberUID = existingMemberUID
 	} else {
 		// Create new committee member.
