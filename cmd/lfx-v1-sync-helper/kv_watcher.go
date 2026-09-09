@@ -56,9 +56,15 @@ func (e *kvEntry) Revision() uint64 {
 // worst-case sum can approach or exceed AckWait. If JetStream redelivers a
 // still-in-flight message, it can land on another replica, where the
 // in-memory userSkillsStaleGuard cannot serialize the two.
+// Set to AckWait/3, not AckWait/2: each successful InProgress() resets the
+// AckWait deadline, so a single failed/timed-out heartbeat (a transient
+// request hiccup on an otherwise-healthy connection) leaves the next tick
+// racing the un-reset deadline if the interval only has one heartbeat's
+// worth of margin. AckWait/3 keeps two full ticks of headroom after one
+// miss, at negligible extra request cost.
 // var, not const, so tests can shrink it rather than waiting on real
 // wall-clock time.
-var kvConsumerHeartbeatInterval = 15 * time.Second
+var kvConsumerHeartbeatInterval = 10 * time.Second
 
 // startInProgressHeartbeat periodically tells JetStream that msg is still
 // being worked on, resetting its AckWait deadline without counting as a
