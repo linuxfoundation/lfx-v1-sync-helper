@@ -165,8 +165,10 @@ const (
 )
 
 // LoadMinimalConfig returns a config for one-shot modes that only need NATS
-// (e.g. --backfill-committee-member-mappings). Only NATS_URL and
-// NATS_FETCH_MAX_WAIT are read; all other fields are left at zero values.
+// (e.g. --backfill-committee-member-mappings, --backfill-projects). Only
+// NATS_URL, NATS_FETCH_MAX_WAIT, and AUTH0_CLIENT_ID are read (the latter for
+// shouldSkipSync's loop-prevention check); all other fields are left at zero
+// values.
 func LoadMinimalConfig() *Config {
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
@@ -175,6 +177,7 @@ func LoadMinimalConfig() *Config {
 	return &Config{
 		NATSURL:                     natsURL,
 		NATSFetchMaxWait:            parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
+		Auth0ClientID:               os.Getenv("AUTH0_CLIENT_ID"),
 		V1MappingsDatabaseURL:       os.Getenv("V1_MAPPINGS_DATABASE_URL"),
 		V1MappingsPGHost:            os.Getenv("V1_MAPPINGS_PGHOST"),
 		V1MappingsPGPort:            os.Getenv("V1_MAPPINGS_PGPORT"),

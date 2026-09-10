@@ -356,6 +356,22 @@ Backfills ACS legacy org grants into v2 b2b_org settings:
 - **Dry-run**: add `--dry-run` to preview without writing.
 - **Summary log fields**: `orgs_total`, `orgs_changed`, `writers_added`, `auditors_added`, `orgs_skipped`, `errors`.
 
+### `--backfill-projects [flags] [--dry-run]` (`backfill_projects.go`)
+
+Re-emits v1 `salesforce-project__c` rows that have no live `project.sfid.*` v1-mappings entry (LFXV2-3220 removed the project allowlist, so projects created before 17 Aug 2026 and never modified since were never synced). Mechanism: re-**PUT** the existing `v1-objects` value; no create logic is duplicated here — the running deployment's durable KV consumer (`handleKVPut` → `handleProjectUpdate`) does the actual create.
+
+**Why depth ordering is required and retries don't help**: `handleKVPut` unconditionally ACKs `salesforce-project__c` messages, so the NAK/redelivery path never fires for projects, and `mapV1DataToProjectCreatePayload` hard-errors (dropping the message) when a project's `parent_project__c` mapping is missing. A flat re-emit of every unmapped project therefore silently fails for any candidate whose parent is itself unmapped. `orderCandidatesByDepth` re-emits level by level (depth 0 = no parent or parent already mapped), rate-limited, then settle-polls `project.sfid.<sfid>` before emitting the next level.
+
+- **Candidate source**: `ScanSubjectData` on `KV_v1-objects` (`$KV.v1-objects.salesforce-project__c.*`) minus live and tombstoned `project.sfid.*` mappings (`KV_v1-mappings`).
+- **Pre-filters** mirror `handleKVPut`'s exact order (empty value, decode failure, soft-delete, `shouldSkipSync`, missing `sfid`/`name`/`slug__c`) so the pass never counts or emits a row the live consumer would drop.
+- **Safety floor**: aborts unless `--force` if live+tombstoned mappings fall below ~1000 (prod has ~12K) — guards against a truncated scan or a stale mappings bucket mass-re-emitting the entire v1 project population.
+- **Formation split**: a live run without `--exclude-stage-prefix`/`--include-stage-prefix`/`--allow-formation` refuses to start if any candidate is Formation-staged, forcing two explicit passes (`--exclude-stage-prefix Formation`, then `--include-stage-prefix Formation`) rather than mixing populations in one run.
+- **Emit**: fresh `v1KV.Get` → re-apply pre-filters → revision-checked `v1KV.Update`; a revision mismatch (`isRevisionMismatchError`) counts as `skipped_revision_race`, not an error — the live path already handled it.
+- **Flags**: `--exclude-stage-prefix`, `--include-stage-prefix` (comma-separated, case-insensitive `project_status__c` prefix match), `--emit-rate` (default 2.0/s), `--allow-formation`, `--check-slugs` (skip candidates whose slug already resolves to a v2 project — a lost-mapping case that needs repair, not a create), `--force`. Reuses `--dry-run` and `--limit` (0 = unlimited).
+- **Dry-run**: validates candidate selection and depth ordering only; it cannot observe the downstream create. Reports the full candidate/skip counters, the stage histogram, and duplicate/conflicting slugs.
+- **Summary log fields**: `scanned`, `mappings_live`, `mappings_tombstoned`, `candidates`, `emitted`, `levels`, `formation_candidates`, `remaining_unmapped`, `errors`.
+- **Manifest**: `manifests/backfill-projects-job.yaml`, shipped dry-run by default with `--exclude-stage-prefix Formation`.
+
 ### `--backfill-alternate-emails [--limit N] [--dry-run]` (`backfill_email_profile.go`)
 
 Iterates Auth0 users (Username-Password-Authentication connection only), sorted by `updated_at` ascending, and links any v1 verified alternate emails not yet linked as Auth0 email-connection identities.
