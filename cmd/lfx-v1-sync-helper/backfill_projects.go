@@ -107,9 +107,45 @@ type backfillProjectsResult struct {
 	skippedRevisionRace    int
 	skippedLimit           int
 	skippedSlugConflict    int
+	skippedMissing         int
 	slugConflicts          []slugConflict
 	duplicateSlugs         map[string][]string
 	stageHistogram         map[string]int
+}
+
+// logFields returns the complete counter set as alternating key/value pairs
+// for logger.With, so every log site (dry-run report, final summary) reports
+// the same fields instead of each hand-maintaining its own drifting subset.
+func (res backfillProjectsResult) logFields() []any {
+	return []any{
+		"scanned", res.scanned,
+		"mappings_live", res.mappingsLive,
+		"mappings_tombstoned", res.mappingsTombstoned,
+		"candidates", res.candidates,
+		"emitted", res.emitted,
+		"levels", res.levels,
+		"formation_candidates", res.formationCandidates,
+		"remaining_unmapped", res.remainingUnmapped,
+		"errors", res.errors,
+		"skipped_already_mapped", res.skippedAlreadyMapped,
+		"skipped_tombstoned", res.skippedTombstoned,
+		"skipped_soft_deleted", res.skippedSoftDeleted,
+		"skipped_empty_value", res.skippedEmptyValue,
+		"skipped_undecodable", res.skippedUndecodable,
+		"skipped_no_sfid", res.skippedNoSFID,
+		"skipped_missing_required", res.skippedMissingRequired,
+		"skipped_v2_authored", res.skippedV2Authored,
+		"skipped_stage_filtered", res.skippedStageFiltered,
+		"skipped_parent_unmapped", res.skippedParentUnmapped,
+		"skipped_parent_blocked", res.skippedParentBlocked,
+		"skipped_revision_race", res.skippedRevisionRace,
+		"skipped_limit", res.skippedLimit,
+		"skipped_slug_conflict", res.skippedSlugConflict,
+		"skipped_missing", res.skippedMissing,
+		"slug_conflicts", len(res.slugConflicts),
+		"duplicate_slugs", len(res.duplicateSlugs),
+		"stage_histogram", res.stageHistogram,
+	}
 }
 
 // slugConflict records a candidate whose slug already resolves to a v2
@@ -146,6 +182,16 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 	res := backfillProjectsResult{
 		duplicateSlugs: map[string][]string{},
 		stageHistogram: map[string]int{},
+	}
+
+	if opts.emitRate <= 0 {
+		return res, fmt.Errorf("--emit-rate must be greater than 0, got %v", opts.emitRate)
+	}
+	if cfg.Auth0ClientID == "" {
+		return res, fmt.Errorf(
+			"AUTH0_CLIENT_ID is not set — shouldSkipSync cannot distinguish v2-authored rows " +
+				"from genuine v1 changes without it, which would silently disable loop prevention",
+		)
 	}
 
 	opTimeout := cfg.NATSFetchMaxWait
@@ -215,17 +261,7 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 	res.remainingUnmapped = len(unresolved)
 
 	if opts.dryRun {
-		logger.With(
-			"scanned", res.scanned,
-			"mappings_live", res.mappingsLive,
-			"mappings_tombstoned", res.mappingsTombstoned,
-			"candidates", res.candidates,
-			"levels", res.levels,
-			"formation_candidates", res.formationCandidates,
-			"skipped_parent_unmapped", res.skippedParentUnmapped,
-			"duplicate_slugs", len(res.duplicateSlugs),
-			"stage_histogram", res.stageHistogram,
-		).InfoContext(ctx, "[dry-run] project backfill candidate report")
+		logger.With(res.logFields()...).InfoContext(ctx, "[dry-run] project backfill candidate report")
 		return res, nil
 	}
 
@@ -291,18 +327,6 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 	}
 	res.skippedParentBlocked = blocked
 
-	logger.With(
-		"scanned", res.scanned,
-		"mappings_live", res.mappingsLive,
-		"mappings_tombstoned", res.mappingsTombstoned,
-		"candidates", res.candidates,
-		"emitted", res.emitted,
-		"levels", res.levels,
-		"formation_candidates", res.formationCandidates,
-		"remaining_unmapped", res.remainingUnmapped,
-		"errors", res.errors,
-	).InfoContext(ctx, "project backfill complete")
-
 	if res.errors > 0 {
 		return res, fmt.Errorf("project backfill completed with %d errors", res.errors)
 	}
@@ -332,7 +356,7 @@ func recordSkip(res *backfillProjectsResult, reason string) {
 	case "revision_race":
 		res.skippedRevisionRace++
 	case "missing":
-		// The row disappeared (deleted) between scan and emit; not an error.
+		res.skippedMissing++
 	}
 }
 

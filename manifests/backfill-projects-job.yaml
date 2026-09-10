@@ -67,7 +67,7 @@ spec:
           #   kubectl --context lfx-v2-prod -n v1-sync-helper get deployment \
           #     -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'
           image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           args: ["--backfill-projects", "--exclude-stage-prefix", "Formation", "--dry-run"]
           env:
             - name: NATS_URL

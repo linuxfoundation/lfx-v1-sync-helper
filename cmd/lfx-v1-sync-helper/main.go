@@ -357,17 +357,7 @@ func main() {
 			logger.With(errKey, err).Error("error during project backfill")
 			os.Exit(1)
 		}
-		logger.With(
-			"scanned", res.scanned,
-			"mappings_live", res.mappingsLive,
-			"mappings_tombstoned", res.mappingsTombstoned,
-			"candidates", res.candidates,
-			"emitted", res.emitted,
-			"levels", res.levels,
-			"formation_candidates", res.formationCandidates,
-			"remaining_unmapped", res.remainingUnmapped,
-			"errors", res.errors,
-		).Info("project backfill completed successfully")
+		logger.With(res.logFields()...).Info("project backfill completed successfully")
 		os.Exit(0)
 	}
 

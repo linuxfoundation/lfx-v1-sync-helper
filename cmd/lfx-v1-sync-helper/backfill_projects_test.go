@@ -313,7 +313,68 @@ func TestRecordSkip(t *testing.T) {
 		res.skippedNoSFID != 1 ||
 		res.skippedMissingRequired != 1 ||
 		res.skippedV2Authored != 1 ||
-		res.skippedRevisionRace != 1 {
+		res.skippedRevisionRace != 1 ||
+		res.skippedMissing != 1 {
 		t.Errorf("unexpected counters after recordSkip calls: %+v", res)
+	}
+}
+
+func TestBackfillProjectsRejectsNonPositiveEmitRate(t *testing.T) {
+	origCfg := cfg
+	t.Cleanup(func() { cfg = origCfg })
+	cfg = &Config{Auth0ClientID: "my-client-id"}
+
+	for _, rate := range []float64{0, -1} {
+		_, err := backfillProjects(context.Background(), backfillProjectsOptions{emitRate: rate})
+		if err == nil {
+			t.Errorf("emitRate = %v: expected error, got nil", rate)
+		}
+	}
+}
+
+func TestBackfillProjectsRejectsMissingAuth0ClientID(t *testing.T) {
+	origCfg := cfg
+	t.Cleanup(func() { cfg = origCfg })
+	cfg = &Config{}
+
+	_, err := backfillProjects(context.Background(), backfillProjectsOptions{emitRate: 2.0})
+	if err == nil {
+		t.Error("expected error when Auth0ClientID is empty, got nil")
+	}
+}
+
+func TestBackfillProjectsResultLogFields(t *testing.T) {
+	res := backfillProjectsResult{
+		duplicateSlugs: map[string][]string{},
+		stageHistogram: map[string]int{},
+	}
+	fields := res.logFields()
+
+	if len(fields)%2 != 0 {
+		t.Fatalf("logFields() returned an odd-length slice: %d", len(fields))
+	}
+
+	keys := make(map[string]bool, len(fields)/2)
+	for i := 0; i < len(fields); i += 2 {
+		key, ok := fields[i].(string)
+		if !ok {
+			t.Fatalf("logFields()[%d] = %v, want a string key", i, fields[i])
+		}
+		keys[key] = true
+	}
+
+	for _, want := range []string{
+		"scanned", "mappings_live", "mappings_tombstoned", "candidates", "emitted",
+		"levels", "formation_candidates", "remaining_unmapped", "errors",
+		"skipped_already_mapped", "skipped_tombstoned", "skipped_soft_deleted",
+		"skipped_empty_value", "skipped_undecodable", "skipped_no_sfid",
+		"skipped_missing_required", "skipped_v2_authored", "skipped_stage_filtered",
+		"skipped_parent_unmapped", "skipped_parent_blocked", "skipped_revision_race",
+		"skipped_limit", "skipped_slug_conflict", "skipped_missing",
+		"slug_conflicts", "duplicate_slugs", "stage_histogram",
+	} {
+		if !keys[want] {
+			t.Errorf("logFields() missing key %q", want)
+		}
 	}
 }
