@@ -7,10 +7,11 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log/slog"
+	"errors"
+	"fmt"
 	"testing"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -127,12 +128,13 @@ func TestEvaluateProjectRow(t *testing.T) {
 
 	ctx := context.Background()
 	validRow := map[string]any{
-		"sfid":              "a0912345",
-		"name":              "Test Project",
-		"slug__c":           "test-project",
-		"parent_project__c": "a0900000",
-		"project_status__c": "Active",
-		"lastmodifiedbyid":  "some-v1-user",
+		"sfid":                          "a0912345",
+		"name":                          "Test Project",
+		"slug__c":                       "test-project",
+		"parent_project__c":             "a0900000",
+		"parent_entity_relationship__c": "a0900001",
+		"project_status__c":             "Active",
+		"lastmodifiedbyid":              "some-v1-user",
 	}
 
 	cases := []struct {
@@ -176,6 +178,9 @@ func TestEvaluateProjectRow(t *testing.T) {
 			}
 			if c.wantReason == "" && candidate.sfid != "a0912345" {
 				t.Errorf("candidate.sfid = %q, want a0912345", candidate.sfid)
+			}
+			if c.wantReason == "" && candidate.legalParentSFID != "a0900001" {
+				t.Errorf("candidate.legalParentSFID = %q, want a0900001", candidate.legalParentSFID)
 			}
 		})
 	}
@@ -236,43 +241,174 @@ func TestOrderCandidatesByDepth(t *testing.T) {
 			t.Fatalf("unresolved = %+v, want 2 entries", unresolved)
 		}
 	})
-}
 
-func TestBackfillProjectsDryRunMakesNoEmitCalls(t *testing.T) {
-	origLogger := logger
-	origCfg := cfg
-	origReEmit := reEmitV1ObjectFn
-	origLookup := lookupProjectMappingFn
-	t.Cleanup(func() {
-		logger = origLogger
-		cfg = origCfg
-		reEmitV1ObjectFn = origReEmit
-		lookupProjectMappingFn = origLookup
+	t.Run("legal parent also unmapped blocks despite mapped project parent", func(t *testing.T) {
+		liveMappings := map[string]string{"root": "v2-root-uid"}
+		child := projectCandidate{sfid: "child", parentSFID: "root", legalParentSFID: "unmapped-legal-parent"}
+
+		levels, unresolved := orderCandidatesByDepth([]projectCandidate{child}, liveMappings)
+		if len(levels) != 0 {
+			t.Fatalf("levels = %v, want empty (legal parent unmapped)", levels)
+		}
+		if len(unresolved) != 1 || unresolved[0].sfid != "child" {
+			t.Fatalf("unresolved = %+v, want [child]", unresolved)
+		}
 	})
 
-	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	t.Run("legal parent settles in an earlier level", func(t *testing.T) {
+		legalParent := projectCandidate{sfid: "legal-parent"}
+		child := projectCandidate{sfid: "child", parentSFID: "root-already-mapped", legalParentSFID: "legal-parent"}
+		liveMappings := map[string]string{"root-already-mapped": "v2-uid"}
+
+		levels, unresolved := orderCandidatesByDepth([]projectCandidate{child, legalParent}, liveMappings)
+		if len(unresolved) != 0 {
+			t.Fatalf("unresolved = %v, want empty", unresolved)
+		}
+		if len(levels) != 2 || levels[0][0].sfid != "legal-parent" || levels[1][0].sfid != "child" {
+			t.Fatalf("unexpected levels: %+v", levels)
+		}
+	})
+}
+
+func TestAllDepsResolved(t *testing.T) {
+	cases := []struct {
+		name      string
+		candidate projectCandidate
+		resolved  map[string]bool
+		want      bool
+	}{
+		{"no deps", projectCandidate{sfid: "a"}, nil, true},
+		{"project parent resolved", projectCandidate{sfid: "a", parentSFID: "p"}, map[string]bool{"p": true}, true},
+		{"project parent unresolved", projectCandidate{sfid: "a", parentSFID: "p"}, nil, false},
+		{
+			"legal parent unresolved despite project parent resolved",
+			projectCandidate{sfid: "a", parentSFID: "p", legalParentSFID: "lp"},
+			map[string]bool{"p": true},
+			false,
+		},
+		{
+			"both deps resolved",
+			projectCandidate{sfid: "a", parentSFID: "p", legalParentSFID: "lp"},
+			map[string]bool{"p": true, "lp": true},
+			true,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := allDepsResolved(c.candidate, c.resolved); got != c.want {
+				t.Errorf("allDepsResolved(%+v) = %v, want %v", c.candidate, got, c.want)
+			}
+		})
+	}
+}
+
+func TestValidateNoFormationMix(t *testing.T) {
+	cases := []struct {
+		name       string
+		candidates []projectCandidate
+		wantErr    bool
+	}{
+		{"empty", nil, false},
+		{"all formation", []projectCandidate{{stage: "Formation - Confidential"}}, false},
+		{"all non-formation", []projectCandidate{{stage: "Active"}}, false},
+		{
+			"mixed despite an unrelated stage filter having been applied upstream",
+			[]projectCandidate{{stage: "Formation - Confidential"}, {stage: "Active"}},
+			true,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateNoFormationMix(c.candidates)
+			if (err != nil) != c.wantErr {
+				t.Errorf("validateNoFormationMix(%+v) error = %v, wantErr %v", c.candidates, err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestReEmitV1ObjectPropagatesTransientMappingLookupError(t *testing.T) {
+	origV1KV, origMappingsKV := v1KV, mappingsKV
+	origCfg := cfg
+	t.Cleanup(func() {
+		v1KV = origV1KV
+		mappingsKV = origMappingsKV
+		cfg = origCfg
+	})
+
 	cfg = &Config{Auth0ClientID: "my-client-id"}
 
-	emitCalls := 0
-	reEmitV1ObjectFn = func(_ context.Context, _ string) (string, error) {
-		emitCalls++
-		return "", nil
+	row, err := json.Marshal(map[string]any{
+		"sfid":              "a0912345",
+		"name":              "Test Project",
+		"slug__c":           "test-project",
+		"project_status__c": "Active",
+	})
+	if err != nil {
+		t.Fatalf("failed to encode fixture: %v", err)
 	}
-	lookupProjectMappingFn = func(_ context.Context, _ string) bool {
-		return true
+	objectsKV := newFakeKV()
+	if _, err := objectsKV.Create(context.Background(), "salesforce-project__c.a0912345", row); err != nil {
+		t.Fatalf("failed to seed objectsKV: %v", err)
+	}
+	v1KV = objectsKV
+	mappingsKV = &erroringGetKV{err: errors.New("transient NATS timeout")}
+
+	_, err = reEmitV1Object(context.Background(), "salesforce-project__c.a0912345")
+	if err == nil {
+		t.Error("expected a transient mapping lookup error to propagate, got nil")
+	}
+}
+
+// erroringGetKV is a jetstream.KeyValue that always fails Get with a
+// non-ErrKeyNotFound error, simulating a NATS timeout/unavailability rather
+// than a confirmed absent key.
+type erroringGetKV struct {
+	jetstream.KeyValue
+	err error
+}
+
+func (f *erroringGetKV) Get(_ context.Context, _ string) (jetstream.KeyValueEntry, error) {
+	return nil, f.err
+}
+
+func TestFilterSlugConflictsPropagatesLookupError(t *testing.T) {
+	origFn := getProjectUIDBySlugFn
+	t.Cleanup(func() { getProjectUIDBySlugFn = origFn })
+
+	getProjectUIDBySlugFn = func(_ context.Context, _ string) (string, error) {
+		return "", errors.New("no responders available for request")
 	}
 
-	candidates := []projectCandidate{{sfid: "a", key: "salesforce-project__c.a"}}
-	levels, _ := orderCandidatesByDepth(candidates, nil)
-	if len(levels) != 1 {
-		t.Fatalf("levels = %d, want 1", len(levels))
+	candidates := []projectCandidate{{sfid: "a", slug: "test-project"}}
+	res := &backfillProjectsResult{duplicateSlugs: map[string][]string{}, stageHistogram: map[string]int{}}
+	_, err := filterSlugConflicts(context.Background(), candidates, res)
+	if err == nil {
+		t.Error("expected a slug-lookup transport error to propagate, got nil")
+	}
+}
+
+func TestFilterSlugConflictsKeepsCandidateOnConfirmedNotFound(t *testing.T) {
+	origFn := getProjectUIDBySlugFn
+	t.Cleanup(func() { getProjectUIDBySlugFn = origFn })
+
+	getProjectUIDBySlugFn = func(_ context.Context, slug string) (string, error) {
+		return "", fmt.Errorf("%w: slug %s", errSlugNotFound, slug)
 	}
 
-	// This test exercises the emit-loop building blocks directly (rather than
-	// backfillProjects end-to-end, which requires a live NATS scan) to confirm
-	// dry-run callers never need to invoke reEmitV1ObjectFn.
-	if emitCalls != 0 {
-		t.Errorf("emitCalls = %d, want 0 before any emit loop runs", emitCalls)
+	candidates := []projectCandidate{{sfid: "a", slug: "test-project"}}
+	res := &backfillProjectsResult{duplicateSlugs: map[string][]string{}, stageHistogram: map[string]int{}}
+	kept, err := filterSlugConflicts(context.Background(), candidates, res)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(kept) != 1 || kept[0].sfid != "a" {
+		t.Errorf("kept = %+v, want candidate a retained", kept)
+	}
+	if res.skippedSlugConflict != 0 {
+		t.Errorf("skippedSlugConflict = %d, want 0", res.skippedSlugConflict)
 	}
 }
 
@@ -371,7 +507,7 @@ func TestBackfillProjectsResultLogFields(t *testing.T) {
 		"skipped_missing_required", "skipped_v2_authored", "skipped_stage_filtered",
 		"skipped_parent_unmapped", "skipped_parent_blocked", "skipped_revision_race",
 		"skipped_limit", "skipped_slug_conflict", "skipped_missing",
-		"slug_conflicts", "duplicate_slugs", "stage_histogram",
+		"slug_conflicts", "duplicate_slugs", "stage_histogram", "low_mappings_count",
 	} {
 		if !keys[want] {
 			t.Errorf("logFields() missing key %q", want)

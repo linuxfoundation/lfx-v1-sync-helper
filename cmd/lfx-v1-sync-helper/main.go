@@ -109,6 +109,17 @@ func main() {
 	}
 	flag.Parse()
 
+	// --limit defaults to 1000 for the user backfills; --backfill-projects
+	// needs a default of unlimited (0) since the acceptance criterion is
+	// that every unmapped v1 project is created in one run, so only treat
+	// --limit as project-scoped when the operator explicitly passed it.
+	limitExplicitlySet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "limit" {
+			limitExplicitlySet = true
+		}
+	})
+
 	// Enforce mutual exclusion across all one-shot flags.
 	oneShotCount := 0
 	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doBackfillV1MappingsToPG, *doBackfillProjects} {
@@ -341,9 +352,13 @@ func main() {
 	// Handle --backfill-projects flag: re-emit v1 projects with no v2 mapping
 	// so the running deployment's KV consumer creates them, then exit.
 	if *doBackfillProjects {
+		projectLimit := *backfillLimit
+		if !limitExplicitlySet {
+			projectLimit = 0
+		}
 		opts := backfillProjectsOptions{
 			dryRun:               *dryRun,
-			limit:                *backfillLimit,
+			limit:                projectLimit,
 			emitRate:             *emitRate,
 			excludeStagePrefixes: parseStagePrefixList(*excludeStagePrefix),
 			includeStagePrefixes: parseStagePrefixList(*includeStagePrefix),
@@ -351,7 +366,7 @@ func main() {
 			checkSlugs:           *checkSlugs,
 			force:                *forceBackfill,
 		}
-		logger.With("dry_run", *dryRun, "emit_rate", *emitRate).Info("starting project backfill")
+		logger.With("dry_run", *dryRun, "emit_rate", *emitRate, "limit", projectLimit).Info("starting project backfill")
 		res, err := backfillProjects(ctx, opts)
 		if err != nil {
 			logger.With(errKey, err).Error("error during project backfill")

@@ -25,6 +25,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -86,6 +87,7 @@ type backfillProjectsResult struct {
 	scanned             int
 	mappingsLive        int
 	mappingsTombstoned  int
+	lowMappingsCount    bool
 	candidates          int
 	emitted             int
 	levels              int
@@ -121,6 +123,7 @@ func (res backfillProjectsResult) logFields() []any {
 		"scanned", res.scanned,
 		"mappings_live", res.mappingsLive,
 		"mappings_tombstoned", res.mappingsTombstoned,
+		"low_mappings_count", res.lowMappingsCount,
 		"candidates", res.candidates,
 		"emitted", res.emitted,
 		"levels", res.levels,
@@ -159,12 +162,27 @@ type slugConflict struct {
 
 // projectCandidate is a v1 project row selected for re-emission.
 type projectCandidate struct {
-	sfid       string
-	key        string
-	data       map[string]any
-	parentSFID string
-	stage      string
-	slug       string
+	sfid            string
+	key             string
+	data            map[string]any
+	parentSFID      string
+	legalParentSFID string
+	stage           string
+	slug            string
+}
+
+// dependencySFIDs returns every parent SFID (project and legal-entity) that
+// must be settled before sfid can safely be emitted — both are hard-error
+// dependencies in mapV1DataToProjectCreatePayload (handlers_projects.go).
+func (c projectCandidate) dependencySFIDs() []string {
+	var deps []string
+	if c.parentSFID != "" {
+		deps = append(deps, c.parentSFID)
+	}
+	if c.legalParentSFID != "" && c.legalParentSFID != c.parentSFID {
+		deps = append(deps, c.legalParentSFID)
+	}
+	return deps
 }
 
 // reEmitV1ObjectFn and lookupProjectMappingFn are package-level function
@@ -173,6 +191,7 @@ type projectCandidate struct {
 var (
 	reEmitV1ObjectFn       = reEmitV1Object
 	lookupProjectMappingFn = lookupProjectMapping
+	getProjectUIDBySlugFn  = getProjectUIDBySlug
 )
 
 // backfillProjects scans v1-objects for salesforce-project__c rows with no
@@ -212,7 +231,7 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 	res.mappingsLive = len(liveMappings)
 	res.mappingsTombstoned = len(tombstonedMappings)
 
-	if !opts.force && res.mappingsLive+res.mappingsTombstoned < minMappingsSafetyFloor {
+	if !opts.dryRun && !opts.force && res.mappingsLive+res.mappingsTombstoned < minMappingsSafetyFloor {
 		return res, fmt.Errorf(
 			"only %d live + %d tombstoned project SFID mappings found (expected at least %d) — "+
 				"this looks like a truncated scan or a stale mappings bucket, not a genuine near-empty "+
@@ -220,11 +239,15 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 			res.mappingsLive, res.mappingsTombstoned, minMappingsSafetyFloor,
 		)
 	}
+	res.lowMappingsCount = res.mappingsLive+res.mappingsTombstoned < minMappingsSafetyFloor
 
 	candidates := selectProjectCandidates(ctx, objects, liveMappings, tombstonedMappings, opts, &res)
 
 	if opts.checkSlugs {
-		candidates = filterSlugConflicts(ctx, candidates, &res)
+		candidates, err = filterSlugConflicts(ctx, candidates, &res)
+		if err != nil {
+			return res, err
+		}
 	}
 
 	for _, c := range candidates {
@@ -239,17 +262,9 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 		}
 	}
 
-	if !opts.dryRun && !opts.allowFormation &&
-		len(opts.excludeStagePrefixes) == 0 && len(opts.includeStagePrefixes) == 0 {
-		for _, c := range candidates {
-			if isFormationStage(c.stage) {
-				return res, fmt.Errorf(
-					"candidates include formation-staged projects but neither --exclude-stage-prefix nor " +
-						"--include-stage-prefix was passed; run --exclude-stage-prefix Formation and " +
-						"--include-stage-prefix Formation as two separate invocations, or pass --allow-formation " +
-						"for a single combined run",
-				)
-			}
+	if !opts.dryRun && !opts.allowFormation {
+		if err := validateNoFormationMix(candidates); err != nil {
+			return res, err
 		}
 	}
 
@@ -280,6 +295,15 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 
 		var emittedThisLevel []string
 		for _, c := range level {
+			if !allDepsResolved(c, settled) {
+				// A dependency (project or legal parent) never settled, so
+				// emitting c would hit the same missing-parent hard-error
+				// this ordering exists to prevent. Its own descendants will
+				// cascade into this branch too, since c's SFID never joins
+				// settled below.
+				res.skippedParentBlocked++
+				continue
+			}
 			if opts.limit > 0 && res.emitted >= opts.limit {
 				limitReached = true
 				res.skippedLimit++
@@ -315,17 +339,20 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 		}
 	}
 
-	// Any candidate whose parent never settled (and everything below it in the
-	// ordering) is blocked, not unmapped-by-omission; reclassify accordingly.
-	blocked := 0
+	// remainingUnmapped was seeded from the structurally-unresolved set before
+	// any emission; recompute it from final settle state so it also reflects
+	// candidates dropped by the limit, emit errors, revision races, or a
+	// blocked/failed dependency — an operator reading only this field should
+	// never see 0 while projects remain unmapped.
+	notSettled := len(unresolved)
 	for _, level := range levels {
 		for _, c := range level {
-			if c.parentSFID != "" && !settled[c.parentSFID] && !settled[c.sfid] {
-				blocked++
+			if !settled[c.sfid] {
+				notSettled++
 			}
 		}
 	}
-	res.skippedParentBlocked = blocked
+	res.remainingUnmapped = notSettled
 
 	if res.errors > 0 {
 		return res, fmt.Errorf("project backfill completed with %d errors", res.errors)
@@ -423,15 +450,17 @@ func evaluateProjectRow(ctx context.Context, key string, raw []byte) (projectCan
 	}
 
 	parentSFID, _ := v1Data["parent_project__c"].(string)
+	legalParentSFID, _ := v1Data["parent_entity_relationship__c"].(string)
 	stage, _ := v1Data["project_status__c"].(string)
 
 	return projectCandidate{
-		sfid:       sfid,
-		key:        key,
-		data:       v1Data,
-		parentSFID: strings.TrimSpace(parentSFID),
-		stage:      stage,
-		slug:       strings.TrimSpace(slug),
+		sfid:            sfid,
+		key:             key,
+		data:            v1Data,
+		parentSFID:      strings.TrimSpace(parentSFID),
+		legalParentSFID: strings.TrimSpace(legalParentSFID),
+		stage:           stage,
+		slug:            strings.TrimSpace(slug),
 	}, ""
 }
 
@@ -515,6 +544,30 @@ func isFormationStage(stage string) bool {
 	return stageMatchesAnyPrefix(stage, []string{formationStagePrefix})
 }
 
+// validateNoFormationMix returns an error if candidates contains both
+// formation-staged and non-formation-staged projects. Validates the actual
+// filtered composition rather than trusting that any non-empty stage filter
+// was Formation-specific: an unrelated filter (e.g. --exclude-stage-prefix
+// Draft) still leaves Formation and non-Formation candidates mixed.
+func validateNoFormationMix(candidates []projectCandidate) error {
+	hasFormation, hasNonFormation := false, false
+	for _, c := range candidates {
+		if isFormationStage(c.stage) {
+			hasFormation = true
+		} else {
+			hasNonFormation = true
+		}
+	}
+	if hasFormation && hasNonFormation {
+		return fmt.Errorf(
+			"candidates mix formation-staged and non-formation-staged projects; run " +
+				"--exclude-stage-prefix Formation and --include-stage-prefix Formation as two " +
+				"separate invocations, or pass --allow-formation for a single combined run",
+		)
+	}
+	return nil
+}
+
 // parseStagePrefixList splits a comma-separated --exclude-stage-prefix /
 // --include-stage-prefix flag value, trimming whitespace and dropping empty
 // entries.
@@ -536,25 +589,31 @@ func parseStagePrefixList(s string) []string {
 // filterSlugConflicts removes candidates whose slug already resolves to a v2
 // project UID (a lost mapping, not a missing project) and records them for
 // the out-of-scope mapping-repair follow-up rather than re-emitting a create
-// that would fail on every run.
-func filterSlugConflicts(ctx context.Context, candidates []projectCandidate, res *backfillProjectsResult) []projectCandidate {
+// that would fail on every run. A transport/lookup error is not the same as
+// a confirmed no-conflict response: --check-slugs exists to prevent
+// duplicate creates, so a lookup failure must not silently disable it by
+// falling through as "no conflict found."
+func filterSlugConflicts(ctx context.Context, candidates []projectCandidate, res *backfillProjectsResult) ([]projectCandidate, error) {
 	kept := make([]projectCandidate, 0, len(candidates))
 	for _, c := range candidates {
 		if c.slug == "" {
 			kept = append(kept, c)
 			continue
 		}
-		uid, err := getProjectUIDBySlug(ctx, c.slug)
-		if err != nil || uid == "" {
-			kept = append(kept, c)
-			continue
+		uid, err := getProjectUIDBySlugFn(ctx, c.slug)
+		if err != nil {
+			if errors.Is(err, errSlugNotFound) {
+				kept = append(kept, c)
+				continue
+			}
+			return nil, fmt.Errorf("--check-slugs lookup failed for slug %s (sfid %s): %w", c.slug, c.sfid, err)
 		}
 		res.skippedSlugConflict++
 		res.slugConflicts = append(res.slugConflicts, slugConflict{sfid: c.sfid, slug: c.slug, projectUID: uid})
 		logger.With("sfid", c.sfid, "slug", c.slug, "project_uid", uid).
 			WarnContext(ctx, "candidate slug already resolves to a v2 project; needs mapping repair, not a create — skipping")
 	}
-	return kept
+	return kept, nil
 }
 
 // slugsBySFID groups candidate SFIDs by slug, for duplicate-slug reporting.
@@ -573,11 +632,15 @@ func slugsBySFID(candidates []projectCandidate) map[string][]string {
 }
 
 // orderCandidatesByDepth partitions candidates into depth levels: level 0 is
-// every candidate with no parent (goes to ROOT) or whose parent is already
-// mapped (liveMappings); level n is every remaining candidate whose parent is
-// in level n-1. Iterates to a fixpoint; any candidates left over (parent is
-// itself unmapped and never becomes a candidate at any level, i.e. a cycle or
-// a parent excluded by stage filtering) are returned as unresolved.
+// every candidate with no dependencies (dependencySFIDs) or whose
+// dependencies are already mapped (liveMappings); level n is every remaining
+// candidate whose dependencies are all in an earlier level. A candidate
+// depends on both its project parent (parent_project__c) and its legal
+// parent (parent_entity_relationship__c) — mapV1DataToProjectCreatePayload
+// hard-errors on either being unmapped. Iterates to a fixpoint; any
+// candidates left over (a dependency is itself unmapped and never becomes a
+// candidate at any level, i.e. a cycle or a dependency excluded by stage
+// filtering) are returned as unresolved.
 func orderCandidatesByDepth(candidates []projectCandidate, liveMappings map[string]string) (levels [][]projectCandidate, unresolved []projectCandidate) {
 	resolved := make(map[string]bool, len(liveMappings)+len(candidates))
 	for sfid := range liveMappings {
@@ -588,7 +651,7 @@ func orderCandidatesByDepth(candidates []projectCandidate, liveMappings map[stri
 	for len(remaining) > 0 {
 		var level, next []projectCandidate
 		for _, c := range remaining {
-			if c.parentSFID == "" || resolved[c.parentSFID] {
+			if allDepsResolved(c, resolved) {
 				level = append(level, c)
 			} else {
 				next = append(next, c)
@@ -605,6 +668,17 @@ func orderCandidatesByDepth(candidates []projectCandidate, liveMappings map[stri
 		remaining = next
 	}
 	return levels, unresolved
+}
+
+// allDepsResolved reports whether every dependency SFID for c is already
+// resolved (mapped or settled in an earlier level).
+func allDepsResolved(c projectCandidate, resolved map[string]bool) bool {
+	for _, dep := range c.dependencySFIDs() {
+		if !resolved[dep] {
+			return false
+		}
+	}
+	return true
 }
 
 // collectProjectSFIDMappingStates reads all project.sfid.* keys from
@@ -677,13 +751,22 @@ func reEmitV1Object(ctx context.Context, key string) (skipReason string, err err
 	}
 
 	mappingKey := projectSFIDMappingKeyPrefix + candidate.sfid
-	if mapping, mErr := mappingsKV.Get(ctx, mappingKey); mErr == nil {
+	mapping, mErr := mappingsKV.Get(ctx, mappingKey)
+	switch mErr {
+	case nil:
 		if isTombstonedMapping(mapping.Value()) {
 			return "tombstoned_mapping", nil
 		}
 		if len(mapping.Value()) > 0 {
 			return "already_mapped", nil
 		}
+	case jetstream.ErrKeyNotFound, jetstream.ErrKeyDeleted:
+		// No mapping exists yet — genuinely unmapped, proceed to re-emit.
+	default:
+		// A transient lookup failure is not the same as "no mapping": treating
+		// it as absent could re-emit a project that's already mapped, sending
+		// the durable consumer down a duplicate-create path.
+		return "", fmt.Errorf("failed to look up mapping %s: %w", mappingKey, mErr)
 	}
 
 	if _, err := v1KV.Update(ctx, key, entry.Value(), entry.Revision()); err != nil {

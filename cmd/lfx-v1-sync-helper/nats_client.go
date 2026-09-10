@@ -7,13 +7,21 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 )
 
+// errSlugNotFound distinguishes a confirmed "no project has this slug"
+// response from a request/transport failure, so callers that need to treat
+// the two differently (e.g. --check-slugs) can do so with errors.Is.
+var errSlugNotFound = errors.New("no project found for slug")
+
 // getProjectUIDBySlug looks up a v2 project UID from a project slug via NATS.
 // Can be used to lookup any project by its slug (e.g., "ROOT", "kubernetes", "linux", etc.).
+// Returns errSlugNotFound (wrapped) when the slug legitimately resolves to
+// nothing; any other error indicates the request itself failed.
 func getProjectUIDBySlug(ctx context.Context, slug string) (string, error) {
 	// Create context with timeout for the NATS request.
 	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -30,7 +38,7 @@ func getProjectUIDBySlug(ctx context.Context, slug string) (string, error) {
 	// The response should be the UUID string.
 	projectUID := strings.TrimSpace(string(resp.Data))
 	if projectUID == "" {
-		return "", fmt.Errorf("empty project UID response for slug %s", slug)
+		return "", fmt.Errorf("%w: slug %s", errSlugNotFound, slug)
 	}
 
 	logger.With("project_uid", projectUID).With("slug", slug).DebugContext(ctx, "successfully retrieved project UID")
