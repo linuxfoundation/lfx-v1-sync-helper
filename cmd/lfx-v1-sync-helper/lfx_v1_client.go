@@ -267,6 +267,11 @@ func ResolveV1UserSFIDByUsername(ctx context.Context, username string) (string, 
 	return dbResolveUserSFIDByUsername(ctx, username)
 }
 
+// resolveV1UserSFIDByUsernameFn is injectable for tests: it lets
+// handleUserProfileUpdated be driven end-to-end (including its per-sfid
+// skills-reconcile ordering guarantee) without a live v1 platform DB.
+var resolveV1UserSFIDByUsernameFn = ResolveV1UserSFIDByUsername
+
 // lookupUserByUsername looks up a username live in the v1 platform database
 // and returns the resolved V1User and SFID in a single operation.
 // Returns (nil, "") on any miss or error.
