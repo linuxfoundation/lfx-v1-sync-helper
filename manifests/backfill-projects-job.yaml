@@ -20,6 +20,18 @@
 # reviewing the counters in the dry-run logs (scanned/candidates/emitted/
 # levels/formation_candidates/remaining_unmapped).
 #
+# --check-slugs: always on. Without it, a project that is created
+# successfully but then loses its mapping (mappingStore.Put failure is only
+# logged, never retried — see handleProjectUpdate) would look unmapped to a
+# rerun and be re-emitted as a duplicate create, violating the linked issue's
+# rerun-idempotency requirement.
+#
+# Formation follow-up: if remaining_unmapped is still nonzero after this pass
+# and a separate --include-stage-prefix Formation pass has since run, re-run
+# this exclude-Formation pass once more — some of the leftover candidates may
+# be non-Formation children whose Formation-staged parent only became mapped
+# by that later pass.
+#
 # Credentials: --backfill-projects uses LoadMinimalConfig (main.go), which
 # only reads NATS_URL / NATS_FETCH_MAX_WAIT / AUTH0_CLIENT_ID (the latter for
 # shouldSkipSync's loop-prevention check) — it never initializes the Heimdall
@@ -68,7 +80,7 @@ spec:
           #     -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'
           image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:latest
           imagePullPolicy: Always
-          args: ["--backfill-projects", "--exclude-stage-prefix", "Formation", "--dry-run"]
+          args: ["--backfill-projects", "--exclude-stage-prefix", "Formation", "--check-slugs", "--dry-run"]
           env:
             - name: NATS_URL
               value: "nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
