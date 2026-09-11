@@ -110,6 +110,7 @@ type backfillProjectsResult struct {
 	skippedLimit           int
 	skippedSlugConflict    int
 	skippedMissing         int
+	skippedSettleTimeout   int
 	slugConflicts          []slugConflict
 	duplicateSlugs         map[string][]string
 	stageHistogram         map[string]int
@@ -145,6 +146,7 @@ func (res backfillProjectsResult) logFields() []any {
 		"skipped_limit", res.skippedLimit,
 		"skipped_slug_conflict", res.skippedSlugConflict,
 		"skipped_missing", res.skippedMissing,
+		"skipped_settle_timeout", res.skippedSettleTimeout,
 		"slug_conflicts", len(res.slugConflicts),
 		"duplicate_slugs", len(res.duplicateSlugs),
 		"stage_histogram", res.stageHistogram,
@@ -250,12 +252,6 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 		}
 	}
 
-	for _, c := range candidates {
-		res.stageHistogram[c.stage]++
-		if isFormationStage(c.stage) {
-			res.formationCandidates++
-		}
-	}
 	for slug, sfids := range slugsBySFID(candidates) {
 		if len(sfids) > 1 {
 			res.duplicateSlugs[slug] = sfids
@@ -263,7 +259,8 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 	}
 
 	if !opts.dryRun && !opts.allowFormation {
-		if err := validateNoFormationMix(candidates); err != nil {
+		stageScoped := len(opts.excludeStagePrefixes) > 0 || len(opts.includeStagePrefixes) > 0
+		if err := validateNoFormationMix(candidates, stageScoped); err != nil {
 			return res, err
 		}
 	}
@@ -327,14 +324,20 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 			emittedThisLevel = append(emittedThisLevel, c.sfid)
 		}
 
-		if limitReached {
-			continue
-		}
-
+		// Always settle-poll whatever was emitted in this level, even if the
+		// limit was hit partway through it: skipping this when limitReached
+		// left those SFIDs out of settled, so the final recompute below
+		// double-counted successful creates as still unmapped.
 		nowSettled := settlePoll(ctx, emittedThisLevel, projectSettlePollTimeout)
-		for sfid, ok := range nowSettled {
-			if ok {
+		for _, sfid := range emittedThisLevel {
+			if nowSettled[sfid] {
 				settled[sfid] = true
+			} else {
+				// Emitted successfully but never confirmed mapped: a
+				// downstream create failure or a settle-poll timeout, not an
+				// intentional skip. Distinct from skippedLimit/skippedRevisionRace,
+				// which are expected and not treated as failures.
+				res.skippedSettleTimeout++
 			}
 		}
 	}
@@ -354,8 +357,11 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 	}
 	res.remainingUnmapped = notSettled
 
-	if res.errors > 0 {
-		return res, fmt.Errorf("project backfill completed with %d errors", res.errors)
+	if res.errors > 0 || res.skippedSettleTimeout > 0 {
+		return res, fmt.Errorf(
+			"project backfill completed with %d errors and %d settle timeouts",
+			res.errors, res.skippedSettleTimeout,
+		)
 	}
 	return res, nil
 }
@@ -460,7 +466,10 @@ func evaluateProjectRow(ctx context.Context, key string, raw []byte) (projectCan
 		parentSFID:      strings.TrimSpace(parentSFID),
 		legalParentSFID: strings.TrimSpace(legalParentSFID),
 		stage:           stage,
-		slug:            strings.TrimSpace(slug),
+		// Lowercased to match mapV1DataToProjectCreatePayload's canonicalization
+		// (handlers_projects.go), so slug-conflict lookup and duplicate-slug
+		// detection compare against the same slug creation will actually use.
+		slug: strings.ToLower(strings.TrimSpace(slug)),
 	}, ""
 }
 
@@ -497,6 +506,15 @@ func selectProjectCandidates(
 		if skipReason != "" {
 			recordSkip(res, skipReason)
 			continue
+		}
+
+		// Recorded before the stage-prefix filter below so a shipped run that
+		// always excludes Formation (e.g. the default manifest) still reports
+		// how many Formation projects exist, per the linked issue's rollout
+		// gate requiring that count ahead of the bulk run.
+		res.stageHistogram[candidate.stage]++
+		if isFormationStage(candidate.stage) {
+			res.formationCandidates++
 		}
 
 		if !stagePassesFilters(candidate.stage, opts.excludeStagePrefixes, opts.includeStagePrefixes) {
@@ -544,12 +562,17 @@ func isFormationStage(stage string) bool {
 	return stageMatchesAnyPrefix(stage, []string{formationStagePrefix})
 }
 
-// validateNoFormationMix returns an error if candidates contains both
-// formation-staged and non-formation-staged projects. Validates the actual
-// filtered composition rather than trusting that any non-empty stage filter
-// was Formation-specific: an unrelated filter (e.g. --exclude-stage-prefix
-// Draft) still leaves Formation and non-Formation candidates mixed.
-func validateNoFormationMix(candidates []projectCandidate) error {
+// validateNoFormationMix returns an error if candidates contains any
+// formation-staged project unless the run was explicitly scoped to a stage
+// (stageScoped: an --exclude-stage-prefix or --include-stage-prefix was
+// passed). Validates the actual filtered composition rather than trusting
+// that any non-empty stage filter was Formation-specific (an unrelated
+// filter, e.g. --exclude-stage-prefix Draft, can still leave Formation and
+// non-Formation candidates mixed), and also rejects an entirely unscoped run
+// whose remaining candidates happen to be all Formation — that combination
+// would otherwise pass a mixed-set-only check and bulk-emit Formation
+// projects without the operator ever choosing to.
+func validateNoFormationMix(candidates []projectCandidate, stageScoped bool) error {
 	hasFormation, hasNonFormation := false, false
 	for _, c := range candidates {
 		if isFormationStage(c.stage) {
@@ -558,9 +581,9 @@ func validateNoFormationMix(candidates []projectCandidate) error {
 			hasNonFormation = true
 		}
 	}
-	if hasFormation && hasNonFormation {
+	if hasFormation && (hasNonFormation || !stageScoped) {
 		return fmt.Errorf(
-			"candidates mix formation-staged and non-formation-staged projects; run " +
+			"candidates include formation-staged projects; run " +
 				"--exclude-stage-prefix Formation and --include-stage-prefix Formation as two " +
 				"separate invocations, or pass --allow-formation for a single combined run",
 		)

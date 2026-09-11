@@ -186,6 +186,33 @@ func TestEvaluateProjectRow(t *testing.T) {
 	}
 }
 
+func TestEvaluateProjectRowLowercasesSlug(t *testing.T) {
+	origCfg := cfg
+	cfg = &Config{Auth0ClientID: "my-client-id"}
+	t.Cleanup(func() { cfg = origCfg })
+
+	raw, err := json.Marshal(map[string]any{
+		"sfid":              "a0912345",
+		"name":              "Test Project",
+		"slug__c":           "Test-Project",
+		"project_status__c": "Active",
+	})
+	if err != nil {
+		t.Fatalf("failed to encode fixture: %v", err)
+	}
+
+	candidate, reason := evaluateProjectRow(context.Background(), "salesforce-project__c.a0912345", raw)
+	if reason != "" {
+		t.Fatalf("unexpected skip reason: %q", reason)
+	}
+	if candidate.slug != "test-project" {
+		t.Errorf(
+			"candidate.slug = %q, want lowercased %q to match mapV1DataToProjectCreatePayload's canonicalization",
+			candidate.slug, "test-project",
+		)
+	}
+}
+
 func TestOrderCandidatesByDepth(t *testing.T) {
 	t.Run("three level chain", func(t *testing.T) {
 		root := projectCandidate{sfid: "root"}
@@ -305,25 +332,36 @@ func TestAllDepsResolved(t *testing.T) {
 
 func TestValidateNoFormationMix(t *testing.T) {
 	cases := []struct {
-		name       string
-		candidates []projectCandidate
-		wantErr    bool
+		name        string
+		candidates  []projectCandidate
+		stageScoped bool
+		wantErr     bool
 	}{
-		{"empty", nil, false},
-		{"all formation", []projectCandidate{{stage: "Formation - Confidential"}}, false},
-		{"all non-formation", []projectCandidate{{stage: "Active"}}, false},
+		{"empty", nil, false, false},
+		{"all formation, stage scoped", []projectCandidate{{stage: "Formation - Confidential"}}, true, false},
+		{
+			"all formation, unscoped run rejected even without a mix",
+			[]projectCandidate{{stage: "Formation - Confidential"}},
+			false,
+			true,
+		},
+		{"all non-formation", []projectCandidate{{stage: "Active"}}, false, false},
 		{
 			"mixed despite an unrelated stage filter having been applied upstream",
 			[]projectCandidate{{stage: "Formation - Confidential"}, {stage: "Active"}},
+			true,
 			true,
 		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := validateNoFormationMix(c.candidates)
+			err := validateNoFormationMix(c.candidates, c.stageScoped)
 			if (err != nil) != c.wantErr {
-				t.Errorf("validateNoFormationMix(%+v) error = %v, wantErr %v", c.candidates, err, c.wantErr)
+				t.Errorf(
+					"validateNoFormationMix(%+v, %v) error = %v, wantErr %v",
+					c.candidates, c.stageScoped, err, c.wantErr,
+				)
 			}
 		})
 	}
@@ -506,11 +544,49 @@ func TestBackfillProjectsResultLogFields(t *testing.T) {
 		"skipped_empty_value", "skipped_undecodable", "skipped_no_sfid",
 		"skipped_missing_required", "skipped_v2_authored", "skipped_stage_filtered",
 		"skipped_parent_unmapped", "skipped_parent_blocked", "skipped_revision_race",
-		"skipped_limit", "skipped_slug_conflict", "skipped_missing",
+		"skipped_limit", "skipped_slug_conflict", "skipped_missing", "skipped_settle_timeout",
 		"slug_conflicts", "duplicate_slugs", "stage_histogram", "low_mappings_count",
 	} {
 		if !keys[want] {
 			t.Errorf("logFields() missing key %q", want)
 		}
+	}
+}
+
+func TestSelectProjectCandidatesCountsFormationBeforeStageFilter(t *testing.T) {
+	origCfg := cfg
+	cfg = &Config{Auth0ClientID: "my-client-id"}
+	t.Cleanup(func() { cfg = origCfg })
+
+	row, err := json.Marshal(map[string]any{
+		"sfid":              "a0912345",
+		"name":              "Test Project",
+		"slug__c":           "test-project",
+		"project_status__c": "Formation - Confidential",
+	})
+	if err != nil {
+		t.Fatalf("failed to encode fixture: %v", err)
+	}
+
+	objects := map[string][]byte{
+		projectObjectSubjectPrefix + "a0912345": row,
+	}
+	res := &backfillProjectsResult{stageHistogram: map[string]int{}}
+	opts := backfillProjectsOptions{excludeStagePrefixes: []string{"Formation"}}
+
+	candidates := selectProjectCandidates(context.Background(), objects, nil, nil, opts, res)
+
+	if len(candidates) != 0 {
+		t.Fatalf("candidates = %+v, want none (excluded by stage filter)", candidates)
+	}
+	if res.formationCandidates != 1 {
+		t.Errorf(
+			"formationCandidates = %d, want 1 — must be counted before the stage-prefix filter "+
+				"so a run that always excludes Formation still reports how many exist",
+			res.formationCandidates,
+		)
+	}
+	if res.stageHistogram["Formation - Confidential"] != 1 {
+		t.Errorf("stageHistogram = %+v, want Formation - Confidential: 1", res.stageHistogram)
 	}
 }
