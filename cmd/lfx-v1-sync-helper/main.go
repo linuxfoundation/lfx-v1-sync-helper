@@ -101,7 +101,7 @@ func main() {
 	var forceBackfill = flag.Bool("force", false, "bypass the minimum-mappings safety floor (applicable with --backfill-projects)")
 	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
 	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-* and --sync-user)")
-	var backfillLimit = flag.Int("limit", 1000, "maximum number of users to process per backfill run (applicable with --backfill-alternate-emails, --backfill-profiles, and --backfill-projects; 0 = unlimited for --backfill-projects)")
+	var backfillLimit = flag.Int("limit", 1000, "maximum number of records (users or projects) to process per backfill run (applicable with --backfill-alternate-emails, --backfill-profiles, and --backfill-projects; 0 = unlimited for --backfill-projects)")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
