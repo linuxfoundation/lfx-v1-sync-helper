@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -367,6 +368,47 @@ func TestValidateNoFormationMix(t *testing.T) {
 	}
 }
 
+func TestValidateNoDuplicateSlugs(t *testing.T) {
+	cases := []struct {
+		name           string
+		duplicateSlugs map[string][]string
+		wantErr        bool
+	}{
+		{"empty", map[string][]string{}, false},
+		{"nil", nil, false},
+		{"one colliding group", map[string][]string{"acme": {"a0900001", "a0900002"}}, true},
+		{
+			"multiple colliding groups",
+			map[string][]string{
+				"acme":  {"a0900001", "a0900002"},
+				"other": {"a0900003", "a0900004"},
+			},
+			true,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateNoDuplicateSlugs(c.duplicateSlugs)
+			if (err != nil) != c.wantErr {
+				t.Errorf("validateNoDuplicateSlugs(%v) error = %v, wantErr %v", c.duplicateSlugs, err, c.wantErr)
+			}
+			if err != nil {
+				for slug, sfids := range c.duplicateSlugs {
+					if !strings.Contains(err.Error(), slug) {
+						t.Errorf("error %q does not mention colliding slug %q", err.Error(), slug)
+					}
+					for _, sfid := range sfids {
+						if !strings.Contains(err.Error(), sfid) {
+							t.Errorf("error %q does not mention colliding sfid %q", err.Error(), sfid)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestIncludesFormation(t *testing.T) {
 	cases := []struct {
 		name            string
@@ -417,9 +459,89 @@ func TestReEmitV1ObjectPropagatesTransientMappingLookupError(t *testing.T) {
 	v1KV = objectsKV
 	mappingsKV = &erroringGetKV{err: errors.New("transient NATS timeout")}
 
-	_, err = reEmitV1Object(context.Background(), "salesforce-project__c.a0912345")
+	_, err = reEmitV1Object(context.Background(), "salesforce-project__c.a0912345", backfillProjectsOptions{})
 	if err == nil {
 		t.Error("expected a transient mapping lookup error to propagate, got nil")
+	}
+}
+
+func TestReEmitV1ObjectRevalidatesStageAgainstFreshRead(t *testing.T) {
+	origV1KV, origMappingsKV := v1KV, mappingsKV
+	origCfg := cfg
+	t.Cleanup(func() {
+		v1KV = origV1KV
+		mappingsKV = origMappingsKV
+		cfg = origCfg
+	})
+
+	cfg = &Config{Auth0ClientID: "my-client-id"}
+
+	// The row now reads back as Formation-staged: it changed after the
+	// original candidate scan (which presumably saw a non-Formation stage
+	// and passed --exclude-stage-prefix Formation), so a run scoped to
+	// exclude Formation must not re-emit it.
+	row, err := json.Marshal(map[string]any{
+		"sfid":              "a0912345",
+		"name":              "Test Project",
+		"slug__c":           "test-project",
+		"project_status__c": "Formation - Confidential",
+	})
+	if err != nil {
+		t.Fatalf("failed to encode fixture: %v", err)
+	}
+	objectsKV := newFakeKV()
+	if _, err := objectsKV.Create(context.Background(), "salesforce-project__c.a0912345", row); err != nil {
+		t.Fatalf("failed to seed objectsKV: %v", err)
+	}
+	v1KV = objectsKV
+	mappingsKV = newFakeKV()
+
+	opts := backfillProjectsOptions{excludeStagePrefixes: []string{"Formation"}}
+	reason, err := reEmitV1Object(context.Background(), "salesforce-project__c.a0912345", opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reason != "stage_filtered" {
+		t.Errorf("skipReason = %q, want %q", reason, "stage_filtered")
+	}
+}
+
+func TestReEmitV1ObjectRejectsUnauthorizedFormationOnFreshRead(t *testing.T) {
+	origV1KV, origMappingsKV := v1KV, mappingsKV
+	origCfg := cfg
+	t.Cleanup(func() {
+		v1KV = origV1KV
+		mappingsKV = origMappingsKV
+		cfg = origCfg
+	})
+
+	cfg = &Config{Auth0ClientID: "my-client-id"}
+
+	// No stage filters were passed (an unscoped run that saw zero Formation
+	// candidates at scan time), but the row is Formation-staged by the time
+	// of this re-read: still must not emit without --allow-formation.
+	row, err := json.Marshal(map[string]any{
+		"sfid":              "a0912345",
+		"name":              "Test Project",
+		"slug__c":           "test-project",
+		"project_status__c": "Formation - Confidential",
+	})
+	if err != nil {
+		t.Fatalf("failed to encode fixture: %v", err)
+	}
+	objectsKV := newFakeKV()
+	if _, err := objectsKV.Create(context.Background(), "salesforce-project__c.a0912345", row); err != nil {
+		t.Fatalf("failed to seed objectsKV: %v", err)
+	}
+	v1KV = objectsKV
+	mappingsKV = newFakeKV()
+
+	reason, err := reEmitV1Object(context.Background(), "salesforce-project__c.a0912345", backfillProjectsOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reason != "stage_filtered" {
+		t.Errorf("skipReason = %q, want %q", reason, "stage_filtered")
 	}
 }
 

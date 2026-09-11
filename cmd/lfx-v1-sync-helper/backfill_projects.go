@@ -261,6 +261,12 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 		}
 	}
 
+	if !opts.dryRun {
+		if err := validateNoDuplicateSlugs(res.duplicateSlugs); err != nil {
+			return res, err
+		}
+	}
+
 	if !opts.dryRun && !opts.allowFormation {
 		if err := validateNoFormationMix(candidates, includesFormation(opts.includeStagePrefixes)); err != nil {
 			return res, err
@@ -312,7 +318,7 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 				return res, fmt.Errorf("rate limiter wait cancelled: %w", err)
 			}
 
-			skipReason, err := reEmitV1ObjectFn(ctx, c.key)
+			skipReason, err := reEmitV1ObjectFn(ctx, c.key, opts)
 			if err != nil {
 				res.errors++
 				logger.With(errKey, err, "sfid", c.sfid, "key", c.key).ErrorContext(ctx, "failed to re-emit project for backfill")
@@ -405,6 +411,8 @@ func recordSkip(res *backfillProjectsResult, reason string) {
 		res.skippedRevisionRace++
 	case "missing":
 		res.skippedMissing++
+	case "stage_filtered":
+		res.skippedStageFiltered++
 	}
 }
 
@@ -681,6 +689,41 @@ func slugsBySFID(candidates []projectCandidate) map[string][]string {
 	return out
 }
 
+// validateNoDuplicateSlugs returns an error if duplicateSlugs is non-empty.
+// The v2 project service rejects a second create for a slug that already
+// exists, so a live run with same-run candidates sharing a slug would create
+// one candidate per colliding group while its siblings never settle,
+// guaranteeing a partially-applied backfill. Refuse the run up front and
+// name the colliding groups so an operator can reconcile them first.
+func validateNoDuplicateSlugs(duplicateSlugs map[string][]string) error {
+	if len(duplicateSlugs) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"candidates include %d colliding slug(s), the v2 project service "+
+			"rejects a second create for the same slug so one candidate in "+
+			"each group would be created while its siblings never settle: %s",
+		len(duplicateSlugs), formatDuplicateSlugs(duplicateSlugs),
+	)
+}
+
+// formatDuplicateSlugs renders duplicateSlugs as "slug: [sfid, sfid], ..."
+// groups, sorted by slug, so the error message is deterministic and an
+// operator can reconcile each colliding group before re-running.
+func formatDuplicateSlugs(duplicateSlugs map[string][]string) string {
+	slugs := make([]string, 0, len(duplicateSlugs))
+	for slug := range duplicateSlugs {
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+
+	groups := make([]string, 0, len(slugs))
+	for _, slug := range slugs {
+		groups = append(groups, fmt.Sprintf("%s: %v", slug, duplicateSlugs[slug]))
+	}
+	return strings.Join(groups, "; ")
+}
+
 // orderCandidatesByDepth partitions candidates into depth levels: level 0 is
 // every candidate with no dependencies (dependencySFIDs) or whose
 // dependencies are already mapped (liveMappings); level n is every remaining
@@ -782,11 +825,17 @@ func collectProjectSFIDMappingStates(ctx context.Context) (map[string]string, ma
 // an earlier scan: the objects scan can run for a long time, and replaying
 // stale bytes could clobber a newer WAL write.
 //
+// Also re-applies the stage-prefix filters and Formation authorization,
+// not just evaluateProjectRow's generic checks: a long or rate-limited run
+// can take long enough for a candidate to change stage (e.g. Active ->
+// Formation) between the initial scan and this re-read, and re-emitting it
+// unchecked would bypass the run's stage scope and Formation rollout gate.
+//
 // Returns a non-empty skipReason (see recordSkip) instead of an error for
 // every outcome that is not itself a failure: the row disappearing, no
 // longer qualifying, or losing a concurrent-write race are all expected,
 // re-run-safe outcomes.
-func reEmitV1Object(ctx context.Context, key string) (skipReason string, err error) {
+func reEmitV1Object(ctx context.Context, key string, opts backfillProjectsOptions) (skipReason string, err error) {
 	entry, err := v1KV.Get(ctx, key)
 	if err != nil {
 		if err == jetstream.ErrKeyNotFound || err == jetstream.ErrKeyDeleted {
@@ -798,6 +847,13 @@ func reEmitV1Object(ctx context.Context, key string) (skipReason string, err err
 	candidate, reason := evaluateProjectRow(ctx, key, entry.Value())
 	if reason != "" {
 		return reason, nil
+	}
+
+	if !stagePassesFilters(candidate.stage, opts.excludeStagePrefixes, opts.includeStagePrefixes) {
+		return "stage_filtered", nil
+	}
+	if isFormationStage(candidate.stage) && !opts.allowFormation && !includesFormation(opts.includeStagePrefixes) {
+		return "stage_filtered", nil
 	}
 
 	mappingKey := projectSFIDMappingKeyPrefix + candidate.sfid
