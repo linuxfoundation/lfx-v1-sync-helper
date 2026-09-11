@@ -262,8 +262,7 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 	}
 
 	if !opts.dryRun && !opts.allowFormation {
-		stageScoped := len(opts.excludeStagePrefixes) > 0 || len(opts.includeStagePrefixes) > 0
-		if err := validateNoFormationMix(candidates, stageScoped); err != nil {
+		if err := validateNoFormationMix(candidates, includesFormation(opts.includeStagePrefixes)); err != nil {
 			return res, err
 		}
 	}
@@ -578,17 +577,29 @@ func isFormationStage(stage string) bool {
 	return stageMatchesAnyPrefix(stage, []string{formationStagePrefix})
 }
 
+// includesFormation reports whether any of includePrefixes itself denotes
+// Formation (e.g. "Formation" or "Formation - Confidential"). This is the
+// only affirmative signal that the operator chose Formation via
+// --include-stage-prefix; an --exclude-stage-prefix, even one unrelated to
+// Formation like "Draft", does not authorize a Formation run just because it
+// happens to leave an all-Formation candidate set behind.
+func includesFormation(includePrefixes []string) bool {
+	for _, p := range includePrefixes {
+		if stageMatchesAnyPrefix(p, []string{formationStagePrefix}) {
+			return true
+		}
+	}
+	return false
+}
+
 // validateNoFormationMix returns an error if candidates contains any
-// formation-staged project unless the run was explicitly scoped to a stage
-// (stageScoped: an --exclude-stage-prefix or --include-stage-prefix was
-// passed). Validates the actual filtered composition rather than trusting
-// that any non-empty stage filter was Formation-specific (an unrelated
-// filter, e.g. --exclude-stage-prefix Draft, can still leave Formation and
-// non-Formation candidates mixed), and also rejects an entirely unscoped run
-// whose remaining candidates happen to be all Formation — that combination
-// would otherwise pass a mixed-set-only check and bulk-emit Formation
-// projects without the operator ever choosing to.
-func validateNoFormationMix(candidates []projectCandidate, stageScoped bool) error {
+// formation-staged project unless the run's --include-stage-prefix filter
+// itself denotes Formation (formationIncluded). A generic stage filter is not
+// enough: an unrelated filter, e.g. --exclude-stage-prefix Draft, can still
+// leave an all-Formation candidate set behind without the operator ever
+// choosing Formation, so only an include prefix that actually names Formation
+// (or --allow-formation, checked by the caller) authorizes a Formation run.
+func validateNoFormationMix(candidates []projectCandidate, formationIncluded bool) error {
 	hasFormation, hasNonFormation := false, false
 	for _, c := range candidates {
 		if isFormationStage(c.stage) {
@@ -597,7 +608,7 @@ func validateNoFormationMix(candidates []projectCandidate, stageScoped bool) err
 			hasNonFormation = true
 		}
 	}
-	if hasFormation && (hasNonFormation || !stageScoped) {
+	if hasFormation && (hasNonFormation || !formationIncluded) {
 		return fmt.Errorf(
 			"candidates include formation-staged projects; run " +
 				"--exclude-stage-prefix Formation and --include-stage-prefix Formation as two " +

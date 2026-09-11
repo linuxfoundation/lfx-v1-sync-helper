@@ -332,22 +332,22 @@ func TestAllDepsResolved(t *testing.T) {
 
 func TestValidateNoFormationMix(t *testing.T) {
 	cases := []struct {
-		name        string
-		candidates  []projectCandidate
-		stageScoped bool
-		wantErr     bool
+		name              string
+		candidates        []projectCandidate
+		formationIncluded bool
+		wantErr           bool
 	}{
 		{"empty", nil, false, false},
-		{"all formation, stage scoped", []projectCandidate{{stage: "Formation - Confidential"}}, true, false},
+		{"all formation, formation explicitly included", []projectCandidate{{stage: "Formation - Confidential"}}, true, false},
 		{
-			"all formation, unscoped run rejected even without a mix",
+			"all formation, unincluded run rejected even without a mix",
 			[]projectCandidate{{stage: "Formation - Confidential"}},
 			false,
 			true,
 		},
 		{"all non-formation", []projectCandidate{{stage: "Active"}}, false, false},
 		{
-			"mixed despite an unrelated stage filter having been applied upstream",
+			"mixed despite formation having been explicitly included",
 			[]projectCandidate{{stage: "Formation - Confidential"}, {stage: "Active"}},
 			true,
 			true,
@@ -356,12 +356,35 @@ func TestValidateNoFormationMix(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := validateNoFormationMix(c.candidates, c.stageScoped)
+			err := validateNoFormationMix(c.candidates, c.formationIncluded)
 			if (err != nil) != c.wantErr {
 				t.Errorf(
 					"validateNoFormationMix(%+v, %v) error = %v, wantErr %v",
-					c.candidates, c.stageScoped, err, c.wantErr,
+					c.candidates, c.formationIncluded, err, c.wantErr,
 				)
+			}
+		})
+	}
+}
+
+func TestIncludesFormation(t *testing.T) {
+	cases := []struct {
+		name            string
+		includePrefixes []string
+		want            bool
+	}{
+		{"empty", nil, false},
+		{"formation exact", []string{"Formation"}, true},
+		{"formation sub-stage prefix", []string{"Formation - Confidential"}, true},
+		{"unrelated prefix only", []string{"Draft"}, false},
+		{"unrelated prefix among others", []string{"Draft", "Active"}, false},
+		{"formation among others", []string{"Draft", "Formation"}, true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := includesFormation(c.includePrefixes); got != c.want {
+				t.Errorf("includesFormation(%v) = %v, want %v", c.includePrefixes, got, c.want)
 			}
 		})
 	}

@@ -164,11 +164,14 @@ const (
 	defaultV1MappingsStoreMode = V1MappingsStoreModeKV
 )
 
-// LoadMinimalConfig returns a config for one-shot modes that only need NATS
-// (e.g. --backfill-committee-member-mappings, --backfill-projects). Only
-// NATS_URL, NATS_FETCH_MAX_WAIT, and AUTH0_CLIENT_ID are read (the latter for
-// shouldSkipSync's loop-prevention check); all other fields are left at zero
-// values.
+// LoadMinimalConfig returns the minimal one-shot configuration for modes that
+// don't need the full HTTP/Heimdall stack (e.g.
+// --backfill-committee-member-mappings, --backfill-projects,
+// --backfill-v1-mappings-to-postgres): NATS_URL, NATS_FETCH_MAX_WAIT, and
+// AUTH0_CLIENT_ID (the latter for shouldSkipSync's loop-prevention check),
+// plus the V1_MAPPINGS_* Postgres settings and V1_MAPPINGS_STORE_MODE needed
+// by the Postgres-backfill and dual-store modes. Fields outside this set are
+// left at zero values, callers must not rely on them being populated.
 func LoadMinimalConfig() *Config {
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
