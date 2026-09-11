@@ -208,6 +208,9 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 	if opts.emitRate <= 0 {
 		return res, fmt.Errorf("--emit-rate must be greater than 0, got %v", opts.emitRate)
 	}
+	if opts.limit < 0 {
+		return res, fmt.Errorf("--limit must be 0 (unlimited) or greater, got %d", opts.limit)
+	}
 	if cfg.Auth0ClientID == "" {
 		return res, fmt.Errorf(
 			"AUTH0_CLIENT_ID is not set — shouldSkipSync cannot distinguish v2-authored rows " +

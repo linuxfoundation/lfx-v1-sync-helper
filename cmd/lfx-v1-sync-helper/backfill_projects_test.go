@@ -520,6 +520,17 @@ func TestBackfillProjectsRejectsNonPositiveEmitRate(t *testing.T) {
 	}
 }
 
+func TestBackfillProjectsRejectsNegativeLimit(t *testing.T) {
+	origCfg := cfg
+	t.Cleanup(func() { cfg = origCfg })
+	cfg = &Config{Auth0ClientID: "my-client-id"}
+
+	_, err := backfillProjects(context.Background(), backfillProjectsOptions{emitRate: 2.0, limit: -1})
+	if err == nil {
+		t.Error("limit = -1: expected error, got nil")
+	}
+}
+
 func TestBackfillProjectsRejectsMissingAuth0ClientID(t *testing.T) {
 	origCfg := cfg
 	t.Cleanup(func() { cfg = origCfg })
