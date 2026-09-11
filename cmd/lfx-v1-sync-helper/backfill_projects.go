@@ -318,6 +318,19 @@ func backfillProjects(ctx context.Context, opts backfillProjectsOptions) (backfi
 			}
 			if skipReason != "" {
 				recordSkip(&res, skipReason)
+				switch skipReason {
+				case "already_mapped":
+					// reEmitV1Object's own mapping lookup just confirmed a live
+					// mapping exists, so children depending on c can unblock
+					// immediately rather than waiting to be settle-polled below.
+					settled[c.sfid] = true
+				case "revision_race":
+					// The object write lost to a concurrent update, which may
+					// itself be creating the mapping (e.g. a live sync racing
+					// this backfill). Settle-poll it like a normal emission
+					// instead of leaving it permanently unresolved.
+					emittedThisLevel = append(emittedThisLevel, c.sfid)
+				}
 				continue
 			}
 			res.emitted++
@@ -825,14 +838,21 @@ func settlePoll(ctx context.Context, sfids []string, timeout time.Duration) map[
 	pending := append([]string{}, sfids...)
 
 	for len(pending) > 0 {
+		// Bound each lookup to the overall settle deadline: without this, a
+		// NATS outage lets every sequential mappingsKV.Get in this round block
+		// on the parent (unbounded) context, and the deadline check below
+		// never runs until all of them return — turning a nominal two-minute
+		// settle phase into hours.
+		lookupCtx, cancel := context.WithDeadline(ctx, deadline)
 		var stillPending []string
 		for _, sfid := range pending {
-			if lookupProjectMappingFn(ctx, sfid) {
+			if lookupProjectMappingFn(lookupCtx, sfid) {
 				settled[sfid] = true
 			} else {
 				stillPending = append(stillPending, sfid)
 			}
 		}
+		cancel()
 		pending = stillPending
 		if len(pending) == 0 || time.Now().After(deadline) {
 			break

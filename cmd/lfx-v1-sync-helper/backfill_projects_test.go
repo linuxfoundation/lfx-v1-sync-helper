@@ -466,6 +466,20 @@ func TestSettlePoll(t *testing.T) {
 	}
 }
 
+func TestSettlePollBoundsEachLookupToTheOverallDeadline(t *testing.T) {
+	origLookup := lookupProjectMappingFn
+	t.Cleanup(func() { lookupProjectMappingFn = origLookup })
+
+	lookupProjectMappingFn = func(ctx context.Context, _ string) bool {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("lookup context has no deadline; a NATS outage could block this call unboundedly")
+		}
+		return true
+	}
+
+	settlePoll(context.Background(), []string{"a"}, projectSettlePollTimeout)
+}
+
 func TestRecordSkip(t *testing.T) {
 	res := backfillProjectsResult{}
 	recordSkip(&res, "already_mapped")
