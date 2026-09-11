@@ -11,7 +11,7 @@
 # when that file is present.
 #
 # Usage:
-#   scripts/lfxv2_1507_wave_usernames.sh <wave>   # wave: 0, 1, 2, ... 9, 11
+#   scripts/lfxv2_1507_wave_usernames.sh <wave>   # wave: 0, 1, 2, ... 9, 11, or 5b
 #
 # Requires: snowsql configured with rsa_key.p8 in the working directory.
 
@@ -27,12 +27,14 @@ case "$WAVE" in
   3) SLUGS="cncf,cdf,openssf,finos,lf-decentralized-trust,openwalletfoundation,jdf3mf" ;;
   4) SLUGS="openchain,lfedge,lfn,lfenergy,dpdk" ;;
   5) SLUGS="risc-v-international,open-software-development-initiative-for-risc-v-ecosystem,chips,zep,cip,cti,pqca" ;;
+  # Wave 5b: AGL was added to wave 5 after wave 5 had already run.
+  5b) SLUGS="agl" ;;
   6) SLUGS="lf-ai-foundation,pytorch,ccc,presto,aether-fund,magma-fund" ;;
   7) SLUGS="soda-foundation,openapi,opensearch-foundation,react-foundation,margo" ;;
   8) SLUGS="o3de,gql,xen,ebpf,finops" ;;
   9) SLUGS="openinfra-foundation,yocto,cephfoundation,tla" ;;
   11) SLUGS="lfresearch,iovisor,jdf" ;;
-  *) echo "error: unknown wave '$WAVE' (waves 0-9 or 11)" >&2; exit 1 ;;
+  *) echo "error: unknown wave '$WAVE' (waves 0-9, 11, or 5b)" >&2; exit 1 ;;
 esac
 
 OUT="lfxv2_1507_wave${WAVE}_usernames.csv"
