@@ -39,6 +39,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-project-service/pkg/events"
 	nats "github.com/nats-io/nats.go"
@@ -50,6 +51,12 @@ import (
 // staff assignment, per the PCC edit-project-staff dialog contract.
 const v1ClearStaffValue = "None"
 
+// v1ProjectStaffSyncTimeout bounds one handleProjectSettingsUpdated run: the
+// v1-mappings/v1-objects reads, the live v1 DB user resolutions, and the
+// gateway PATCH (v1HTTPClient itself has no client-level timeout). Token
+// acquisition is bounded separately in ClientCredentialsTokenSource.Token.
+const v1ProjectStaffSyncTimeout = 30 * time.Second
+
 // errV1ProjectNotFound marks a 404 from the v1 project-service PATCH: the
 // project is platform-native (lf... SFID) with no Salesforce-backed record, so
 // there is nothing to sync to. Warn and skip — retrying cannot help.
@@ -59,20 +66,24 @@ var errV1ProjectNotFound = errors.New("v1 project not found")
 // client_projects.go, lookupUserByUsernameForACS in lfx_v1_client.go).
 var (
 	// getV1ProjectSFIDByUID resolves a v2 project UID to the v1 project SFID via
-	// the v1-mappings KV reverse mapping written by the v1->v2 handler. Returns
-	// ("", nil) when the mapping is absent or tombstoned.
+	// the v1-mappings reverse mapping written by the v1->v2 handler. Returns
+	// ("", nil) when the mapping is absent or tombstoned. Reads go through the
+	// MappingStore port (lookup_handler.go is the reference pattern) so the
+	// lookup stays correct when V1_MAPPINGS_STORE_MODE selects dual/postgres —
+	// a direct mappingsKV read would miss Postgres-only mappings and silently
+	// drop the staff update.
 	getV1ProjectSFIDByUID = func(ctx context.Context, projectUID string) (string, error) {
-		entry, err := mappingsKV.Get(ctx, "project.uid."+projectUID)
+		entry, err := mappingStore.Get(ctx, "project.uid."+projectUID)
 		if err != nil {
-			if err == jetstream.ErrKeyNotFound || err == jetstream.ErrKeyDeleted {
+			if errors.Is(err, ErrKeyNotFound) {
 				return "", nil
 			}
 			return "", err
 		}
-		if isTombstonedMapping(entry.Value()) {
+		if isTombstonedMapping(entry.Value) {
 			return "", nil
 		}
-		return string(entry.Value()), nil
+		return string(entry.Value), nil
 	}
 
 	// getV1ProjectStaffSFIDs reads the current v1 project record from the
@@ -118,7 +129,12 @@ var (
 // handleProjectSettingsUpdated processes project_settings.updated events and
 // syncs executive_director / program_manager changes back to v1.
 func handleProjectSettingsUpdated(msg *nats.Msg) {
-	ctx := context.Background()
+	// Bound the whole handler: v1HTTPClient has no client-level timeout and
+	// this callback runs on the subscription's single delivery goroutine, so
+	// an unbounded gateway PATCH (or KV/PG read) would stall every later
+	// staff event assigned to this subscriber.
+	ctx, cancel := context.WithTimeout(context.Background(), v1ProjectStaffSyncTimeout)
+	defer cancel()
 
 	var event events.ProjectSettingsUpdatedMessage
 	if err := json.Unmarshal(msg.Data, &event); err != nil {
