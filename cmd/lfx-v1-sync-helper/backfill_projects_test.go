@@ -545,6 +545,97 @@ func TestReEmitV1ObjectRejectsUnauthorizedFormationOnFreshRead(t *testing.T) {
 	}
 }
 
+func TestReEmitV1ObjectRechecksDependenciesAgainstFreshRead(t *testing.T) {
+	origV1KV, origMappingsKV := v1KV, mappingsKV
+	origCfg := cfg
+	t.Cleanup(func() {
+		v1KV = origV1KV
+		mappingsKV = origMappingsKV
+		cfg = origCfg
+	})
+
+	cfg = &Config{Auth0ClientID: "my-client-id"}
+
+	// The fresh row now points at a parent that was never settled: the
+	// caller's own allDepsResolved check ran against the scan-time
+	// candidate, so this changed parent must be rechecked here or the
+	// re-emit would hit the same missing-parent hard-error the depth
+	// ordering exists to prevent.
+	row, err := json.Marshal(map[string]any{
+		"sfid":              "a0912345",
+		"name":              "Test Project",
+		"slug__c":           "test-project",
+		"project_status__c": "Active",
+		"parent_project__c": "a0999999",
+	})
+	if err != nil {
+		t.Fatalf("failed to encode fixture: %v", err)
+	}
+	objectsKV := newFakeKV()
+	if _, err := objectsKV.Create(context.Background(), "salesforce-project__c.a0912345", row); err != nil {
+		t.Fatalf("failed to seed objectsKV: %v", err)
+	}
+	v1KV = objectsKV
+	mappingsKV = newFakeKV() // no mapping for a0999999 — parent is unmapped
+
+	reason, err := reEmitV1Object(context.Background(), "salesforce-project__c.a0912345", backfillProjectsOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reason != "parent_blocked" {
+		t.Errorf("skipReason = %q, want %q", reason, "parent_blocked")
+	}
+}
+
+func TestReEmitV1ObjectRechecksSlugAgainstFreshRead(t *testing.T) {
+	origV1KV, origMappingsKV := v1KV, mappingsKV
+	origCfg := cfg
+	origSlugFn := getProjectUIDBySlugFn
+	t.Cleanup(func() {
+		v1KV = origV1KV
+		mappingsKV = origMappingsKV
+		cfg = origCfg
+		getProjectUIDBySlugFn = origSlugFn
+	})
+
+	cfg = &Config{Auth0ClientID: "my-client-id"}
+
+	row, err := json.Marshal(map[string]any{
+		"sfid":              "a0912345",
+		"name":              "Test Project",
+		"slug__c":           "test-project",
+		"project_status__c": "Active",
+	})
+	if err != nil {
+		t.Fatalf("failed to encode fixture: %v", err)
+	}
+	objectsKV := newFakeKV()
+	if _, err := objectsKV.Create(context.Background(), "salesforce-project__c.a0912345", row); err != nil {
+		t.Fatalf("failed to seed objectsKV: %v", err)
+	}
+	v1KV = objectsKV
+	mappingsKV = newFakeKV()
+
+	// The slug now resolves to a v2 project — e.g. created by an earlier
+	// candidate in this same run — even though the scan-time --check-slugs
+	// pass found it clear.
+	getProjectUIDBySlugFn = func(_ context.Context, slug string) (string, error) {
+		if slug == "test-project" {
+			return "project-uid-123", nil
+		}
+		return "", fmt.Errorf("%w: slug %s", errSlugNotFound, slug)
+	}
+
+	opts := backfillProjectsOptions{checkSlugs: true}
+	reason, err := reEmitV1Object(context.Background(), "salesforce-project__c.a0912345", opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reason != "slug_conflict" {
+		t.Errorf("skipReason = %q, want %q", reason, "slug_conflict")
+	}
+}
+
 // erroringGetKV is a jetstream.KeyValue that always fails Get with a
 // non-ErrKeyNotFound error, simulating a NATS timeout/unavailability rather
 // than a confirmed absent key.

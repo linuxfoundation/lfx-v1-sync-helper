@@ -413,6 +413,10 @@ func recordSkip(res *backfillProjectsResult, reason string) {
 		res.skippedMissing++
 	case "stage_filtered":
 		res.skippedStageFiltered++
+	case "parent_blocked":
+		res.skippedParentBlocked++
+	case "slug_conflict":
+		res.skippedSlugConflict++
 	}
 }
 
@@ -860,6 +864,35 @@ func reEmitV1Object(ctx context.Context, key string, opts backfillProjectsOption
 	}
 	if isFormationStage(candidate.stage) && !opts.allowFormation && !includesFormation(opts.includeStagePrefixes) {
 		return "stage_filtered", nil
+	}
+
+	// The caller's allDepsResolved check runs against the scan-time candidate,
+	// not this fresh read: a long run can see either parent SFID change to one
+	// that never settled, and emitting that unchecked would hit the same
+	// missing-parent hard-error the depth ordering exists to prevent.
+	for _, dep := range candidate.dependencySFIDs() {
+		if !lookupProjectMappingFn(ctx, dep) {
+			return "parent_blocked", nil
+		}
+	}
+
+	if opts.checkSlugs && candidate.slug != "" {
+		// --check-slugs only screened the scan-time slug: this fresh row's
+		// slug may since resolve to a v2 project — including one created by
+		// an earlier candidate in this same run — so repeat the lookup here
+		// before emitting.
+		uid, err := getProjectUIDBySlugFn(ctx, candidate.slug)
+		if err != nil {
+			if !errors.Is(err, errSlugNotFound) {
+				return "", fmt.Errorf(
+					"--check-slugs lookup failed for slug %s (sfid %s): %w", candidate.slug, candidate.sfid, err,
+				)
+			}
+		} else {
+			logger.With("sfid", candidate.sfid, "slug", candidate.slug, "project_uid", uid).
+				WarnContext(ctx, "candidate slug now resolves to a v2 project on fresh re-check; needs mapping repair, not a create — skipping")
+			return "slug_conflict", nil
+		}
 	}
 
 	mappingKey := projectSFIDMappingKeyPrefix + candidate.sfid
