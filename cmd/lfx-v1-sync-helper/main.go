@@ -67,16 +67,6 @@ var (
 	// See mapping_store.go for the port and V1MappingsStoreMode
 	// selection.
 	mappingStore MappingStore
-
-	// distributedSync is the singleton mappingLocker used to serialise
-	// concurrent read-modify-write operations on shared mapping state.
-	// Callers pass fully-qualified lock keys (including any namespace prefix).
-	// TODO: When migrating handlers to the wrapper services, review the
-	// initialization pattern — a global singleton may not fit the target
-	// design (globals can be harder to test, maintain, and reason about),
-	// so the lock backend, lifecycle, and injection strategy will need
-	// a proper design review.
-	distributedSync mappingLocker //nolint:unused
 )
 
 // main parses optional flags and starts the NATS subscribers.
@@ -529,13 +519,6 @@ func main() {
 		logger.With(fields...).Info("v1-mappings Postgres backfill completed successfully")
 		os.Exit(0)
 	}
-
-	// Initialize the distributed sync singleton backed by the mappings KV bucket.
-	distributedSync = newKVMappingLocker(mappingsKV,
-		withLockerOptionMaxRetries(mappingLockRetryAttempts),
-		withLockerOptionRetryInterval(mappingLockRetryInterval),
-		withLockerOptionTimeout(mappingLockTimeout),
-	)
 
 	// Wire the online MappingStore based on V1_MAPPINGS_STORE_MODE.
 	// This is the runtime port that all non-backfill callers use to
