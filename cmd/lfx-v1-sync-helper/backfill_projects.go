@@ -548,6 +548,12 @@ func selectProjectCandidates(
 		candidates = append(candidates, candidate)
 	}
 
+	// objects is a Go map, so ranging over it above yields candidates in
+	// nondeterministic order across runs. Sort by sfid so downstream
+	// depth-level ordering, --limit truncation, and --dry-run output are
+	// reproducible run-to-run.
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].sfid < candidates[j].sfid })
+
 	return candidates
 }
 

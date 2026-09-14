@@ -760,3 +760,41 @@ func TestSelectProjectCandidatesCountsFormationBeforeStageFilter(t *testing.T) {
 		t.Errorf("stageHistogram = %+v, want Formation - Confidential: 1", res.stageHistogram)
 	}
 }
+
+func TestSelectProjectCandidatesOrdersBySFID(t *testing.T) {
+	origCfg := cfg
+	cfg = &Config{Auth0ClientID: "my-client-id"}
+	t.Cleanup(func() { cfg = origCfg })
+
+	sfids := []string{"a0900005", "a0900001", "a0900003", "a0900002", "a0900004"}
+	objects := map[string][]byte{}
+	for _, sfid := range sfids {
+		row, err := json.Marshal(map[string]any{
+			"sfid":              sfid,
+			"name":              "Test Project " + sfid,
+			"slug__c":           "test-project-" + sfid,
+			"project_status__c": "Active",
+		})
+		if err != nil {
+			t.Fatalf("failed to encode fixture: %v", err)
+		}
+		objects[projectObjectSubjectPrefix+sfid] = row
+	}
+
+	res := &backfillProjectsResult{stageHistogram: map[string]int{}}
+	candidates := selectProjectCandidates(context.Background(), objects, nil, nil, backfillProjectsOptions{}, res)
+
+	if len(candidates) != len(sfids) {
+		t.Fatalf("candidates = %+v, want %d entries", candidates, len(sfids))
+	}
+	for i := 1; i < len(candidates); i++ {
+		if candidates[i-1].sfid >= candidates[i].sfid {
+			t.Errorf(
+				"candidates not sorted by sfid: %q >= %q at index %d — order must be "+
+					"deterministic across runs since a Go map range order is not, and "+
+					"--limit truncates this order",
+				candidates[i-1].sfid, candidates[i].sfid, i,
+			)
+		}
+	}
+}

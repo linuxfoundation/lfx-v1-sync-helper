@@ -173,13 +173,13 @@ kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-proj
 Add `--dry-run` to the manifest args first, apply, inspect logs (`scanned`/`candidates`/`emitted`/`levels`/`formation_candidates`/`remaining_unmapped` counts), then run the exclude-Formation pass without it:
 
 ```sh
-lfx-v1-sync-helper --backfill-projects --exclude-stage-prefix Formation [--dry-run]
+lfx-v1-sync-helper --backfill-projects --exclude-stage-prefix Formation --check-slugs [--dry-run]
 ```
 
 The include-Formation pass bulk-creates checklists in `lfx-v2-formation-service` on first sync, so do not run it until lfx-self-serve#1957's "re-emitting a create event for a project that already has a checklist creates nothing" acceptance criterion is confirmed and the dry-run's `formation_candidates` count has been shared with the Formation team:
 
 ```sh
-lfx-v1-sync-helper --backfill-projects --include-stage-prefix Formation [--dry-run]
+lfx-v1-sync-helper --backfill-projects --include-stage-prefix Formation --check-slugs [--dry-run]
 ```
 
 ## Architecture Diagrams
