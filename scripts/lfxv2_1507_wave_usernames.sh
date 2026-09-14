@@ -11,7 +11,7 @@
 # when that file is present.
 #
 # Usage:
-#   scripts/lfxv2_1507_wave_usernames.sh <wave>   # wave: 0, 1, 2, ... 9, 11, or 5b
+#   scripts/lfxv2_1507_wave_usernames.sh <wave>   # wave: 0, 1, 2, ... 9, 11, 4b, 5b
 #
 # Requires: snowsql configured with rsa_key.p8 in the working directory.
 
@@ -26,6 +26,10 @@ case "$WAVE" in
   2) SLUGS="aswf,jupyter-foundation,project-jupyter,ojsf,open-mainframe-project,aomedia,ocudu-ecosystem-foundation,neonephos-foundation,egate" ;;
   3) SLUGS="cncf,cdf,openssf,finos,lf-decentralized-trust,openwalletfoundation,jdf3mf" ;;
   4) SLUGS="openchain,lfedge,lfn,lfenergy,dpdk" ;;
+  # Wave 4b: Camara Fund belongs to wave 4 but was omitted from the wave 4
+  # slug list, so it is picked up as a follow-on. camarafund is the fund
+  # entity; the spine pulls in the Camara Project (telcoapi) beneath it.
+  4b) SLUGS="camarafund" ;;
   5) SLUGS="risc-v-international,open-software-development-initiative-for-risc-v-ecosystem,chips,zep,cip,cti,pqca" ;;
   # Wave 5b: AGL was added to wave 5 after wave 5 had already run.
   5b) SLUGS="agl" ;;
@@ -34,7 +38,7 @@ case "$WAVE" in
   8) SLUGS="o3de,gql,xen,ebpf,finops" ;;
   9) SLUGS="openinfra-foundation,yocto,cephfoundation,tla" ;;
   11) SLUGS="lfresearch,iovisor,jdf" ;;
-  *) echo "error: unknown wave '$WAVE' (waves 0-9, 11, or 5b)" >&2; exit 1 ;;
+  *) echo "error: unknown wave '$WAVE' (waves 0-9, 11, 4b, or 5b)" >&2; exit 1 ;;
 esac
 
 OUT="lfxv2_1507_wave${WAVE}_usernames.csv"
