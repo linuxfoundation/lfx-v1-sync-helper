@@ -342,7 +342,7 @@ func patchV1ProjectStaff(ctx context.Context, sfid string, fields map[string]str
 	if resp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("%w: %s", errV1ProjectNotFound, sfid)
 	}
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("project-service returned status %d for project %s: %s", resp.StatusCode, sfid, string(respBody))
 	}
 

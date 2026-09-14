@@ -112,15 +112,15 @@ func settingsUpdatedMsg(t *testing.T, actor string, oldSettings, newSettings eve
 func TestHandleProjectSettingsUpdated_StaffChangeWritesV1(t *testing.T) {
 	spy := setupStaffBridgeTest(t, http.StatusOK)
 	resolveV1UserSFIDByUsername = func(_ context.Context, username string) (string, error) {
-		if username == "kperez" {
+		if username == "staffpm" {
 			return bridgeTestPMSFID, nil
 		}
 		return "", nil
 	}
 
-	msg := settingsUpdatedMsg(t, "audigregorie",
+	msg := settingsUpdatedMsg(t, "test-actor",
 		events.ProjectSettings{},
-		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "kperez", Email: "kperez@linuxfoundation.org"}})
+		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "staffpm", Email: "staffpm@example.com"}})
 	handleProjectSettingsUpdated(msg)
 
 	if spy.patchCalls != 1 {
@@ -146,8 +146,8 @@ func TestHandleProjectSettingsUpdated_StaffChangeWritesV1(t *testing.T) {
 func TestHandleProjectSettingsUpdated_NoStaffChangeSkips(t *testing.T) {
 	spy := setupStaffBridgeTest(t, http.StatusOK)
 
-	pm := &events.UserInfo{Username: "kperez", Email: "kperez@linuxfoundation.org"}
-	msg := settingsUpdatedMsg(t, "audigregorie",
+	pm := &events.UserInfo{Username: "staffpm", Email: "staffpm@example.com"}
+	msg := settingsUpdatedMsg(t, "test-actor",
 		events.ProjectSettings{ProgramManager: pm, MissionStatement: "old"},
 		events.ProjectSettings{ProgramManager: pm, MissionStatement: "new"})
 	handleProjectSettingsUpdated(msg)
@@ -162,9 +162,9 @@ func TestHandleProjectSettingsUpdated_OpportunityOwnerOnlyIgnored(t *testing.T) 
 
 	// AC-2: opportunity_owner diffs are logged and ignored — SFDC-owned,
 	// one-way v1->v2.
-	msg := settingsUpdatedMsg(t, "audigregorie",
+	msg := settingsUpdatedMsg(t, "test-actor",
 		events.ProjectSettings{},
-		events.ProjectSettings{OpportunityOwner: &events.UserInfo{Username: "mwhite"}})
+		events.ProjectSettings{OpportunityOwner: &events.UserInfo{Username: "staffowner"}})
 	handleProjectSettingsUpdated(msg)
 
 	if spy.patchCalls != 0 {
@@ -179,7 +179,7 @@ func TestHandleProjectSettingsUpdated_OriginSkip(t *testing.T) {
 	// principal and are skipped.
 	msg := settingsUpdatedMsg(t, "test-heimdall-client@clients",
 		events.ProjectSettings{},
-		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "kperez"}})
+		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "staffpm"}})
 	handleProjectSettingsUpdated(msg)
 
 	if spy.patchCalls != 0 {
@@ -195,7 +195,7 @@ func TestHandleProjectSettingsUpdated_OtherMachineActorStillSyncs(t *testing.T) 
 	// API correction) must still sync.
 	msg := settingsUpdatedMsg(t, "some-other-client@clients",
 		events.ProjectSettings{},
-		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "kperez"}})
+		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "staffpm"}})
 	handleProjectSettingsUpdated(msg)
 
 	if spy.patchCalls != 1 {
@@ -207,9 +207,9 @@ func TestHandleProjectSettingsUpdated_UnmappedProjectSkips(t *testing.T) {
 	spy := setupStaffBridgeTest(t, http.StatusOK)
 	getV1ProjectSFIDByUID = func(context.Context, string) (string, error) { return "", nil }
 
-	msg := settingsUpdatedMsg(t, "audigregorie",
+	msg := settingsUpdatedMsg(t, "test-actor",
 		events.ProjectSettings{},
-		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "kperez"}})
+		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "staffpm"}})
 	handleProjectSettingsUpdated(msg)
 
 	if spy.patchCalls != 0 {
@@ -225,9 +225,9 @@ func TestHandleProjectSettingsUpdated_NoDiffVsV1Skips(t *testing.T) {
 		return map[string]string{"program_manager__c": bridgeTestPMSFID}, nil
 	}
 
-	msg := settingsUpdatedMsg(t, "audigregorie",
+	msg := settingsUpdatedMsg(t, "test-actor",
 		events.ProjectSettings{},
-		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "kperez"}})
+		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "staffpm"}})
 	handleProjectSettingsUpdated(msg)
 
 	if spy.patchCalls != 0 {
@@ -241,8 +241,8 @@ func TestHandleProjectSettingsUpdated_ClearWritesNone(t *testing.T) {
 		return map[string]string{"program_manager__c": bridgeTestPMSFID}, nil
 	}
 
-	msg := settingsUpdatedMsg(t, "audigregorie",
-		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "kperez"}},
+	msg := settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "staffpm"}},
 		events.ProjectSettings{})
 	handleProjectSettingsUpdated(msg)
 
@@ -265,8 +265,8 @@ func TestHandleProjectSettingsUpdated_UnresolvableUserLeavesV1Unchanged(t *testi
 	}
 	// Default seams resolve nothing for this user.
 
-	msg := settingsUpdatedMsg(t, "audigregorie",
-		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "kperez"}},
+	msg := settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "staffpm"}},
 		events.ProjectSettings{ProgramManager: &events.UserInfo{Name: "Ghost User", Email: "ghost@example.com"}})
 	handleProjectSettingsUpdated(msg)
 
@@ -279,17 +279,17 @@ func TestHandleProjectSettingsUpdated_UnresolvableUserLeavesV1Unchanged(t *testi
 func TestHandleProjectSettingsUpdated_UnresolvableFieldDoesNotBlockSibling(t *testing.T) {
 	spy := setupStaffBridgeTest(t, http.StatusOK)
 	resolveV1UserSFIDByUsername = func(_ context.Context, username string) (string, error) {
-		if username == "kperez" {
+		if username == "staffpm" {
 			return bridgeTestPMSFID, nil
 		}
 		return "", nil
 	}
 
-	msg := settingsUpdatedMsg(t, "audigregorie",
+	msg := settingsUpdatedMsg(t, "test-actor",
 		events.ProjectSettings{},
 		events.ProjectSettings{
 			ExecutiveDirector: &events.UserInfo{Name: "Ghost User", Email: "ghost@example.com"},
-			ProgramManager:    &events.UserInfo{Username: "kperez"},
+			ProgramManager:    &events.UserInfo{Username: "staffpm"},
 		})
 	handleProjectSettingsUpdated(msg)
 
@@ -312,15 +312,15 @@ func TestHandleProjectSettingsUpdated_EmailFallback(t *testing.T) {
 		return "", nil
 	}
 	resolveV1UserSFIDByEmail = func(_ context.Context, email string) (string, error) {
-		if email == "caseycain@linuxfoundation.org" {
+		if email == "staffemail@example.com" {
 			return "0032M00002cQF7WQAW", nil
 		}
 		return "", nil
 	}
 
-	msg := settingsUpdatedMsg(t, "audigregorie",
+	msg := settingsUpdatedMsg(t, "test-actor",
 		events.ProjectSettings{},
-		events.ProjectSettings{ProgramManager: &events.UserInfo{Email: "caseycain@linuxfoundation.org"}})
+		events.ProjectSettings{ProgramManager: &events.UserInfo{Email: "staffemail@example.com"}})
 	handleProjectSettingsUpdated(msg)
 
 	if usernameCalled {
@@ -340,9 +340,9 @@ func TestHandleProjectSettingsUpdated_ResolutionErrorAborts(t *testing.T) {
 		return "", errors.New("v1 DB unavailable")
 	}
 
-	msg := settingsUpdatedMsg(t, "audigregorie",
+	msg := settingsUpdatedMsg(t, "test-actor",
 		events.ProjectSettings{},
-		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "kperez"}})
+		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "staffpm"}})
 	handleProjectSettingsUpdated(msg)
 
 	if spy.patchCalls != 0 {
@@ -355,9 +355,9 @@ func TestHandleProjectSettingsUpdated_MissingV1RecordSkips(t *testing.T) {
 	resolveV1UserSFIDByUsername = func(context.Context, string) (string, error) { return bridgeTestPMSFID, nil }
 	getV1ProjectStaffSFIDs = func(context.Context, string) (map[string]string, error) { return nil, nil }
 
-	msg := settingsUpdatedMsg(t, "audigregorie",
+	msg := settingsUpdatedMsg(t, "test-actor",
 		events.ProjectSettings{},
-		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "kperez"}})
+		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "staffpm"}})
 	handleProjectSettingsUpdated(msg)
 
 	if spy.patchCalls != 0 {
@@ -371,9 +371,9 @@ func TestHandleProjectSettingsUpdated_Patch404IsTerminalSkip(t *testing.T) {
 
 	// Platform-native (lf...) projects 404 on the v1 API; the handler warns and
 	// moves on without retrying.
-	msg := settingsUpdatedMsg(t, "audigregorie",
+	msg := settingsUpdatedMsg(t, "test-actor",
 		events.ProjectSettings{},
-		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "kperez"}})
+		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "staffpm"}})
 	handleProjectSettingsUpdated(msg)
 
 	if spy.patchCalls != 1 {
@@ -384,7 +384,7 @@ func TestHandleProjectSettingsUpdated_Patch404IsTerminalSkip(t *testing.T) {
 func TestHandleProjectSettingsUpdated_EDChangeOmitsUnchangedPM(t *testing.T) {
 	spy := setupStaffBridgeTest(t, http.StatusOK)
 	resolveV1UserSFIDByUsername = func(_ context.Context, username string) (string, error) {
-		if username == "asitha" {
+		if username == "staffed" {
 			return "0034100001oQRLDAA4", nil
 		}
 		return "", nil
@@ -393,11 +393,11 @@ func TestHandleProjectSettingsUpdated_EDChangeOmitsUnchangedPM(t *testing.T) {
 		return map[string]string{"program_manager__c": bridgeTestPMSFID}, nil
 	}
 
-	msg := settingsUpdatedMsg(t, "audigregorie",
-		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "kperez"}},
+	msg := settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "staffpm"}},
 		events.ProjectSettings{
-			ProgramManager:    &events.UserInfo{Username: "kperez"},
-			ExecutiveDirector: &events.UserInfo{Username: "asitha"},
+			ProgramManager:    &events.UserInfo{Username: "staffpm"},
+			ExecutiveDirector: &events.UserInfo{Username: "staffed"},
 		})
 	handleProjectSettingsUpdated(msg)
 
@@ -419,7 +419,7 @@ func TestHandleProjectSettingsUpdated_EDChangeOmitsUnchangedPM(t *testing.T) {
 func TestHandleProjectSettingsUpdated_StaleReplicaDoesNotRevertSiblingField(t *testing.T) {
 	spy := setupStaffBridgeTest(t, http.StatusOK)
 	resolveV1UserSFIDByUsername = func(_ context.Context, username string) (string, error) {
-		if username == "kperez" {
+		if username == "staffpm" {
 			return bridgeTestPMSFID, nil
 		}
 		return "", nil
@@ -430,10 +430,10 @@ func TestHandleProjectSettingsUpdated_StaleReplicaDoesNotRevertSiblingField(t *t
 		return map[string]string{"executive_director__c": "0034100001staleED"}, nil
 	}
 
-	ed := &events.UserInfo{Username: "asitha"}
-	msg := settingsUpdatedMsg(t, "audigregorie",
+	ed := &events.UserInfo{Username: "staffed"}
+	msg := settingsUpdatedMsg(t, "test-actor",
 		events.ProjectSettings{ExecutiveDirector: ed},
-		events.ProjectSettings{ExecutiveDirector: ed, ProgramManager: &events.UserInfo{Username: "kperez"}})
+		events.ProjectSettings{ExecutiveDirector: ed, ProgramManager: &events.UserInfo{Username: "staffpm"}})
 	handleProjectSettingsUpdated(msg)
 
 	if spy.patchCalls != 1 {
@@ -456,19 +456,19 @@ func TestHandleProjectSettingsUpdated_InvalidEventSkips(t *testing.T) {
 }
 
 func TestStaffUserInfosEqual(t *testing.T) {
-	kperez := &events.UserInfo{Username: "kperez", Email: "kperez@linuxfoundation.org"}
+	staffpm := &events.UserInfo{Username: "staffpm", Email: "staffpm@example.com"}
 	tests := []struct {
 		name string
 		a, b *events.UserInfo
 		want bool
 	}{
 		{"both nil", nil, nil, true},
-		{"nil vs set", nil, kperez, false},
-		{"set vs nil", kperez, nil, false},
-		{"identical", kperez, &events.UserInfo{Username: "kperez", Email: "kperez@linuxfoundation.org"}, true},
-		{"name/avatar drift only", kperez, &events.UserInfo{Username: "kperez", Email: "kperez@linuxfoundation.org", Name: "K. Perez", Avatar: "x"}, true},
-		{"username differs", kperez, &events.UserInfo{Username: "kperez2", Email: "kperez@linuxfoundation.org"}, false},
-		{"email differs", kperez, &events.UserInfo{Username: "kperez", Email: "other@linuxfoundation.org"}, false},
+		{"nil vs set", nil, staffpm, false},
+		{"set vs nil", staffpm, nil, false},
+		{"identical", staffpm, &events.UserInfo{Username: "staffpm", Email: "staffpm@example.com"}, true},
+		{"name/avatar drift only", staffpm, &events.UserInfo{Username: "staffpm", Email: "staffpm@example.com", Name: "Staff PM", Avatar: "x"}, true},
+		{"username differs", staffpm, &events.UserInfo{Username: "staffpm2", Email: "staffpm@example.com"}, false},
+		{"email differs", staffpm, &events.UserInfo{Username: "staffpm", Email: "other@example.com"}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -496,6 +496,7 @@ func TestPatchV1ProjectStaff(t *testing.T) {
 		wantNotFnd bool
 	}{
 		{"200 OK", http.StatusOK, false, false},
+		{"204 No Content", http.StatusNoContent, false, false},
 		{"404 maps to sentinel", http.StatusNotFound, true, true},
 		{"500 is a plain error", http.StatusInternalServerError, true, false},
 	}
