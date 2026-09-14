@@ -44,6 +44,9 @@
 //	kv-user-index-cleanup                              # dry-run audit, all prefixes
 //	kv-user-index-cleanup --execute
 //	kv-user-index-cleanup --execute --prefix v1-user.email.
+//	kv-user-index-cleanup --execute --prefix v1-user.email. --start-seq 2279905
+//	    # resume/diagnose from a specific stream sequence instead of 1
+//	    # (requires --prefix; see scanAndPurgePrefix doc comment)
 package main
 
 import (
@@ -92,12 +95,16 @@ func scanAndPurgePrefix(
 	scanDelay, deleteDelay time.Duration,
 	progressEvery int,
 	getTimeout time.Duration,
+	startSeq uint64,
 ) (prefixResult, error) {
 	subjectFilter := subjectPrefix + keyPrefix + ">"
 	seenSubjects := make(map[string]struct{})
 
 	var res prefixResult
-	var seq uint64 = 1
+	seq := startSeq
+	if seq < 1 {
+		seq = 1
+	}
 	start := time.Now()
 	lastReport := start
 
@@ -193,6 +200,7 @@ type config struct {
 	deleteDelay   time.Duration
 	progressEvery int
 	execute       bool
+	startSeq      uint64
 }
 
 func parseFlags() config {
@@ -204,6 +212,7 @@ func parseFlags() config {
 	var cfg config
 	var jsTimeoutSecs, scanDelaySecs, deleteDelaySecs float64
 	var prefix string
+	var startSeq uint64
 
 	flag.StringVar(&cfg.natsURL, "nats-url", defaultNATSURL, "NATS server URL")
 	flag.Float64Var(&jsTimeoutSecs, "js-timeout", 300.0, "per-call JetStream operation timeout, in seconds")
@@ -212,16 +221,37 @@ func parseFlags() config {
 	flag.Float64Var(&deleteDelaySecs, "delete-delay", 0.25, "seconds to sleep between each purge call (default 0.25s, i.e. slow)")
 	flag.IntVar(&cfg.progressEvery, "progress-every", 1000, "print a progress line every N matching revisions (also at least every 15s)")
 	flag.BoolVar(&cfg.execute, "execute", false, "purge matching subjects as they're found (default: dry-run audit only)")
+	flag.Uint64Var(&startSeq, "start-seq", 0, "resume scanning from this stream sequence instead of 1 (requires --prefix; diagnostic/resume aid)")
 	flag.Parse()
 
 	cfg.jsTimeout = time.Duration(jsTimeoutSecs * float64(time.Second))
 	cfg.scanDelay = time.Duration(scanDelaySecs * float64(time.Second))
 	cfg.deleteDelay = time.Duration(deleteDelaySecs * float64(time.Second))
 	cfg.prefix = prefix
+	cfg.startSeq = startSeq
 	return cfg
 }
 
 func run(ctx context.Context, cfg config) int {
+	if cfg.progressEvery <= 0 {
+		fmt.Fprintf(os.Stderr, "Invalid --progress-every value %d. Must be a positive integer.\n", cfg.progressEvery)
+		return 1
+	}
+
+	prefixes := targetKeyPrefixes
+	if cfg.prefix != "" {
+		if !slices.Contains(targetKeyPrefixes, cfg.prefix) {
+			fmt.Fprintf(os.Stderr, "Unknown --prefix value %q. Must be one of: %v\n", cfg.prefix, targetKeyPrefixes)
+			return 1
+		}
+		prefixes = []string{cfg.prefix}
+	}
+
+	if cfg.startSeq > 0 && cfg.prefix == "" {
+		fmt.Fprintf(os.Stderr, "--start-seq requires --prefix (it only applies to a single target key prefix).\n")
+		return 1
+	}
+
 	nc, err := nats.Connect(cfg.natsURL, nats.Timeout(30*time.Second))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to connect to %s: %v\n", cfg.natsURL, err)
@@ -256,20 +286,6 @@ func run(ctx context.Context, cfg config) int {
 		return 1
 	}
 
-	if cfg.progressEvery <= 0 {
-		fmt.Fprintf(os.Stderr, "Invalid --progress-every value %d. Must be a positive integer.\n", cfg.progressEvery)
-		return 1
-	}
-
-	prefixes := targetKeyPrefixes
-	if cfg.prefix != "" {
-		if !slices.Contains(targetKeyPrefixes, cfg.prefix) {
-			fmt.Fprintf(os.Stderr, "Unknown --prefix value %q. Must be one of: %v\n", cfg.prefix, targetKeyPrefixes)
-			return 1
-		}
-		prefixes = []string{cfg.prefix}
-	}
-
 	mode := "DRY RUN (audit only)"
 	if cfg.execute {
 		mode = "EXECUTE (purging as we go)"
@@ -283,7 +299,7 @@ func run(ctx context.Context, cfg config) int {
 
 	var totals prefixResult
 	for _, keyPrefix := range prefixes {
-		res, err := scanAndPurgePrefix(ctx, str, keyPrefix, cfg.execute, cfg.scanDelay, cfg.deleteDelay, cfg.progressEvery, cfg.jsTimeout)
+		res, err := scanAndPurgePrefix(ctx, str, keyPrefix, cfg.execute, cfg.scanDelay, cfg.deleteDelay, cfg.progressEvery, cfg.jsTimeout, cfg.startSeq)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR scanning %s: %v\n", keyPrefix, err)
 			return 1
