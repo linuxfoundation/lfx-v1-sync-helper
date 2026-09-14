@@ -92,9 +92,16 @@ func main() {
 	var doBackfillCommitteeMemberMappings = flag.Bool("backfill-committee-member-mappings", false, "repair committee-member reverse mappings that store the record sfid instead of the contact SFID, then exit")
 	var doBackfillCommitteeMemberNames = flag.Bool("backfill-committee-member-names", false, "populate first_name/last_name on V2 committee members that have no name (members without an LFX account at sync time), then exit")
 	var doBackfillV1MappingsToPG = flag.Bool("backfill-v1-mappings-to-postgres", false, "copy the v1-mappings NATS KV bucket into the Postgres v1_mappings table, then exit (LFXV2-2985)")
+	var doBackfillProjects = flag.Bool("backfill-projects", false, "re-emit v1 projects that have no v2 mapping so the running deployment creates them, then exit")
+	var excludeStagePrefix = flag.String("exclude-stage-prefix", "", "comma-separated, case-insensitive project_status__c prefixes to exclude (applicable with --backfill-projects)")
+	var includeStagePrefix = flag.String("include-stage-prefix", "", "comma-separated, case-insensitive project_status__c prefixes to include exclusively (applicable with --backfill-projects)")
+	var emitRate = flag.Float64("emit-rate", 2.0, "maximum project re-emits per second (applicable with --backfill-projects)")
+	var allowFormation = flag.Bool("allow-formation", false, "allow formation-staged projects in the same run as non-formation projects (applicable with --backfill-projects)")
+	var checkSlugs = flag.Bool("check-slugs", false, "skip candidates whose slug already resolves to a v2 project (applicable with --backfill-projects)")
+	var forceBackfill = flag.Bool("force", false, "bypass the minimum-mappings safety floor (applicable with --backfill-projects)")
 	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
 	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-* and --sync-user)")
-	var backfillLimit = flag.Int("limit", 1000, "maximum number of users to process per backfill run (applicable with --backfill-alternate-emails and --backfill-profiles)")
+	var backfillLimit = flag.Int("limit", 1000, "maximum number of records (users or projects) to process per backfill run (applicable with --backfill-alternate-emails, --backfill-profiles, and --backfill-projects; 0 = unlimited for --backfill-projects)")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -102,15 +109,26 @@ func main() {
 	}
 	flag.Parse()
 
+	// --limit defaults to 1000 for the user backfills; --backfill-projects
+	// needs a default of unlimited (0) since the acceptance criterion is
+	// that every unmapped v1 project is created in one run, so only treat
+	// --limit as project-scoped when the operator explicitly passed it.
+	limitExplicitlySet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "limit" {
+			limitExplicitlySet = true
+		}
+	})
+
 	// Enforce mutual exclusion across all one-shot flags.
 	oneShotCount := 0
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doBackfillV1MappingsToPG} {
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doBackfillV1MappingsToPG, *doBackfillProjects} {
 		if b {
 			oneShotCount++
 		}
 	}
 	if oneShotCount > 1 {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --backfill-committee-member-names, --backfill-v1-mappings-to-postgres, and --sync-user are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --backfill-committee-member-names, --backfill-v1-mappings-to-postgres, --backfill-projects, and --sync-user are mutually exclusive")
 		os.Exit(2)
 	}
 
@@ -118,12 +136,12 @@ func main() {
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}))
 	slog.SetDefault(logger)
 
-	// --backfill-committee-member-mappings and --backfill-v1-mappings-to-postgres
-	// only need NATS KV (plus Postgres for the v1-mappings backfill); skip full
-	// config and API client init.
+	// --backfill-committee-member-mappings, --backfill-v1-mappings-to-postgres,
+	// and --backfill-projects only need NATS KV (plus Postgres for the
+	// v1-mappings backfill); skip full config and API client init.
 	// --backfill-acs-project and --backfill-acs-org require full config and API client init.
 	var err error
-	if *doBackfillCommitteeMemberMappings || *doBackfillV1MappingsToPG {
+	if *doBackfillCommitteeMemberMappings || *doBackfillV1MappingsToPG || *doBackfillProjects {
 		cfg = LoadMinimalConfig()
 	} else {
 		cfg, err = LoadConfig()
@@ -328,6 +346,33 @@ func main() {
 			os.Exit(1)
 		}
 		logger.Info("ACS project grants backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --backfill-projects flag: re-emit v1 projects with no v2 mapping
+	// so the running deployment's KV consumer creates them, then exit.
+	if *doBackfillProjects {
+		projectLimit := *backfillLimit
+		if !limitExplicitlySet {
+			projectLimit = 0
+		}
+		opts := backfillProjectsOptions{
+			dryRun:               *dryRun,
+			limit:                projectLimit,
+			emitRate:             *emitRate,
+			excludeStagePrefixes: parseStagePrefixList(*excludeStagePrefix),
+			includeStagePrefixes: parseStagePrefixList(*includeStagePrefix),
+			allowFormation:       *allowFormation,
+			checkSlugs:           *checkSlugs,
+			force:                *forceBackfill,
+		}
+		logger.With("dry_run", *dryRun, "emit_rate", *emitRate, "limit", projectLimit).Info("starting project backfill")
+		res, err := backfillProjects(ctx, opts)
+		if err != nil {
+			logger.With(errKey, err).Error("error during project backfill")
+			os.Exit(1)
+		}
+		logger.With(res.logFields()...).Info("project backfill completed successfully")
 		os.Exit(0)
 	}
 
