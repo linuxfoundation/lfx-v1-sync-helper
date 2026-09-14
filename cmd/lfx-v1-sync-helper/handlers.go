@@ -5,8 +5,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -112,14 +114,11 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 	// Determine the object type based on the key prefix.
 	switch prefix {
 	case "salesforce-project__c":
-		handleProjectUpdate(ctx, key, v1Data)
-		return false
+		return handleProjectUpdate(ctx, key, v1Data)
 	case "platform-collaboration__c":
-		handleCommitteeUpdate(ctx, key, v1Data)
-		return false
+		return handleCommitteeUpdate(ctx, key, v1Data)
 	case "platform-community__c":
-		handleCommitteeMemberUpdate(ctx, key, v1Data)
-		return false
+		return handleCommitteeMemberUpdate(ctx, key, v1Data)
 	case "itx-poll", "itx-poll-vote", "itx-poll-results":
 		// Voting records are handled by lfx-v2-voting-service.
 		logger.With("key", key).DebugContext(ctx, "voting record, handled by lfx-v2-voting-service")
@@ -147,6 +146,8 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 		return handleMergedUserUpdate(ctx, key, v1Data)
 	case "salesforce-alternate_email__c":
 		return handleAlternateEmailUpdate(ctx, key, v1Data)
+	case "salesforce-user_skills":
+		return handleUserSkillsUpdate(ctx, key, v1Data)
 	case "salesforce_b2b-Account",
 		"salesforce_b2b-Asset",
 		"salesforce_b2b-Product2",
@@ -162,7 +163,8 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 	case "itx-groupsio-v2-service",
 		"itx-groupsio-v2-subgroup",
 		"itx-groupsio-v2-member",
-		"itx-groupsio-v2-artifact":
+		"itx-groupsio-v2-artifact",
+		"itx-groupsio-v2-message":
 		// Groups.io records are processed by lfx-v2-mailing-list-service eventing processor.
 		logger.With("key", key).DebugContext(ctx, "groupsio record updated, processed by lfx-v2-mailing-list-service")
 		return false
@@ -228,6 +230,8 @@ func handleResourceDelete(ctx context.Context, key string, v1Data map[string]any
 		return handleMergedUserDelete(ctx, key, sfid, v1Data)
 	case "salesforce-alternate_email__c":
 		return handleAlternateEmailDelete(ctx, key, sfid, v1Data)
+	case "salesforce-user_skills":
+		return handleUserSkillsDelete(ctx, key, sfid, v1Data)
 	case "itx-zoom-meetings-v2",
 		"itx-zoom-meetings-registrants-v2",
 		"itx-zoom-past-meetings-attendees",
@@ -266,7 +270,8 @@ func handleResourceDelete(ctx context.Context, key string, v1Data map[string]any
 	case "itx-groupsio-v2-service",
 		"itx-groupsio-v2-subgroup",
 		"itx-groupsio-v2-member",
-		"itx-groupsio-v2-artifact":
+		"itx-groupsio-v2-artifact",
+		"itx-groupsio-v2-message":
 		// Groups.io records are processed by lfx-v2-mailing-list-service eventing processor.
 		logger.With("key", key).DebugContext(ctx, "groupsio record deleted, processed by lfx-v2-mailing-list-service")
 		return false
@@ -282,10 +287,378 @@ func handleResourceDelete(ctx context.Context, key string, v1Data map[string]any
 	}
 }
 
-// tombstoneMapping stores a tombstone marker in the mapping KV store.
+// mappingGetMaxAttempts caps the retry loop in getMappingEntryWithRetry.
+// Extracted as a var so tests can shorten it; production code should treat it as
+// read-only. Four attempts give three sleeps at the default 50ms initial
+// backoff (50 + 100 + 200 = 350ms total sleep before returning the final
+// error), which is the intended race window described on
+// getMappingEntryWithRetry.
+var mappingGetMaxAttempts = 4
+
+// mappingGetInitialBackoff is the first sleep in the exponential backoff between
+// getMappingEntryWithRetry attempts.
+var mappingGetInitialBackoff = 50 * time.Millisecond
+
+// getMappingEntryWithRetry does a bounded exponential-backoff Get on the
+// mappings store. Every error, including ErrKeyNotFound, is retried
+// (with a short delay) because the two failure modes this helper is designed
+// to absorb both look the same at the caller:
+//
+//  1. A concurrent v1→v2 handler is about to persist the mapping after
+//     returning from the v2 create (see handlers_projects.go). The indexer
+//     event our subscriber received races that write; a short retry on
+//     ErrKeyNotFound gives the write a chance to land before we treat the
+//     read as final.
+//  2. Two separate NATS core subscriptions (e.g. lfx.project.created and
+//     lfx.project.updated) can be dispatched to different goroutines with no
+//     inter-subject ordering guarantee. An update handler for a project can
+//     race the create handler that is about to write the mapping.
+//
+// Total wait is short by design. The loop makes at most
+// mappingGetMaxAttempts Get calls and sleeps mappingGetMaxAttempts-1 times
+// between them (the final attempt returns immediately). At the defaults —
+// 4 attempts and 50ms initial backoff, doubling each round — that is three
+// sleeps of 50 + 100 + 200 = 350ms of wall time on top of the store call
+// latency, so the handler goroutine is not held for long. Callers must still
+// interpret the final error:
+//   - nil                → mapping present, entry is populated
+//   - ErrKeyNotFound     → mapping is absent even after retries
+//   - other errors       → transient store problem; event should be
+//     treated as un-lookable and ops should be alerted
+//
+// Context cancellation is honored immediately for clean shutdown.
+func getMappingEntryWithRetry(ctx context.Context, key string) (MappingEntry, error) {
+	var lastErr error
+	delay := mappingGetInitialBackoff
+	for attempt := 1; attempt <= mappingGetMaxAttempts; attempt++ {
+		entry, err := mappingStore.Get(ctx, key)
+		if err == nil {
+			return entry, nil
+		}
+		lastErr = err
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return MappingEntry{}, err
+		}
+		if attempt == mappingGetMaxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return MappingEntry{}, ctx.Err()
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
+	return MappingEntry{}, lastErr
+}
+
+// tombstoneMapping stores a tombstone marker in the mapping store using
+// putMappingWithRetry so a transient store blip does not leave the mapping
+// live. Routes through the process-wide mappingStore so the write goes to
+// the backend selected by V1_MAPPINGS_STORE_MODE (kv / dual / postgres). The
+// bounded retry inside putMappingWithRetry is the only mitigation in either
+// direction — the two calling sides use different NATS mechanisms, but
+// neither retries after this helper returns:
+//
+//   - v1 → v2 side (handleProjectDelete / handleCommitteeDelete /
+//     handleCommitteeMemberDelete): runs under a JetStream KV watcher. A failed
+//     tombstone is logged at WARN and the handler returns false, which causes
+//     kv_watcher.go to call msg.Ack() rather than msg.NakWithDelay(). The
+//     JetStream stream is capable of NAK/redelivery, but the tombstone-failure
+//     branch does not take advantage of it.
+//   - v2 → v1 side (syncProjectDeleteToV1 / syncCommitteeDeleteToV1 /
+//     syncCommitteeMemberDeleteToV1): runs on core NATS
+//     (natsConn.QueueSubscribe on lfx.{project,committee,committee_member}.*).
+//     Core NATS has no acknowledgement or redelivery mechanism at all, so the
+//     failure is inherently fire-and-forget.
+//
+// A failed tombstone is the same order of concern as a failed create-path
+// mapping Put: the v1 record has already been deleted (or was already absent),
+// but the mapping still points at a live SFID. On the next event the
+// create-path loop guard will read the non-tombstoned mapping and skip a
+// legitimate re-sync, or a replayed delete will look up a stale SFID against a
+// record that no longer exists.
+//
+// The v2 → v1 callers additionally escalate a terminal failure to ERROR with
+// reconciliation guidance, because those events are the authoritative sync path
+// from v2 and losing a mapping there breaks the create-path guard for the next
+// event with the same UID. The v1 → v2 callers continue to log at WARN,
+// matching pre-existing behavior; escalating those to ERROR is a separate
+// concern outside this change's scope.
 func tombstoneMapping(ctx context.Context, mappingKey string) error {
-	if _, err := mappingsKV.Put(ctx, mappingKey, []byte(tombstoneMarker)); err != nil {
+	if err := putMappingWithRetry(ctx, mappingKey, []byte(tombstoneMarker)); err != nil {
 		return fmt.Errorf("failed to tombstone mapping %s: %w", mappingKey, err)
+	}
+	return nil
+}
+
+// errTransientStore wraps a transient mapping-store failure. Payload
+// builders in handlers_projects.go / handlers_committees.go return an
+// error of this type when a parent-lookup fails for a reason OTHER
+// than ErrKeyNotFound, so the outer handler can distinguish "parent
+// legitimately missing" (permanent, ACK) from "we could not tell right
+// now" (transient, NACK for redelivery to avoid dropping the sync).
+//
+// Callers do not construct this directly: they use wrapTransientStoreErr.
+type errTransientStore struct{ err error }
+
+func (e *errTransientStore) Error() string {
+	return "transient mapping-store failure: " + e.err.Error()
+}
+func (e *errTransientStore) Unwrap() error { return e.err }
+
+// wrapTransientStoreErr classifies a mappingStore error: ErrKeyNotFound
+// stays a plain error (treated as permanent by callers), everything
+// else becomes an *errTransientStore. Returns nil unchanged.
+func wrapTransientStoreErr(err error) error {
+	if err == nil || errors.Is(err, ErrKeyNotFound) {
+		return err
+	}
+	return &errTransientStore{err: err}
+}
+
+// isTransientStoreErr reports whether err was wrapped by
+// wrapTransientStoreErr. Outer handlers use this to decide whether to
+// nack the message.
+func isTransientStoreErr(err error) bool {
+	var t *errTransientStore
+	return errors.As(err, &t)
+}
+
+// mappingPutMaxAttempts caps the retry loop in putMappingWithRetry. Extracted as
+// a var (not a const) so tests can shorten it; production code should treat it as
+// read-only.
+var mappingPutMaxAttempts = 5
+
+// mappingPutInitialBackoff is the first sleep in the exponential backoff between
+// putMappingWithRetry attempts. Extracted as a var for the same reason as
+// mappingPutMaxAttempts.
+var mappingPutInitialBackoff = 100 * time.Millisecond
+
+// errPutRaceAbortedByTombstone is returned by putMappingWithRetry when a
+// concurrent tombstone wrote to the target key at a revision later than our
+// baseline while we were trying to write a live value. Callers use
+// errors.Is(err, errPutRaceAbortedByTombstone) to distinguish the
+// consistent-final-state race (v1 record was deleted by the delete handler,
+// mapping is tombstoned, both sides agree) from a real terminal failure.
+var errPutRaceAbortedByTombstone = errors.New("mapping put aborted: newer tombstone raced with intended live value")
+
+// putRaceDecision is the outcome of classifyPutRace: continue retrying the
+// Put, treat the current mapping-store state as an equivalent success, or
+// abort because a concurrent tombstone has won the race.
+type putRaceDecision int
+
+const (
+	putRaceDecisionRetry putRaceDecision = iota
+	putRaceDecisionDone
+	putRaceDecisionAbort
+)
+
+// classifyPutRace decides how putMappingWithRetry should react to the
+// mapping-store state observed after a failed CAS write attempt.
+//
+// Rules:
+//
+//   - If the current value already equals the intended value, our previous
+//     CAS write must have committed and we simply lost the response (or a peer
+//     wrote the same value). Report done.
+//   - If we intended a live mapping and a peer has written a tombstone that
+//     did not exist at our baseline, a delete handler raced with us and
+//     already tombstoned the key for a v1 record it just deleted. Report
+//     abort so the caller can surface the race outcome instead of overwriting
+//     the tombstone with our stale live value. The "did not exist at
+//     baseline" test is:
+//   - baseline reported the key absent, so any tombstone must have been
+//     written after us; OR
+//   - baseline had a value at some revision N, and the current tombstone
+//     is at a revision > N.
+//   - Otherwise (nothing changed, a peer wrote a different live value, or we
+//     intended a tombstone and a peer wrote a live value) report retry.
+//
+// The tombstone-intent side deliberately never aborts: the delete handler has
+// already removed the v1 record, so a last-writer-wins tombstone is the
+// correct final state and the CAS loop will retarget to the peer's revision
+// on the next attempt.
+func classifyPutRace(intendedValue, currentValue []byte, baselineExists bool, baselineRevision, currentRevision uint64) putRaceDecision {
+	if bytes.Equal(currentValue, intendedValue) {
+		return putRaceDecisionDone
+	}
+	intendedIsTombstone := bytes.Equal(intendedValue, []byte(tombstoneMarker))
+	currentIsTombstone := bytes.Equal(currentValue, []byte(tombstoneMarker))
+	if !intendedIsTombstone && currentIsTombstone {
+		if !baselineExists || currentRevision > baselineRevision {
+			return putRaceDecisionAbort
+		}
+	}
+	return putRaceDecisionRetry
+}
+
+// readMappingBaseline reads the current state of key from the mapping store
+// with bounded exponential backoff on transient errors. It returns
+// definitively (present with value+revision, or cleanly absent) or fails
+// after exhausting retries, so putMappingWithRetry never has to guess.
+//
+// Distinguishing "cleanly absent" from a transient Get failure is essential
+// for the race guard: if a transient error were silently treated like
+// ErrKeyNotFound, a pre-existing tombstone would look like a concurrent
+// delete on the first CAS conflict and callers would log a false
+// "delete raced with create" alert while the intended mapping was in fact
+// established.
+func readMappingBaseline(ctx context.Context, key string) (exists bool, revision uint64, value []byte, err error) {
+	var lastErr error
+	delay := mappingPutInitialBackoff
+	for attempt := 1; attempt <= mappingPutMaxAttempts; attempt++ {
+		entry, getErr := mappingStore.Get(ctx, key)
+		if getErr == nil {
+			return true, entry.Revision, entry.Value, nil
+		}
+		if errors.Is(getErr, ErrKeyNotFound) {
+			return false, 0, nil, nil
+		}
+		if errors.Is(getErr, context.Canceled) || errors.Is(getErr, context.DeadlineExceeded) {
+			return false, 0, nil, getErr
+		}
+		lastErr = getErr
+		if attempt == mappingPutMaxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return false, 0, nil, ctx.Err()
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
+	return false, 0, nil, fmt.Errorf("baseline get failed after %d attempts: %w", mappingPutMaxAttempts, lastErr)
+}
+
+// putMappingWithRetry writes a mapping value with bounded exponential
+// backoff and server-enforced CAS. Every write is either a Create (when the
+// key is known to be absent) or an Update against a known revision — the
+// mapping store rejects the write if a concurrent writer has advanced the
+// key, so there is no check-then-act (TOCTOU) window between the state read
+// and the write. Routes through the process-wide mappingStore so writes go
+// to the backend selected by V1_MAPPINGS_STORE_MODE (kv / dual / postgres).
+//
+// Used on the v2→v1 create success path (and via tombstoneMapping on the
+// delete path) where losing the mapping produces a permanent inconsistency:
+// the v1 record has been written or deleted but the reverse mapping that (a)
+// prevents duplicate creation on replay and (b) resolves the SFID for
+// subsequent update/delete events is missing. Core NATS carries the indexer
+// subjects with no NAK/redelivery, so a terminal failure is an ops-visible
+// incident; the caller escalates at ERROR level and includes the SFID + UID
+// for reconciliation.
+//
+// Race guard: because the v2→v1 create and delete subjects are separate core
+// NATS subscriptions (main.go:517-528), a Put on the reverse key can race
+// with a tombstone written by the delete handler on the same UID. Concretely,
+// if the create's write commits server-side but the response is lost, the
+// delete handler can read the live mapping, delete the v1 record, and
+// tombstone the mapping during the create's backoff. The CAS loop detects
+// this by re-reading the key after every failed write attempt (including the
+// final one, so a lost-response commit does not appear as a terminal
+// failure), classifying the outcome with classifyPutRace:
+//
+//   - Done: current value equals intended (lost-response success).
+//   - Abort: live-write intent, current is a tombstone that did not exist at
+//     baseline → return errPutRaceAbortedByTombstone.
+//   - Retry: retarget the next Update to the peer's revision (or fall back to
+//     Create if the key was subsequently removed) and try again.
+//
+// Baseline reads are retried on transient errors via readMappingBaseline;
+// only a confirmed ErrKeyNotFound establishes an absent baseline. If baseline
+// cannot be established, the function fails fast rather than guessing, so
+// callers get an accurate "manual reconciliation required" signal instead of
+// a silent misclassification.
+//
+// The per-retry classification is delegated to classifyPutRace so it can be
+// unit tested independently of a live mapping store.
+//
+// The retry gives up immediately on context cancellation so shutdown drains
+// cleanly, and returns wrapped errors so callers can errors.Is against
+// context.Canceled / context.DeadlineExceeded, errPutRaceAbortedByTombstone,
+// or the underlying mapping-store error class.
+func putMappingWithRetry(ctx context.Context, key string, value []byte) error {
+	baselineExists, baselineRevision, baselineValue, err := readMappingBaseline(ctx, key)
+	if err != nil {
+		return fmt.Errorf("mapping put baseline read failed for key %s: %w", key, err)
+	}
+	// Already at the intended value — no write needed.
+	if baselineExists && bytes.Equal(baselineValue, value) {
+		return nil
+	}
+
+	keyExists := baselineExists
+	expectedRevision := baselineRevision
+
+	var lastErr error
+	delay := mappingPutInitialBackoff
+	for attempt := 1; attempt <= mappingPutMaxAttempts; attempt++ {
+		var writeErr error
+		if keyExists {
+			_, writeErr = mappingStore.Update(ctx, key, value, expectedRevision)
+		} else {
+			_, writeErr = mappingStore.Create(ctx, key, value)
+		}
+		if writeErr == nil {
+			return nil
+		}
+		lastErr = writeErr
+		if errors.Is(writeErr, context.Canceled) || errors.Is(writeErr, context.DeadlineExceeded) {
+			return writeErr
+		}
+
+		// Verify current state after every non-context error, including the
+		// last attempt: a lost-response commit on the final attempt must be
+		// recognized as success or the caller emits a spurious
+		// reconciliation alert.
+		entry, getErr := mappingStore.Get(ctx, key)
+		switch {
+		case getErr == nil:
+			switch classifyPutRace(value, entry.Value, baselineExists, baselineRevision, entry.Revision) {
+			case putRaceDecisionDone:
+				return nil
+			case putRaceDecisionAbort:
+				return fmt.Errorf("mapping put aborted for key %s: newer tombstone at revision %d (baseline exists=%t revision=%d): %w",
+					key, entry.Revision, baselineExists, baselineRevision, errPutRaceAbortedByTombstone)
+			case putRaceDecisionRetry:
+				// Retarget CAS at the peer's revision so the next Update
+				// call carries the correct expected revision.
+				keyExists = true
+				expectedRevision = entry.Revision
+			}
+		case errors.Is(getErr, ErrKeyNotFound):
+			// Peer removed the key entirely (rare — our mapping-store model
+			// tombstones rather than deletes). Fall back to Create on the
+			// next attempt.
+			keyExists = false
+			expectedRevision = 0
+		default:
+			// Transient verification error. Keep prior expectations for the
+			// next attempt; the write will either succeed or produce another
+			// verification opportunity.
+		}
+
+		if attempt == mappingPutMaxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
+	return fmt.Errorf("mapping put failed after %d attempts: %w", mappingPutMaxAttempts, lastErr)
+}
+
+// deleteIndexKey removes a secondary-index key from the mapping store.
+// Unlike tombstoneMapping, this does not leave a "!del" marker — secondary
+// indexes have no resurrection-prevention requirement, so a native delete
+// is sufficient. Routes through mappingStore for backend selection.
+func deleteIndexKey(ctx context.Context, mappingKey string) error {
+	if err := mappingStore.Delete(ctx, mappingKey); err != nil {
+		return fmt.Errorf("failed to delete index key %s: %w", mappingKey, err)
 	}
 	return nil
 }

@@ -267,6 +267,11 @@ func ResolveV1UserSFIDByUsername(ctx context.Context, username string) (string, 
 	return dbResolveUserSFIDByUsername(ctx, username)
 }
 
+// resolveV1UserSFIDByUsernameFn is injectable for tests: it lets
+// handleUserProfileUpdated be driven end-to-end (including its per-sfid
+// skills-reconcile ordering guarantee) without a live v1 platform DB.
+var resolveV1UserSFIDByUsernameFn = ResolveV1UserSFIDByUsername
+
 // lookupUserByUsername looks up a username live in the v1 platform database
 // and returns the resolved V1User and SFID in a single operation.
 // Returns (nil, "") on any miss or error.
@@ -476,24 +481,24 @@ func resolveV1OrgID(ctx context.Context, name, website string) (string, error) {
 	return created.ID, nil
 }
 
-// getCachedV1Org retrieves an organization from the mappings KV cache
+// getCachedV1Org retrieves an organization from the mappings cache
 func getCachedV1Org(ctx context.Context, sfid string) (*V1Organization, error) {
 	cacheKey := orgCacheKeyPrefix + sfid
 
-	entry, err := mappingsKV.Get(ctx, cacheKey)
+	entry, err := mappingStore.Get(ctx, cacheKey)
 	if err != nil {
 		return nil, err // No cached entry
 	}
 
 	var org V1Organization
-	if err := json.Unmarshal(entry.Value(), &org); err != nil {
+	if err := json.Unmarshal(entry.Value, &org); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal cached organization: %w", err)
 	}
 
 	return &org, nil
 }
 
-// setCachedOrg stores an organization in the mappings KV cache
+// setCachedOrg stores an organization in the mappings cache
 func setCachedV1Org(ctx context.Context, sfid string, org *V1Organization) error {
 	cacheKey := orgCacheKeyPrefix + sfid
 
@@ -502,7 +507,7 @@ func setCachedV1Org(ctx context.Context, sfid string, org *V1Organization) error
 		return fmt.Errorf("failed to marshal organization for cache: %w", err)
 	}
 
-	_, err = mappingsKV.Put(ctx, cacheKey, data)
+	_, err = mappingStore.Put(ctx, cacheKey, data)
 	return err
 }
 
@@ -516,18 +521,18 @@ func acquireV1OrgLock(ctx context.Context, sfid string, maxRetries int) (bool, b
 		lockValue := strconv.FormatInt(time.Now().Unix(), 10)
 
 		// Try to create the lock (will fail if it already exists)
-		_, err := mappingsKV.Create(ctx, lockKey, []byte(lockValue))
+		_, err := mappingStore.Create(ctx, lockKey, []byte(lockValue))
 		if err == nil {
 			return true, waited // Successfully acquired lock
 		}
 
 		// Check if lock already exists and if it's stale
-		if entry, getErr := mappingsKV.Get(ctx, lockKey); getErr == nil {
-			if lockTimestamp, parseErr := strconv.ParseInt(string(entry.Value()), 10, 64); parseErr == nil {
+		if entry, getErr := mappingStore.Get(ctx, lockKey); getErr == nil {
+			if lockTimestamp, parseErr := strconv.ParseInt(string(entry.Value), 10, 64); parseErr == nil {
 				lockTime := time.Unix(lockTimestamp, 0)
 				if time.Since(lockTime) > orgLockTimeout {
 					// Lock is stale, try to update it
-					if _, updateErr := mappingsKV.Put(ctx, lockKey, []byte(lockValue)); updateErr == nil {
+					if _, updateErr := mappingStore.Put(ctx, lockKey, []byte(lockValue)); updateErr == nil {
 						return true, waited
 					}
 				}
@@ -547,7 +552,7 @@ func acquireV1OrgLock(ctx context.Context, sfid string, maxRetries int) (bool, b
 // releaseOrgLock releases an organization refresh lock
 func releaseV1OrgLock(ctx context.Context, sfid string) error {
 	lockKey := orgLockKeyPrefix + sfid
-	return mappingsKV.Delete(ctx, lockKey)
+	return mappingStore.Delete(ctx, lockKey)
 }
 
 // refreshOrgInBackground refreshes organization data in the background
@@ -815,8 +820,200 @@ func deleteV1Committee(ctx context.Context, projectSFID, committeeSFID string) e
 	respBody, _ := io.ReadAll(resp.Body)
 	logger.DebugContext(ctx, "deleteV1Committee response", "status", resp.StatusCode, "body", string(respBody))
 
+	// Treat 404 as already-deleted (idempotent — safe for JetStream redelivery when V1
+	// completed the delete but its response was lost).
+	if resp.StatusCode == http.StatusNotFound {
+		logger.With("project_sfid", projectSFID, "committee_sfid", committeeSFID).
+			InfoContext(ctx, "v1 committee already absent on delete, treating as success")
+		return nil
+	}
 	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("project service returned status %d deleting committee %s for project %s: %s", resp.StatusCode, committeeSFID, projectSFID, string(respBody))
+	}
+
+	return nil
+}
+
+// projectServiceProjectCreate is the request body for POST /project-service/v1/projects.
+// Field names mirror the v1 project-service HTTP API contract (verified against the
+// TypeScript consumers in linuxfoundation/lfx-pcc — packages/lfx-pcc/interfaces/project.d.ts
+// and apps/v1-backend/src/helpers/environment-reset/data/data-type.d.ts).
+//
+// omitempty is used everywhere except Name and ProjectType so unset v2 fields don't
+// overwrite v1 defaults or existing values. Only fields the v2 project model actually
+// exposes are represented here; the richer v1-only legal metadata (MSA URLs, industry
+// sector, etc.) is intentionally left unset per LFXV2 self-serve #2003.
+type projectServiceProjectCreate struct {
+	Name                           string   `json:"Name"`
+	ProjectType                    string   `json:"ProjectType"`
+	Slug                           string   `json:"Slug,omitempty"`
+	Description                    string   `json:"Description,omitempty"`
+	Parent                         string   `json:"Parent,omitempty"` // parent project SFID
+	Status                         string   `json:"Status,omitempty"` // v2 stage
+	Category                       string   `json:"Category,omitempty"`
+	EntityName                     string   `json:"EntityName,omitempty"`
+	EntityType                     string   `json:"EntityType,omitempty"` // v2 legal_entity_type
+	Funding                        string   `json:"Funding,omitempty"`
+	Model                          []string `json:"Model,omitempty"` // v2 funding_model
+	CharterURL                     string   `json:"CharterURL,omitempty"`
+	AutoJoinEnabled                *bool    `json:"AutoJoinEnabled,omitempty"`
+	StartDate                      string   `json:"StartDate,omitempty"` // v2 formation_date, date-only
+	ProjectLogo                    string   `json:"ProjectLogo,omitempty"`
+	RepositoryURL                  string   `json:"RepositoryURL,omitempty"`
+	Website                        string   `json:"Website,omitempty"`
+	ProjectEntityDissolutionDate   string   `json:"ProjectEntityDissolutionDate,omitempty"`   // date-only
+	ProjectEntityFormationDocument string   `json:"ProjectEntityFormationDocument,omitempty"` // URL
+	LegalParentID                  string   `json:"LegalParentID,omitempty"`                  // legal parent SFID
+}
+
+// projectServiceProjectUpdate is the request body for PATCH /project-service/v1/projects/{sfid}.
+// All fields are optional; unset fields are left untouched on the v1 record.
+type projectServiceProjectUpdate struct {
+	Name                           string   `json:"Name,omitempty"`
+	Slug                           string   `json:"Slug,omitempty"`
+	Description                    string   `json:"Description,omitempty"`
+	Parent                         string   `json:"Parent,omitempty"`
+	ProjectType                    string   `json:"ProjectType,omitempty"` // v2 is_foundation: true→"Project Group", false→"Project"
+	Status                         string   `json:"Status,omitempty"`
+	Category                       string   `json:"Category,omitempty"`
+	EntityName                     string   `json:"EntityName,omitempty"`
+	EntityType                     string   `json:"EntityType,omitempty"`
+	Funding                        string   `json:"Funding,omitempty"`
+	Model                          []string `json:"Model,omitempty"`
+	CharterURL                     string   `json:"CharterURL,omitempty"`
+	AutoJoinEnabled                *bool    `json:"AutoJoinEnabled,omitempty"`
+	StartDate                      string   `json:"StartDate,omitempty"`
+	ProjectLogo                    string   `json:"ProjectLogo,omitempty"`
+	RepositoryURL                  string   `json:"RepositoryURL,omitempty"`
+	Website                        string   `json:"Website,omitempty"`
+	ProjectEntityDissolutionDate   string   `json:"ProjectEntityDissolutionDate,omitempty"`
+	ProjectEntityFormationDocument string   `json:"ProjectEntityFormationDocument,omitempty"`
+	LegalParentID                  string   `json:"LegalParentID,omitempty"`
+}
+
+// projectServiceProjectResponse is the relevant subset of the response returned by
+// POST /project-service/v1/projects. The v1 API returns the full project record but we
+// only need the SFID (ID) to persist the v1↔v2 mapping.
+type projectServiceProjectResponse struct {
+	ID   string `json:"ID"`
+	Name string `json:"Name"`
+	Slug string `json:"Slug"`
+}
+
+// createV1Project creates a project in v1 via POST /project-service/v1/projects.
+// Called on receipt of an lfx.project.created indexer event whose reverse mapping
+// is absent (i.e. the v2 project did not originate in v1).
+func createV1Project(ctx context.Context, payload projectServiceProjectCreate) (*projectServiceProjectResponse, error) {
+	apiURL := fmt.Sprintf("%sproject-service/v1/projects", cfg.LFXAPIGateway.String())
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal create project payload: %w", err)
+	}
+
+	logger.DebugContext(ctx, "createV1Project request", "url", apiURL, "payload", string(body))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send create project request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read create project response: %w", err)
+	}
+
+	logger.DebugContext(ctx, "createV1Project response", "status", resp.StatusCode, "url", resp.Request.URL.String(), "body", string(respBody))
+
+	// The v1 project-service returns 201 Created on success (verified via the
+	// lfx-pcc data-generator consumer). Accept 200 too in case the shape ever
+	// changes; anything else is an error.
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("project service returned status %d creating project: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result projectServiceProjectResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal create project response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// updateV1Project patches a project in v1 via PATCH /project-service/v1/projects/{sfid}.
+func updateV1Project(ctx context.Context, projectSFID string, payload projectServiceProjectUpdate) error {
+	apiURL := fmt.Sprintf("%sproject-service/v1/projects/%s", cfg.LFXAPIGateway.String(), projectSFID)
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal update project payload: %w", err)
+	}
+
+	logger.DebugContext(ctx, "updateV1Project request", "url", apiURL, "payload", string(body))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send update project request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read update project response: %w", err)
+	}
+
+	logger.DebugContext(ctx, "updateV1Project response", "status", resp.StatusCode, "body", string(respBody))
+
+	// Accept 200 (typical PATCH) and 204 (No Content).
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("project service returned status %d updating project %s: %s", resp.StatusCode, projectSFID, string(respBody))
+	}
+
+	return nil
+}
+
+// deleteV1Project deletes a project in v1 via DELETE /project-service/v1/projects/{sfid}.
+func deleteV1Project(ctx context.Context, projectSFID string) error {
+	apiURL := fmt.Sprintf("%sproject-service/v1/projects/%s", cfg.LFXAPIGateway.String(), projectSFID)
+
+	logger.DebugContext(ctx, "deleteV1Project request", "url", apiURL)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, apiURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send delete project request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	respBody, _ := io.ReadAll(resp.Body)
+	logger.DebugContext(ctx, "deleteV1Project response", "status", resp.StatusCode, "body", string(respBody))
+
+	// Accept 204 (No Content — standard for DELETE) and 200. Treat 404 as
+	// already-deleted (idempotent — safe for delete retries and for the case
+	// where the v1 record was removed out of band).
+	if resp.StatusCode == http.StatusNotFound {
+		logger.With("project_sfid", projectSFID).InfoContext(ctx, "v1 project already absent on delete, treating as success")
+		return nil
+	}
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("project service returned status %d deleting project %s: %s", resp.StatusCode, projectSFID, string(respBody))
 	}
 
 	return nil
@@ -972,6 +1169,13 @@ func deleteV1CommitteeMember(ctx context.Context, projectSFID, committeeSFID, me
 	respBody, _ := io.ReadAll(resp.Body)
 	logger.DebugContext(ctx, "deleteV1CommitteeMember response", "status", resp.StatusCode, "body", string(respBody))
 
+	// Treat 404 as already-deleted (idempotent — safe for JetStream redelivery when V1
+	// completed the delete but its response was lost).
+	if resp.StatusCode == http.StatusNotFound {
+		logger.With("project_sfid", projectSFID, "committee_sfid", committeeSFID, "member_sfid", memberSFID).
+			InfoContext(ctx, "v1 committee member already absent on delete, treating as success")
+		return nil
+	}
 	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("project service returned status %d deleting member %s from committee %s: %s", resp.StatusCode, memberSFID, committeeSFID, string(respBody))
 	}

@@ -352,9 +352,9 @@ sequenceDiagram
 
 ### LFX One to v1 bidirectional sync
 
-Implemented for **committees** and **committee members**. The v1-sync-helper subscribes to indexer domain events (`lfx.committee.*`, `lfx.committee_member.*`) published after every successful OpenSearch write and mirrors the change to the v1 API via the Project Service v2 API.
+Implemented for **projects**, **committees**, and **committee members**. The v1-sync-helper subscribes to indexer domain events (`lfx.project.*`, `lfx.committee.*`, `lfx.committee_member.*`) published after every successful OpenSearch write and mirrors the change to the v1 API — projects via the Project Service v1 API (`/project-service/v1/projects`), committees and members via the Project Service v2 API.
 
-Loop detection: if a non-tombstoned reverse mapping already exists for the v2 object, the event originated from v1 and is skipped to prevent infinite sync loops.
+Loop detection: if a non-tombstoned reverse mapping already exists for the v2 object, the event originated from v1 and the create is skipped to prevent duplicate v1 records. On the update and delete paths the loop is broken on the v1 side by `shouldSkipSync`, which detects v1 records whose `lastmodifiedbyid` matches the v1-sync-helper's own Auth0 client ID.
 
 ```mermaid
 sequenceDiagram

@@ -12,7 +12,11 @@ import (
 )
 
 // fetchCommitteeBase fetches an existing committee base from the Committee Service API.
-func fetchCommitteeBase(ctx context.Context, committeeUID string) (*committeeservice.CommitteeBaseWithReadonlyAttributes, string, error) {
+//
+// Declared as a var (mirroring fetchProjectBase in client_projects.go) so
+// tests can patch it to drive controlled failure paths through updateCommittee
+// / deleteCommittee without standing up a full committeeClient stub.
+var fetchCommitteeBase = func(ctx context.Context, committeeUID string) (*committeeservice.CommitteeBaseWithReadonlyAttributes, string, error) {
 	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, "")
 	if err != nil {
 		return nil, "", err
@@ -59,17 +63,23 @@ func createCommittee(ctx context.Context, payload *committeeservice.CreateCommit
 // do not clobber existing V2 values with the Go zero value for plain-bool payload
 // fields (EnableVoting, SsoGroupEnabled, Public).
 //
-func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string]any, v1Principal string) (*committeeservice.CommitteeBaseWithReadonlyAttributes, error) {
+// Returns mutated=true iff UpdateCommitteeBase was actually issued. When the
+// mapped state matches the current V2 base the API call is skipped and
+// (false, nil, nil) is returned so callers can clean up any pending
+// indexer-echo marker they wrote before this call — matching updateProject
+// and updateCommitteeMember so all three handler cleanup sites use the same
+// !mutated check.
+func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string]any, v1Principal string) (bool, *committeeservice.CommitteeBaseWithReadonlyAttributes, error) {
 	// Fetch current committee base + ETag.
 	currentBase, baseETag, err := fetchCommitteeBase(ctx, committeeUID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch current committee base: %w", err)
+		return false, nil, fmt.Errorf("failed to fetch current committee base: %w", err)
 	}
 
 	// Build a fully-merged update payload: start from currentBase, overlay V1 fields.
 	payload, err := mapV1DataToCommitteeUpdateBasePayload(ctx, committeeUID, v1Data, currentBase)
 	if err != nil {
-		return nil, err
+		return false, nil, err
 	}
 
 	// Snapshot the merged payload as a base struct for change detection.
@@ -77,12 +87,12 @@ func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string
 
 	// Skip the call if no synced field has changed.
 	if committeeBasesEqual(currentBase, updatedBase) {
-		return nil, nil
+		return false, nil, nil
 	}
 
 	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, v1Principal)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate token for committee base update: %w", err)
+		return false, nil, fmt.Errorf("failed to generate token for committee base update: %w", err)
 	}
 
 	payload.BearerToken = &token
@@ -90,10 +100,10 @@ func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string
 
 	result, err := committeeClient.UpdateCommitteeBase(ctx, payload)
 	if err != nil {
-		return nil, fmt.Errorf("failed to update committee base: %w", err)
+		return false, nil, fmt.Errorf("failed to update committee base: %w", err)
 	}
 
-	return result, nil
+	return true, result, nil
 }
 
 // committeeBaseFromUpdatePayload projects an UpdateCommitteeBasePayload into a
@@ -177,32 +187,41 @@ func fetchCommitteeMember(ctx context.Context, committeeUID, memberUID string) (
 }
 
 // updateCommitteeMember updates an existing committee member via the Committee Service API.
-func updateCommitteeMember(ctx context.Context, payload *committeeservice.UpdateCommitteeMemberPayload, v1Principal string) error {
+//
+// Returns mutated=true iff UpdateCommitteeMember was actually issued. When the
+// mapped state is byte-for-byte equal to the current V2 member the API call is
+// skipped and (false, nil) is returned so callers can clean up any pending
+// indexer-echo marker they wrote before this call — otherwise the marker
+// silences the next legitimate v2 committee-member update within the freshness
+// window.
+func updateCommitteeMember(ctx context.Context, payload *committeeservice.UpdateCommitteeMemberPayload, v1Principal string) (bool, error) {
 	// Fetch current committee member for comparison.
 	currentMember, etag, err := fetchCommitteeMember(ctx, payload.UID, payload.MemberUID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch current committee member: %w", err)
+		return false, fmt.Errorf("failed to fetch current committee member: %w", err)
 	}
 
 	// Check if member has changes (basic comparison).
 	memberChanged := !committeeMembersEqual(currentMember, payload)
 
-	if memberChanged {
-		token, err := generateCachedJWTToken(ctx, committeeServiceAudience, v1Principal)
-		if err != nil {
-			return fmt.Errorf("failed to generate token for committee member update: %w", err)
-		}
-
-		payload.BearerToken = &token
-		payload.IfMatch = stringToStringPtr(etag)
-
-		_, err = committeeClient.UpdateCommitteeMember(ctx, payload)
-		if err != nil {
-			return fmt.Errorf("failed to update committee member: %w", err)
-		}
+	if !memberChanged {
+		return false, nil
 	}
 
-	return nil
+	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, v1Principal)
+	if err != nil {
+		return false, fmt.Errorf("failed to generate token for committee member update: %w", err)
+	}
+
+	payload.BearerToken = &token
+	payload.IfMatch = stringToStringPtr(etag)
+
+	_, err = committeeClient.UpdateCommitteeMember(ctx, payload)
+	if err != nil {
+		return false, fmt.Errorf("failed to update committee member: %w", err)
+	}
+
+	return true, nil
 }
 
 // deleteCommittee deletes a committee by UID.
