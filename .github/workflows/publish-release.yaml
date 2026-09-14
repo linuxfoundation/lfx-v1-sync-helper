@@ -29,14 +29,16 @@ jobs:
       chart_version: ${{ steps.prepare.outputs.chart_version }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - name: Prepare versions and chart name
         id: prepare
         run: |
           set -euo pipefail
-          APP_VERSION=$(echo ${{ github.ref_name }} | sed 's/v//g')
+          APP_VERSION="${GITHUB_REF_NAME//v/}"
           CHART_NAME="$(yq '.name' charts/*/Chart.yaml)"
-          CHART_VERSION=$(echo ${{ github.ref_name }} | sed 's/v//g')
+          CHART_VERSION="${GITHUB_REF_NAME//v/}"
           {
             echo "app_version=$APP_VERSION"
             echo "chart_name=$CHART_NAME"
@@ -47,6 +49,7 @@ jobs:
         uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5.4.0
         with:
           go-version-file: go.mod
+          cache: false
 
       - name: Setup Ko
         uses: ko-build/setup-ko@d006021bd0c28d1ce33a07e7943d48b079944c8d # v0.9
@@ -58,19 +61,23 @@ jobs:
           ko build github.com/linuxfoundation/lfx-v1-sync-helper/cmd/lfx-v1-sync-helper \
             -B \
             --platform linux/amd64,linux/arm64 \
-            -t ${{ github.ref_name }} \
-            -t ${{ steps.prepare.outputs.app_version }} \
+            -t "${GITHUB_REF_NAME}" \
+            -t "${STEPS_PREPARE_OUTPUTS_APP_VERSION}" \
             -t latest \
             --sbom spdx
+        env:
+          STEPS_PREPARE_OUTPUTS_APP_VERSION: ${{ steps.prepare.outputs.app_version }}
       - name: Build and publish dynamodb-stream-consumer image
         run: |
           ko build github.com/linuxfoundation/lfx-v1-sync-helper/cmd/dynamodb-stream-consumer \
             -B \
             --platform linux/amd64,linux/arm64 \
-            -t ${{ github.ref_name }} \
-            -t ${{ steps.prepare.outputs.app_version }} \
+            -t "${GITHUB_REF_NAME}" \
+            -t "${STEPS_PREPARE_OUTPUTS_APP_VERSION}" \
             -t latest \
             --sbom spdx
+        env:
+          STEPS_PREPARE_OUTPUTS_APP_VERSION: ${{ steps.prepare.outputs.app_version }}
 
   publish-meltano:
     name: Publish Meltano Tagged Release
@@ -86,13 +93,15 @@ jobs:
       app_version: ${{ steps.prepare.outputs.app_version }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Prepare versions
         id: prepare
         run: |
           set -euo pipefail
-          APP_VERSION=$(echo ${{ github.ref_name }} | sed 's/v//g')
+          APP_VERSION="${GITHUB_REF_NAME//v/}"
           {
             echo "app_version=$APP_VERSION"
             echo "image_name=${DOCKER_REGISTRY}/meltano"
@@ -141,9 +150,10 @@ jobs:
       - name: Sign the Meltano container image
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STEPS_BUILD_OUTPUTS_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
-          cosign sign --yes '${{ env.DOCKER_REGISTRY }}/meltano@${{ steps.build.outputs.digest }}'
+          cosign sign --yes "${DOCKER_REGISTRY}/meltano@${STEPS_BUILD_OUTPUTS_DIGEST}"
 
   release-helm-chart:
     needs:
@@ -159,12 +169,13 @@ jobs:
       image_name: ${{ steps.publish-ghcr.outputs.image_name }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Publish Chart to GHCR
         id: publish-ghcr
-        uses: >- # main
-          linuxfoundation/lfx-public-workflows/.github/actions/helm-chart-oci-publisher@17e4144d7ba68f7c3e8c16eece5aed15fd7c2dc8
+        uses: linuxfoundation/lfx-public-workflows/.github/actions/helm-chart-oci-publisher@a93335d2abc2a2e2bb1b7a4cdefbbf15351681ce  # v0.1.0
         with:
           name: ${{ needs.publish-v1-sync-helper.outputs.chart_name }}
           repository: ${{ github.repository }}/chart
@@ -190,9 +201,11 @@ jobs:
       - name: Sign the Helm chart in GHCR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STEPS_PUBLISH_GHCR_OUTPUTS_IMAGE_NAME: ${{ steps.publish-ghcr.outputs.image_name }}
+          STEPS_PUBLISH_GHCR_OUTPUTS_DIGEST: ${{ steps.publish-ghcr.outputs.digest }}
         run: |
           set -euo pipefail
-          cosign sign --yes '${{ steps.publish-ghcr.outputs.image_name }}@${{ steps.publish-ghcr.outputs.digest }}'
+          cosign sign --yes "${STEPS_PUBLISH_GHCR_OUTPUTS_IMAGE_NAME}@${STEPS_PUBLISH_GHCR_OUTPUTS_DIGEST}"
 
   create-ghcr-helm-provenance:
     needs:
@@ -204,7 +217,7 @@ jobs:
     # Note, this action *cannot* be pinned to a ref: see the project's
     # explanation at "Referencing SLSA builders and generators" in their
     # README.
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0  # zizmor: ignore[unpinned-uses]
     with:
       image: ${{ needs.release-helm-chart.outputs.image_name }}
       digest: ${{ needs.release-helm-chart.outputs.digest }}
@@ -222,7 +235,7 @@ jobs:
     # Note, this action *cannot* be pinned to a ref: see the project's
     # explanation at "Referencing SLSA builders and generators" in their
     # README.
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0  # zizmor: ignore[unpinned-uses]
     with:
       image: ${{ needs.publish-meltano.outputs.image_name }}
       digest: ${{ needs.publish-meltano.outputs.digest }}

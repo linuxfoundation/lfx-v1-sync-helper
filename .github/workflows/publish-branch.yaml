@@ -20,7 +20,9 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5.4.0
         with:
           go-version-file: go.mod
@@ -46,8 +48,8 @@ jobs:
           ko build github.com/linuxfoundation/lfx-v1-sync-helper/cmd/lfx-v1-sync-helper \
             -B \
             --platform linux/amd64,linux/arm64 \
-            -t ${{ github.sha }} \
-            -t ${{ steps.container_tag.outputs.tag }} \
+            -t "${GITHUB_SHA}" \
+            -t "${VERSION}" \
             --sbom spdx
       - name: Build dynamodb-stream-consumer for PR
         env:
@@ -61,6 +63,6 @@ jobs:
           ko build github.com/linuxfoundation/lfx-v1-sync-helper/cmd/dynamodb-stream-consumer \
             -B \
             --platform linux/amd64,linux/arm64 \
-            -t ${{ github.sha }} \
-            -t ${{ steps.container_tag.outputs.tag }} \
+            -t "${GITHUB_SHA}" \
+            -t "${VERSION}" \
             --sbom spdx
