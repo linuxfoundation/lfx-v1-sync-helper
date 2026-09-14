@@ -252,7 +252,9 @@ func run(ctx context.Context, cfg config) int {
 		return 1
 	}
 
-	nc, err := nats.Connect(cfg.natsURL, nats.Timeout(30*time.Second))
+	// 90s (rather than the client default) to tolerate slow JetStream API
+	// responses observed from an overloaded stream leader.
+	nc, err := nats.Connect(cfg.natsURL, nats.Timeout(90*time.Second))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to connect to %s: %v\n", cfg.natsURL, err)
 		return 1
