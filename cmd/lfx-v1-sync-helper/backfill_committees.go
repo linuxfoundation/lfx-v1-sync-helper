@@ -215,6 +215,13 @@ func backfillCommittees(ctx context.Context, opts backfillCommitteesOptions) (ba
 
 	if opts.dryRun {
 		logger.With(res.logFields()...).InfoContext(ctx, "[dry-run] committee backfill candidate report")
+		if res.errors > 0 {
+			// selectCommitteeCandidates recorded transient parent-lookup
+			// failures: the candidate/remaining_unmapped counts above are
+			// incomplete, so a caller checking only the error return must not
+			// see this dry-run reported as clean.
+			return res, fmt.Errorf("committee backfill dry-run completed with %d errors", res.errors)
+		}
 		return res, nil
 	}
 
