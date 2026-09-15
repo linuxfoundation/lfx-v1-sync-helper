@@ -18,6 +18,33 @@ import (
 // the two differently (e.g. --check-slugs) can do so with errors.Is.
 var errSlugNotFound = errors.New("no project found for slug")
 
+// parseSlugResponse decodes the raw NATS reply body from
+// lfx.projects-api.slug_to_uid for the given slug.
+// Project-service replies with a plain UID on success, or
+// {"error":"<code>",...} on failure.
+// Returns the UID when the response is a plain non-empty string.
+// Returns errSlugNotFound (wrapped) when the response is empty or carries
+// error code "not_found".
+// Returns a non-not-found error for any other error code or malformed body
+// so callers can distinguish a transient/internal failure from a genuine miss.
+func parseSlugResponse(data []byte, slug string) (string, error) {
+	var rpcEnv struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(data, &rpcEnv) == nil && rpcEnv.Error != "" {
+		if rpcEnv.Error == "not_found" {
+			return "", fmt.Errorf("%w: slug %s", errSlugNotFound, slug)
+		}
+		return "", fmt.Errorf("project-service error for slug %s: %s", slug, rpcEnv.Error)
+	}
+
+	projectUID := strings.TrimSpace(string(data))
+	if projectUID == "" {
+		return "", fmt.Errorf("%w: slug %s", errSlugNotFound, slug)
+	}
+	return projectUID, nil
+}
+
 // getProjectUIDBySlug looks up a v2 project UID from a project slug via NATS.
 // Can be used to lookup any project by its slug (e.g., "ROOT", "kubernetes", "linux", etc.).
 // Returns errSlugNotFound (wrapped) when the slug legitimately resolves to
@@ -35,23 +62,9 @@ func getProjectUIDBySlug(ctx context.Context, slug string) (string, error) {
 		return "", fmt.Errorf("failed to request project UID for slug %s: %w", slug, err)
 	}
 
-	// Project-service returns {"error":"<code>",...} on errors. Parse the
-	// specific "error" key: "not_found" maps to a not-found result; any other
-	// code is an unexpected error.
-	data := resp.Data
-	var rpcEnv struct {
-		Error string `json:"error"`
-	}
-	if json.Unmarshal(data, &rpcEnv) == nil && rpcEnv.Error != "" {
-		if rpcEnv.Error == "not_found" {
-			return "", fmt.Errorf("%w: slug %s", errSlugNotFound, slug)
-		}
-		return "", fmt.Errorf("project-service error for slug %s: %s", slug, rpcEnv.Error)
-	}
-
-	projectUID := strings.TrimSpace(string(data))
-	if projectUID == "" {
-		return "", fmt.Errorf("%w: slug %s", errSlugNotFound, slug)
+	projectUID, err := parseSlugResponse(resp.Data, slug)
+	if err != nil {
+		return "", err
 	}
 
 	logger.With("project_uid", projectUID).With("slug", slug).DebugContext(ctx, "successfully retrieved project UID")
