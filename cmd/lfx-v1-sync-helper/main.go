@@ -19,6 +19,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+
+	projectconstants "github.com/linuxfoundation/lfx-v2-project-service/pkg/constants"
 )
 
 const (
@@ -680,6 +682,32 @@ func main() {
 	if err != nil {
 		logger.With(errKey, err, "subject", "lfx.user_profile.updated").Error("error subscribing to user profile updated subject")
 		os.Exit(1)
+	}
+
+	// Subscribe to project-service settings events for v2-to-v1 project staff
+	// sync (executive director and program manager only; GH-1802).
+	//
+	// Ordering note: a queue group does not preserve per-project ordering
+	// across replicas. nats.go serializes delivery per subscription within a
+	// process, so at the chart's default of one app replica this handler is
+	// fully serialized; with two or more replicas, two rapid edits to the same
+	// staff field can be processed concurrently and their PATCHes complete out
+	// of order, leaving v1 (and, via the v1->v2 echo, eventually v2) with the
+	// older assignment. The event contract carries no sequence/timestamp to
+	// reject a stale delivery. Accepted for now given the single-replica
+	// deployment and rare, human-paced staff edits; if the app ever scales
+	// out, add cross-replica per-project serialization (re-reading current v2
+	// settings inside the lock before PATCHing) or move to ordered
+	// consumption.
+	if cfg.V2ToV1ProjectStaffSyncEnabled {
+		_, err = natsConn.QueueSubscribe(projectconstants.ProjectSettingsUpdatedSubject, natsQueue, handleProjectSettingsUpdated)
+		if err != nil {
+			logger.With(errKey, err, "subject", projectconstants.ProjectSettingsUpdatedSubject).Error("error subscribing to project settings updated subject")
+			os.Exit(1)
+		}
+		logger.With("subject", projectconstants.ProjectSettingsUpdatedSubject).Info("v2-to-v1 project staff sync enabled, subscription registered")
+	} else {
+		logger.With("subject", projectconstants.ProjectSettingsUpdatedSubject).Info("v2-to-v1 project staff sync disabled, skipping subscription")
 	}
 
 	// Subscribe to indexer domain events for bidirectional committee sync via a durable
