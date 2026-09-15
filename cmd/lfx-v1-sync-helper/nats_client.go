@@ -22,11 +22,14 @@ var errSlugNotFound = errors.New("no project found for slug")
 // lfx.projects-api.slug_to_uid for the given slug.
 // Project-service replies with a plain UID on success, or
 // {"error":"<code>",...} on failure.
-// Returns the UID when the response is a plain non-empty string.
-// Returns errSlugNotFound (wrapped) when the response is empty or carries
-// error code "not_found".
-// Returns a non-not-found error for any other error code or malformed body
-// so callers can distinguish a transient/internal failure from a genuine miss.
+//
+// Error classification:
+//   - {"error":"not_found",...} → errSlugNotFound (confirmed absence).
+//   - any other {"error":"<code>",...} → non-not-found error (transient/internal).
+//   - empty / nil body → non-not-found error (per the coordinated contract,
+//     only {"error":"not_found"} proves absence; an absent body is ambiguous).
+//   - non-empty body that is not a valid UUID → non-not-found error (malformed).
+//   - valid UUID body → (uid, nil).
 func parseSlugResponse(data []byte, slug string) (string, error) {
 	var rpcEnv struct {
 		Error string `json:"error"`
@@ -40,7 +43,15 @@ func parseSlugResponse(data []byte, slug string) (string, error) {
 
 	projectUID := strings.TrimSpace(string(data))
 	if projectUID == "" {
-		return "", fmt.Errorf("%w: slug %s", errSlugNotFound, slug)
+		// An empty body is not a confirmed absence: only {"error":"not_found"}
+		// proves absence. Treat a missing body as an unrecoverable error so
+		// --check-slugs does not permit a duplicate create on a transport failure.
+		return "", fmt.Errorf("empty reply for slug %s: lookup result inconclusive", slug)
+	}
+	// Validate: the success payload must be a UUID. A JSON object without an
+	// "error" key (or any other non-UUID body) is not a valid UID.
+	if !isUUID(projectUID) {
+		return "", fmt.Errorf("unexpected non-UUID reply for slug %s: %q", slug, projectUID)
 	}
 	return projectUID, nil
 }

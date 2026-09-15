@@ -49,16 +49,22 @@ func TestParseSlugResponse(t *testing.T) {
 			wantErrAs: true,
 		},
 		{
-			name:    "empty body maps to errSlugNotFound",
-			data:    []byte{},
-			slug:    "empty-slug",
-			wantErr: errSlugNotFound,
+			name:      "empty body is ambiguous — not a confirmed miss, returns non-not-found error",
+			data:      []byte{},
+			slug:      "empty-slug",
+			wantErrAs: true,
 		},
 		{
-			name:    "whitespace-only body maps to errSlugNotFound",
-			data:    []byte("   "),
-			slug:    "whitespace-slug",
-			wantErr: errSlugNotFound,
+			name:      "whitespace-only body is ambiguous — not a confirmed miss, returns non-not-found error",
+			data:      []byte("   "),
+			slug:      "whitespace-slug",
+			wantErrAs: true,
+		},
+		{
+			name:      "non-UUID body (malformed JSON without error key) returns non-not-found error",
+			data:      []byte(`{"slug":"kubernetes"}`),
+			slug:      "kubernetes",
+			wantErrAs: true,
 		},
 	}
 
