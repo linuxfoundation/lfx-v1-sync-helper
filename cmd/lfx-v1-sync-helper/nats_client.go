@@ -35,8 +35,21 @@ func getProjectUIDBySlug(ctx context.Context, slug string) (string, error) {
 		return "", fmt.Errorf("failed to request project UID for slug %s: %w", slug, err)
 	}
 
-	// The response should be the UUID string.
-	projectUID := strings.TrimSpace(string(resp.Data))
+	// Project-service returns {"error":"<code>",...} on errors. Parse the
+	// specific "error" key: "not_found" maps to a not-found result; any other
+	// code is an unexpected error.
+	data := resp.Data
+	var rpcEnv struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(data, &rpcEnv) == nil && rpcEnv.Error != "" {
+		if rpcEnv.Error == "not_found" {
+			return "", fmt.Errorf("%w: slug %s", errSlugNotFound, slug)
+		}
+		return "", fmt.Errorf("project-service error for slug %s: %s", slug, rpcEnv.Error)
+	}
+
+	projectUID := strings.TrimSpace(string(data))
 	if projectUID == "" {
 		return "", fmt.Errorf("%w: slug %s", errSlugNotFound, slug)
 	}
