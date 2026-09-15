@@ -15,7 +15,7 @@
 # applying. Remove it for the live run.
 #
 # Credentials: every valueFrom.secretKeyRef below references a Kubernetes Secret
-# already provisioned in the v1-sync-helper namespace (e.g. v1-sync-helper-auth0-credentials,
+# already provisioned in the v1-sync-helper namespace (e.g. v1-sync-helper-secrets,
 # heimdall-signer-cert). Only secret names are committed here — the kubelet
 # resolves the actual values at pod start. Safe to commit.
 #
