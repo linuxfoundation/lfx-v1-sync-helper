@@ -190,7 +190,7 @@ Re-emits v1 committees that have no v2 mapping, by re-PUTting the existing `v1-o
 kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-committees-job.yaml
 ```
 
-Add `--dry-run` to the manifest args first, apply, inspect logs (`scanned`/`candidates`/`emitted`/`remaining_unmapped` counts), then re-apply without it:
+Apply the manifest as shipped (`--dry-run` is on by default), inspect logs (`scanned`/`candidates`/`emitted`/`remaining_unmapped` counts), then remove `--dry-run` and re-apply for the live run:
 
 ```sh
 lfx-v1-sync-helper --backfill-committees [--dry-run]

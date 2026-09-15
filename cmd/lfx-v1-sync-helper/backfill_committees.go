@@ -31,6 +31,17 @@ package main
 // separate mapping-key lookup that itself skips (rather than hard-errors)
 // on a missing parent committee, so no committee-side cascade exists to
 // order around.
+//
+// Known limitation: handleCommitteeMemberUpdate has the same permanent-drop
+// bug for its own parent (committee.sfid.*) lookup miss (see
+// handlers_committees.go). Any platform-community__c member row that was
+// processed while its parent committee was unmapped was silently dropped at
+// that time and will NOT be recovered once this backfill creates the
+// committee — the existing --backfill-committee-member-mappings flag only
+// repairs reverse mappings that already exist, it cannot recreate members
+// that were never created. Restored committees can therefore come back
+// empty; a member-level re-emission pass analogous to this one is tracked
+// separately rather than added here.
 import (
 	"context"
 	"encoding/json"
@@ -431,6 +442,8 @@ func selectCommitteeCandidates(
 			// mapping": treating it as absent would silently drop an
 			// otherwise-eligible committee from this run without recording
 			// an error.
+			logger.With(errKey, err, "sfid", candidate.sfid, "project_sfid", candidate.projectSFID).
+				ErrorContext(ctx, "failed to look up parent project mapping for committee backfill candidate")
 			res.errors++
 			continue
 		}
