@@ -201,7 +201,17 @@ func backfillCommittees(ctx context.Context, opts backfillCommitteesOptions) (ba
 
 	candidates := selectCommitteeCandidates(ctx, objects, liveMappings, tombstonedMappings, &res)
 	res.candidates = len(candidates)
-	res.remainingUnmapped = len(candidates)
+	// Captured before the emit loop runs: selectCommitteeCandidates is the
+	// only mutator of skippedParentUnmapped so far, so this reflects
+	// exactly the rows excluded from candidates for that reason (they never
+	// appear in the candidates slice, so len(candidates) alone undercounts
+	// remaining work). The emit loop below can also increment
+	// skippedParentUnmapped (a fresh re-check finding the parent still
+	// unmapped), but those candidates DO remain in the candidates slice, so
+	// counting them via res.skippedParentUnmapped again at that point would
+	// double-count them alongside the settled-state sweep.
+	scanTimeParentUnmapped := res.skippedParentUnmapped
+	res.remainingUnmapped = len(candidates) + scanTimeParentUnmapped
 
 	if opts.dryRun {
 		logger.With(res.logFields()...).InfoContext(ctx, "[dry-run] committee backfill candidate report")
@@ -268,8 +278,12 @@ func backfillCommittees(ctx context.Context, opts backfillCommitteesOptions) (ba
 	// set (not just emitted) so it also reflects candidates dropped by the
 	// limit, emit errors, or a re-check skip discovered on fresh read (e.g.
 	// tombstoned/parent_unmapped/missing) — an operator reading only this
-	// field should never see 0 while committees remain unmapped.
-	notSettled := res.skippedParentUnmapped
+	// field should never see 0 while committees remain unmapped. Seed from
+	// the captured scan-time count, not the live res.skippedParentUnmapped:
+	// a fresh re-check parent_unmapped candidate stays in the candidates
+	// slice and unsettled, so the loop below already counts it once — adding
+	// the live (emit-loop-mutated) counter here would double-count it.
+	notSettled := scanTimeParentUnmapped
 	for _, c := range candidates {
 		if !settled[c.sfid] {
 			notSettled++
