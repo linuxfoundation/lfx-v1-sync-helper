@@ -210,6 +210,7 @@ func backfillCommittees(ctx context.Context, opts backfillCommitteesOptions) (ba
 
 	limiter := rate.NewLimiter(rate.Limit(opts.emitRate), 1)
 
+	settled := make(map[string]bool, len(candidates))
 	var emitted []string
 	limitReached := false
 	for _, c := range candidates {
@@ -234,7 +235,13 @@ func backfillCommittees(ctx context.Context, opts backfillCommitteesOptions) (ba
 		}
 		if skipReason != "" {
 			recordCommitteeSkip(&res, skipReason)
-			if skipReason == "revision_race" {
+			switch skipReason {
+			case "already_mapped":
+				// reEmitCommitteeV1Object's own mapping lookup just confirmed
+				// a live mapping exists, so this candidate is resolved
+				// without needing to be settle-polled below.
+				settled[c.sfid] = true
+			case "revision_race":
 				// The object write lost to a concurrent update, which may
 				// itself be creating the mapping. Settle-poll it like a
 				// normal emission instead of leaving it permanently
@@ -247,25 +254,27 @@ func backfillCommittees(ctx context.Context, opts backfillCommitteesOptions) (ba
 		emitted = append(emitted, c.sfid)
 	}
 
-	settled := settleCommitteePoll(ctx, emitted, committeeSettlePollTimeout)
+	nowSettled := settleCommitteePoll(ctx, emitted, committeeSettlePollTimeout)
 	for _, sfid := range emitted {
-		if !settled[sfid] {
+		if nowSettled[sfid] {
+			settled[sfid] = true
+		} else {
 			res.skippedSettleTimeout++
 		}
 	}
 
 	// remainingUnmapped was seeded from the full candidate set before
-	// emission; recompute it from final settle state so it reflects
-	// candidates dropped by the limit, emit errors, revision races, or a
-	// parent that never settled — an operator reading only this field
-	// should never see 0 while committees remain unmapped.
+	// emission; recompute it from final settle state over the full candidate
+	// set (not just emitted) so it also reflects candidates dropped by the
+	// limit, emit errors, or a re-check skip discovered on fresh read (e.g.
+	// tombstoned/parent_unmapped/missing) — an operator reading only this
+	// field should never see 0 while committees remain unmapped.
 	notSettled := res.skippedParentUnmapped
-	for _, sfid := range emitted {
-		if !settled[sfid] {
+	for _, c := range candidates {
+		if !settled[c.sfid] {
 			notSettled++
 		}
 	}
-	notSettled += res.skippedLimit
 	res.remainingUnmapped = notSettled
 
 	if res.errors > 0 || res.skippedSettleTimeout > 0 {
@@ -482,10 +491,6 @@ func reEmitCommitteeV1Object(ctx context.Context, key string) (skipReason string
 	// re-verify against the current mapping state before emitting.
 	if !lookupCommitteeProjectMapping(ctx, candidate.projectSFID) {
 		return "parent_unmapped", nil
-	}
-
-	if lookupCommitteeMappingFn(ctx, candidate.sfid) {
-		return "already_mapped", nil
 	}
 
 	mappingKey := committeeSFIDMappingKeyPrefix + candidate.sfid

@@ -82,10 +82,6 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: client_id
-                  # NOTE: chart default is `v1-sync-helper-auth0-credentials`
-                  # (app.auth0.secret.name in values.yaml), but the prod
-                  # install overrides it — verify with:
-                  #   kubectl --context lfx-v2-prod -n v1-sync-helper get secrets
                   name: v1-sync-helper-secrets
           resources:
             requests:
