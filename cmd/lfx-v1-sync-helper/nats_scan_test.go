@@ -190,11 +190,11 @@ func TestScanSubjectDataStreamRange_SparseSequencesAdvance(t *testing.T) {
 
 func TestScanSubjectDataStreamRange_ClassifiesDELandPURGE(t *testing.T) {
 	fs := newFakeStream(
-		msg(1, "a", "v1", ""),      // live PUT
-		msg(2, "a", "", "DEL"),     // native DEL
-		msg(3, "a", "v3", ""),      // live PUT
-		msg(4, "a", "", "PURGE"),   // native PURGE
-		msg(5, "a", "!del", ""),    // app-level tombstone — NOT a native DEL/PURGE
+		msg(1, "a", "v1", ""),    // live PUT
+		msg(2, "a", "", "DEL"),   // native DEL
+		msg(3, "a", "v3", ""),    // live PUT
+		msg(4, "a", "", "PURGE"), // native PURGE
+		msg(5, "a", "!del", ""),  // app-level tombstone — NOT a native DEL/PURGE
 	)
 	var got []visit
 	visits, tombs, err := scanSubjectDataStreamRangeWith(context.Background(), fs.get, "S", "", 0, 0, time.Second, captureCB(&got))

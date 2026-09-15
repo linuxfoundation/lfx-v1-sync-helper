@@ -61,6 +61,13 @@ type Config struct {
 	DynamoDBIngestEnabled bool   // Whether to consume dynamodb_streams events (default: false)
 	DynamoDBStreamName    string // NATS stream name to consume (default: "dynamodb_streams")
 
+	// V2ToV1ProjectStaffSyncEnabled controls the v2-to-v1 project staff bridge:
+	// when true, the service subscribes to lfx.projects-api.project_settings.updated
+	// and pushes executive_director / program_manager changes back to the v1
+	// platform via the v1 API Gateway (GH-1802). opportunity_owner stays
+	// v1-to-v2 only. Default: false.
+	V2ToV1ProjectStaffSyncEnabled bool
+
 	// NATSFetchMaxWait is the per-Fetch timeout used when scanning large
 	// KV streams with sparse subject filters (backfill and reindex passes).
 	// Both KV_v1-mappings and KV_v1-objects have millions of sequences; a
@@ -262,6 +269,7 @@ func LoadConfig() (*Config, error) {
 		HTTPDebug:                        parseBooleanEnv("HTTP_DEBUG"),
 		UseMsgpack:                       parseBooleanEnv("USE_MSGPACK"),
 		DynamoDBIngestEnabled:            parseBooleanEnv("DYNAMODB_INGEST_ENABLED"),
+		V2ToV1ProjectStaffSyncEnabled:    parseBooleanEnv("V2_TO_V1_PROJECT_STAFF_SYNC_ENABLED"),
 		CommitteeSkipMemberNotifications: parseBooleanEnvWithDefault("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS", true),
 		DynamoDBStreamName:               os.Getenv("DYNAMODB_STREAM_NAME"),
 		NATSFetchMaxWait:                 parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),

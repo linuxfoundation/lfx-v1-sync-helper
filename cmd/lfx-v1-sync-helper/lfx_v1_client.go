@@ -97,12 +97,22 @@ type ClientCredentialsTokenSource struct {
 	audience   string
 }
 
+// v1TokenFetchTimeout bounds a single Auth0 client-credentials token fetch.
+// Matches auth0CallTimeout (the other live Auth0 bound) in duration.
+const v1TokenFetchTimeout = 20 * time.Second
+
 // Token implements the oauth2.TokenSource interface to return a new access token
 func (c *ClientCredentialsTokenSource) Token() (*oauth2.Token, error) {
 	ctx := c.ctx
 	if ctx == nil {
 		ctx = context.TODO()
 	}
+	// Bound the fetch: oauth2.Transport calls Token() synchronously before the
+	// base RoundTripper sees the request, so the caller's request context can
+	// never interrupt a stalled Auth0 call. c.ctx is context.Background() in
+	// production, making this the only bound on token acquisition.
+	ctx, cancel := context.WithTimeout(ctx, v1TokenFetchTimeout)
+	defer cancel()
 
 	// Build and issue a request using Auth0 client credentials flow
 	body := oauth.LoginWithClientCredentialsRequest{

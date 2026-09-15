@@ -216,6 +216,12 @@ app:
     # Requires the dynamodb_streams NATS stream to exist and dynamodbStreamConsumer to be running.
     DYNAMODB_INGEST_ENABLED:
       value: "false"
+    # V2_TO_V1_PROJECT_STAFF_SYNC_ENABLED enables the v2-to-v1 project staff bridge (GH-1802):
+    # subscribes to lfx.projects-api.project_settings.updated and pushes executive_director /
+    # program_manager changes back to the v1 platform via the v1 API Gateway.
+    # opportunity_owner stays one-way v1-to-v2. Accepts truthy values: "true", "yes", "t", "y", "1".
+    V2_TO_V1_PROJECT_STAFF_SYNC_ENABLED:
+      value: "false"
     # DYNAMODB_STREAM_NAME is the NATS stream name to consume DynamoDB events from.
     DYNAMODB_STREAM_NAME:
       value: "dynamodb_streams"
