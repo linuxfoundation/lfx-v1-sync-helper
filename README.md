@@ -160,6 +160,28 @@ Locally (with NATS port-forwarded):
 lfx-v1-sync-helper --backfill-committee-member-mappings [--dry-run]
 ```
 
+**Unmapped-project backfill (`--backfill-projects`):**
+
+Re-emits v1 projects that have no v2 mapping (LFXV2-3220 removed the project allowlist, so projects created before 17 Aug 2026 and never modified since were never synced) by re-PUTting the existing `v1-objects` value and letting the running deployment's KV consumer create them. Because that consumer unconditionally ACKs project messages and hard-errors when a parent's mapping is missing, this backfill re-emits parent-before-child, level by level, rather than in one flat pass. Requires only NATS (`NATS_URL`, `AUTH0_CLIENT_ID`) — it makes no v2 API calls itself.
+
+Formation-staged projects are scoped separately by default: a live run refuses to start if it finds Formation-staged candidates unless `--exclude-stage-prefix`, `--include-stage-prefix`, or `--allow-formation` is passed, so the two populations are never silently mixed into one run.
+
+```sh
+kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-projects-job.yaml
+```
+
+Add `--dry-run` to the manifest args first, apply, inspect logs (`scanned`/`candidates`/`emitted`/`levels`/`formation_candidates`/`remaining_unmapped` counts), then run the exclude-Formation pass without it:
+
+```sh
+lfx-v1-sync-helper --backfill-projects --exclude-stage-prefix Formation --check-slugs [--dry-run]
+```
+
+The include-Formation pass bulk-creates checklists in `lfx-v2-formation-service` on first sync, so do not run it until lfx-self-serve#1957's "re-emitting a create event for a project that already has a checklist creates nothing" acceptance criterion is confirmed and the dry-run's `formation_candidates` count has been shared with the Formation team:
+
+```sh
+lfx-v1-sync-helper --backfill-projects --include-stage-prefix Formation --check-slugs [--dry-run]
+```
+
 ## Architecture Diagrams
 
 Regarding the following sequence diagrams:
