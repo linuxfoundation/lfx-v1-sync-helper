@@ -182,6 +182,20 @@ The include-Formation pass bulk-creates checklists in `lfx-v2-formation-service`
 lfx-v1-sync-helper --backfill-projects --include-stage-prefix Formation --check-slugs [--dry-run]
 ```
 
+**Unmapped-committee backfill (`--backfill-committees`):**
+
+Re-emits v1 committees that have no v2 mapping, by re-PUTting the existing `v1-objects` value and letting the running deployment's KV consumer create them. `handleCommitteeUpdate` permanently drops (ACKs, no redelivery) a committee create whose parent project has no live mapping — the same bug pattern as the project backfill above, but with a single dependency (parent project) rather than two. Run this after `--backfill-projects` has completed and settled; a candidate whose parent project is still unmapped is reported as `skipped_parent_unmapped` rather than resolved. Requires only NATS (`NATS_URL`, `AUTH0_CLIENT_ID`) — it makes no v2 API calls itself.
+
+```sh
+kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-committees-job.yaml
+```
+
+Add `--dry-run` to the manifest args first, apply, inspect logs (`scanned`/`candidates`/`emitted`/`remaining_unmapped` counts), then re-apply without it:
+
+```sh
+lfx-v1-sync-helper --backfill-committees [--dry-run]
+```
+
 ## Architecture Diagrams
 
 Regarding the following sequence diagrams:
