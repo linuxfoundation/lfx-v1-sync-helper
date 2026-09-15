@@ -119,13 +119,13 @@ const (
 // design intentionally does not do that — silent stale reads are the
 // exact failure mode the cutover diff is designed to detect.
 type dualMappingStore struct {
-	pg              MappingStore
-	kv              MappingStore
-	log             *slog.Logger
-	mirrorTimeout   time.Duration
-	drainTimeout    time.Duration
-	keyLocks        keyedMutex
-	mirrorCh        chan mirrorTask
+	pg            MappingStore
+	kv            MappingStore
+	log           *slog.Logger
+	mirrorTimeout time.Duration
+	drainTimeout  time.Duration
+	keyLocks      keyedMutex
+	mirrorCh      chan mirrorTask
 	// closeMu / closed serialise enqueue admission with Close so an
 	// enqueue that observed stopCh as still-open cannot race Close and
 	// land a task after the worker has drained. Every enqueue takes
