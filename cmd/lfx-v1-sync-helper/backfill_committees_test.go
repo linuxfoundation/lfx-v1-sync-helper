@@ -114,7 +114,7 @@ func TestSelectCommitteeCandidatesOrdersBySFID(t *testing.T) {
 	origCfg := cfg
 	cfg = &Config{Auth0ClientID: "my-client-id"}
 	origLookupProject := lookupCommitteeProjectMapping
-	lookupCommitteeProjectMapping = func(_ context.Context, _ string) bool { return true }
+	lookupCommitteeProjectMapping = func(_ context.Context, _ string) (bool, error) { return true, nil }
 	t.Cleanup(func() {
 		cfg = origCfg
 		lookupCommitteeProjectMapping = origLookupProject
@@ -158,7 +158,7 @@ func TestSelectCommitteeCandidatesExcludesMappedAndUnmappedParent(t *testing.T) 
 	}
 	liveMappings := map[string]string{"live": "v2-uid"}
 	tombstonedMappings := map[string]struct{}{"tombstoned": {}}
-	lookupCommitteeProjectMapping = func(_ context.Context, sfid string) bool { return sfid == "p1" }
+	lookupCommitteeProjectMapping = func(_ context.Context, sfid string) (bool, error) { return sfid == "p1", nil }
 
 	res := &backfillCommitteesResult{}
 	candidates := selectCommitteeCandidates(ctx, objects, liveMappings, tombstonedMappings, res)
@@ -177,6 +177,42 @@ func TestSelectCommitteeCandidatesExcludesMappedAndUnmappedParent(t *testing.T) 
 	}
 }
 
+// TestSelectCommitteeCandidatesCountsParentLookupErrorsAsErrors guards
+// against a transient parent-project mapping lookup failure being silently
+// treated as "no parent mapping": it must count toward res.errors, not
+// res.skippedParentUnmapped, and the candidate must not be dropped from the
+// run without that failure being recorded.
+func TestSelectCommitteeCandidatesCountsParentLookupErrorsAsErrors(t *testing.T) {
+	origCfg := cfg
+	cfg = &Config{Auth0ClientID: "my-client-id"}
+	origLookupProject := lookupCommitteeProjectMapping
+	t.Cleanup(func() {
+		cfg = origCfg
+		lookupCommitteeProjectMapping = origLookupProject
+	})
+
+	ctx := context.Background()
+	objects := map[string][]byte{
+		committeeObjectSubjectPrefix + "a1": mustJSON(t, map[string]any{"sfid": "a1", "mailing_list__c": "a", "project_name__c": "p1"}),
+	}
+	lookupCommitteeProjectMapping = func(_ context.Context, _ string) (bool, error) {
+		return false, errors.New("transient NATS timeout")
+	}
+
+	res := &backfillCommitteesResult{}
+	candidates := selectCommitteeCandidates(ctx, objects, map[string]string{}, map[string]struct{}{}, res)
+
+	if len(candidates) != 0 {
+		t.Fatalf("candidates = %+v, want none", candidates)
+	}
+	if res.errors != 1 {
+		t.Errorf("errors = %d, want 1", res.errors)
+	}
+	if res.skippedParentUnmapped != 0 {
+		t.Errorf("skippedParentUnmapped = %d, want 0 (transient error must not be counted as confirmed-unmapped)", res.skippedParentUnmapped)
+	}
+}
+
 func TestReEmitCommitteeV1ObjectPropagatesTransientMappingLookupError(t *testing.T) {
 	origV1KV, origMappingsKV := v1KV, mappingsKV
 	origCfg := cfg
@@ -189,7 +225,7 @@ func TestReEmitCommitteeV1ObjectPropagatesTransientMappingLookupError(t *testing
 	})
 
 	cfg = &Config{Auth0ClientID: "my-client-id"}
-	lookupCommitteeProjectMapping = func(_ context.Context, _ string) bool { return true }
+	lookupCommitteeProjectMapping = func(_ context.Context, _ string) (bool, error) { return true, nil }
 
 	row := mustJSON(t, map[string]any{
 		"sfid": "a1", "mailing_list__c": "committee-a", "project_name__c": "p1",
@@ -207,6 +243,45 @@ func TestReEmitCommitteeV1ObjectPropagatesTransientMappingLookupError(t *testing
 	}
 }
 
+// TestReEmitCommitteeV1ObjectPropagatesTransientParentLookupError guards
+// against a transient parent-project mapping lookup failure being reported
+// as "parent_unmapped": a genuine NATS error must propagate as err so the
+// caller counts it as an error, not a confirmed-unmapped skip.
+func TestReEmitCommitteeV1ObjectPropagatesTransientParentLookupError(t *testing.T) {
+	origV1KV, origMappingsKV := v1KV, mappingsKV
+	origCfg := cfg
+	origLookupProject := lookupCommitteeProjectMapping
+	t.Cleanup(func() {
+		v1KV = origV1KV
+		mappingsKV = origMappingsKV
+		cfg = origCfg
+		lookupCommitteeProjectMapping = origLookupProject
+	})
+
+	cfg = &Config{Auth0ClientID: "my-client-id"}
+	lookupCommitteeProjectMapping = func(_ context.Context, _ string) (bool, error) {
+		return false, errors.New("transient NATS timeout")
+	}
+
+	row := mustJSON(t, map[string]any{
+		"sfid": "a1", "mailing_list__c": "committee-a", "project_name__c": "p1",
+	})
+	objectsKV := newFakeKV()
+	if _, err := objectsKV.Create(context.Background(), "platform-collaboration__c.a1", row); err != nil {
+		t.Fatalf("failed to seed objectsKV: %v", err)
+	}
+	v1KV = objectsKV
+	mappingsKV = newFakeKV()
+
+	reason, err := reEmitCommitteeV1Object(context.Background(), "platform-collaboration__c.a1")
+	if err == nil {
+		t.Error("expected a transient parent lookup error to propagate, got nil")
+	}
+	if reason == "parent_unmapped" {
+		t.Error("transient parent lookup error must not be reported as the confirmed-unmapped skip reason")
+	}
+}
+
 func TestReEmitCommitteeV1ObjectRechecksParentAgainstFreshRead(t *testing.T) {
 	origV1KV, origMappingsKV := v1KV, mappingsKV
 	origCfg := cfg
@@ -219,7 +294,7 @@ func TestReEmitCommitteeV1ObjectRechecksParentAgainstFreshRead(t *testing.T) {
 	})
 
 	cfg = &Config{Auth0ClientID: "my-client-id"}
-	lookupCommitteeProjectMapping = func(_ context.Context, _ string) bool { return false }
+	lookupCommitteeProjectMapping = func(_ context.Context, _ string) (bool, error) { return false, nil }
 
 	row := mustJSON(t, map[string]any{
 		"sfid": "a1", "mailing_list__c": "committee-a", "project_name__c": "p1",
@@ -265,7 +340,7 @@ func TestReEmitCommitteeV1ObjectIssuesOneMappingLookup(t *testing.T) {
 	})
 
 	cfg = &Config{Auth0ClientID: "my-client-id"}
-	lookupCommitteeProjectMapping = func(_ context.Context, _ string) bool { return true }
+	lookupCommitteeProjectMapping = func(_ context.Context, _ string) (bool, error) { return true, nil }
 
 	row := mustJSON(t, map[string]any{
 		"sfid": "a1", "mailing_list__c": "committee-a", "project_name__c": "p1",

@@ -934,6 +934,22 @@ func lookupProjectMapping(ctx context.Context, sfid string) bool {
 	return len(entry.Value()) > 0 && !isTombstonedMapping(entry.Value())
 }
 
+// lookupProjectMappingErr is the error-propagating counterpart to
+// lookupProjectMapping: it distinguishes a confirmed absent/tombstoned
+// mapping from a transient NATS lookup failure, so callers don't silently
+// treat a KV error the same as "genuinely unmapped".
+func lookupProjectMappingErr(ctx context.Context, sfid string) (bool, error) {
+	entry, err := mappingsKV.Get(ctx, projectSFIDMappingKeyPrefix+sfid)
+	switch err {
+	case nil:
+		return len(entry.Value()) > 0 && !isTombstonedMapping(entry.Value()), nil
+	case jetstream.ErrKeyNotFound, jetstream.ErrKeyDeleted:
+		return false, nil
+	default:
+		return false, fmt.Errorf("failed to look up project mapping %s: %w", sfid, err)
+	}
+}
+
 // settlePoll polls lookupProjectMappingFn for every sfid in sfids until each
 // either settles (mapping appears) or timeout elapses, returning which ones
 // settled.

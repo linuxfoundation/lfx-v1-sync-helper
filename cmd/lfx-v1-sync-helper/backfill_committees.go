@@ -148,7 +148,7 @@ type committeeCandidate struct {
 var (
 	reEmitCommitteeV1ObjectFn     = reEmitCommitteeV1Object
 	lookupCommitteeMappingFn      = lookupCommitteeMapping
-	lookupCommitteeProjectMapping = lookupProjectMapping
+	lookupCommitteeProjectMapping = lookupProjectMappingErr
 )
 
 // backfillCommittees scans v1-objects for platform-collaboration__c rows
@@ -418,7 +418,16 @@ func selectCommitteeCandidates(
 			continue
 		}
 
-		if !lookupCommitteeProjectMapping(ctx, candidate.projectSFID) {
+		parentMapped, err := lookupCommitteeProjectMapping(ctx, candidate.projectSFID)
+		if err != nil {
+			// A transient lookup failure is not the same as "no parent
+			// mapping": treating it as absent would silently drop an
+			// otherwise-eligible committee from this run without recording
+			// an error.
+			res.errors++
+			continue
+		}
+		if !parentMapped {
 			res.skippedParentUnmapped++
 			continue
 		}
@@ -503,7 +512,11 @@ func reEmitCommitteeV1Object(ctx context.Context, key string) (skipReason string
 
 	// The scan-time parent check can go stale on a long, rate-limited run —
 	// re-verify against the current mapping state before emitting.
-	if !lookupCommitteeProjectMapping(ctx, candidate.projectSFID) {
+	parentMapped, err := lookupCommitteeProjectMapping(ctx, candidate.projectSFID)
+	if err != nil {
+		return "", fmt.Errorf("failed to look up parent project mapping for %s: %w", candidate.sfid, err)
+	}
+	if !parentMapped {
 		return "parent_unmapped", nil
 	}
 
