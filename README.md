@@ -394,7 +394,7 @@ Staff-field direction coverage:
 | --- | --- | --- | --- |
 | `executive_director` | ✅ | ✅ | Resolves through B2C `merged_user` by username, then email; v1→v2 propagates removals (GH-179) |
 | `program_manager` | ✅ | ✅ | Resolves through B2C `merged_user` by username, then email; v1→v2 propagates removals (GH-179) |
-| `opportunity_owner` | ✅ | ❌ | SFDC-owned; resolves through the B2B user store; one-way only |
+| `opportunity_owner` | ✅ | ❌ | SFDC-owned; resolves through the B2B user store; one-way only; v1→v2 propagates removals (GH-179) |
 
 Echo/loop guards:
 

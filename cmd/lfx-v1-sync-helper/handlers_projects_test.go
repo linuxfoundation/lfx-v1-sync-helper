@@ -9,9 +9,9 @@ import (
 )
 
 // No test case populates a staff SFID with a resolvable value: lookupStaffUser
-// (and lookupOpportunityOwner's lookupB2BUser) would reach the uninitialized
-// v1DB handle and panic, so a passing run also proves the empty-field path
-// performs no user lookup.
+// would reach the uninitialized v1DB handle and panic, and
+// lookupOpportunityOwner's lookupB2BUser the uninitialized v1KV handle, so a
+// passing run also proves the empty-field path performs no user lookup.
 func TestMapV1DataToProjectUpdateSettingsPayload_StaffClearFlags(t *testing.T) {
 	tests := []struct {
 		name       string
