@@ -76,7 +76,7 @@ Payload: <mapping_key>
 The following table shows the supported mapping key patterns and their expected response formats:
 
 | Direction | Lookup Key Pattern | Example Key | Response Format | Description |
-|-----------|-------------------|-------------|-----------------|-------------|
+| ----------- | ------------------- | ------------- | ----------------- | ------------- |
 | **Projects** |
 | v1→v2 | `project.sfid.{v1_sfid}` | `project.sfid.a0941000002wBjEAAU` | `{v2_uuid}` | Project SFID to UUID |
 | v2→v1 | `project.uid.{v2_uuid}` | `project.uid.123e4567-e89b-12d3-a456-426614174000` | `{v1_sfid}` | Project UUID to SFID |
@@ -406,14 +406,16 @@ When `V2_TO_V1_PROJECT_STAFF_SYNC_ENABLED=true`, the service also subscribes to 
 
 Only the roles that actually changed in the event are sent. The v1 PATCH is partial (PCC's other project dialogs send disjoint field subsets), so an unchanged role is omitted rather than re-sent from the `v1-objects` replica — that replica lags v1 by the WAL pipeline, and echoing it back would revert a newer v1 assignment when two single-role edits land inside the lag window.
 
-A role assigned in v2 that cannot be resolved to a v1 contact — LFX One allows a manual staff entry with name + email and no username, and such an email often has no `merged_user` row — is logged and **omitted**, leaving the existing v1 assignment intact. `"None"` is written only when the role was genuinely cleared in v2.
+A role assigned in v2 that cannot be resolved to a v1 contact — LFX One allows a manual staff entry with name + email and no username, and such an email often has no `merged_user` row — is logged and **omitted**, leaving the existing v1 assignment intact. `"None"` is written only when the role was genuinely cleared in v2. The converse of that omission: such an entry never reaches v1, so v1's field stays empty — and v1-empty is authoritative on the next v1→v2 sync (see the GH-179 paragraph below), meaning an unresolvable v2-only entry is not durable and is cleared from the staff card by the next v1 project update.
+
+Removals propagate in the v1→v2 direction as well (GH-179): a role cleared in PCC arrives as an empty SFID field, which the settings sync treats as a deliberate clear — the settings PUT (a full-document replace) fires with the role omitted, storing it as cleared. Previously that write was gated on at least one non-nil settings field, so a removal that arrived with no other settings change was silently dropped and the stale person lingered on the LFX One staff card.
 
 Staff-field direction coverage:
 
 | Field | v1→v2 | v2→v1 | Notes |
 | --- | --- | --- | --- |
-| `executive_director` | ✅ | ✅ | Resolves through B2C `merged_user` by username, then email |
-| `program_manager` | ✅ | ✅ | Resolves through B2C `merged_user` by username, then email |
+| `executive_director` | ✅ | ✅ | Resolves through B2C `merged_user` by username, then email; v1→v2 propagates removals (GH-179) |
+| `program_manager` | ✅ | ✅ | Resolves through B2C `merged_user` by username, then email; v1→v2 propagates removals (GH-179) |
 | `opportunity_owner` | ✅ | ❌ | SFDC-owned; resolves through the B2B user store; one-way only |
 
 Echo/loop guards:
