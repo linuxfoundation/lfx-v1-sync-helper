@@ -182,6 +182,30 @@ The include-Formation pass bulk-creates checklists in `lfx-v2-formation-service`
 lfx-v1-sync-helper --backfill-projects --include-stage-prefix Formation --check-slugs [--dry-run]
 ```
 
+**Unmapped-committee backfill (`--backfill-committees`):**
+
+Re-emits v1 committees that have no v2 mapping, by re-PUTting the existing `v1-objects` value and letting the running deployment's KV consumer create them. `handleCommitteeUpdate` permanently drops (ACKs, no redelivery) a committee create whose parent project has no live mapping — the same bug pattern as the project backfill above, but with a single dependency (parent project) rather than two. Run this after `--backfill-projects` has completed and settled; a candidate whose parent project is still unmapped is reported as `skipped_parent_unmapped` rather than resolved. Requires only NATS (`NATS_URL`, `AUTH0_CLIENT_ID`) — it makes no v2 API calls itself.
+
+`--check-committee-names` skips candidates whose project UID + name already resolves to a v2 committee via NATS `lfx.committee-api.name_to_uid` (`lfx-v2-committee-service` PR #209) — a lost-mapping case that needs a mapping repair, not a duplicate create.
+
+**Prerequisite**: `lfx-v2-committee-service` PR #209 must be merged and deployed to the target environment before this job is run. `--check-committee-names` is on by default in the shipped manifest, and without the `name_to_uid` subject that PR adds, every lookup gets "no responders" and the job (including a dry run) hard-errors before reporting any counters.
+
+```sh
+kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-committees-job.yaml
+```
+
+Apply the manifest as shipped (`--dry-run` and `--check-committee-names` are on by default), inspect logs (`scanned`/`candidates`/`emitted`/`remaining_unmapped`/`skipped_name_conflict` counts), then delete the completed dry-run Job, remove `--dry-run` from its `args`, and apply again for the live run — `kubectl apply` on an existing Job whose pod template changed is rejected with `field is immutable`:
+
+```sh
+kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-committees
+```
+
+Locally:
+
+```sh
+lfx-v1-sync-helper --backfill-committees --check-committee-names [--dry-run]
+```
+
 ## Architecture Diagrams
 
 Regarding the following sequence diagrams:
