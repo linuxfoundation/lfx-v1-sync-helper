@@ -150,16 +150,10 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 			return baseMutated, fmt.Errorf("failed to fetch current project settings: %w", err)
 		}
 
-		// Preserve existing values for fields not being updated.
-		if settingsPayload.Writers == nil {
-			settingsPayload.Writers = currentSettings.Writers
-		}
-		if settingsPayload.MeetingCoordinators == nil {
-			settingsPayload.MeetingCoordinators = currentSettings.MeetingCoordinators
-		}
-		if settingsPayload.Auditors == nil {
-			settingsPayload.Auditors = currentSettings.Auditors
-		}
+		// Round-trip every field the update is not changing: the settings PUT
+		// replaces the full document, so a nil field would be wiped in v2 even
+		// though nil means "not being updated" everywhere else in this pipeline.
+		hydrateSettingsPayload(settingsPayload, currentSettings, clears)
 
 		// Check if settings have changes.
 		if projectSettingsUpdateNeeded(settingsPayload, currentSettings, clears) {
@@ -179,6 +173,40 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 	}
 
 	return baseMutated, nil
+}
+
+// hydrateSettingsPayload round-trips every field the update is not changing
+// from the current settings document. UpdateProjectSettings is a full-replace
+// PUT, so a nil field would otherwise be wiped in v2 even though nil means
+// "not being updated" everywhere else in this pipeline — including a staff
+// role whose v1 lookup transiently failed, and settings v1 never sends (e.g. a
+// mission statement set directly in v2). Cleared staff roles stay nil on
+// purpose: the PUT must clear them.
+func hydrateSettingsPayload(settingsPayload *projectservice.UpdateProjectSettingsPayload, currentSettings *projectservice.ProjectSettings, clears staffClearFlags) {
+	if settingsPayload.MissionStatement == nil {
+		settingsPayload.MissionStatement = currentSettings.MissionStatement
+	}
+	if settingsPayload.AnnouncementDate == nil {
+		settingsPayload.AnnouncementDate = currentSettings.AnnouncementDate
+	}
+	if settingsPayload.ExecutiveDirector == nil && !clears.ExecutiveDirector {
+		settingsPayload.ExecutiveDirector = currentSettings.ExecutiveDirector
+	}
+	if settingsPayload.ProgramManager == nil && !clears.ProgramManager {
+		settingsPayload.ProgramManager = currentSettings.ProgramManager
+	}
+	if settingsPayload.OpportunityOwner == nil {
+		settingsPayload.OpportunityOwner = currentSettings.OpportunityOwner
+	}
+	if settingsPayload.Writers == nil {
+		settingsPayload.Writers = currentSettings.Writers
+	}
+	if settingsPayload.MeetingCoordinators == nil {
+		settingsPayload.MeetingCoordinators = currentSettings.MeetingCoordinators
+	}
+	if settingsPayload.Auditors == nil {
+		settingsPayload.Auditors = currentSettings.Auditors
+	}
 }
 
 // projectSettingsUpdateNeeded reports whether issuing UpdateProjectSettings
