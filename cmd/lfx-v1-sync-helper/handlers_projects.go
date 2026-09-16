@@ -135,9 +135,11 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 			return isTransientStoreErr(err)
 		}
 
-		// Map v1 data to settings payload.
+		// Map v1 data to settings payload. The clear flags record which staff
+		// roles v1 emptied so updateProject can fire the clearing write.
 		var settingsPayload *projectservice.UpdateProjectSettingsPayload
-		settingsPayload, err = mapV1DataToProjectUpdateSettingsPayload(ctx, existingUID, v1Data)
+		var clears staffClearFlags
+		settingsPayload, clears, err = mapV1DataToProjectUpdateSettingsPayload(ctx, existingUID, v1Data)
 		if err != nil {
 			logger.With(errKey, err, "sfid", sfid, "slug", slug).ErrorContext(ctx, "failed to map v1 data to settings payload")
 			return isTransientStoreErr(err)
@@ -163,7 +165,7 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 		writePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceProject, existingUID)
 
 		var baseMutated bool
-		baseMutated, err = updateProject(ctx, payload, settingsPayload, v1Principal)
+		baseMutated, err = updateProject(ctx, payload, settingsPayload, clears, v1Principal)
 		if !baseMutated {
 			deletePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceProject, existingUID)
 		}
@@ -640,11 +642,36 @@ func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string,
 	return payload, nil
 }
 
+// staffClearFlags reports which staff roles v1 has deliberately cleared (the
+// SFID field is absent or empty in the v1 record), as opposed to merely
+// unresolvable. A set flag means "v1 says this role is now empty — clear it in
+// v2"; an unset flag with a nil payload field means "leave whatever v2 has
+// alone" (e.g. a lookup failure on a still-populated v1 field).
+type staffClearFlags struct {
+	ExecutiveDirector bool
+	ProgramManager    bool
+	OpportunityOwner  bool
+}
+
+// v1StaffFieldCleared reports whether a v1 staff SFID field is absent or
+// whitespace-empty — i.e. the role was deliberately cleared in v1 (PCC sends
+// the "None" sentinel, which Salesforce persists as an empty field). Uses the
+// same trim semantics as lookupStaffUser.
+func v1StaffFieldCleared(v1Data map[string]any, field string) bool {
+	sfid, _ := v1Data[field].(string)
+	return strings.TrimSpace(sfid) == ""
+}
+
 // mapV1DataToProjectUpdateSettingsPayload converts v1 project data to an UpdateProjectSettingsPayload.
-func mapV1DataToProjectUpdateSettingsPayload(ctx context.Context, projectUID string, v1Data map[string]any) (*projectservice.UpdateProjectSettingsPayload, error) {
+// The returned staffClearFlags distinguish a deliberate v1 clear (nil payload
+// field with flag set — the settings write must fire so the full-replace PUT
+// clears the role) from an unresolvable lookup (nil payload field with flag
+// unset — preserve whatever v2 currently has).
+func mapV1DataToProjectUpdateSettingsPayload(ctx context.Context, projectUID string, v1Data map[string]any) (*projectservice.UpdateProjectSettingsPayload, staffClearFlags, error) {
 	payload := &projectservice.UpdateProjectSettingsPayload{
 		UID: &projectUID,
 	}
+	var clears staffClearFlags
 
 	// Map mission statement.
 	if missionStatement, ok := v1Data["mission_statement"].(string); ok && missionStatement != "" {
@@ -658,13 +685,23 @@ func mapV1DataToProjectUpdateSettingsPayload(ctx context.Context, projectUID str
 		}
 	}
 
-	// Map executive director from v1 Salesforce contact SFID.
+	// Map executive director from v1 Salesforce contact SFID. A nil result on
+	// an emptied v1 field is a deliberate clear, not a lookup failure.
 	payload.ExecutiveDirector = lookupExecutiveDirector(ctx, v1Data)
+	if payload.ExecutiveDirector == nil && v1StaffFieldCleared(v1Data, "executive_director__c") {
+		clears.ExecutiveDirector = true
+	}
 	// Map program manager and opportunity owner from v1 Salesforce contact SFIDs.
 	payload.ProgramManager = lookupProgramManager(ctx, v1Data)
+	if payload.ProgramManager == nil && v1StaffFieldCleared(v1Data, "program_manager__c") {
+		clears.ProgramManager = true
+	}
 	payload.OpportunityOwner = lookupOpportunityOwner(ctx, v1Data)
+	if payload.OpportunityOwner == nil && v1StaffFieldCleared(v1Data, "opportunity_owner__c") {
+		clears.OpportunityOwner = true
+	}
 
-	return payload, nil
+	return payload, clears, nil
 }
 
 // lookupStaffUser resolves a Salesforce contact SFID stored under v1Field in v1Data to a

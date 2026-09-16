@@ -76,7 +76,7 @@ Payload: <mapping_key>
 The following table shows the supported mapping key patterns and their expected response formats:
 
 | Direction | Lookup Key Pattern | Example Key | Response Format | Description |
-|-----------|-------------------|-------------|-----------------|-------------|
+| ----------- | ------------------- | ------------- | ----------------- | ------------- |
 | **Projects** |
 | v1→v2 | `project.sfid.{v1_sfid}` | `project.sfid.a0941000002wBjEAAU` | `{v2_uuid}` | Project SFID to UUID |
 | v2→v1 | `project.uid.{v2_uuid}` | `project.uid.123e4567-e89b-12d3-a456-426614174000` | `{v1_sfid}` | Project UUID to SFID |
@@ -180,6 +180,30 @@ The include-Formation pass bulk-creates checklists in `lfx-v2-formation-service`
 
 ```sh
 lfx-v1-sync-helper --backfill-projects --include-stage-prefix Formation --check-slugs [--dry-run]
+```
+
+**Unmapped-committee backfill (`--backfill-committees`):**
+
+Re-emits v1 committees that have no v2 mapping, by re-PUTting the existing `v1-objects` value and letting the running deployment's KV consumer create them. `handleCommitteeUpdate` permanently drops (ACKs, no redelivery) a committee create whose parent project has no live mapping — the same bug pattern as the project backfill above, but with a single dependency (parent project) rather than two. Run this after `--backfill-projects` has completed and settled; a candidate whose parent project is still unmapped is reported as `skipped_parent_unmapped` rather than resolved. Requires only NATS (`NATS_URL`, `AUTH0_CLIENT_ID`) — it makes no v2 API calls itself.
+
+`--check-committee-names` skips candidates whose project UID + name already resolves to a v2 committee via NATS `lfx.committee-api.name_to_uid` (`lfx-v2-committee-service` PR #209) — a lost-mapping case that needs a mapping repair, not a duplicate create.
+
+**Prerequisite**: `lfx-v2-committee-service` PR #209 must be merged and deployed to the target environment before this job is run. `--check-committee-names` is on by default in the shipped manifest, and without the `name_to_uid` subject that PR adds, every lookup gets "no responders" and the job (including a dry run) hard-errors before reporting any counters.
+
+```sh
+kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-committees-job.yaml
+```
+
+Apply the manifest as shipped (`--dry-run` and `--check-committee-names` are on by default), inspect logs (`scanned`/`candidates`/`emitted`/`remaining_unmapped`/`skipped_name_conflict` counts), then delete the completed dry-run Job, remove `--dry-run` from its `args`, and apply again for the live run — `kubectl apply` on an existing Job whose pod template changed is rejected with `field is immutable`:
+
+```sh
+kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-committees
+```
+
+Locally:
+
+```sh
+lfx-v1-sync-helper --backfill-committees --check-committee-names [--dry-run]
 ```
 
 ## Architecture Diagrams
@@ -374,9 +398,35 @@ sequenceDiagram
 
 ### LFX One to v1 bidirectional sync
 
-Implemented for **projects**, **committees**, and **committee members**. The v1-sync-helper subscribes to indexer domain events (`lfx.project.*`, `lfx.committee.*`, `lfx.committee_member.*`) published after every successful OpenSearch write and mirrors the change to the v1 API — projects via the Project Service v1 API (`/project-service/v1/projects`), committees and members via the Project Service v2 API.
+Implemented for **projects**, **committees**, **committee members**, and **project staff**. The v1-sync-helper subscribes to indexer domain events (`lfx.project.*`, `lfx.committee.*`, `lfx.committee_member.*`) published after every successful OpenSearch write and mirrors the change to the v1 API — projects via the Project Service v1 API (`/project-service/v1/projects`), committees and members via the Project Service v2 API. Project staff uses a separate projects-api event subscription; see below.
 
 Loop detection: if a non-tombstoned reverse mapping already exists for the v2 object, the event originated from v1 and the create is skipped to prevent duplicate v1 records. On the update and delete paths the loop is broken on the v1 side by `shouldSkipSync`, which detects v1 records whose `lastmodifiedbyid` matches the v1-sync-helper's own Auth0 client ID.
+
+#### Project staff sync (GH-1802)
+
+When `V2_TO_V1_PROJECT_STAFF_SYNC_ENABLED=true`, the service also subscribes to `lfx.projects-api.project_settings.updated` (published by project-service on every settings write, with before/after snapshots) and pushes `executive_director` / `program_manager` changes back to the v1 platform via `PATCH {LFX_API_GW}project-service/v1/projects/{sfid}` — the same v1 contract PCC's own staff edit dialog uses, including `"None"` to clear an assignment. This is the return path for the LFX One staff dialog (lfx-self-serve `PUT /projects/{uid}/staff`, which edits one role per save).
+
+Only the roles that actually changed in the event are sent. The v1 PATCH is partial (PCC's other project dialogs send disjoint field subsets), so an unchanged role is omitted rather than re-sent from the `v1-objects` replica — that replica lags v1 by the WAL pipeline, and echoing it back would revert a newer v1 assignment when two single-role edits land inside the lag window.
+
+A role assigned in v2 that cannot be resolved to a v1 contact — LFX One allows a manual staff entry with name + email and no username, and such an email often has no `merged_user` row — is logged and **omitted**, leaving the existing v1 assignment intact. `"None"` is written only when the role was genuinely cleared in v2. The converse of that omission: such an entry never reaches v1, so v1's field stays empty — and v1-empty is authoritative on the next v1→v2 sync (see the GH-179 paragraph below), meaning an unresolvable v2-only entry is not durable and is cleared from the staff card by the next v1 project update.
+
+Removals propagate in the v1→v2 direction as well (GH-179): a role cleared in PCC arrives as an empty SFID field, which the settings sync treats as a deliberate clear — the settings PUT (a full-document replace) fires with the role omitted, storing it as cleared. Previously that write was gated on at least one non-nil settings field, so a removal that arrived with no other settings change was silently dropped and the stale person lingered on the LFX One staff card.
+
+Staff-field direction coverage:
+
+| Field | v1→v2 | v2→v1 | Notes |
+| --- | --- | --- | --- |
+| `executive_director` | ✅ | ✅ | Resolves through B2C `merged_user` by username, then email; v1→v2 propagates removals (GH-179) |
+| `program_manager` | ✅ | ✅ | Resolves through B2C `merged_user` by username, then email; v1→v2 propagates removals (GH-179) |
+| `opportunity_owner` | ✅ | ❌ | SFDC-owned; resolves through the B2B user store; one-way only; v1→v2 propagates removals (GH-179) |
+
+Echo/loop guards:
+
+- **Compare-before-write (primary).** Each changed role is compared against the current `v1-objects` record before writing. A PCC-originated edit reaches v2 only *after* the `v1-objects` update that triggered the v1→v2 sync, so the record read back already carries the new value and the event no-ops.
+- **Auth0 M2M attribution.** The v1 write sets `lastmodifiedbyid = "{AUTH0_CLIENT_ID}@clients"`, which `shouldSkipSync` skips when the change replicates back through WAL → `v1-objects` KV, so our own v1 write never bounces into v2.
+- **Heimdall origin skip (partial).** Events whose actor is `{HEIMDALL_CLIENT_ID}@clients` are dropped on receipt. This only covers the v1→v2 writes that fall back to the service account (empty/`platform`/unknown-Salesforce principals): v1→v2 normally impersonates the real v1 user, so the actor is usually that user's LFID.
+
+Delivery: the subscription is core NATS (matching `lfx.user_profile.updated`), so there is no redelivery. A transient failure — v1 DB unavailable during contact resolution, or a 5xx from the gateway — is logged as an error and the event is dropped; recovering that project's staff state requires a fresh edit or a manual backfill.
 
 ```mermaid
 sequenceDiagram

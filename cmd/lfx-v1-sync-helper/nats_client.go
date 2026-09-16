@@ -82,6 +82,64 @@ func getProjectUIDBySlug(ctx context.Context, slug string) (string, error) {
 	return projectUID, nil
 }
 
+// errCommitteeNameNotFound distinguishes a confirmed "no committee with this
+// project UID + name" response from a request/transport failure, so callers
+// that need to treat the two differently (e.g. --check-committee-names) can
+// do so with errors.Is.
+var errCommitteeNameNotFound = errors.New("no committee found for project UID and name")
+
+// committeeNameToUIDRequest mirrors lfx-v2-committee-service's
+// pkg/api.CommitteeNameToUIDRequest — the request payload for
+// lfx.committee-api.name_to_uid.
+type committeeNameToUIDRequest struct {
+	ProjectUID string `json:"project_uid"`
+	Name       string `json:"name"`
+}
+
+// committeeNameToUIDResponse mirrors lfx-v2-committee-service's
+// pkg/api.CommitteeNameToUIDResponse. An empty CommitteeUID with an empty
+// Error is a normal (non-error) miss, not a failure.
+type committeeNameToUIDResponse struct {
+	CommitteeUID string `json:"committee_uid,omitempty"`
+	Error        string `json:"error,omitempty"`
+}
+
+// getCommitteeUIDByProjectAndName looks up a v2 committee UID via NATS
+// lfx.committee-api.name_to_uid, given the committee's v2 project UID and
+// name. Returns errCommitteeNameNotFound (wrapped) when the pair legitimately
+// resolves to nothing; any other error indicates the request itself failed.
+func getCommitteeUIDByProjectAndName(ctx context.Context, projectUID, name string) (string, error) {
+	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	payload, err := json.Marshal(committeeNameToUIDRequest{ProjectUID: projectUID, Name: name})
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal name_to_uid request: %w", err)
+	}
+
+	logger.With("project_uid", projectUID).With("name", name).DebugContext(ctx, "requesting committee UID via NATS")
+
+	resp, err := natsConn.RequestWithContext(requestCtx, "lfx.committee-api.name_to_uid", payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to request committee UID for project %s name %s: %w", projectUID, name, err)
+	}
+
+	var result committeeNameToUIDResponse
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return "", fmt.Errorf("failed to decode name_to_uid response: %w", err)
+	}
+	if result.Error != "" {
+		return "", fmt.Errorf("name_to_uid request failed: %s", result.Error)
+	}
+	if result.CommitteeUID == "" {
+		return "", fmt.Errorf("%w: project %s name %s", errCommitteeNameNotFound, projectUID, name)
+	}
+
+	logger.With("committee_uid", result.CommitteeUID).With("project_uid", projectUID).With("name", name).
+		DebugContext(ctx, "successfully retrieved committee UID")
+	return result.CommitteeUID, nil
+}
+
 // authServiceMetadataResponse is the minimal shape of the response from
 // lfx.auth-service.user_metadata.read used to extract name fields.
 type authServiceMetadataResponse struct {

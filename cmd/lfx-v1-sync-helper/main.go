@@ -19,6 +19,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+
+	projectconstants "github.com/linuxfoundation/lfx-v2-project-service/pkg/constants"
 )
 
 const (
@@ -83,15 +85,17 @@ func main() {
 	var doBackfillCommitteeMemberNames = flag.Bool("backfill-committee-member-names", false, "populate first_name/last_name on V2 committee members that have no name (members without an LFX account at sync time), then exit")
 	var doBackfillV1MappingsToPG = flag.Bool("backfill-v1-mappings-to-postgres", false, "copy the v1-mappings NATS KV bucket into the Postgres v1_mappings table, then exit (LFXV2-2985)")
 	var doBackfillProjects = flag.Bool("backfill-projects", false, "re-emit v1 projects that have no v2 mapping so the running deployment creates them, then exit")
+	var doBackfillCommittees = flag.Bool("backfill-committees", false, "re-emit v1 committees that have no v2 mapping so the running deployment creates them, then exit")
 	var excludeStagePrefix = flag.String("exclude-stage-prefix", "", "comma-separated, case-insensitive project_status__c prefixes to exclude (applicable with --backfill-projects)")
 	var includeStagePrefix = flag.String("include-stage-prefix", "", "comma-separated, case-insensitive project_status__c prefixes to include exclusively (applicable with --backfill-projects)")
-	var emitRate = flag.Float64("emit-rate", 2.0, "maximum project re-emits per second (applicable with --backfill-projects)")
+	var emitRate = flag.Float64("emit-rate", 2.0, "maximum record re-emits per second (applicable with --backfill-projects and --backfill-committees)")
 	var allowFormation = flag.Bool("allow-formation", false, "allow formation-staged projects in the same run as non-formation projects (applicable with --backfill-projects)")
 	var checkSlugs = flag.Bool("check-slugs", false, "skip candidates whose slug already resolves to a v2 project (applicable with --backfill-projects)")
-	var forceBackfill = flag.Bool("force", false, "bypass the minimum-mappings safety floor (applicable with --backfill-projects)")
+	var checkCommitteeNames = flag.Bool("check-committee-names", false, "skip candidates whose project UID + name already resolves to a v2 committee via lfx.committee-api.name_to_uid (applicable with --backfill-committees)")
+	var forceBackfill = flag.Bool("force", false, "bypass the minimum-mappings safety floor (applicable with --backfill-projects and --backfill-committees)")
 	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
 	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-* and --sync-user)")
-	var backfillLimit = flag.Int("limit", 1000, "maximum number of records (users or projects) to process per backfill run (applicable with --backfill-alternate-emails, --backfill-profiles, and --backfill-projects; 0 = unlimited for --backfill-projects)")
+	var backfillLimit = flag.Int("limit", 1000, "maximum number of records (users, projects, or committees) to process per backfill run (applicable with --backfill-alternate-emails, --backfill-profiles, --backfill-projects, and --backfill-committees; 0 = unlimited for --backfill-projects and --backfill-committees)")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -112,13 +116,13 @@ func main() {
 
 	// Enforce mutual exclusion across all one-shot flags.
 	oneShotCount := 0
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doBackfillV1MappingsToPG, *doBackfillProjects} {
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doBackfillV1MappingsToPG, *doBackfillProjects, *doBackfillCommittees} {
 		if b {
 			oneShotCount++
 		}
 	}
 	if oneShotCount > 1 {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --backfill-committee-member-names, --backfill-v1-mappings-to-postgres, --backfill-projects, and --sync-user are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --backfill-committee-member-names, --backfill-v1-mappings-to-postgres, --backfill-projects, --backfill-committees, and --sync-user are mutually exclusive")
 		os.Exit(2)
 	}
 
@@ -127,11 +131,11 @@ func main() {
 	slog.SetDefault(logger)
 
 	// --backfill-committee-member-mappings, --backfill-v1-mappings-to-postgres,
-	// and --backfill-projects only need NATS KV (plus Postgres for the
-	// v1-mappings backfill); skip full config and API client init.
+	// --backfill-projects, and --backfill-committees only need NATS KV (plus
+	// Postgres for the v1-mappings backfill); skip full config and API client init.
 	// --backfill-acs-project and --backfill-acs-org require full config and API client init.
 	var err error
-	if *doBackfillCommitteeMemberMappings || *doBackfillV1MappingsToPG || *doBackfillProjects {
+	if *doBackfillCommitteeMemberMappings || *doBackfillV1MappingsToPG || *doBackfillProjects || *doBackfillCommittees {
 		cfg = LoadMinimalConfig()
 	} else {
 		cfg, err = LoadConfig()
@@ -363,6 +367,33 @@ func main() {
 			os.Exit(1)
 		}
 		logger.With(res.logFields()...).Info("project backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --backfill-committees flag: re-emit v1 committees with no v2
+	// mapping so the running deployment's KV consumer creates them, then exit.
+	if *doBackfillCommittees {
+		committeeLimit := *backfillLimit
+		if !limitExplicitlySet {
+			committeeLimit = 0
+		}
+		opts := backfillCommitteesOptions{
+			dryRun:              *dryRun,
+			limit:               committeeLimit,
+			emitRate:            *emitRate,
+			checkCommitteeNames: *checkCommitteeNames,
+			force:               *forceBackfill,
+		}
+		logger.With(
+			"dry_run", *dryRun, "emit_rate", *emitRate, "limit", committeeLimit,
+			"check_committee_names", *checkCommitteeNames,
+		).Info("starting committee backfill")
+		res, err := backfillCommittees(ctx, opts)
+		if err != nil {
+			logger.With(errKey, err).Error("error during committee backfill")
+			os.Exit(1)
+		}
+		logger.With(res.logFields()...).Info("committee backfill completed successfully")
 		os.Exit(0)
 	}
 
@@ -656,6 +687,32 @@ func main() {
 	if err != nil {
 		logger.With(errKey, err, "subject", "lfx.user_profile.updated").Error("error subscribing to user profile updated subject")
 		os.Exit(1)
+	}
+
+	// Subscribe to project-service settings events for v2-to-v1 project staff
+	// sync (executive director and program manager only; GH-1802).
+	//
+	// Ordering note: a queue group does not preserve per-project ordering
+	// across replicas. nats.go serializes delivery per subscription within a
+	// process, so at the chart's default of one app replica this handler is
+	// fully serialized; with two or more replicas, two rapid edits to the same
+	// staff field can be processed concurrently and their PATCHes complete out
+	// of order, leaving v1 (and, via the v1->v2 echo, eventually v2) with the
+	// older assignment. The event contract carries no sequence/timestamp to
+	// reject a stale delivery. Accepted for now given the single-replica
+	// deployment and rare, human-paced staff edits; if the app ever scales
+	// out, add cross-replica per-project serialization (re-reading current v2
+	// settings inside the lock before PATCHing) or move to ordered
+	// consumption.
+	if cfg.V2ToV1ProjectStaffSyncEnabled {
+		_, err = natsConn.QueueSubscribe(projectconstants.ProjectSettingsUpdatedSubject, natsQueue, handleProjectSettingsUpdated)
+		if err != nil {
+			logger.With(errKey, err, "subject", projectconstants.ProjectSettingsUpdatedSubject).Error("error subscribing to project settings updated subject")
+			os.Exit(1)
+		}
+		logger.With("subject", projectconstants.ProjectSettingsUpdatedSubject).Info("v2-to-v1 project staff sync enabled, subscription registered")
+	} else {
+		logger.With("subject", projectconstants.ProjectSettingsUpdatedSubject).Info("v2-to-v1 project staff sync disabled, skipping subscription")
 	}
 
 	// Subscribe to indexer domain events for bidirectional committee sync via a durable

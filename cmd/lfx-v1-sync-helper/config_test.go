@@ -77,7 +77,7 @@ func TestCommitteeSkipMemberNotificationsConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			setRequiredEnvs(t)
-			os.Unsetenv("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS")
+			_ = os.Unsetenv("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS")
 			if tt.envVal != "" {
 				t.Setenv("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS", tt.envVal)
 			}
