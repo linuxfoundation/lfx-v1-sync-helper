@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -633,6 +634,100 @@ func TestReEmitCommitteeV1ObjectRechecksNameAgainstFreshRead(t *testing.T) {
 	}
 	if reason != "name_conflict" {
 		t.Errorf("reason = %q, want %q", reason, "name_conflict")
+	}
+}
+
+// TestReEmitCommitteeV1ObjectPrefersAlreadyMappedOverNameConflict guards the
+// mapping-check-before-name-check ordering: a mapping that appeared mid-run
+// (e.g. a concurrent writer completing the create-and-map sequence for this
+// SFID) must be classified as "already_mapped" — which the caller marks
+// settled — rather than "name_conflict", even though the name lookup would
+// also match.
+func TestReEmitCommitteeV1ObjectPrefersAlreadyMappedOverNameConflict(t *testing.T) {
+	origV1KV, origMappingsKV := v1KV, mappingsKV
+	origCfg := cfg
+	origLookupProject := lookupCommitteeProjectMapping
+	origProjectUIDFn := projectUIDForSFIDFn
+	origNameFn := getCommitteeUIDByProjectAndNameFn
+	t.Cleanup(func() {
+		v1KV = origV1KV
+		mappingsKV = origMappingsKV
+		cfg = origCfg
+		lookupCommitteeProjectMapping = origLookupProject
+		projectUIDForSFIDFn = origProjectUIDFn
+		getCommitteeUIDByProjectAndNameFn = origNameFn
+	})
+
+	cfg = &Config{Auth0ClientID: "my-client-id"}
+	lookupCommitteeProjectMapping = func(_ context.Context, _ string) (bool, error) { return true, nil }
+	projectUIDForSFIDFn = func(_ context.Context, _ string) (string, error) {
+		return "project-uid-1", nil
+	}
+	getCommitteeUIDByProjectAndNameFn = func(_ context.Context, _, _ string) (string, error) {
+		return "committee-uid-1", nil
+	}
+
+	row := mustJSON(t, map[string]any{
+		"sfid": "a1", "mailing_list__c": "committee-a", "project_name__c": "p1",
+	})
+	objectsKV := newFakeKV()
+	if _, err := objectsKV.Create(context.Background(), "platform-collaboration__c.a1", row); err != nil {
+		t.Fatalf("failed to seed objectsKV: %v", err)
+	}
+	v1KV = objectsKV
+
+	mappings := newFakeKV()
+	if _, err := mappings.Create(context.Background(), committeeSFIDMappingKeyPrefix+"a1", []byte("committee-uid-1")); err != nil {
+		t.Fatalf("failed to seed mappingsKV: %v", err)
+	}
+	mappingsKV = mappings
+
+	opts := backfillCommitteesOptions{checkCommitteeNames: true}
+	reason, err := reEmitCommitteeV1Object(context.Background(), "platform-collaboration__c.a1", opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reason != "already_mapped" {
+		t.Errorf("reason = %q, want %q", reason, "already_mapped")
+	}
+}
+
+// TestValidateNoDuplicateCommitteeNames guards Finding 1: two unmapped
+// candidates sharing a (projectSFID, name) pair within the same run must
+// refuse a live run, since the v2 committee service's project+name
+// uniqueness reservation would let one succeed while its sibling never
+// settles.
+func TestValidateNoDuplicateCommitteeNames(t *testing.T) {
+	if err := validateNoDuplicateCommitteeNames(nil); err != nil {
+		t.Errorf("expected nil error for no duplicates, got %v", err)
+	}
+
+	dup := map[string][]string{"p1\x00committee-a": {"a1", "a2"}}
+	err := validateNoDuplicateCommitteeNames(dup)
+	if err == nil {
+		t.Fatal("expected error for duplicate names, got nil")
+	}
+	if !strings.Contains(err.Error(), "p1/committee-a") {
+		t.Errorf("error message %q does not name the colliding group", err.Error())
+	}
+}
+
+// TestCommitteeNamesBySFIDGroupsByProjectAndName guards the grouping key
+// used by Finding 1's duplicate detection: two candidates sharing a
+// (projectSFID, name) pair must land in the same group, but a shared name
+// across different projects must not collide.
+func TestCommitteeNamesBySFIDGroupsByProjectAndName(t *testing.T) {
+	candidates := []committeeCandidate{
+		{sfid: "a2", projectSFID: "p1", name: "committee-a"},
+		{sfid: "a1", projectSFID: "p1", name: "committee-a"},
+		{sfid: "b1", projectSFID: "p2", name: "committee-a"},
+	}
+	groups := committeeNamesBySFID(candidates)
+	if got := groups["p1\x00committee-a"]; len(got) != 2 || got[0] != "a1" || got[1] != "a2" {
+		t.Errorf("groups[p1/committee-a] = %v, want sorted [a1 a2]", got)
+	}
+	if got := groups["p2\x00committee-a"]; len(got) != 1 || got[0] != "b1" {
+		t.Errorf("groups[p2/committee-a] = %v, want [b1]", got)
 	}
 }
 

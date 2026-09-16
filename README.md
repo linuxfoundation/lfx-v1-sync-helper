@@ -188,6 +188,8 @@ Re-emits v1 committees that have no v2 mapping, by re-PUTting the existing `v1-o
 
 `--check-committee-names` skips candidates whose project UID + name already resolves to a v2 committee via NATS `lfx.committee-api.name_to_uid` (`lfx-v2-committee-service` PR #209) — a lost-mapping case that needs a mapping repair, not a duplicate create.
 
+**Prerequisite**: `lfx-v2-committee-service` PR #209 must be merged and deployed to the target environment before this job is run. `--check-committee-names` is on by default in the shipped manifest, and without the `name_to_uid` subject that PR adds, every lookup gets "no responders" and the job (including a dry run) hard-errors before reporting any counters.
+
 ```sh
 kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-committees-job.yaml
 ```

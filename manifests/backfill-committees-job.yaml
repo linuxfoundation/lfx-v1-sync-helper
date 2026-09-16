@@ -29,6 +29,14 @@
 # created successfully but whose mapping write then silently failed would
 # look unmapped to a rerun and be re-emitted as a duplicate create.
 #
+# PREREQUISITE: do not apply this manifest until lfx-v2-committee-service#209
+# (the PR that adds the lfx.committee-api.name_to_uid subject) is merged and
+# deployed to the target environment. Since --check-committee-names is always
+# on, running this job first would leave every --check-committee-names lookup
+# with "no responders" and hard-error the job (including a dry run) before it
+# reports any counters. This is a deployment-order note only — it does not
+# gate or block anything in this repo.
+#
 # Credentials: --backfill-committees uses LoadMinimalConfig (main.go), which
 # only reads NATS_URL / NATS_FETCH_MAX_WAIT / AUTH0_CLIENT_ID (the latter for
 # shouldSkipSync's loop-prevention check) — it never initializes the Heimdall

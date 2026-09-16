@@ -119,7 +119,8 @@ type backfillCommitteesResult struct {
 	skippedSettleTimeout   int
 	skippedNameConflict    int
 
-	nameConflicts []committeeNameConflict
+	nameConflicts  []committeeNameConflict
+	duplicateNames map[string][]string
 }
 
 // committeeNameConflict records a candidate whose project UID + name already
@@ -159,6 +160,7 @@ func (res backfillCommitteesResult) logFields() []any {
 		"skipped_settle_timeout", res.skippedSettleTimeout,
 		"skipped_name_conflict", res.skippedNameConflict,
 		"name_conflicts", len(res.nameConflicts),
+		"duplicate_names", len(res.duplicateNames),
 	}
 }
 
@@ -204,7 +206,7 @@ func projectUIDForSFID(ctx context.Context, sfid string) (string, error) {
 // parent project is already mapped so the running deployment's KV consumer
 // creates each committee in v2.
 func backfillCommittees(ctx context.Context, opts backfillCommitteesOptions) (backfillCommitteesResult, error) {
-	res := backfillCommitteesResult{}
+	res := backfillCommitteesResult{duplicateNames: map[string][]string{}}
 
 	if opts.emitRate <= 0 {
 		return res, fmt.Errorf("--emit-rate must be greater than 0, got %v", opts.emitRate)
@@ -252,6 +254,17 @@ func backfillCommittees(ctx context.Context, opts backfillCommitteesOptions) (ba
 	if opts.checkCommitteeNames {
 		candidates, err = filterCommitteeNameConflicts(ctx, candidates, &res)
 		if err != nil {
+			return res, err
+		}
+	}
+
+	for nameKey, sfids := range committeeNamesBySFID(candidates) {
+		if len(sfids) > 1 {
+			res.duplicateNames[nameKey] = sfids
+		}
+	}
+	if !opts.dryRun {
+		if err := validateNoDuplicateCommitteeNames(res.duplicateNames); err != nil {
 			return res, err
 		}
 	}
@@ -562,6 +575,61 @@ func filterCommitteeNameConflicts(
 	return kept, nil
 }
 
+// committeeNamesBySFID groups candidate SFIDs by (projectSFID, name), for
+// duplicate-name reporting. The v2 committee service reserves project+name
+// uniqueness, so two unmapped candidates sharing a pair within the same run
+// are a collision, not a normal same-run duplicate scan artifact.
+func committeeNamesBySFID(candidates []committeeCandidate) map[string][]string {
+	out := map[string][]string{}
+	for _, c := range candidates {
+		key := c.projectSFID + "\x00" + c.name
+		out[key] = append(out[key], c.sfid)
+	}
+	for key := range out {
+		sort.Strings(out[key])
+	}
+	return out
+}
+
+// validateNoDuplicateCommitteeNames returns an error if duplicateNames is
+// non-empty. The v2 committee service rejects a second create for a
+// project+name pair that already exists, so a live run with same-run
+// candidates sharing a pair would create one candidate per colliding group
+// while its siblings never settle, guaranteeing a partially-applied backfill.
+// Refuse the run up front and name the colliding groups so an operator can
+// reconcile them first.
+func validateNoDuplicateCommitteeNames(duplicateNames map[string][]string) error {
+	if len(duplicateNames) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"candidates include %d colliding project+name pair(s), the v2 "+
+			"committee service rejects a second create for the same pair so "+
+			"one candidate in each group would be created while its siblings "+
+			"never settle: %s",
+		len(duplicateNames), formatDuplicateCommitteeNames(duplicateNames),
+	)
+}
+
+// formatDuplicateCommitteeNames renders duplicateNames as
+// "projectSFID/name: [sfid, sfid], ..." groups, sorted by key, so the error
+// message is deterministic and an operator can reconcile each colliding
+// group before re-running.
+func formatDuplicateCommitteeNames(duplicateNames map[string][]string) string {
+	keys := make([]string, 0, len(duplicateNames))
+	for key := range duplicateNames {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	groups := make([]string, 0, len(keys))
+	for _, key := range keys {
+		projectSFID, name, _ := strings.Cut(key, "\x00")
+		groups = append(groups, fmt.Sprintf("%s/%s: %v", projectSFID, name, duplicateNames[key]))
+	}
+	return strings.Join(groups, "; ")
+}
+
 // collectCommitteeSFIDMappingStates reads all committee.sfid.* keys from
 // KV_v1-mappings and returns both live (SFID -> v2 UID) and tombstoned
 // (SFID set) mappings.
@@ -639,6 +707,32 @@ func reEmitCommitteeV1Object(ctx context.Context, key string, opts backfillCommi
 		return "parent_unmapped", nil
 	}
 
+	// Check the forward mapping before the name conflict: a mapping that
+	// appeared mid-run (e.g. a concurrent writer completing the create-and-map
+	// sequence for this same SFID) must be classified as "already_mapped" —
+	// which the caller marks settled — rather than "name_conflict", which
+	// does not, and would wrongly leave an already-resolved committee in
+	// remaining_unmapped and log it as needing a mapping repair it doesn't
+	// need.
+	mappingKey := committeeSFIDMappingKeyPrefix + candidate.sfid
+	mapping, mErr := mappingsKV.Get(ctx, mappingKey)
+	switch mErr {
+	case nil:
+		if isTombstonedMapping(mapping.Value()) {
+			return "tombstoned_mapping", nil
+		}
+		if len(mapping.Value()) > 0 {
+			return "already_mapped", nil
+		}
+	case jetstream.ErrKeyNotFound, jetstream.ErrKeyDeleted:
+		// No mapping exists yet — genuinely unmapped, proceed to re-emit.
+	default:
+		// A transient lookup failure is not the same as "no mapping":
+		// treating it as absent could re-emit a committee that's already
+		// mapped, sending the durable consumer down a duplicate-create path.
+		return "", fmt.Errorf("failed to look up mapping %s: %w", mappingKey, mErr)
+	}
+
 	if opts.checkCommitteeNames && candidate.name != "" {
 		// --check-committee-names only screened the scan-time name: this
 		// fresh row's name may since resolve to a v2 committee — including
@@ -665,25 +759,6 @@ func reEmitCommitteeV1Object(ctx context.Context, key string, opts backfillCommi
 			).WarnContext(ctx, "candidate name now resolves to a v2 committee on fresh re-check; needs mapping repair, not a create — skipping")
 			return "name_conflict", nil
 		}
-	}
-
-	mappingKey := committeeSFIDMappingKeyPrefix + candidate.sfid
-	mapping, mErr := mappingsKV.Get(ctx, mappingKey)
-	switch mErr {
-	case nil:
-		if isTombstonedMapping(mapping.Value()) {
-			return "tombstoned_mapping", nil
-		}
-		if len(mapping.Value()) > 0 {
-			return "already_mapped", nil
-		}
-	case jetstream.ErrKeyNotFound, jetstream.ErrKeyDeleted:
-		// No mapping exists yet — genuinely unmapped, proceed to re-emit.
-	default:
-		// A transient lookup failure is not the same as "no mapping":
-		// treating it as absent could re-emit a committee that's already
-		// mapped, sending the durable consumer down a duplicate-create path.
-		return "", fmt.Errorf("failed to look up mapping %s: %w", mappingKey, mErr)
 	}
 
 	if _, err := v1KV.Update(ctx, key, entry.Value(), entry.Revision()); err != nil {
