@@ -20,7 +20,14 @@
 #
 # Dry run: args below default to --dry-run. Remove it for the live run, after
 # reviewing the counters in the dry-run logs (scanned/candidates/emitted/
-# remaining_unmapped/skipped_parent_unmapped).
+# remaining_unmapped/skipped_parent_unmapped/skipped_name_conflict).
+#
+# --check-committee-names is always on: it skips candidates whose project UID
+# + name already resolves to a v2 committee via NATS
+# lfx.committee-api.name_to_uid (lfx-v2-committee-service#209) — a lost
+# mapping that needs repair, not a duplicate create. Without it, a committee
+# created successfully but whose mapping write then silently failed would
+# look unmapped to a rerun and be re-emitted as a duplicate create.
 #
 # Credentials: --backfill-committees uses LoadMinimalConfig (main.go), which
 # only reads NATS_URL / NATS_FETCH_MAX_WAIT / AUTH0_CLIENT_ID (the latter for
@@ -70,7 +77,7 @@ spec:
           #     -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'
           image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:latest
           imagePullPolicy: Always
-          args: ["--backfill-committees", "--dry-run"]
+          args: ["--backfill-committees", "--check-committee-names", "--dry-run"]
           env:
             - name: NATS_URL
               value: "nats://lfx-platform-nats.lfx.svc.cluster.local:4222"

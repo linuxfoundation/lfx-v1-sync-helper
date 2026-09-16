@@ -45,6 +45,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -85,10 +86,11 @@ const (
 
 // backfillCommitteesOptions configures a --backfill-committees run.
 type backfillCommitteesOptions struct {
-	dryRun   bool
-	limit    int
-	emitRate float64
-	force    bool
+	dryRun              bool
+	limit               int
+	emitRate            float64
+	checkCommitteeNames bool
+	force               bool
 }
 
 // backfillCommitteesResult summarizes a backfill run.
@@ -115,6 +117,18 @@ type backfillCommitteesResult struct {
 	skippedLimit           int
 	skippedMissing         int
 	skippedSettleTimeout   int
+	skippedNameConflict    int
+
+	nameConflicts []committeeNameConflict
+}
+
+// committeeNameConflict records a candidate whose project UID + name already
+// resolves to a v2 committee UID: it needs a mapping repair, not a create.
+type committeeNameConflict struct {
+	sfid         string
+	name         string
+	projectSFID  string
+	committeeUID string
 }
 
 // logFields returns the complete counter set as alternating key/value pairs
@@ -143,6 +157,8 @@ func (res backfillCommitteesResult) logFields() []any {
 		"skipped_limit", res.skippedLimit,
 		"skipped_missing", res.skippedMissing,
 		"skipped_settle_timeout", res.skippedSettleTimeout,
+		"skipped_name_conflict", res.skippedNameConflict,
+		"name_conflicts", len(res.nameConflicts),
 	}
 }
 
@@ -151,16 +167,37 @@ type committeeCandidate struct {
 	sfid        string
 	key         string
 	projectSFID string
+	name        string
 }
 
 // reEmitCommitteeV1ObjectFn and lookupCommitteeProjectMappingFn are
 // package-level function variables so tests can stub the NATS-dependent
 // emit/poll steps without a live cluster.
 var (
-	reEmitCommitteeV1ObjectFn     = reEmitCommitteeV1Object
-	lookupCommitteeMappingFn      = lookupCommitteeMapping
-	lookupCommitteeProjectMapping = lookupProjectMappingErr
+	reEmitCommitteeV1ObjectFn         = reEmitCommitteeV1Object
+	lookupCommitteeMappingFn          = lookupCommitteeMapping
+	lookupCommitteeProjectMapping     = lookupProjectMappingErr
+	getCommitteeUIDByProjectAndNameFn = getCommitteeUIDByProjectAndName
+	projectUIDForSFIDFn               = projectUIDForSFID
 )
+
+// projectUIDForSFID resolves a project's v2 UID from its v1 SFID via
+// v1-mappings, for --check-committee-names lookups (which need the value,
+// not just a live/unmapped bool as lookupProjectMappingErr returns).
+func projectUIDForSFID(ctx context.Context, sfid string) (string, error) {
+	entry, err := mappingsKV.Get(ctx, projectSFIDMappingKeyPrefix+sfid)
+	switch err {
+	case nil:
+		if len(entry.Value()) == 0 || isTombstonedMapping(entry.Value()) {
+			return "", fmt.Errorf("project %s has no live v2 mapping", sfid)
+		}
+		return string(entry.Value()), nil
+	case jetstream.ErrKeyNotFound, jetstream.ErrKeyDeleted:
+		return "", fmt.Errorf("project %s has no v2 mapping", sfid)
+	default:
+		return "", fmt.Errorf("failed to look up project mapping %s: %w", sfid, err)
+	}
+}
 
 // backfillCommittees scans v1-objects for platform-collaboration__c rows
 // with no live v1-mappings entry, then re-emits every candidate whose
@@ -211,6 +248,14 @@ func backfillCommittees(ctx context.Context, opts backfillCommitteesOptions) (ba
 	res.lowMappingsCount = res.mappingsLive+res.mappingsTombstoned < minCommitteeMappingsSafetyFloor
 
 	candidates := selectCommitteeCandidates(ctx, objects, liveMappings, tombstonedMappings, &res)
+
+	if opts.checkCommitteeNames {
+		candidates, err = filterCommitteeNameConflicts(ctx, candidates, &res)
+		if err != nil {
+			return res, err
+		}
+	}
+
 	res.candidates = len(candidates)
 	// Captured before the emit loop runs: selectCommitteeCandidates is the
 	// only mutator of skippedParentUnmapped so far, so this reflects
@@ -255,7 +300,7 @@ func backfillCommittees(ctx context.Context, opts backfillCommitteesOptions) (ba
 			return res, fmt.Errorf("rate limiter wait cancelled: %w", err)
 		}
 
-		skipReason, err := reEmitCommitteeV1ObjectFn(ctx, c.key)
+		skipReason, err := reEmitCommitteeV1ObjectFn(ctx, c.key, opts)
 		if err != nil {
 			res.errors++
 			logger.With(errKey, err, "sfid", c.sfid, "key", c.key).ErrorContext(ctx, "failed to re-emit committee for backfill")
@@ -344,6 +389,8 @@ func recordCommitteeSkip(res *backfillCommitteesResult, reason string) {
 		res.skippedMissing++
 	case "parent_unmapped":
 		res.skippedParentUnmapped++
+	case "name_conflict":
+		res.skippedNameConflict++
 	}
 }
 
@@ -389,9 +436,10 @@ func evaluateCommitteeRow(ctx context.Context, key string, raw []byte) (committe
 	}
 
 	name, _ := v1Data["mailing_list__c"].(string)
+	name = strings.TrimSpace(name)
 	projectSFID, _ := v1Data["project_name__c"].(string)
 	projectSFID = strings.TrimSpace(projectSFID)
-	if strings.TrimSpace(name) == "" || projectSFID == "" {
+	if name == "" || projectSFID == "" {
 		return committeeCandidate{}, "missing_required"
 	}
 
@@ -399,6 +447,7 @@ func evaluateCommitteeRow(ctx context.Context, key string, raw []byte) (committe
 		sfid:        sfid,
 		key:         key,
 		projectSFID: projectSFID,
+		name:        name,
 	}, ""
 }
 
@@ -463,6 +512,54 @@ func selectCommitteeCandidates(
 	return candidates
 }
 
+// filterCommitteeNameConflicts removes candidates whose project UID + name
+// already resolves to a v2 committee UID (a lost mapping, not a missing
+// committee) and records them for a mapping-repair follow-up rather than
+// re-emitting a create that would duplicate an existing committee. A
+// transport/lookup error is not the same as a confirmed no-conflict
+// response: --check-committee-names exists to prevent duplicate creates, so
+// a lookup failure must not silently disable it by falling through as "no
+// conflict found."
+func filterCommitteeNameConflicts(
+	ctx context.Context,
+	candidates []committeeCandidate,
+	res *backfillCommitteesResult,
+) ([]committeeCandidate, error) {
+	kept := make([]committeeCandidate, 0, len(candidates))
+	for _, c := range candidates {
+		if c.name == "" {
+			kept = append(kept, c)
+			continue
+		}
+
+		projectUID, err := projectUIDForSFIDFn(ctx, c.projectSFID)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"--check-committee-names: failed to resolve project UID for sfid %s: %w", c.projectSFID, err,
+			)
+		}
+
+		committeeUID, err := getCommitteeUIDByProjectAndNameFn(ctx, projectUID, c.name)
+		if err != nil {
+			if errors.Is(err, errCommitteeNameNotFound) {
+				kept = append(kept, c)
+				continue
+			}
+			return nil, fmt.Errorf(
+				"--check-committee-names lookup failed for name %s (sfid %s): %w", c.name, c.sfid, err,
+			)
+		}
+
+		res.skippedNameConflict++
+		res.nameConflicts = append(res.nameConflicts, committeeNameConflict{
+			sfid: c.sfid, name: c.name, projectSFID: c.projectSFID, committeeUID: committeeUID,
+		})
+		logger.With("sfid", c.sfid, "name", c.name, "project_sfid", c.projectSFID, "committee_uid", committeeUID).
+			WarnContext(ctx, "candidate name already resolves to a v2 committee; needs mapping repair, not a create — skipping")
+	}
+	return kept, nil
+}
+
 // collectCommitteeSFIDMappingStates reads all committee.sfid.* keys from
 // KV_v1-mappings and returns both live (SFID -> v2 UID) and tombstoned
 // (SFID set) mappings.
@@ -516,7 +613,7 @@ func collectCommitteeSFIDMappingStates(ctx context.Context) (map[string]string, 
 // error for every outcome that is not itself a failure: the row
 // disappearing, no longer qualifying, or losing a concurrent-write race are
 // all expected, re-run-safe outcomes.
-func reEmitCommitteeV1Object(ctx context.Context, key string) (skipReason string, err error) {
+func reEmitCommitteeV1Object(ctx context.Context, key string, opts backfillCommitteesOptions) (skipReason string, err error) {
 	entry, err := v1KV.Get(ctx, key)
 	if err != nil {
 		if err == jetstream.ErrKeyNotFound || err == jetstream.ErrKeyDeleted {
@@ -538,6 +635,34 @@ func reEmitCommitteeV1Object(ctx context.Context, key string) (skipReason string
 	}
 	if !parentMapped {
 		return "parent_unmapped", nil
+	}
+
+	if opts.checkCommitteeNames && candidate.name != "" {
+		// --check-committee-names only screened the scan-time name: this
+		// fresh row's name may since resolve to a v2 committee — including
+		// one created by an earlier candidate in this same run — so repeat
+		// the lookup here before emitting.
+		projectUID, err := projectUIDForSFIDFn(ctx, candidate.projectSFID)
+		if err != nil {
+			return "", fmt.Errorf(
+				"--check-committee-names: failed to resolve project UID for sfid %s: %w", candidate.projectSFID, err,
+			)
+		}
+		committeeUID, nameErr := getCommitteeUIDByProjectAndNameFn(ctx, projectUID, candidate.name)
+		if nameErr != nil {
+			if !errors.Is(nameErr, errCommitteeNameNotFound) {
+				return "", fmt.Errorf(
+					"--check-committee-names lookup failed for name %s (sfid %s): %w",
+					candidate.name, candidate.sfid, nameErr,
+				)
+			}
+		} else {
+			logger.With(
+				"sfid", candidate.sfid, "name", candidate.name,
+				"project_sfid", candidate.projectSFID, "committee_uid", committeeUID,
+			).WarnContext(ctx, "candidate name now resolves to a v2 committee on fresh re-check; needs mapping repair, not a create — skipping")
+			return "name_conflict", nil
+		}
 	}
 
 	mappingKey := committeeSFIDMappingKeyPrefix + candidate.sfid

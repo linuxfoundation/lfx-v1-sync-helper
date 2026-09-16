@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -237,7 +238,7 @@ func TestReEmitCommitteeV1ObjectPropagatesTransientMappingLookupError(t *testing
 	v1KV = objectsKV
 	mappingsKV = &erroringGetKV{err: errors.New("transient NATS timeout")}
 
-	_, err := reEmitCommitteeV1Object(context.Background(), "platform-collaboration__c.a1")
+	_, err := reEmitCommitteeV1Object(context.Background(), "platform-collaboration__c.a1", backfillCommitteesOptions{})
 	if err == nil {
 		t.Error("expected a transient mapping lookup error to propagate, got nil")
 	}
@@ -273,7 +274,7 @@ func TestReEmitCommitteeV1ObjectPropagatesTransientParentLookupError(t *testing.
 	v1KV = objectsKV
 	mappingsKV = newFakeKV()
 
-	reason, err := reEmitCommitteeV1Object(context.Background(), "platform-collaboration__c.a1")
+	reason, err := reEmitCommitteeV1Object(context.Background(), "platform-collaboration__c.a1", backfillCommitteesOptions{})
 	if err == nil {
 		t.Error("expected a transient parent lookup error to propagate, got nil")
 	}
@@ -306,7 +307,7 @@ func TestReEmitCommitteeV1ObjectRechecksParentAgainstFreshRead(t *testing.T) {
 	v1KV = objectsKV
 	mappingsKV = newFakeKV()
 
-	reason, err := reEmitCommitteeV1Object(context.Background(), "platform-collaboration__c.a1")
+	reason, err := reEmitCommitteeV1Object(context.Background(), "platform-collaboration__c.a1", backfillCommitteesOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -354,7 +355,7 @@ func TestReEmitCommitteeV1ObjectIssuesOneMappingLookup(t *testing.T) {
 	counting := &countingGetKV{fakeKV: newFakeKV()}
 	mappingsKV = counting
 
-	if _, err := reEmitCommitteeV1Object(context.Background(), "platform-collaboration__c.a1"); err != nil {
+	if _, err := reEmitCommitteeV1Object(context.Background(), "platform-collaboration__c.a1", backfillCommitteesOptions{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if counting.gets != 1 {
@@ -475,6 +476,162 @@ func TestBackfillCommitteesRejectsMissingAuth0ClientID(t *testing.T) {
 	_, err := backfillCommittees(context.Background(), backfillCommitteesOptions{emitRate: 1})
 	if err == nil {
 		t.Error("expected error for missing AUTH0_CLIENT_ID, got nil")
+	}
+}
+
+// TestFilterCommitteeNameConflictsPropagatesLookupError guards
+// --check-committee-names: a transport/lookup failure must not be silently
+// treated as "no conflict found," since that would defeat the purpose of the
+// flag (preventing duplicate creates).
+func TestFilterCommitteeNameConflictsPropagatesLookupError(t *testing.T) {
+	origProjectUIDFn := projectUIDForSFIDFn
+	origNameFn := getCommitteeUIDByProjectAndNameFn
+	t.Cleanup(func() {
+		projectUIDForSFIDFn = origProjectUIDFn
+		getCommitteeUIDByProjectAndNameFn = origNameFn
+	})
+
+	projectUIDForSFIDFn = func(_ context.Context, _ string) (string, error) {
+		return "project-uid-1", nil
+	}
+	getCommitteeUIDByProjectAndNameFn = func(_ context.Context, _, _ string) (string, error) {
+		return "", errors.New("no responders available for request")
+	}
+
+	candidates := []committeeCandidate{{sfid: "a1", name: "committee-a", projectSFID: "p1"}}
+	res := &backfillCommitteesResult{}
+	_, err := filterCommitteeNameConflicts(context.Background(), candidates, res)
+	if err == nil {
+		t.Error("expected a name-lookup transport error to propagate, got nil")
+	}
+}
+
+// TestFilterCommitteeNameConflictsPropagatesProjectUIDLookupError guards the
+// same case for the project-UID resolution step, which runs before the name
+// lookup.
+func TestFilterCommitteeNameConflictsPropagatesProjectUIDLookupError(t *testing.T) {
+	origProjectUIDFn := projectUIDForSFIDFn
+	t.Cleanup(func() { projectUIDForSFIDFn = origProjectUIDFn })
+
+	projectUIDForSFIDFn = func(_ context.Context, _ string) (string, error) {
+		return "", errors.New("transient NATS timeout")
+	}
+
+	candidates := []committeeCandidate{{sfid: "a1", name: "committee-a", projectSFID: "p1"}}
+	res := &backfillCommitteesResult{}
+	_, err := filterCommitteeNameConflicts(context.Background(), candidates, res)
+	if err == nil {
+		t.Error("expected a project-UID-lookup transport error to propagate, got nil")
+	}
+}
+
+func TestFilterCommitteeNameConflictsKeepsCandidateOnConfirmedNotFound(t *testing.T) {
+	origProjectUIDFn := projectUIDForSFIDFn
+	origNameFn := getCommitteeUIDByProjectAndNameFn
+	t.Cleanup(func() {
+		projectUIDForSFIDFn = origProjectUIDFn
+		getCommitteeUIDByProjectAndNameFn = origNameFn
+	})
+
+	projectUIDForSFIDFn = func(_ context.Context, _ string) (string, error) {
+		return "project-uid-1", nil
+	}
+	getCommitteeUIDByProjectAndNameFn = func(_ context.Context, projectUID, name string) (string, error) {
+		return "", fmt.Errorf("%w: project %s name %s", errCommitteeNameNotFound, projectUID, name)
+	}
+
+	candidates := []committeeCandidate{{sfid: "a1", name: "committee-a", projectSFID: "p1"}}
+	res := &backfillCommitteesResult{}
+	kept, err := filterCommitteeNameConflicts(context.Background(), candidates, res)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(kept) != 1 || kept[0].sfid != "a1" {
+		t.Errorf("kept = %+v, want candidate a1 retained", kept)
+	}
+	if res.skippedNameConflict != 0 {
+		t.Errorf("skippedNameConflict = %d, want 0", res.skippedNameConflict)
+	}
+}
+
+func TestFilterCommitteeNameConflictsDropsCandidateOnConfirmedConflict(t *testing.T) {
+	origProjectUIDFn := projectUIDForSFIDFn
+	origNameFn := getCommitteeUIDByProjectAndNameFn
+	t.Cleanup(func() {
+		projectUIDForSFIDFn = origProjectUIDFn
+		getCommitteeUIDByProjectAndNameFn = origNameFn
+	})
+
+	projectUIDForSFIDFn = func(_ context.Context, _ string) (string, error) {
+		return "project-uid-1", nil
+	}
+	getCommitteeUIDByProjectAndNameFn = func(_ context.Context, _, _ string) (string, error) {
+		return "committee-uid-1", nil
+	}
+
+	candidates := []committeeCandidate{{sfid: "a1", name: "committee-a", projectSFID: "p1"}}
+	res := &backfillCommitteesResult{}
+	kept, err := filterCommitteeNameConflicts(context.Background(), candidates, res)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(kept) != 0 {
+		t.Errorf("kept = %+v, want no candidates retained", kept)
+	}
+	if res.skippedNameConflict != 1 {
+		t.Errorf("skippedNameConflict = %d, want 1", res.skippedNameConflict)
+	}
+	if len(res.nameConflicts) != 1 || res.nameConflicts[0].committeeUID != "committee-uid-1" {
+		t.Errorf("nameConflicts = %+v, want one entry with committeeUID committee-uid-1", res.nameConflicts)
+	}
+}
+
+// TestReEmitCommitteeV1ObjectRechecksNameAgainstFreshRead guards the fresh
+// per-candidate re-check in reEmitCommitteeV1Object: a name that resolves to a
+// v2 committee only on the fresh read (e.g. created by an earlier candidate
+// in this same run) must still be caught, even though a hypothetical
+// scan-time --check-committee-names pass found it clear.
+func TestReEmitCommitteeV1ObjectRechecksNameAgainstFreshRead(t *testing.T) {
+	origV1KV, origMappingsKV := v1KV, mappingsKV
+	origCfg := cfg
+	origLookupProject := lookupCommitteeProjectMapping
+	origProjectUIDFn := projectUIDForSFIDFn
+	origNameFn := getCommitteeUIDByProjectAndNameFn
+	t.Cleanup(func() {
+		v1KV = origV1KV
+		mappingsKV = origMappingsKV
+		cfg = origCfg
+		lookupCommitteeProjectMapping = origLookupProject
+		projectUIDForSFIDFn = origProjectUIDFn
+		getCommitteeUIDByProjectAndNameFn = origNameFn
+	})
+
+	cfg = &Config{Auth0ClientID: "my-client-id"}
+	lookupCommitteeProjectMapping = func(_ context.Context, _ string) (bool, error) { return true, nil }
+	projectUIDForSFIDFn = func(_ context.Context, _ string) (string, error) {
+		return "project-uid-1", nil
+	}
+	getCommitteeUIDByProjectAndNameFn = func(_ context.Context, _, _ string) (string, error) {
+		return "committee-uid-1", nil
+	}
+
+	row := mustJSON(t, map[string]any{
+		"sfid": "a1", "mailing_list__c": "committee-a", "project_name__c": "p1",
+	})
+	objectsKV := newFakeKV()
+	if _, err := objectsKV.Create(context.Background(), "platform-collaboration__c.a1", row); err != nil {
+		t.Fatalf("failed to seed objectsKV: %v", err)
+	}
+	v1KV = objectsKV
+	mappingsKV = newFakeKV()
+
+	opts := backfillCommitteesOptions{checkCommitteeNames: true}
+	reason, err := reEmitCommitteeV1Object(context.Background(), "platform-collaboration__c.a1", opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reason != "name_conflict" {
+		t.Errorf("reason = %q, want %q", reason, "name_conflict")
 	}
 }
 

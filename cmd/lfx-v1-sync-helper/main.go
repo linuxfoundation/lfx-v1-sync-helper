@@ -91,6 +91,7 @@ func main() {
 	var emitRate = flag.Float64("emit-rate", 2.0, "maximum record re-emits per second (applicable with --backfill-projects and --backfill-committees)")
 	var allowFormation = flag.Bool("allow-formation", false, "allow formation-staged projects in the same run as non-formation projects (applicable with --backfill-projects)")
 	var checkSlugs = flag.Bool("check-slugs", false, "skip candidates whose slug already resolves to a v2 project (applicable with --backfill-projects)")
+	var checkCommitteeNames = flag.Bool("check-committee-names", false, "skip candidates whose project UID + name already resolves to a v2 committee via lfx.committee-api.name_to_uid (applicable with --backfill-committees)")
 	var forceBackfill = flag.Bool("force", false, "bypass the minimum-mappings safety floor (applicable with --backfill-projects and --backfill-committees)")
 	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
 	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-* and --sync-user)")
@@ -377,12 +378,16 @@ func main() {
 			committeeLimit = 0
 		}
 		opts := backfillCommitteesOptions{
-			dryRun:   *dryRun,
-			limit:    committeeLimit,
-			emitRate: *emitRate,
-			force:    *forceBackfill,
+			dryRun:              *dryRun,
+			limit:               committeeLimit,
+			emitRate:            *emitRate,
+			checkCommitteeNames: *checkCommitteeNames,
+			force:               *forceBackfill,
 		}
-		logger.With("dry_run", *dryRun, "emit_rate", *emitRate, "limit", committeeLimit).Info("starting committee backfill")
+		logger.With(
+			"dry_run", *dryRun, "emit_rate", *emitRate, "limit", committeeLimit,
+			"check_committee_names", *checkCommitteeNames,
+		).Info("starting committee backfill")
 		res, err := backfillCommittees(ctx, opts)
 		if err != nil {
 			logger.With(errKey, err).Error("error during committee backfill")
