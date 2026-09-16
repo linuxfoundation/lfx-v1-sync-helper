@@ -139,10 +139,9 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 		baseMutated = true
 	}
 
-	// Handle settings update if provided. A set staff clear flag must also
-	// pass the gate: on a deliberate v1 clear the payload staff field stays
-	// nil, so the non-nil-field check alone would skip the write and the
-	// full-replace PUT would never perform the removal.
+	// Handle settings update if provided. The gate must also pass on a set
+	// staff clear flag: a deliberate v1 clear leaves the staff field nil, so a
+	// nil-field-only check would skip the removal write.
 	if settingsPayload != nil && projectSettingsWriteMayBeNeeded(settingsPayload, clears) {
 		// Fetch current project settings.
 		currentSettings, settingsETag, err := fetchProjectSettings(ctx, *basePayload.UID)
