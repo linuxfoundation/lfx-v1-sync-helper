@@ -411,6 +411,7 @@ func TestRecordCommitteeSkip(t *testing.T) {
 		{"revision_race", func() int { return res.skippedRevisionRace }},
 		{"missing", func() int { return res.skippedMissing }},
 		{"parent_unmapped", func() int { return res.skippedParentUnmapped }},
+		{"name_conflict", func() int { return res.skippedNameConflict }},
 	}
 
 	for _, r := range reasons {

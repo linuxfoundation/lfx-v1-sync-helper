@@ -192,7 +192,13 @@ Re-emits v1 committees that have no v2 mapping, by re-PUTting the existing `v1-o
 kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-committees-job.yaml
 ```
 
-Apply the manifest as shipped (`--dry-run` and `--check-committee-names` are on by default), inspect logs (`scanned`/`candidates`/`emitted`/`remaining_unmapped`/`skipped_name_conflict` counts), then remove `--dry-run` and re-apply for the live run:
+Apply the manifest as shipped (`--dry-run` and `--check-committee-names` are on by default), inspect logs (`scanned`/`candidates`/`emitted`/`remaining_unmapped`/`skipped_name_conflict` counts), then delete the completed dry-run Job, remove `--dry-run` from its `args`, and apply again for the live run — `kubectl apply` on an existing Job whose pod template changed is rejected with `field is immutable`:
+
+```sh
+kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-committees
+```
+
+Locally:
 
 ```sh
 lfx-v1-sync-helper --backfill-committees --check-committee-names [--dry-run]

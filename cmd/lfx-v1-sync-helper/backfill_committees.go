@@ -436,10 +436,9 @@ func evaluateCommitteeRow(ctx context.Context, key string, raw []byte) (committe
 	}
 
 	name, _ := v1Data["mailing_list__c"].(string)
-	name = strings.TrimSpace(name)
 	projectSFID, _ := v1Data["project_name__c"].(string)
 	projectSFID = strings.TrimSpace(projectSFID)
-	if name == "" || projectSFID == "" {
+	if strings.TrimSpace(name) == "" || projectSFID == "" {
 		return committeeCandidate{}, "missing_required"
 	}
 
@@ -447,7 +446,12 @@ func evaluateCommitteeRow(ctx context.Context, key string, raw []byte) (committe
 		sfid:        sfid,
 		key:         key,
 		projectSFID: projectSFID,
-		name:        name,
+		// name is kept raw (not trimmed): mapV1DataToCommitteeCreatePayload
+		// forwards the raw mailing_list__c as the v2 name, and
+		// --check-committee-names' name_to_uid lookup must match it exactly
+		// or a padded row would miss an existing committee and re-emit a
+		// duplicate create.
+		name: name,
 	}, ""
 }
 
@@ -527,11 +531,9 @@ func filterCommitteeNameConflicts(
 ) ([]committeeCandidate, error) {
 	kept := make([]committeeCandidate, 0, len(candidates))
 	for _, c := range candidates {
-		if c.name == "" {
-			kept = append(kept, c)
-			continue
-		}
-
+		// c.name is never empty here: evaluateCommitteeRow already rejects
+		// any row with a blank mailing_list__c as "missing_required" before
+		// it can become a candidate.
 		projectUID, err := projectUIDForSFIDFn(ctx, c.projectSFID)
 		if err != nil {
 			return nil, fmt.Errorf(
