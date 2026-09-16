@@ -158,7 +158,7 @@ func TestDualMappingStore_GetReadsKVOnly(t *testing.T) {
 		t.Fatalf("seed kv: %v", err)
 	}
 	dual := newDualMappingStore(pg, kv, discardLogger())
-	defer dual.Close()
+	defer func() { _ = dual.Close() }()
 
 	entry, err := dual.Get(context.Background(), "k")
 	if err != nil {
@@ -182,7 +182,7 @@ func TestDualMappingStore_GetSurfacesKVError(t *testing.T) {
 	sentinel := errors.New("kv boom")
 	kv.nextGetErr = sentinel
 	dual := newDualMappingStore(pg, kv, discardLogger())
-	defer dual.Close()
+	defer func() { _ = dual.Close() }()
 
 	_, err := dual.Get(context.Background(), "k")
 	if !errors.Is(err, sentinel) {
@@ -197,7 +197,7 @@ func TestDualMappingStore_PutWritesBoth(t *testing.T) {
 	pg := newFakeMappingStore()
 	kv := newFakeMappingStore()
 	dual := newDualMappingStore(pg, kv, discardLogger())
-	defer dual.Close()
+	defer func() { _ = dual.Close() }()
 
 	rev, err := dual.Put(context.Background(), "k", []byte("v"))
 	if err != nil {
@@ -225,7 +225,7 @@ func TestDualMappingStore_PutFailsWhenKVFails(t *testing.T) {
 	sentinel := errors.New("kv boom")
 	kv.nextPutErr = sentinel
 	dual := newDualMappingStore(pg, kv, discardLogger())
-	defer dual.Close()
+	defer func() { _ = dual.Close() }()
 
 	_, err := dual.Put(context.Background(), "k", []byte("v"))
 	if !errors.Is(err, sentinel) {
@@ -244,7 +244,7 @@ func TestDualMappingStore_PutSucceedsWhenPGFails(t *testing.T) {
 	kv := newFakeMappingStore()
 	pg.nextPutErr = errors.New("pg boom")
 	dual := newDualMappingStore(pg, kv, discardLogger())
-	defer dual.Close()
+	defer func() { _ = dual.Close() }()
 
 	// Per the dual-store doc: KV succeeded so the operation is considered
 	// successful. The mirror failure runs in the background worker and
@@ -265,7 +265,7 @@ func TestDualMappingStore_DeleteAbortsOnKVFailure(t *testing.T) {
 	sentinel := errors.New("kv boom")
 	kv.nextDeleteErr = sentinel
 	dual := newDualMappingStore(pg, kv, discardLogger())
-	defer dual.Close()
+	defer func() { _ = dual.Close() }()
 
 	err := dual.Delete(context.Background(), "k")
 	if !errors.Is(err, sentinel) {
@@ -285,7 +285,7 @@ func TestDualMappingStore_DeleteSucceedsWhenPGFails(t *testing.T) {
 	kv := newFakeMappingStore()
 	pg.nextDeleteErr = errors.New("pg boom")
 	dual := newDualMappingStore(pg, kv, discardLogger())
-	defer dual.Close()
+	defer func() { _ = dual.Close() }()
 
 	// KV succeeded → caller sees success. Reads come from KV so the
 	// stale PG row is invisible to callers; the diff scan will catch
@@ -303,7 +303,7 @@ func TestDualMappingStore_DeleteBothIdempotent(t *testing.T) {
 	pg := newFakeMappingStore()
 	kv := newFakeMappingStore()
 	dual := newDualMappingStore(pg, kv, discardLogger())
-	defer dual.Close()
+	defer func() { _ = dual.Close() }()
 
 	if err := dual.Delete(context.Background(), "missing"); err != nil {
 		t.Errorf("Delete on absent key returned %v; want nil (idempotent)", err)
@@ -328,7 +328,7 @@ func TestDualMappingStore_CreateOverwritesPGOnErrKeyExists(t *testing.T) {
 	// Force the Create call to hit ErrKeyExists (fakeMappingStore.Create
 	// already returns ErrKeyExists on a pre-existing key).
 	dual := newDualMappingStore(pg, kv, discardLogger())
-	defer dual.Close()
+	defer func() { _ = dual.Close() }()
 
 	if _, err := dual.Create(context.Background(), "k", []byte("fresh")); err != nil {
 		t.Fatalf("Create returned %v; want nil (KV succeeded, PG overwritten)", err)
@@ -358,7 +358,7 @@ func TestDualMappingStore_SerialisesPGMirrorPerKey(t *testing.T) {
 	pg := newFakeMappingStore()
 	kv := newFakeMappingStore()
 	dual := newDualMappingStore(pg, kv, discardLogger())
-	defer dual.Close()
+	defer func() { _ = dual.Close() }()
 
 	const N = 50
 	var wg sync.WaitGroup
@@ -407,7 +407,7 @@ func TestDualMappingStore_MirrorHonoursTimeout(t *testing.T) {
 	kv := newFakeMappingStore()
 	dual := newDualMappingStore(pg, kv, discardLogger())
 	dual.mirrorTimeout = 20 * time.Millisecond
-	defer dual.Close()
+	defer func() { _ = dual.Close() }()
 
 	// Caller path: KV write + enqueue, should be near-instantaneous
 	// regardless of PG being hung.
@@ -611,7 +611,7 @@ func TestDualMappingStore_RegistryDoesNotLeak(t *testing.T) {
 	pg := newFakeMappingStore()
 	kv := newFakeMappingStore()
 	dual := newDualMappingStore(pg, kv, discardLogger())
-	defer dual.Close()
+	defer func() { _ = dual.Close() }()
 
 	const N = 500
 	for i := 0; i < N; i++ {

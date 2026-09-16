@@ -84,7 +84,7 @@ func createProject(ctx context.Context, payload *projectservice.CreateProjectPay
 // mutation" so they clean the marker up. If neither base nor settings changed
 // the function returns (false, nil) so callers can distinguish a genuine no-op
 // from a successful mutating call.
-func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjectBasePayload, settingsPayload *projectservice.UpdateProjectSettingsPayload, v1Principal string) (bool, error) {
+func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjectBasePayload, settingsPayload *projectservice.UpdateProjectSettingsPayload, clears staffClearFlags, v1Principal string) (bool, error) {
 	// Fetch current project base.
 	currentBase, baseETag, err := fetchProjectBase(ctx, *basePayload.UID)
 	if err != nil {
@@ -139,8 +139,11 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 		baseMutated = true
 	}
 
-	// Handle settings update if provided.
-	if settingsPayload != nil && (settingsPayload.MissionStatement != nil || settingsPayload.AnnouncementDate != nil || settingsPayload.ExecutiveDirector != nil || settingsPayload.ProgramManager != nil || settingsPayload.OpportunityOwner != nil) {
+	// Handle settings update if provided. A set staff clear flag must also
+	// pass the gate: on a deliberate v1 clear the payload staff field stays
+	// nil, so the non-nil-field check alone would skip the write and the
+	// full-replace PUT would never perform the removal.
+	if settingsPayload != nil && (settingsPayload.MissionStatement != nil || settingsPayload.AnnouncementDate != nil || settingsPayload.ExecutiveDirector != nil || settingsPayload.ProgramManager != nil || settingsPayload.OpportunityOwner != nil || clears.ExecutiveDirector || clears.ProgramManager) {
 		// Fetch current project settings.
 		currentSettings, settingsETag, err := fetchProjectSettings(ctx, *basePayload.UID)
 		if err != nil {
@@ -159,24 +162,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 		}
 
 		// Check if settings have changes.
-		settingsChanged := false
-		if settingsPayload.MissionStatement != nil && stringPtrToString(currentSettings.MissionStatement) != stringPtrToString(settingsPayload.MissionStatement) {
-			settingsChanged = true
-		}
-		if settingsPayload.AnnouncementDate != nil && stringPtrToString(currentSettings.AnnouncementDate) != stringPtrToString(settingsPayload.AnnouncementDate) {
-			settingsChanged = true
-		}
-		if settingsPayload.ExecutiveDirector != nil && !userInfoPtrsEqual(settingsPayload.ExecutiveDirector, currentSettings.ExecutiveDirector) {
-			settingsChanged = true
-		}
-		if settingsPayload.ProgramManager != nil && !userInfoPtrsEqual(settingsPayload.ProgramManager, currentSettings.ProgramManager) {
-			settingsChanged = true
-		}
-		if settingsPayload.OpportunityOwner != nil && !userInfoPtrsEqual(settingsPayload.OpportunityOwner, currentSettings.OpportunityOwner) {
-			settingsChanged = true
-		}
-
-		if settingsChanged {
+		if projectSettingsUpdateNeeded(settingsPayload, currentSettings, clears) {
 			token, err := generateCachedJWTToken(ctx, projectServiceAudience, v1Principal)
 			if err != nil {
 				return baseMutated, fmt.Errorf("failed to generate token for settings update: %w", err)
@@ -193,6 +179,38 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 	}
 
 	return baseMutated, nil
+}
+
+// projectSettingsUpdateNeeded reports whether issuing UpdateProjectSettings
+// would change the stored settings document. A nil payload field means "not
+// being updated" and is not compared — except on a staff clear: a set clear
+// flag means v1 emptied the role and the payload field is deliberately nil so
+// the full-replace PUT clears it, which is a change iff v2 currently has
+// someone in the role (userInfoPtrsEqual's nil-≡-all-empty rule makes
+// clearing an already-empty role a no-op).
+func projectSettingsUpdateNeeded(settingsPayload *projectservice.UpdateProjectSettingsPayload, currentSettings *projectservice.ProjectSettings, clears staffClearFlags) bool {
+	if settingsPayload.MissionStatement != nil && stringPtrToString(currentSettings.MissionStatement) != stringPtrToString(settingsPayload.MissionStatement) {
+		return true
+	}
+	if settingsPayload.AnnouncementDate != nil && stringPtrToString(currentSettings.AnnouncementDate) != stringPtrToString(settingsPayload.AnnouncementDate) {
+		return true
+	}
+	if settingsPayload.ExecutiveDirector != nil && !userInfoPtrsEqual(settingsPayload.ExecutiveDirector, currentSettings.ExecutiveDirector) {
+		return true
+	}
+	if settingsPayload.ProgramManager != nil && !userInfoPtrsEqual(settingsPayload.ProgramManager, currentSettings.ProgramManager) {
+		return true
+	}
+	if settingsPayload.OpportunityOwner != nil && !userInfoPtrsEqual(settingsPayload.OpportunityOwner, currentSettings.OpportunityOwner) {
+		return true
+	}
+	if clears.ExecutiveDirector && !userInfoPtrsEqual(nil, currentSettings.ExecutiveDirector) {
+		return true
+	}
+	if clears.ProgramManager && !userInfoPtrsEqual(nil, currentSettings.ProgramManager) {
+		return true
+	}
+	return false
 }
 
 // deleteProject deletes a project by UID.
