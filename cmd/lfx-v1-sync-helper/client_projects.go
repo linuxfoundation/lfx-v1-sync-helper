@@ -143,7 +143,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 	// pass the gate: on a deliberate v1 clear the payload staff field stays
 	// nil, so the non-nil-field check alone would skip the write and the
 	// full-replace PUT would never perform the removal.
-	if settingsPayload != nil && (settingsPayload.MissionStatement != nil || settingsPayload.AnnouncementDate != nil || settingsPayload.ExecutiveDirector != nil || settingsPayload.ProgramManager != nil || settingsPayload.OpportunityOwner != nil || clears.ExecutiveDirector || clears.ProgramManager) {
+	if settingsPayload != nil && projectSettingsWriteMayBeNeeded(settingsPayload, clears) {
 		// Fetch current project settings.
 		currentSettings, settingsETag, err := fetchProjectSettings(ctx, *basePayload.UID)
 		if err != nil {
@@ -175,6 +175,24 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 	return baseMutated, nil
 }
 
+// projectSettingsWriteMayBeNeeded reports whether the settings payload or the
+// staff clear flags could require the settings write — i.e. whether it is
+// worth fetching the current settings document at all. This gate is the
+// GH-179 fix: a set clear flag must pass even when every payload field is
+// nil, because on a deliberate v1 clear the staff field stays nil so the
+// full-replace PUT can clear the role. Keep its clear-flag terms in sync with
+// hydrateSettingsPayload and projectSettingsUpdateNeeded.
+func projectSettingsWriteMayBeNeeded(settingsPayload *projectservice.UpdateProjectSettingsPayload, clears staffClearFlags) bool {
+	return settingsPayload.MissionStatement != nil ||
+		settingsPayload.AnnouncementDate != nil ||
+		settingsPayload.ExecutiveDirector != nil ||
+		settingsPayload.ProgramManager != nil ||
+		settingsPayload.OpportunityOwner != nil ||
+		clears.ExecutiveDirector ||
+		clears.ProgramManager ||
+		clears.OpportunityOwner
+}
+
 // hydrateSettingsPayload round-trips every field the update is not changing
 // from the current settings document. UpdateProjectSettings is a full-replace
 // PUT, so a nil field would otherwise be wiped in v2 even though nil means
@@ -195,7 +213,7 @@ func hydrateSettingsPayload(settingsPayload *projectservice.UpdateProjectSetting
 	if settingsPayload.ProgramManager == nil && !clears.ProgramManager {
 		settingsPayload.ProgramManager = currentSettings.ProgramManager
 	}
-	if settingsPayload.OpportunityOwner == nil {
+	if settingsPayload.OpportunityOwner == nil && !clears.OpportunityOwner {
 		settingsPayload.OpportunityOwner = currentSettings.OpportunityOwner
 	}
 	if settingsPayload.Writers == nil {
@@ -210,12 +228,16 @@ func hydrateSettingsPayload(settingsPayload *projectservice.UpdateProjectSetting
 }
 
 // projectSettingsUpdateNeeded reports whether issuing UpdateProjectSettings
-// would change the stored settings document. A nil payload field means "not
-// being updated" and is not compared — except on a staff clear: a set clear
-// flag means v1 emptied the role and the payload field is deliberately nil so
-// the full-replace PUT clears it, which is a change iff v2 currently has
-// someone in the role (userInfoPtrsEqual's nil-≡-all-empty rule makes
-// clearing an already-empty role a no-op).
+// would change the scalar and staff fields of the stored settings document.
+// Writers, MeetingCoordinators, and Auditors are deliberately not compared:
+// the v1→v2 pipeline never sets them, and by the time this runs
+// hydrateSettingsPayload has already round-tripped them from currentSettings,
+// so they always compare equal — do not call this on a non-hydrated payload.
+// A nil payload field means "not being updated" and is not compared — except
+// on a staff clear: a set clear flag means v1 emptied the role and the
+// payload field is deliberately nil so the full-replace PUT clears it, which
+// is a change iff v2 currently has someone in the role (userInfoPtrsEqual's
+// nil-≡-all-empty rule makes clearing an already-empty role a no-op).
 func projectSettingsUpdateNeeded(settingsPayload *projectservice.UpdateProjectSettingsPayload, currentSettings *projectservice.ProjectSettings, clears staffClearFlags) bool {
 	if settingsPayload.MissionStatement != nil && stringPtrToString(currentSettings.MissionStatement) != stringPtrToString(settingsPayload.MissionStatement) {
 		return true
@@ -236,6 +258,9 @@ func projectSettingsUpdateNeeded(settingsPayload *projectservice.UpdateProjectSe
 		return true
 	}
 	if clears.ProgramManager && !userInfoPtrsEqual(nil, currentSettings.ProgramManager) {
+		return true
+	}
+	if clears.OpportunityOwner && !userInfoPtrsEqual(nil, currentSettings.OpportunityOwner) {
 		return true
 	}
 	return false

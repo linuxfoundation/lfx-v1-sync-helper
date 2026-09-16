@@ -9,6 +9,77 @@ import (
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
 )
 
+func TestProjectSettingsWriteMayBeNeeded(t *testing.T) {
+	jdoe := &projectservice.UserInfo{Username: stringToStringPtr("jdoe"), Name: stringToStringPtr("J Doe")}
+
+	tests := []struct {
+		name    string
+		payload *projectservice.UpdateProjectSettingsPayload
+		clears  staffClearFlags
+		want    bool
+	}{
+		// The GH-179 regression guard: a staff clear with an otherwise all-nil
+		// payload must still pass the gate so the full-replace PUT can clear
+		// the role. Dropping a clear term from the predicate fails these.
+		{
+			name:    "ED clear flag alone passes",
+			payload: &projectservice.UpdateProjectSettingsPayload{},
+			clears:  staffClearFlags{ExecutiveDirector: true},
+			want:    true,
+		},
+		{
+			name:    "PM clear flag alone passes",
+			payload: &projectservice.UpdateProjectSettingsPayload{},
+			clears:  staffClearFlags{ProgramManager: true},
+			want:    true,
+		},
+		{
+			name:    "OO clear flag alone passes",
+			payload: &projectservice.UpdateProjectSettingsPayload{},
+			clears:  staffClearFlags{OpportunityOwner: true},
+			want:    true,
+		},
+		{
+			name:    "no flags and all-nil payload skips the write",
+			payload: &projectservice.UpdateProjectSettingsPayload{},
+			want:    false,
+		},
+		{
+			name:    "mission statement passes",
+			payload: &projectservice.UpdateProjectSettingsPayload{MissionStatement: stringToStringPtr("m")},
+			want:    true,
+		},
+		{
+			name:    "announcement date passes",
+			payload: &projectservice.UpdateProjectSettingsPayload{AnnouncementDate: stringToStringPtr("2026-01-01")},
+			want:    true,
+		},
+		{
+			name:    "executive director passes",
+			payload: &projectservice.UpdateProjectSettingsPayload{ExecutiveDirector: jdoe},
+			want:    true,
+		},
+		{
+			name:    "program manager passes",
+			payload: &projectservice.UpdateProjectSettingsPayload{ProgramManager: jdoe},
+			want:    true,
+		},
+		{
+			name:    "opportunity owner passes",
+			payload: &projectservice.UpdateProjectSettingsPayload{OpportunityOwner: jdoe},
+			want:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := projectSettingsWriteMayBeNeeded(tt.payload, tt.clears); got != tt.want {
+				t.Errorf("projectSettingsWriteMayBeNeeded() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProjectSettingsUpdateNeeded(t *testing.T) {
 	jdoe := &projectservice.UserInfo{Username: stringToStringPtr("jdoe"), Name: stringToStringPtr("J Doe")}
 	jdoeDup := &projectservice.UserInfo{Username: stringToStringPtr("jdoe"), Name: stringToStringPtr("J Doe")}
@@ -48,6 +119,20 @@ func TestProjectSettingsUpdateNeeded(t *testing.T) {
 			current: &projectservice.ProjectSettings{ProgramManager: asmith},
 			clears:  staffClearFlags{ProgramManager: true},
 			want:    true,
+		},
+		{
+			name:    "OO clear pending and current role populated",
+			payload: &projectservice.UpdateProjectSettingsPayload{},
+			current: &projectservice.ProjectSettings{OpportunityOwner: jdoe},
+			clears:  staffClearFlags{OpportunityOwner: true},
+			want:    true,
+		},
+		{
+			name:    "OO clear pending and current role already empty",
+			payload: &projectservice.UpdateProjectSettingsPayload{},
+			current: &projectservice.ProjectSettings{},
+			clears:  staffClearFlags{OpportunityOwner: true},
+			want:    false,
 		},
 		{
 			name:    "staff reassignment differs from current",
@@ -138,6 +223,7 @@ func TestHydrateSettingsPayload(t *testing.T) {
 		// want nil = field must stay nil after hydration (deliberate clear).
 		wantEDNil bool
 		wantPMNil bool
+		wantOONil bool
 	}{
 		{
 			name:    "all-nil payload round-trips every current field",
@@ -159,12 +245,20 @@ func TestHydrateSettingsPayload(t *testing.T) {
 			wantEDNil: true,
 		},
 		{
-			name:      "both staff clears stay nil",
+			name:      "all three staff clears stay nil",
 			payload:   &projectservice.UpdateProjectSettingsPayload{},
 			current:   fullCurrent(),
-			clears:    staffClearFlags{ExecutiveDirector: true, ProgramManager: true},
+			clears:    staffClearFlags{ExecutiveDirector: true, ProgramManager: true, OpportunityOwner: true},
 			wantEDNil: true,
 			wantPMNil: true,
+			wantOONil: true,
+		},
+		{
+			name:      "OO clear stays nil while ED and PM hydrate",
+			payload:   &projectservice.UpdateProjectSettingsPayload{},
+			current:   fullCurrent(),
+			clears:    staffClearFlags{OpportunityOwner: true},
+			wantOONil: true,
 		},
 		{
 			name:    "empty current leaves payload fields nil",
@@ -208,7 +302,11 @@ func TestHydrateSettingsPayload(t *testing.T) {
 			} else if !userInfoPtrsEqual(tt.payload.ProgramManager, tt.current.ProgramManager) {
 				t.Errorf("ProgramManager not hydrated from current")
 			}
-			if !userInfoPtrsEqual(tt.payload.OpportunityOwner, tt.current.OpportunityOwner) {
+			if tt.wantOONil {
+				if tt.payload.OpportunityOwner != nil {
+					t.Errorf("OpportunityOwner = %v, want nil (deliberate clear)", tt.payload.OpportunityOwner)
+				}
+			} else if !userInfoPtrsEqual(tt.payload.OpportunityOwner, tt.current.OpportunityOwner) {
 				t.Errorf("OpportunityOwner not hydrated from current")
 			}
 			if !userInfoSlicesEqual(tt.payload.Writers, tt.current.Writers) {

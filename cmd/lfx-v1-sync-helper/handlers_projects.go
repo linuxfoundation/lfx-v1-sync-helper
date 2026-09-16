@@ -650,6 +650,7 @@ func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string,
 type staffClearFlags struct {
 	ExecutiveDirector bool
 	ProgramManager    bool
+	OpportunityOwner  bool
 }
 
 // v1StaffFieldCleared reports whether a v1 staff SFID field is absent or
@@ -696,6 +697,9 @@ func mapV1DataToProjectUpdateSettingsPayload(ctx context.Context, projectUID str
 		clears.ProgramManager = true
 	}
 	payload.OpportunityOwner = lookupOpportunityOwner(ctx, v1Data)
+	if payload.OpportunityOwner == nil && v1StaffFieldCleared(v1Data, "opportunity_owner__c") {
+		clears.OpportunityOwner = true
+	}
 
 	return payload, clears, nil
 }

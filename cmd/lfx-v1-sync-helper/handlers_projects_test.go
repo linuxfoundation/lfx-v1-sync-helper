@@ -9,8 +9,9 @@ import (
 )
 
 // No test case populates a staff SFID with a resolvable value: lookupStaffUser
-// would reach the uninitialized v1DB handle and panic, so a passing run also
-// proves the empty-field path performs no user lookup.
+// (and lookupOpportunityOwner's lookupB2BUser) would reach the uninitialized
+// v1DB handle and panic, so a passing run also proves the empty-field path
+// performs no user lookup.
 func TestMapV1DataToProjectUpdateSettingsPayload_StaffClearFlags(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -18,9 +19,9 @@ func TestMapV1DataToProjectUpdateSettingsPayload_StaffClearFlags(t *testing.T) {
 		wantClears staffClearFlags
 	}{
 		{
-			name:       "both staff fields absent",
+			name:       "all staff fields absent",
 			v1Data:     map[string]any{},
-			wantClears: staffClearFlags{ExecutiveDirector: true, ProgramManager: true},
+			wantClears: staffClearFlags{ExecutiveDirector: true, ProgramManager: true, OpportunityOwner: true},
 		},
 		{
 			name: "empty strings",
@@ -28,7 +29,7 @@ func TestMapV1DataToProjectUpdateSettingsPayload_StaffClearFlags(t *testing.T) {
 				"executive_director__c": "",
 				"program_manager__c":    "",
 			},
-			wantClears: staffClearFlags{ExecutiveDirector: true, ProgramManager: true},
+			wantClears: staffClearFlags{ExecutiveDirector: true, ProgramManager: true, OpportunityOwner: true},
 		},
 		{
 			name: "whitespace-only strings",
@@ -36,7 +37,7 @@ func TestMapV1DataToProjectUpdateSettingsPayload_StaffClearFlags(t *testing.T) {
 				"executive_director__c": "   ",
 				"program_manager__c":    "\t\n ",
 			},
-			wantClears: staffClearFlags{ExecutiveDirector: true, ProgramManager: true},
+			wantClears: staffClearFlags{ExecutiveDirector: true, ProgramManager: true, OpportunityOwner: true},
 		},
 		{
 			// Mirrors lookupStaffUser's `!ok || sfid == ""` semantics: a
@@ -46,7 +47,7 @@ func TestMapV1DataToProjectUpdateSettingsPayload_StaffClearFlags(t *testing.T) {
 				"executive_director__c": 123,
 				"program_manager__c":    nil,
 			},
-			wantClears: staffClearFlags{ExecutiveDirector: true, ProgramManager: true},
+			wantClears: staffClearFlags{ExecutiveDirector: true, ProgramManager: true, OpportunityOwner: true},
 		},
 	}
 
@@ -64,6 +65,9 @@ func TestMapV1DataToProjectUpdateSettingsPayload_StaffClearFlags(t *testing.T) {
 			}
 			if payload.ProgramManager != nil {
 				t.Errorf("payload.ProgramManager = %+v, want nil on the clear path", payload.ProgramManager)
+			}
+			if payload.OpportunityOwner != nil {
+				t.Errorf("payload.OpportunityOwner = %+v, want nil on the clear path", payload.OpportunityOwner)
 			}
 			if payload.UID == nil || *payload.UID != "project-uid" {
 				t.Errorf("payload.UID = %v, want %q", payload.UID, "project-uid")
