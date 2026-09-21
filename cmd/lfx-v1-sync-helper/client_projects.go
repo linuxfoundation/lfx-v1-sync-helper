@@ -23,7 +23,7 @@ var fetchProjectBase = func(ctx context.Context, projectUID string) (*projectser
 		UID:         &projectUID,
 	})
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to fetch project base: %w", err)
+		return nil, "", wrapProjectServiceError("failed to fetch project base", err)
 	}
 
 	etag := ""
@@ -46,7 +46,7 @@ func fetchProjectSettings(ctx context.Context, projectUID string) (*projectservi
 		UID:         &projectUID,
 	})
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to fetch project settings: %w", err)
+		return nil, "", wrapProjectServiceError("failed to fetch project settings", err)
 	}
 
 	etag := ""
@@ -68,7 +68,7 @@ func createProject(ctx context.Context, payload *projectservice.CreateProjectPay
 
 	result, err := projectClient.CreateProject(ctx, payload)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create project: %w", err)
+		return nil, wrapProjectServiceError("failed to create project", err)
 	}
 
 	return result, nil
@@ -134,7 +134,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 
 		_, err = projectClient.UpdateProjectBase(ctx, basePayload)
 		if err != nil {
-			return false, fmt.Errorf("failed to update project base: %w", err)
+			return false, wrapProjectServiceError("failed to update project base", err)
 		}
 		baseMutated = true
 	}
@@ -166,7 +166,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 
 			_, err = projectClient.UpdateProjectSettings(ctx, settingsPayload)
 			if err != nil {
-				return baseMutated, fmt.Errorf("failed to update project settings: %w", err)
+				return baseMutated, wrapProjectServiceError("failed to update project settings", err)
 			}
 		}
 	}
@@ -270,7 +270,7 @@ func deleteProject(ctx context.Context, projectUID string, v1Principal string) e
 	// Fetch current project base to get etag.
 	_, etag, err := fetchProjectBase(ctx, projectUID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch project base for deletion: %w", err)
+		return wrapProjectServiceError("failed to fetch project base for deletion", err)
 	}
 
 	token, err := generateCachedJWTToken(ctx, projectServiceAudience, v1Principal)
@@ -286,7 +286,7 @@ func deleteProject(ctx context.Context, projectUID string, v1Principal string) e
 
 	err = projectClient.DeleteProject(ctx, payload)
 	if err != nil {
-		return fmt.Errorf("failed to delete project: %w", err)
+		return wrapProjectServiceError("failed to delete project", err)
 	}
 
 	return nil
