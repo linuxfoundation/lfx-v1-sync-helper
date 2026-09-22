@@ -4,11 +4,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
@@ -381,29 +383,37 @@ func TestCommitteeMemberDeleteDispatcher_ConsumesMarkerOnTombstonedMapping(t *te
 }
 
 // TestCommitteeMemberDeleteDispatcher_TombstonedMappingNoMarker pins the
-// fix for the v2-originated delete race: when handleCommitteeMemberDelete
-// tombstones committee_member.uid.<uid> before the indexer event arrives,
-// and there is NO v1_to_v2 pending marker (because the delete originated
-// in v2, not v1), processCommitteeMemberIndexingEvent must return nil
-// cleanly without treating !del as a malformed mapping.
+// fix for re-delivered deleted events: when the reverse mapping is already
+// tombstoned and there is NO v1_to_v2 pending marker (already consumed on
+// the first delivery, or absent because the delete originated in v2),
+// processCommitteeMemberIndexingEvent must return nil cleanly and log at
+// Info level — not fall through to the "unexpected format" Warn path.
 //
 // This is the source of the "committee member reverse mapping has
 // unexpected format, skipping" warnings seen in production with
 // mapping_value: '!del' (linuxfoundation/lfx-self-serve-ops#24).
 // Regression guard: removing the isTombstonedMapping guard after the
-// reverse-mapping lookup in the deleted branch restores the warn path.
+// reverse-mapping lookup in the deleted branch causes this test to fail
+// because the Warn message appears and the Info tombstone message does not.
 func TestCommitteeMemberDeleteDispatcher_TombstonedMappingNoMarker(t *testing.T) {
 	fake := setupHandlerMarkerTest(t)
 
 	const uid = "member-uid-v2-delete"
 
-	// No pending marker — this delete originated in v2, not v1.
+	// No pending marker — already consumed on a prior delivery (or absent
+	// because the delete originated in v2).
 
-	// Seed the reverse mapping as tombstoned (as handleCommitteeMemberDelete
-	// would leave it after the v2 DELETE succeeded).
+	// Seed the reverse mapping as tombstoned.
 	if _, err := fake.Put(context.Background(), "committee_member.uid."+uid, []byte(tombstoneMarker)); err != nil {
 		t.Fatalf("seed tombstoned reverse mapping: %v", err)
 	}
+
+	// Capture log output for this call by replacing the package logger with
+	// a text handler writing to a buffer, then restoring it after.
+	var buf bytes.Buffer
+	origLogger := logger
+	logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	t.Cleanup(func() { logger = origLogger })
 
 	event := indexingEvent{
 		ObjectID:   uid,
@@ -415,9 +425,18 @@ func TestCommitteeMemberDeleteDispatcher_TombstonedMappingNoMarker(t *testing.T)
 		t.Fatalf("marshal event: %v", err)
 	}
 
-	// Must return nil (not an error and not a spurious warn).
 	if err := processCommitteeMemberIndexingEvent(context.Background(), "lfx.committee_member.deleted", payload); err != nil {
 		t.Fatalf("processCommitteeMemberIndexingEvent: unexpected error = %v", err)
+	}
+
+	logs := buf.String()
+	// The tombstone-specific Info message must appear.
+	if !strings.Contains(logs, "already tombstoned") {
+		t.Errorf("expected tombstone Info log, got:\n%s", logs)
+	}
+	// The "unexpected format" Warn must NOT appear — that's the regression we're guarding.
+	if strings.Contains(logs, "unexpected format") {
+		t.Errorf("unexpected-format Warn fired for a tombstoned mapping (regression):\n%s", logs)
 	}
 }
 
@@ -425,13 +444,12 @@ func TestCommitteeMemberDeleteDispatcher_TombstonedMappingNoMarker(t *testing.T)
 // fix for the updated-branch tombstone guard: when a committee_member
 // "updated" indexer event arrives but the reverse mapping is already
 // tombstoned (!del), processCommitteeMemberIndexingEvent must return nil
-// without logging "unexpected format" and without trying to sync to v1.
+// and log at Info level — not fall through to the "unexpected format" Warn.
 //
-// Regression guard: removing the isTombstonedMapping guard before the
-// parseCommitteeMemberReverseMapping call in the updated branch restores
-// the warn path and this test still passes (nil return), but the warning
-// continues appearing in production — so this test alone is insufficient;
-// it pairs with the log-level assertion documented in the issue.
+// Regression guard: removing the isTombstonedMapping guard before
+// parseCommitteeMemberReverseMapping in the updated branch causes this
+// test to fail because the Warn message appears and the Info tombstone
+// message does not.
 func TestCommitteeMemberUpdateDispatcher_TombstonedMappingSkipsSync(t *testing.T) {
 	fake := setupHandlerMarkerTest(t)
 
@@ -441,6 +459,12 @@ func TestCommitteeMemberUpdateDispatcher_TombstonedMappingSkipsSync(t *testing.T
 	if _, err := fake.Put(context.Background(), "committee_member.uid."+uid, []byte(tombstoneMarker)); err != nil {
 		t.Fatalf("seed tombstoned reverse mapping: %v", err)
 	}
+
+	// Capture log output for this call.
+	var buf bytes.Buffer
+	origLogger := logger
+	logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	t.Cleanup(func() { logger = origLogger })
 
 	event := indexingEvent{
 		ObjectID:   uid,
@@ -452,8 +476,17 @@ func TestCommitteeMemberUpdateDispatcher_TombstonedMappingSkipsSync(t *testing.T
 		t.Fatalf("marshal event: %v", err)
 	}
 
-	// Must return nil — tombstoned member, nothing to sync.
 	if err := processCommitteeMemberIndexingEvent(context.Background(), "lfx.committee_member.updated", payload); err != nil {
 		t.Fatalf("processCommitteeMemberIndexingEvent: unexpected error = %v", err)
+	}
+
+	logs := buf.String()
+	// The tombstone-specific Info message must appear.
+	if !strings.Contains(logs, "tombstoned") {
+		t.Errorf("expected tombstone Info log, got:\n%s", logs)
+	}
+	// The "unexpected format" Warn must NOT appear.
+	if strings.Contains(logs, "unexpected format") {
+		t.Errorf("unexpected-format Warn fired for a tombstoned mapping (regression):\n%s", logs)
 	}
 }
