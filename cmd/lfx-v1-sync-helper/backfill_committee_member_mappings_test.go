@@ -189,6 +189,14 @@ func TestParseCommitteeMemberReverseMapping(t *testing.T) {
 			s:      "not-a-mapping",
 			wantOK: false,
 		},
+		{
+			// Tombstone values must return ok=false; callers are responsible
+			// for checking isTombstonedMapping before calling this function
+			// (see processCommitteeMemberIndexingEvent).
+			name:   "tombstone marker !del",
+			s:      tombstoneMarker,
+			wantOK: false,
+		},
 	}
 
 	for _, tt := range tests {
