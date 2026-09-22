@@ -241,7 +241,7 @@ func backfillProjectACSGrants(ctx context.Context, sfid, projectUID string, dryR
 		MeetingCoordinators: mergedCoordinators,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to update project settings: %w", err)
+		return wrapProjectServiceError("failed to update project settings", err)
 	}
 
 	logger.With(

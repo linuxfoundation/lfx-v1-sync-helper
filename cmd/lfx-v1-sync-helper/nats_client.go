@@ -18,6 +18,44 @@ import (
 // the two differently (e.g. --check-slugs) can do so with errors.Is.
 var errSlugNotFound = errors.New("no project found for slug")
 
+// parseSlugResponse decodes the raw NATS reply body from
+// lfx.projects-api.slug_to_uid for the given slug.
+// Project-service replies with a plain UID on success, or
+// {"error":"<code>",...} on failure.
+//
+// Error classification:
+//   - {"error":"not_found",...} → errSlugNotFound (confirmed absence).
+//   - any other {"error":"<code>",...} → non-not-found error (transient/internal).
+//   - empty / nil body → non-not-found error (per the coordinated contract,
+//     only {"error":"not_found"} proves absence; an absent body is ambiguous).
+//   - non-empty body that is not a valid UUID → non-not-found error (malformed).
+//   - valid UUID body → (uid, nil).
+func parseSlugResponse(data []byte, slug string) (string, error) {
+	var rpcEnv struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(data, &rpcEnv) == nil && rpcEnv.Error != "" {
+		if rpcEnv.Error == "not_found" {
+			return "", fmt.Errorf("%w: slug %s", errSlugNotFound, slug)
+		}
+		return "", fmt.Errorf("project-service error for slug %s: %s", slug, rpcEnv.Error)
+	}
+
+	projectUID := strings.TrimSpace(string(data))
+	if projectUID == "" {
+		// An empty body is not a confirmed absence: only {"error":"not_found"}
+		// proves absence. Treat a missing body as an unrecoverable error so
+		// --check-slugs does not permit a duplicate create on a transport failure.
+		return "", fmt.Errorf("empty reply for slug %s: lookup result inconclusive", slug)
+	}
+	// Validate: the success payload must be a UUID. A JSON object without an
+	// "error" key (or any other non-UUID body) is not a valid UID.
+	if !isUUID(projectUID) {
+		return "", fmt.Errorf("unexpected non-UUID reply for slug %s: %q", slug, projectUID)
+	}
+	return projectUID, nil
+}
+
 // getProjectUIDBySlug looks up a v2 project UID from a project slug via NATS.
 // Can be used to lookup any project by its slug (e.g., "ROOT", "kubernetes", "linux", etc.).
 // Returns errSlugNotFound (wrapped) when the slug legitimately resolves to
@@ -35,14 +73,71 @@ func getProjectUIDBySlug(ctx context.Context, slug string) (string, error) {
 		return "", fmt.Errorf("failed to request project UID for slug %s: %w", slug, err)
 	}
 
-	// The response should be the UUID string.
-	projectUID := strings.TrimSpace(string(resp.Data))
-	if projectUID == "" {
-		return "", fmt.Errorf("%w: slug %s", errSlugNotFound, slug)
+	projectUID, err := parseSlugResponse(resp.Data, slug)
+	if err != nil {
+		return "", err
 	}
 
 	logger.With("project_uid", projectUID).With("slug", slug).DebugContext(ctx, "successfully retrieved project UID")
 	return projectUID, nil
+}
+
+// errCommitteeNameNotFound distinguishes a confirmed "no committee with this
+// project UID + name" response from a request/transport failure, so callers
+// that need to treat the two differently (e.g. --check-committee-names) can
+// do so with errors.Is.
+var errCommitteeNameNotFound = errors.New("no committee found for project UID and name")
+
+// committeeNameToUIDRequest mirrors lfx-v2-committee-service's
+// pkg/api.CommitteeNameToUIDRequest — the request payload for
+// lfx.committee-api.name_to_uid.
+type committeeNameToUIDRequest struct {
+	ProjectUID string `json:"project_uid"`
+	Name       string `json:"name"`
+}
+
+// committeeNameToUIDResponse mirrors lfx-v2-committee-service's
+// pkg/api.CommitteeNameToUIDResponse. An empty CommitteeUID with an empty
+// Error is a normal (non-error) miss, not a failure.
+type committeeNameToUIDResponse struct {
+	CommitteeUID string `json:"committee_uid,omitempty"`
+	Error        string `json:"error,omitempty"`
+}
+
+// getCommitteeUIDByProjectAndName looks up a v2 committee UID via NATS
+// lfx.committee-api.name_to_uid, given the committee's v2 project UID and
+// name. Returns errCommitteeNameNotFound (wrapped) when the pair legitimately
+// resolves to nothing; any other error indicates the request itself failed.
+func getCommitteeUIDByProjectAndName(ctx context.Context, projectUID, name string) (string, error) {
+	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	payload, err := json.Marshal(committeeNameToUIDRequest{ProjectUID: projectUID, Name: name})
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal name_to_uid request: %w", err)
+	}
+
+	logger.With("project_uid", projectUID).With("name", name).DebugContext(ctx, "requesting committee UID via NATS")
+
+	resp, err := natsConn.RequestWithContext(requestCtx, "lfx.committee-api.name_to_uid", payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to request committee UID for project %s name %s: %w", projectUID, name, err)
+	}
+
+	var result committeeNameToUIDResponse
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return "", fmt.Errorf("failed to decode name_to_uid response: %w", err)
+	}
+	if result.Error != "" {
+		return "", fmt.Errorf("name_to_uid request failed: %s", result.Error)
+	}
+	if result.CommitteeUID == "" {
+		return "", fmt.Errorf("%w: project %s name %s", errCommitteeNameNotFound, projectUID, name)
+	}
+
+	logger.With("committee_uid", result.CommitteeUID).With("project_uid", projectUID).With("name", name).
+		DebugContext(ctx, "successfully retrieved committee UID")
+	return result.CommitteeUID, nil
 }
 
 // authServiceMetadataResponse is the minimal shape of the response from
