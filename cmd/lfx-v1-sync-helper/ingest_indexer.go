@@ -225,6 +225,11 @@ func processCommitteeMemberIndexingEvent(ctx context.Context, subject string, da
 			}
 			return err // transient: KV unavailable
 		}
+		if isTombstonedMapping(entry.Value) {
+			logger.With("member_uid", event.ObjectID).
+				InfoContext(ctx, "committee member reverse mapping is tombstoned, skipping update sync (member previously deleted)")
+			return nil // permanent: member was deleted; nothing to sync
+		}
 		projectSFID, committeeSFID, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(entry.Value))
 		if !ok {
 			logger.With("mapping_value", string(entry.Value), "member_uid", event.ObjectID).
@@ -245,13 +250,12 @@ func processCommitteeMemberIndexingEvent(ctx context.Context, subject string, da
 		// Suppress the indexer echo of our own v1→v2 DELETE at the
 		// EARLIEST point in the dispatch — before the reverse-mapping
 		// lookup. handleCommitteeMemberDelete tombstones
-		// committee_member.uid.<uid> AFTER the v2 API call succeeds;
-		// if that tombstone lands before the indexer event arrives
-		// here, parseCommitteeMemberReverseMapping("!del") returns
-		// ok=false and the branch returns nil without ever calling
-		// syncCommitteeMemberDeleteToV1 — leaking the marker forever
-		// (PR #170 review). Consuming at the dispatch top converges
-		// every tombstone-vs-echo race outcome to a consumed marker.
+		// committee_member.uid.<uid> AFTER the v2 API call succeeds.
+		// For v1-originated deletes, consuming the pending marker here
+		// converges every tombstone-vs-echo race outcome to a consumed
+		// marker (PR #170 review). For v2-originated deletes there is
+		// no pending marker; the tombstone race is instead handled by
+		// the explicit isTombstonedMapping guard below.
 		if consumePendingMarker(ctx, markerV1ToV2, markerOpDelete, markerResourceCommitteeMember, event.ObjectID) {
 			logger.With("member_uid", event.ObjectID).
 				InfoContext(ctx, "skipping indexer echo of v1-originated committee member delete (fresh v1_to_v2 pending marker); mappings already tombstoned by v1→v2 handler")
@@ -267,6 +271,15 @@ func processCommitteeMemberIndexingEvent(ctx context.Context, subject string, da
 				return nil // permanent: member has no v1 counterpart
 			}
 			return err // transient: KV unavailable
+		}
+		// A tombstoned reverse mapping means the v2-originated delete handler already
+		// cleaned up mappings before this indexer event arrived (a race the
+		// consumePendingMarker above only covers for v1-originated deletes). Nothing
+		// remains to sync to v1; consume silently.
+		if isTombstonedMapping(entry.Value) {
+			logger.With("member_uid", event.ObjectID).
+				InfoContext(ctx, "committee member reverse mapping already tombstoned, skipping v2-originated delete sync (mappings already cleaned up)")
+			return nil // permanent: already cleaned up
 		}
 		projectSFID, committeeSFID, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(entry.Value))
 		if !ok {
