@@ -272,13 +272,20 @@ func processCommitteeMemberIndexingEvent(ctx context.Context, subject string, da
 			}
 			return err // transient: KV unavailable
 		}
-		// A tombstoned reverse mapping means a prior delivery of this event (or a
-		// concurrent v1-originated delete whose marker was already consumed above)
-		// already ran syncCommitteeMemberDeleteToV1 and tombstoned the mapping.
-		// There is nothing left to sync to v1; consume this re-delivery silently.
+		// A tombstoned reverse mapping means the member was already cleaned up before
+		// this delivery arrived. Two paths lead here:
+		//   - Re-delivered v2-originated delete: a prior delivery of this same event
+		//     already called syncCommitteeMemberDeleteToV1, which tombstones the
+		//     reverse mapping on success; the pending-marker check above doesn't apply
+		//     (v2-originated deletes never write a marker).
+		//   - Re-delivered v1-originated delete: handleCommitteeMemberDelete tombstoned
+		//     the mapping and wrote the pending marker; the first delivery of this event
+		//     consumed that marker (returned early above), so this re-delivery finds no
+		//     marker and reaches this guard instead.
+		// In both cases nothing remains to sync to v1.
 		if isTombstonedMapping(entry.Value) {
 			logger.With("member_uid", event.ObjectID).
-				InfoContext(ctx, "committee member reverse mapping already tombstoned, skipping delete sync (already cleaned up by a prior delivery or concurrent handler)")
+				InfoContext(ctx, "committee member reverse mapping already tombstoned, skipping re-delivered delete (mappings cleaned up by a prior delivery)")
 			return nil // permanent: already cleaned up
 		}
 		projectSFID, committeeSFID, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(entry.Value))
