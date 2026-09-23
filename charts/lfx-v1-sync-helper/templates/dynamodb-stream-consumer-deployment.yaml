@@ -7,6 +7,8 @@ kind: Deployment
 metadata:
   name: {{ .Chart.Name }}-dynamodb-stream-consumer
   namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
   {{- with .Values.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -21,6 +23,7 @@ spec:
     metadata:
       labels:
         app: {{ .Chart.Name }}
+        app.kubernetes.io/name: {{ .Chart.Name }}
         component: dynamodb-stream-consumer
     spec:
       serviceAccountName: {{ .Values.dynamodbStreamConsumer.serviceAccountName | default (.Values.serviceAccount.name | default .Chart.Name) }}

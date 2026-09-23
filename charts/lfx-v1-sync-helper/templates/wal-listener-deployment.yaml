@@ -9,6 +9,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app: {{ .Chart.Name }}
+    app.kubernetes.io/name: {{ .Chart.Name }}
     component: wal-listener
 spec:
   replicas: {{ .Values.walListener.replicas }}
@@ -20,6 +21,7 @@ spec:
     metadata:
       labels:
         app: {{ .Chart.Name }}
+        app.kubernetes.io/name: {{ .Chart.Name }}
         component: wal-listener
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name | default .Chart.Name }}

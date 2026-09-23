@@ -9,6 +9,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app: {{ .Chart.Name }}
+    app.kubernetes.io/name: {{ .Chart.Name }}
     component: wal-listener
 data:
   config.yml: |
