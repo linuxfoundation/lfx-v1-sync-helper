@@ -55,10 +55,12 @@ func wrapCommitteeServiceError(op string, err error) error {
 // type err carries, falling back to the error's own text and finally to its
 // Go type — so no failure can be logged without something attributable.
 //
-// Unlike the project-service equivalent, the committee-service generated
-// error types carry no Code field, only Message. ForbiddenError is included
-// here even though its own Error() is non-empty, because that constant
-// discards the server's Message.
+// Unlike the project-service equivalent, the six error types handled below
+// carry no Code field, only Message — other generated error types in this
+// package (e.g. the weekly-brief errors) do carry Code, but this wrapper
+// doesn't switch on those. ForbiddenError is included here even though its
+// own Error() is non-empty, because that constant discards the server's
+// Message.
 func committeeServiceErrorDetail(err error) string {
 	var (
 		badRequest  *committeeservice.BadRequestError
