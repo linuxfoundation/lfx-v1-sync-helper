@@ -27,7 +27,7 @@ var fetchCommitteeBase = func(ctx context.Context, committeeUID string) (*commit
 		UID:         &committeeUID,
 	})
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to fetch committee base: %w", err)
+		return nil, "", wrapCommitteeServiceError("failed to fetch committee base", err)
 	}
 
 	etag := ""
@@ -49,7 +49,7 @@ func createCommittee(ctx context.Context, payload *committeeservice.CreateCommit
 
 	result, err := committeeClient.CreateCommittee(ctx, payload)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create committee: %w", err)
+		return nil, wrapCommitteeServiceError("failed to create committee", err)
 	}
 
 	return result, nil
@@ -73,7 +73,7 @@ func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string
 	// Fetch current committee base + ETag.
 	currentBase, baseETag, err := fetchCommitteeBase(ctx, committeeUID)
 	if err != nil {
-		return false, nil, fmt.Errorf("failed to fetch current committee base: %w", err)
+		return false, nil, wrapCommitteeServiceError("failed to fetch current committee base", err)
 	}
 
 	// Build a fully-merged update payload: start from currentBase, overlay V1 fields.
@@ -100,7 +100,7 @@ func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string
 
 	result, err := committeeClient.UpdateCommitteeBase(ctx, payload)
 	if err != nil {
-		return false, nil, fmt.Errorf("failed to update committee base: %w", err)
+		return false, nil, wrapCommitteeServiceError("failed to update committee base", err)
 	}
 
 	return true, result, nil
@@ -155,7 +155,7 @@ func createCommitteeMember(ctx context.Context, payload *committeeservice.Create
 
 	result, err := committeeClient.CreateCommitteeMember(ctx, payload)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create committee member: %w", err)
+		return nil, wrapCommitteeServiceError("failed to create committee member", err)
 	}
 
 	return result, nil
@@ -175,7 +175,7 @@ func fetchCommitteeMember(ctx context.Context, committeeUID, memberUID string) (
 		Version:     "1",
 	})
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to fetch committee member: %w", err)
+		return nil, "", wrapCommitteeServiceError("failed to fetch committee member", err)
 	}
 
 	etag := ""
@@ -198,7 +198,7 @@ func updateCommitteeMember(ctx context.Context, payload *committeeservice.Update
 	// Fetch current committee member for comparison.
 	currentMember, etag, err := fetchCommitteeMember(ctx, payload.UID, payload.MemberUID)
 	if err != nil {
-		return false, fmt.Errorf("failed to fetch current committee member: %w", err)
+		return false, wrapCommitteeServiceError("failed to fetch current committee member", err)
 	}
 
 	// Check if member has changes (basic comparison).
@@ -218,7 +218,7 @@ func updateCommitteeMember(ctx context.Context, payload *committeeservice.Update
 
 	_, err = committeeClient.UpdateCommitteeMember(ctx, payload)
 	if err != nil {
-		return false, fmt.Errorf("failed to update committee member: %w", err)
+		return false, wrapCommitteeServiceError("failed to update committee member", err)
 	}
 
 	return true, nil
@@ -229,7 +229,7 @@ func deleteCommittee(ctx context.Context, committeeUID string, v1Principal strin
 	// Fetch current committee base to get etag.
 	_, etag, err := fetchCommitteeBase(ctx, committeeUID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch committee base for deletion: %w", err)
+		return wrapCommitteeServiceError("failed to fetch committee base for deletion", err)
 	}
 
 	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, v1Principal)
@@ -245,7 +245,7 @@ func deleteCommittee(ctx context.Context, committeeUID string, v1Principal strin
 
 	err = committeeClient.DeleteCommittee(ctx, payload)
 	if err != nil {
-		return fmt.Errorf("failed to delete committee: %w", err)
+		return wrapCommitteeServiceError("failed to delete committee", err)
 	}
 
 	return nil
@@ -256,7 +256,7 @@ func deleteCommitteeMember(ctx context.Context, committeeUID, memberUID string, 
 	// Fetch current committee member to get etag.
 	_, etag, err := fetchCommitteeMember(ctx, committeeUID, memberUID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch committee member for deletion: %w", err)
+		return wrapCommitteeServiceError("failed to fetch committee member for deletion", err)
 	}
 
 	token, err := generateCachedJWTToken(ctx, committeeServiceAudience, v1Principal)
@@ -275,7 +275,7 @@ func deleteCommitteeMember(ctx context.Context, committeeUID, memberUID string, 
 
 	err = committeeClient.DeleteCommitteeMember(ctx, payload)
 	if err != nil {
-		return fmt.Errorf("failed to delete committee member: %w", err)
+		return wrapCommitteeServiceError("failed to delete committee member", err)
 	}
 
 	return nil
