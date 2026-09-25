@@ -130,5 +130,3 @@ func TestParseSlugResponse_SlugInError(t *testing.T) {
 		})
 	}
 }
-
-

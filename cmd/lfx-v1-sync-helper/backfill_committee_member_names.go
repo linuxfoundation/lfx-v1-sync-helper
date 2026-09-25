@@ -264,7 +264,8 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 		payload.BearerToken = &token
 
 		if _, updateErr := committeeClient.UpdateCommitteeMember(ctx, payload); updateErr != nil {
-			logger.With(errKey, updateErr, "committee_uid", committeeUID, "member_uid", memberUID).
+			wrappedErr := wrapCommitteeServiceError("failed to update committee member name", updateErr)
+			logger.With(errKey, wrappedErr, "committee_uid", committeeUID, "member_uid", memberUID).
 				WarnContext(ctx, "backfill: failed to update committee member name")
 			res.errored++
 			continue
