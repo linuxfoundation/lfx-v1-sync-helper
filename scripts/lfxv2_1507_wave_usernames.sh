@@ -11,7 +11,7 @@
 # when that file is present.
 #
 # Usage:
-#   scripts/lfxv2_1507_wave_usernames.sh <wave>   # wave: 0, 1, 2, ... 9, 11, 4b, 5b
+#   scripts/lfxv2_1507_wave_usernames.sh <wave>   # wave: 0-11, or 4b, 5b, 7b
 #
 # Requires: snowsql configured with rsa_key.p8 in the working directory.
 
@@ -19,7 +19,8 @@ set -eu
 
 WAVE="${1:?usage: $0 <wave-number>}"
 
-# Slug lists per waves.md. Wave 0 is AAIF (predates the wave schedule).
+# Slug lists for waves 0 to 7 follow waves.md; wave 0 is AAIF, which predates
+# the wave schedule. Waves 7b and 8 onward follow the Manage Access Audit.
 case "$WAVE" in
   0) SLUGS="agentic-ai-foundation" ;;
   1) SLUGS="sonicfund,lfeurope,openhpc,openids-foundation,interuss,opencontainers,cloud-foundry,x402-foundation,openpowerfoundation,real-time-linux,ACT,todogroup" ;;
@@ -35,10 +36,19 @@ case "$WAVE" in
   5b) SLUGS="agl" ;;
   6) SLUGS="lf-ai-foundation,pytorch,ccc,presto,aether-fund,magma-fund" ;;
   7) SLUGS="soda-foundation,openapi,opensearch-foundation,react-foundation,margo" ;;
-  8) SLUGS="o3de,gql,xen,ebpf,finops" ;;
-  9) SLUGS="openinfra-foundation,yocto,cephfoundation,tla" ;;
-  11) SLUGS="lfresearch,iovisor,jdf" ;;
-  *) echo "error: unknown wave '$WAVE' (waves 0-9, 11, 4b, or 5b)" >&2; exit 1 ;;
+  # Wave 7b: HPSF appears only in the Manage Access Audit, which places it in
+  # wave 7. It is in neither waves.md nor waves-expanded-with-slugs.md, so it
+  # was never available to the earlier wave lists.
+  7b) SLUGS="hpsf" ;;
+  # Waves 8 to 11 follow the Manage Access Audit rather than waves.md, which
+  # is stale for the back half of the schedule. The audit shifts xen, ebpf and
+  # finops from wave 8 to wave 9, and places the already-run wave 7
+  # foundations in its wave 8; those are omitted here as they are complete.
+  8) SLUGS="o3de,gql,broadband-fund,daos-fund,murmur-project,p4-fund,socbb,tars" ;;
+  9) SLUGS="openinfra-foundation,yocto,cephfoundation,tla,xen,ebpf,finops,device-automation-bus-fund,dronecode,kernelci,lf-charities,netdev-foundation,opifund" ;;
+  10) SLUGS="akrites,aousd,app-defense-alliance,appia,c2pa,configurator-file-type-project,elisa,financial-services-open-source-ai-fund,green-software,lfai-onnx,overture,spaceone" ;;
+  11) SLUGS="lfresearch,iovisor,jdf,alpha-omega-foundation,alphaomega,lfcf,oneapi,openchami,operator-sdk,quantum-ir,r-hub,rcons,spdx,uepf" ;;
+  *) echo "error: unknown wave '$WAVE' (waves 0-11, 4b, 5b, or 7b)" >&2; exit 1 ;;
 esac
 
 OUT="lfxv2_1507_wave${WAVE}_usernames.csv"
