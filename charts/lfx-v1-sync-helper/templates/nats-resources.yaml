@@ -93,6 +93,31 @@ spec:
   duplicateWindow: 2m
 {{- end }}
 ---
+{{- if .Values.natsResources.stream_committee_events.creation }}
+apiVersion: jetstream.nats.io/v1beta2
+kind: Stream
+metadata:
+  name: {{ .Values.natsResources.stream_committee_events.name | replace "_" "-" }}
+  namespace: lfx
+  {{- if .Values.natsResources.stream_committee_events.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+spec:
+  name: {{ .Values.natsResources.stream_committee_events.name }}
+  subjects:
+  {{- range .Values.natsResources.stream_committee_events.subjects }}
+    - {{ . }}
+  {{- end }}
+  storage: {{ .Values.natsResources.stream_committee_events.storage }}
+  retention: {{ .Values.natsResources.stream_committee_events.retention }}
+  maxAge: {{ .Values.natsResources.stream_committee_events.maxAge }}
+  maxBytes: {{ .Values.natsResources.stream_committee_events.maxBytes }}
+  maxMsgs: {{ .Values.natsResources.stream_committee_events.maxMsgs }}
+  replicas: {{ .Values.natsResources.stream_committee_events.replicas }}
+  compression: {{ .Values.natsResources.stream_committee_events.compression }}
+{{- end }}
+---
 {{- if .Values.natsResources.stream_wal_listener.creation }}
 apiVersion: jetstream.nats.io/v1beta2
 kind: Stream

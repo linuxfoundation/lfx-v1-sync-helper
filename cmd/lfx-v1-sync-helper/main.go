@@ -16,9 +16,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/time/rate"
+
+	projectconstants "github.com/linuxfoundation/lfx-v2-project-service/pkg/constants"
 )
 
 const (
@@ -44,15 +47,29 @@ var (
 	v1KV       jetstream.KeyValue
 	mappingsKV jetstream.KeyValue
 
-	// distributedSync is the singleton mappingLocker used to serialise
-	// concurrent read-modify-write operations on shared mapping state.
-	// Callers pass fully-qualified lock keys (including any namespace prefix).
-	// TODO: When migrating handlers to the wrapper services, review the
-	// initialization pattern — a global singleton may not fit the target
-	// design (globals can be harder to test, maintain, and reason about),
-	// so the lock backend, lifecycle, and injection strategy will need
-	// a proper design review.
-	distributedSync mappingLocker //nolint:unused
+	// mappingStore is the abstract v1-mappings backing store used by
+	// every online (non-backfill) code path and by the one-shot
+	// backfills that read/write mappings.
+	//
+	// Two-phase initialisation (see main below):
+	//
+	//   1. Immediately after the v1-mappings KV bucket handle is
+	//      opened, mappingStore is wired to a KV-backed adapter
+	//      (newKVMappingStore) so one-shot flags dispatched next in
+	//      main can safely call mappingStore.Get/Put/etc. This is
+	//      NOT gated on V1_MAPPINGS_STORE_MODE — every one-shot runs
+	//      against the KV backend regardless of the runtime mode
+	//      because Postgres is not part of the one-shot contract.
+	//   2. If the process is on the long-running service path (no
+	//      one-shot flag fired), initMappingStore reassigns
+	//      mappingStore to the mode-configured backend (kv | dual |
+	//      postgres). Dual mode wraps KV in dualMappingStore which
+	//      spawns the async mirror worker; graceful shutdown
+	//      type-asserts and calls Close() to drain pending mirrors.
+	//
+	// See mapping_store.go for the port and V1MappingsStoreMode
+	// selection.
+	mappingStore MappingStore
 )
 
 // main parses optional flags and starts the NATS subscribers.
@@ -66,10 +83,21 @@ func main() {
 	var doBackfillProfiles = flag.Bool("backfill-profiles", false, "backfill v1 profile fields to Auth0 user_metadata, then exit")
 	var doBackfillWorkspaces = flag.Bool("backfill-workspaces", false, "backfill legacy workspaces into v2 member-service, then exit")
 	var doBackfillCommitteeMemberMappings = flag.Bool("backfill-committee-member-mappings", false, "repair committee-member reverse mappings that store the record sfid instead of the contact SFID, then exit")
+	var doBackfillCommitteeMemberNames = flag.Bool("backfill-committee-member-names", false, "populate first_name/last_name on V2 committee members that have no name (members without an LFX account at sync time), then exit")
+	var doBackfillV1MappingsToPG = flag.Bool("backfill-v1-mappings-to-postgres", false, "copy the v1-mappings NATS KV bucket into the Postgres v1_mappings table, then exit (LFXV2-2985)")
+	var doBackfillProjects = flag.Bool("backfill-projects", false, "re-emit v1 projects that have no v2 mapping so the running deployment creates them, then exit")
+	var doBackfillCommittees = flag.Bool("backfill-committees", false, "re-emit v1 committees that have no v2 mapping so the running deployment creates them, then exit")
+	var excludeStagePrefix = flag.String("exclude-stage-prefix", "", "comma-separated, case-insensitive project_status__c prefixes to exclude (applicable with --backfill-projects)")
+	var includeStagePrefix = flag.String("include-stage-prefix", "", "comma-separated, case-insensitive project_status__c prefixes to include exclusively (applicable with --backfill-projects)")
+	var emitRate = flag.Float64("emit-rate", 2.0, "maximum record re-emits per second (applicable with --backfill-projects and --backfill-committees)")
+	var allowFormation = flag.Bool("allow-formation", false, "allow formation-staged projects in the same run as non-formation projects (applicable with --backfill-projects)")
+	var checkSlugs = flag.Bool("check-slugs", false, "skip candidates whose slug already resolves to a v2 project (applicable with --backfill-projects)")
+	var checkCommitteeNames = flag.Bool("check-committee-names", false, "skip candidates whose project UID + name already resolves to a v2 committee via lfx.committee-api.name_to_uid (applicable with --backfill-committees)")
+	var forceBackfill = flag.Bool("force", false, "bypass the minimum-mappings safety floor (applicable with --backfill-projects and --backfill-committees)")
 	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
 	var syncUsersFile = flag.String("sync-users-file", "", "sync profile and alternate emails for each username listed in a file (one per line), then exit")
 	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-*, --sync-user, and --sync-users-file)")
-	var backfillLimit = flag.Int("limit", 1000, "maximum number of users to process per backfill run (applicable with --backfill-alternate-emails and --backfill-profiles)")
+	var backfillLimit = flag.Int("limit", 1000, "maximum number of records (users, projects, or committees) to process per backfill run (applicable with --backfill-alternate-emails, --backfill-profiles, --backfill-projects, and --backfill-committees; 0 = unlimited for --backfill-projects and --backfill-committees)")
 	var auth0Rate = flag.Float64("auth0-rate", defaultAuth0RateLimit, "users per second to pace the backfill and batch-sync loops (applicable with --backfill-alternate-emails, --backfill-profiles, and --sync-users-file)")
 
 	flag.Usage = func() {
@@ -85,15 +113,26 @@ func main() {
 	}
 	auth0RateLimiter.SetLimit(rate.Limit(*auth0Rate))
 
+	// --limit defaults to 1000 for the user backfills; --backfill-projects
+	// needs a default of unlimited (0) since the acceptance criterion is
+	// that every unmapped v1 project is created in one run, so only treat
+	// --limit as project-scoped when the operator explicitly passed it.
+	limitExplicitlySet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "limit" {
+			limitExplicitlySet = true
+		}
+	})
+
 	// Enforce mutual exclusion across all one-shot flags.
 	oneShotCount := 0
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *syncUsersFile != "", *doBackfillCommitteeMemberMappings} {
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *syncUsersFile != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doBackfillV1MappingsToPG, *doBackfillProjects, *doBackfillCommittees} {
 		if b {
 			oneShotCount++
 		}
 	}
 	if oneShotCount > 1 {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --sync-user, and --sync-users-file are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --backfill-committee-member-names, --backfill-v1-mappings-to-postgres, --backfill-projects, --backfill-committees, --sync-user, and --sync-users-file are mutually exclusive")
 		os.Exit(2)
 	}
 
@@ -101,11 +140,12 @@ func main() {
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}))
 	slog.SetDefault(logger)
 
-	// --backfill-committee-member-mappings only needs NATS KV; skip full
-	// config and API client init.
+	// --backfill-committee-member-mappings, --backfill-v1-mappings-to-postgres,
+	// --backfill-projects, and --backfill-committees only need NATS KV (plus
+	// Postgres for the v1-mappings backfill); skip full config and API client init.
 	// --backfill-acs-project and --backfill-acs-org require full config and API client init.
 	var err error
-	if *doBackfillCommitteeMemberMappings {
+	if *doBackfillCommitteeMemberMappings || *doBackfillV1MappingsToPG || *doBackfillProjects || *doBackfillCommittees {
 		cfg = LoadMinimalConfig()
 	} else {
 		cfg, err = LoadConfig()
@@ -168,7 +208,7 @@ func main() {
 	})
 
 	// Basic health check.
-	http.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+	http.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		if natsConn == nil {
 			http.Error(w, "no NATS connection", http.StatusServiceUnavailable)
 			return
@@ -176,6 +216,21 @@ func main() {
 		if !natsConn.IsConnected() || natsConn.IsDraining() {
 			http.Error(w, "NATS connection not ready", http.StatusServiceUnavailable)
 			return
+		}
+		// In postgres-only mode the pod cannot serve any mapping
+		// read/write without a live Postgres connection, so a
+		// dead-pool pod must fail readiness so the Service stops
+		// routing to it. Dual mode is deliberately NATS-authoritative
+		// (Postgres is a best-effort shadow) so a PG outage does NOT
+		// affect readiness there; the diff-scan tooling catches the
+		// resulting drift before cutover.
+		if cfg != nil && cfg.V1MappingsStoreMode == V1MappingsStoreModePostgres && pgPool != nil {
+			pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			defer cancel()
+			if err := pgPool.Ping(pingCtx); err != nil {
+				http.Error(w, "Postgres not ready: "+err.Error(), http.StatusServiceUnavailable)
+				return
+			}
 		}
 		fmt.Fprintf(w, "OK\n") //nolint:errcheck
 	})
@@ -206,9 +261,16 @@ func main() {
 	// closing) a connection.
 	gracefulCloseWG := sync.WaitGroup{}
 
-	// Support graceful shutdown.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Support graceful shutdown. signal.NotifyContext wires SIGINT /
+	// SIGTERM directly to the process-wide context — this way the
+	// one-shot backfills (which run long-running scans and exit
+	// before the normal `<-done>` service loop is reached) observe a
+	// kubectl-driven cancellation and clean up on their own,
+	// including the deferred staging-table DROP in
+	// backfill_v1_mappings_pg.go. The long-running service path also
+	// exits when ctx is cancelled via the shared done channel.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
@@ -269,6 +331,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Initialize a KV-backed mappingStore immediately so one-shot backfills
+	// that read/write mappings do not hit a nil interface. The
+	// mode-configured mappingStore for the long-running service path (which
+	// may open a Postgres pool for dual/postgres modes) is set later, after
+	// all one-shot branches have exited. This intentionally keeps every
+	// one-shot on the KV backend regardless of V1_MAPPINGS_STORE_MODE:
+	// Postgres is not part of the one-shot contract yet, and the migration
+	// story assumes the KV bucket stays authoritative for the offline
+	// backfill window (LFXV2-2985).
+	mappingStore = newKVMappingStore(mappingsKV)
+
 	// Handle --backfill-acs-project flag: populate v2 project settings from ACS grants, then exit.
 	if *doBackfillACSProject {
 		logger.With("dry_run", *dryRun).Info("starting ACS project grants backfill")
@@ -277,6 +350,60 @@ func main() {
 			os.Exit(1)
 		}
 		logger.Info("ACS project grants backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --backfill-projects flag: re-emit v1 projects with no v2 mapping
+	// so the running deployment's KV consumer creates them, then exit.
+	if *doBackfillProjects {
+		projectLimit := *backfillLimit
+		if !limitExplicitlySet {
+			projectLimit = 0
+		}
+		opts := backfillProjectsOptions{
+			dryRun:               *dryRun,
+			limit:                projectLimit,
+			emitRate:             *emitRate,
+			excludeStagePrefixes: parseStagePrefixList(*excludeStagePrefix),
+			includeStagePrefixes: parseStagePrefixList(*includeStagePrefix),
+			allowFormation:       *allowFormation,
+			checkSlugs:           *checkSlugs,
+			force:                *forceBackfill,
+		}
+		logger.With("dry_run", *dryRun, "emit_rate", *emitRate, "limit", projectLimit).Info("starting project backfill")
+		res, err := backfillProjects(ctx, opts)
+		if err != nil {
+			logger.With(errKey, err).Error("error during project backfill")
+			os.Exit(1)
+		}
+		logger.With(res.logFields()...).Info("project backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --backfill-committees flag: re-emit v1 committees with no v2
+	// mapping so the running deployment's KV consumer creates them, then exit.
+	if *doBackfillCommittees {
+		committeeLimit := *backfillLimit
+		if !limitExplicitlySet {
+			committeeLimit = 0
+		}
+		opts := backfillCommitteesOptions{
+			dryRun:              *dryRun,
+			limit:               committeeLimit,
+			emitRate:            *emitRate,
+			checkCommitteeNames: *checkCommitteeNames,
+			force:               *forceBackfill,
+		}
+		logger.With(
+			"dry_run", *dryRun, "emit_rate", *emitRate, "limit", committeeLimit,
+			"check_committee_names", *checkCommitteeNames,
+		).Info("starting committee backfill")
+		res, err := backfillCommittees(ctx, opts)
+		if err != nil {
+			logger.With(errKey, err).Error("error during committee backfill")
+			os.Exit(1)
+		}
+		logger.With(res.logFields()...).Info("committee backfill completed successfully")
 		os.Exit(0)
 	}
 
@@ -388,12 +515,86 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Initialize the distributed sync singleton backed by the mappings KV bucket.
-	distributedSync = newKVMappingLocker(mappingsKV,
-		withLockerOptionMaxRetries(mappingLockRetryAttempts),
-		withLockerOptionRetryInterval(mappingLockRetryInterval),
-		withLockerOptionTimeout(mappingLockTimeout),
-	)
+	// Handle --backfill-committee-member-names flag: populate first_name/last_name
+	// on V2 committee members whose name fields are empty because the member had no
+	// LFX account at sync time (linuxfoundation/lfx-self-serve-ops#3), then exit.
+	if *doBackfillCommitteeMemberNames {
+		logger.With("dry_run", *dryRun).Info("starting committee-member name backfill")
+		res, err := backfillCommitteeMemberNames(ctx, *dryRun)
+		if err != nil {
+			logger.With(errKey, err).Error("error during committee-member name backfill")
+			os.Exit(1)
+		}
+		logger.With(
+			"inspected", res.inspected,
+			"skipped", res.skipped,
+			"no_mapping", res.noMapping,
+			"no_name", res.noName,
+			"updated", res.updated,
+			"dry_run", res.dryRun,
+			"errored", res.errored,
+		).Info("committee-member name backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --backfill-v1-mappings-to-postgres flag: copy the v1-mappings NATS
+	// KV bucket into the Postgres v1_mappings table, then exit (LFXV2-2985).
+	if *doBackfillV1MappingsToPG {
+		logger.With("dry_run", *dryRun).Info("starting v1-mappings Postgres backfill")
+		// --dry-run needs Postgres credentials only when it will
+		// actually connect; the backfill itself no-ops COPY/upsert
+		// in dry-run mode, so open a pool WITHOUT running schema DDL
+		// (that would fail on a read-only replica or without a
+		// working DSN, which is exactly the case a dry-run should
+		// tolerate). Non-dry-run uses initPGPoolWithSchema so the
+		// v1_mappings table is created before the first COPY.
+		var pool *pgxpool.Pool
+		if *dryRun {
+			pool, err = initPGPool(ctx, cfg)
+		} else {
+			pool, err = initPGPoolWithSchema(ctx, cfg)
+		}
+		if err != nil {
+			logger.With(errKey, err).Error("error initializing Postgres pool for v1-mappings backfill")
+			os.Exit(1)
+		}
+		defer pool.Close()
+		res, err := backfillV1MappingsToPostgres(ctx, pool, *dryRun)
+		fields := []any{
+			"visits", res.visits,
+			"live", res.live,
+			"tombstoned", res.tombstoned,
+			"empty", res.empty,
+			"native_del", res.nativeDel,
+			"staged", res.staged,
+			"inserted_rows", res.insertedRows,
+			"batches", res.batches,
+			"workers", res.workers,
+			"max_seq", res.maxSeq,
+			"elapsed", res.elapsed.String(),
+			"dry_run", res.dryRun,
+		}
+		if err != nil {
+			logger.With(append(fields, errKey, err)...).Error("error during v1-mappings Postgres backfill")
+			os.Exit(1)
+		}
+		logger.With(fields...).Info("v1-mappings Postgres backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Wire the online MappingStore based on V1_MAPPINGS_STORE_MODE.
+	// This is the runtime port that all non-backfill callers use to
+	// read/write v1-mappings state. In "kv" mode the store is a thin
+	// adapter over mappingsKV so behaviour is unchanged; in "dual" or
+	// "postgres" mode a pgxpool is opened and the embedded schema is
+	// applied idempotently before the store is exposed. See
+	// mapping_store.go for the interface and semantic contract.
+	mappingStore, err = initMappingStore(ctx, cfg, mappingsKV)
+	if err != nil {
+		logger.With(errKey, err, "mode", string(cfg.V1MappingsStoreMode)).Error("error initializing v1-mappings store")
+		os.Exit(1)
+	}
+	logger.With("mode", string(cfg.V1MappingsStoreMode)).Info("v1-mappings store initialized")
 
 	// Create or get the JetStream pull consumer for v1 objects KV bucket
 	// This replaces the KV Watch() method to enable horizontal scaling
@@ -519,19 +720,80 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Subscribe to indexer domain events for bidirectional committee sync.
-	// The indexer publishes lfx.{object_type}.{action} after every successful OpenSearch write.
-	indexerEventSubscriptions := map[string]func(*nats.Msg){
-		"lfx.committee.created":        committeeIndexerEventHandler,
-		"lfx.committee.updated":        committeeIndexerEventHandler,
-		"lfx.committee.deleted":        committeeIndexerEventHandler,
-		"lfx.committee_member.created": committeeMemberIndexerEventHandler,
-		"lfx.committee_member.updated": committeeMemberIndexerEventHandler,
-		"lfx.committee_member.deleted": committeeMemberIndexerEventHandler,
+	// Subscribe to project-service settings events for v2-to-v1 project staff
+	// sync (executive director and program manager only; GH-1802).
+	//
+	// Ordering note: a queue group does not preserve per-project ordering
+	// across replicas. nats.go serializes delivery per subscription within a
+	// process, so at the chart's default of one app replica this handler is
+	// fully serialized; with two or more replicas, two rapid edits to the same
+	// staff field can be processed concurrently and their PATCHes complete out
+	// of order, leaving v1 (and, via the v1->v2 echo, eventually v2) with the
+	// older assignment. The event contract carries no sequence/timestamp to
+	// reject a stale delivery. Accepted for now given the single-replica
+	// deployment and rare, human-paced staff edits; if the app ever scales
+	// out, add cross-replica per-project serialization (re-reading current v2
+	// settings inside the lock before PATCHing) or move to ordered
+	// consumption.
+	if cfg.V2ToV1ProjectStaffSyncEnabled {
+		_, err = natsConn.QueueSubscribe(projectconstants.ProjectSettingsUpdatedSubject, natsQueue, handleProjectSettingsUpdated)
+		if err != nil {
+			logger.With(errKey, err, "subject", projectconstants.ProjectSettingsUpdatedSubject).Error("error subscribing to project settings updated subject")
+			os.Exit(1)
+		}
+		logger.With("subject", projectconstants.ProjectSettingsUpdatedSubject).Info("v2-to-v1 project staff sync enabled, subscription registered")
+	} else {
+		logger.With("subject", projectconstants.ProjectSettingsUpdatedSubject).Info("v2-to-v1 project staff sync disabled, skipping subscription")
 	}
-	for subject, handler := range indexerEventSubscriptions {
-		if _, err = natsConn.QueueSubscribe(subject, natsQueue, handler); err != nil {
-			logger.With(errKey, err, "subject", subject).Error("error subscribing to indexer event subject")
+
+	// Subscribe to indexer domain events for bidirectional committee sync via a durable
+	// JetStream consumer on the committee-events stream. The stream captures
+	// lfx.committee.> and lfx.committee_member.> subjects published by the indexer service
+	// after every successful OpenSearch write. Using JetStream gives at-least-once delivery,
+	// replacing the at-most-once core NATS QueueSubscribe that could silently drop events.
+	committeeEventsStreamName := "committee_events"
+	committeeEventsConsumerName := "v1-sync-helper-committee-events-consumer"
+
+	committeeEventsConsumer, err := jsContext.CreateOrUpdateConsumer(ctx, committeeEventsStreamName, jetstream.ConsumerConfig{
+		Name:    committeeEventsConsumerName,
+		Durable: committeeEventsConsumerName,
+		// DeliverNewPolicy: only deliver messages published after this consumer is first created.
+		// The old QueueSubscribe only processed events after subscription; replaying stream history
+		// on first start would flood V1 with redundant updates. The durable name ensures the
+		// consumer resumes from its last ACKed position on restarts, so no events are dropped
+		// after the initial connection.
+		DeliverPolicy: jetstream.DeliverNewPolicy,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		FilterSubjects: []string{
+			"lfx.committee.>",
+			"lfx.committee_member.>",
+		},
+		MaxDeliver:    3,
+		AckWait:       30 * time.Second,
+		MaxAckPending: 100,
+		Description:   "Indexer committee/committee-member event consumer for v1-sync-helper",
+	})
+	if err != nil {
+		logger.With(errKey, err, "consumer", committeeEventsConsumerName, "stream", committeeEventsStreamName).Error("error creating committee-events consumer")
+		os.Exit(1)
+	}
+
+	committeeEventsConsumerCtx, err := committeeEventsConsumer.Consume(committeeEventsIngestHandler, jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
+		logger.With(errKey, err).Error("committee-events consumer error encountered")
+	}))
+	if err != nil {
+		logger.With(errKey, err, "consumer", committeeEventsConsumerName).Error("error starting committee-events consumer")
+		os.Exit(1)
+	}
+	defer committeeEventsConsumerCtx.Stop()
+
+	logger.With("stream", committeeEventsStreamName, "consumer", committeeEventsConsumerName).Info("committee-events consumer started")
+
+	// Subscribe to project indexer events via core NATS for bidirectional project sync.
+	// The indexer publishes lfx.project.{action} after every successful OpenSearch write.
+	for _, subject := range []string{"lfx.project.created", "lfx.project.updated", "lfx.project.deleted"} {
+		if _, err = natsConn.QueueSubscribe(subject, natsQueue, projectIndexerEventHandler); err != nil {
+			logger.With(errKey, err, "subject", subject).Error("error subscribing to project indexer event subject")
 			os.Exit(1)
 		}
 	}
@@ -546,12 +808,16 @@ func main() {
 	// errors in the ConsumeErrHandler.
 	kvConsumerCtx.Drain()
 	walConsumerCtx.Drain()
+	committeeEventsConsumerCtx.Drain()
 	if dynamodbConsumerCtx != nil {
 		dynamodbConsumerCtx.Drain()
 	}
 
-	// Cancel the background context.
-	cancel()
+	// Cancel the background context. signal.NotifyContext also cancels
+	// ctx on SIGTERM, so this defensive cancel is idempotent when the
+	// shutdown was signal-driven; it is required when the shutdown was
+	// triggered by the NATS ClosedHandler synthesising an interrupt.
+	stop()
 
 	// Drain the connection, which will drain all remaining subscriptions, then
 	// close the connection when complete (including the consumer draining).
@@ -567,6 +833,25 @@ func main() {
 	logger.Debug("waiting for graceful shutdown steps to complete")
 	gracefulCloseWG.Wait()
 	logger.Debug("graceful shutdown steps completed")
+
+	// Drain the online MappingStore's async mirror queue before we
+	// close the Postgres pool. Only dualMappingStore has a background
+	// worker; kv- and postgres-only modes are no-ops here (they don't
+	// implement Closer).
+	if closer, ok := mappingStore.(interface{ Close() error }); ok {
+		logger.Debug("draining dual-store mirror queue")
+		if err := closer.Close(); err != nil {
+			logger.With(errKey, err).Warn("error draining mapping store on shutdown")
+		}
+	}
+
+	// Close the Postgres pool if the online MappingStore backend
+	// opened one (dual or postgres mode). Kv-only mode never allocates
+	// pgPool so this is a no-op.
+	if pgPool != nil {
+		logger.Debug("closing Postgres pool")
+		pgPool.Close()
+	}
 
 	// Immediately close the HTTP server after graceful shutdown has finished.
 	if err = httpServer.Close(); err != nil {

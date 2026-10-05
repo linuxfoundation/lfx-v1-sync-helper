@@ -6,27 +6,32 @@ package main
 
 import (
 	"context"
+	"errors"
 
 	nats "github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // lookupHandler handles NATS function calls for bidirectional v1-v2 mapping lookups.
 // It receives a mapping key as the request payload and returns the corresponding
-// value from the NATS KV store, an empty string if the key is not found or tombstoned,
+// value from the mapping store, an empty string if the key is not found or tombstoned,
 // or an error message prefixed with "error: " for other errors. Supports both v1->v2
 // and v2->v1 lookups depending on the key format used.
+//
+// The store is chosen at boot via V1_MAPPINGS_STORE_MODE (see mapping_store.go);
+// this handler is unaware of the backend and treats ErrKeyNotFound identically
+// regardless of whether it originated in Postgres, KV, or the dual-store fallback
+// path.
 func lookupHandler(msg *nats.Msg) {
 	ctx := context.Background()
 	mappingKey := string(msg.Data)
 
 	logger.With("mapping_key", mappingKey, "subject", msg.Subject).DebugContext(ctx, "received mapping lookup request")
 
-	// Look up the mapping key in the v1-mappings KV bucket.
-	entry, err := mappingsKV.Get(ctx, mappingKey)
+	// Look up the mapping key via the online MappingStore.
+	entry, err := mappingStore.Get(ctx, mappingKey)
 	if err != nil {
 		// Handle different types of errors.
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, ErrKeyNotFound) {
 			logger.With("mapping_key", mappingKey).DebugContext(ctx, "mapping key not found")
 			// Respond with empty string for key not found.
 			if err := msg.Respond([]byte("")); err != nil {
@@ -44,7 +49,7 @@ func lookupHandler(msg *nats.Msg) {
 	}
 
 	// Check if the value is a tombstone (deleted mapping).
-	value := entry.Value()
+	value := entry.Value
 	if isTombstonedMapping(value) {
 		logger.With("mapping_key", mappingKey).DebugContext(ctx, "mapping key is tombstoned")
 

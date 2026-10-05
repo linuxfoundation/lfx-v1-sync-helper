@@ -91,12 +91,12 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: client_id
-                  name: v1-sync-helper-auth0-credentials
+                  name: v1-sync-helper-secrets
             - name: AUTH0_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
                   key: client_private_key
-                  name: v1-sync-helper-auth0-credentials
+                  name: v1-sync-helper-secrets
             # v1 platform database connection for live user lookups.
             - name: V1_DB_HOST
               valueFrom:

@@ -31,8 +31,9 @@ jobs:
         id: container_tag
         env:
           HEAD_REF: "${{ github.head_ref }}"
+          PR_NUMBER: "${{ github.event.pull_request.number }}"
         run: |
-          container_tag=$(echo "$HEAD_REF" | sed 's/[^_0-9a-zA-Z]/-/g' | cut -c -127)
+          container_tag=$(echo "pr-${PR_NUMBER}-${HEAD_REF}" | sed 's/[^_0-9a-zA-Z]/-/g' | cut -c -120)
           echo tag="$container_tag" >> "$GITHUB_OUTPUT"
       - name: Build lfx-v1-sync-helper for PR
         env:
