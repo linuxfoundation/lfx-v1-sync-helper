@@ -87,6 +87,9 @@ type prefixResult struct {
 // consumer, no full-stream walk). As soon as a new subject is seen (its
 // first matching revision), it is immediately purged (removes all revisions
 // of that subject in one call) if execute is true.
+//
+// A startSeq of zero begins at sequence 1. A non-zero startSeq resumes a
+// single-prefix scan from the specified stream sequence.
 func scanAndPurgePrefix(
 	ctx context.Context,
 	str jetstream.Stream,
