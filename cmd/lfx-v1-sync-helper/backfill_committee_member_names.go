@@ -112,11 +112,11 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 	}
 
 	kvGetFn := func(ctx context.Context, key string) ([]byte, error) {
-		entry, err := mappingsKV.Get(ctx, key)
+		entry, err := mappingStore.Get(ctx, key)
 		if err != nil {
 			return nil, err
 		}
-		return entry.Value(), nil
+		return entry.Value, nil
 	}
 
 	res := &backfillCommitteeMemberNamesResult{}
@@ -264,7 +264,8 @@ func backfillCommitteeMemberNames(ctx context.Context, dryRun bool) (*backfillCo
 		payload.BearerToken = &token
 
 		if _, updateErr := committeeClient.UpdateCommitteeMember(ctx, payload); updateErr != nil {
-			logger.With(errKey, updateErr, "committee_uid", committeeUID, "member_uid", memberUID).
+			wrappedErr := wrapCommitteeServiceError("failed to update committee member name", updateErr)
+			logger.With(errKey, wrappedErr, "committee_uid", committeeUID, "member_uid", memberUID).
 				WarnContext(ctx, "backfill: failed to update committee member name")
 			res.errored++
 			continue
@@ -303,7 +304,11 @@ func resolveContactSFIDForMember(
 	reverseKey := "committee_member.uid." + memberUID
 	val, kvErr := kvGet(ctx, reverseKey)
 	if kvErr != nil {
-		if kvErr == jetstream.ErrKeyNotFound || kvErr == jetstream.ErrKeyDeleted {
+		// mappingStore normalises both the jetstream ErrKeyNotFound and
+		// ErrKeyDeleted sentinels to the port-level ErrKeyNotFound; use
+		// errors.Is so the check works whether kvGet is backed by the
+		// port or (in tests) by a raw jetstream.KeyValue handle.
+		if errors.Is(kvErr, ErrKeyNotFound) || errors.Is(kvErr, jetstream.ErrKeyNotFound) || errors.Is(kvErr, jetstream.ErrKeyDeleted) {
 			return "", nil
 		}
 		return "", fmt.Errorf("reading reverse mapping: %w", kvErr)

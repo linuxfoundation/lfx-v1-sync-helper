@@ -30,7 +30,7 @@ type fakeMsg struct {
 	nacked  bool
 }
 
-func (m *fakeMsg) Subject() string                            { return m.subject }
+func (m *fakeMsg) Subject() string                           { return m.subject }
 func (m *fakeMsg) Data() []byte                              { return m.data }
 func (m *fakeMsg) Headers() nats.Header                      { return nil }
 func (m *fakeMsg) Reply() string                             { return "" }

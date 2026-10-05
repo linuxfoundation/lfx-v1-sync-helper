@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	sfutil "github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -213,15 +212,15 @@ type workspaceCacheEntry struct {
 // Returns ("", nil, nil) on a cache miss or tombstone.
 func getWorkspaceCacheEntry(ctx context.Context, orgUID, name string) (uid string, projects []workspaceCacheProject, err error) {
 	key := workspaceCacheKey(orgUID, name)
-	entry, kvErr := mappingsKV.Get(ctx, key)
-	if kvErr != nil {
-		if kvErr == jetstream.ErrKeyNotFound {
+	entry, storeErr := mappingStore.Get(ctx, key)
+	if storeErr != nil {
+		if stderrors.Is(storeErr, ErrKeyNotFound) {
 			return "", nil, nil
 		}
-		return "", nil, fmt.Errorf("failed to get workspace cache entry: %w", kvErr)
+		return "", nil, fmt.Errorf("failed to get workspace cache entry: %w", storeErr)
 	}
 
-	value := entry.Value()
+	value := entry.Value
 	if len(value) == 0 || isTombstonedMapping(value) {
 		return "", nil, nil
 	}
@@ -244,19 +243,18 @@ func putWorkspaceCacheEntry(ctx context.Context, orgUID, name, workspaceUID stri
 	if err != nil {
 		return fmt.Errorf("failed to marshal workspace cache entry: %w", err)
 	}
-	if _, err := mappingsKV.Put(ctx, key, data); err != nil {
+	if _, err := mappingStore.Put(ctx, key, data); err != nil {
 		return fmt.Errorf("failed to cache workspace entry: %w", err)
 	}
 	return nil
 }
 
 // deleteWorkspaceUID removes the workspace uid from v1-mappings.
+// mappingStore.Delete is idempotent (returns nil for absent keys), so no
+// explicit not-found handling is needed here.
 func deleteWorkspaceUID(ctx context.Context, orgUID, name string) error {
 	key := workspaceCacheKey(orgUID, name)
-	if err := mappingsKV.Delete(ctx, key); err != nil {
-		if err == jetstream.ErrKeyNotFound {
-			return nil
-		}
+	if err := mappingStore.Delete(ctx, key); err != nil {
 		return fmt.Errorf("failed to delete workspace UID from cache: %w", err)
 	}
 	return nil

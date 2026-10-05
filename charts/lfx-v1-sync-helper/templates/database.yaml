@@ -1,0 +1,56 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+{{- $mode := .Values.database.mode }}
+{{- if or (eq $mode "database") (eq $mode "cluster+database") }}
+{{- /*
+Both CNPG modes reference database.cloudNativePG.clusterName; a missing
+value would otherwise silently render an invalid Cluster resource /
+Database CR with an empty owner reference. Fail installation immediately
+with an actionable message.
+*/ -}}
+{{- $clusterName := required (printf "database.cloudNativePG.clusterName is required when database.mode=%q (got empty)" $mode) .Values.database.cloudNativePG.clusterName }}
+{{- $databaseName := required (printf "database.cloudNativePG.databaseName is required when database.mode=%q (got empty)" $mode) .Values.database.cloudNativePG.databaseName }}
+{{- if eq $mode "cluster+database" }}
+---
+# CloudNativePG Cluster provisioned by this chart (mode: cluster+database).
+# Use this mode when deploying the chart standalone without an umbrella chart.
+# In "database" mode the cluster is expected to exist already (typically
+# provisioned by an umbrella chart or by lfx-platform).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ $clusterName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lfx-v1-sync-helper.labels" . | nindent 4 }}
+spec:
+  instances: {{ .Values.database.cloudNativePG.cluster.instances }}
+  storage:
+    size: {{ .Values.database.cloudNativePG.cluster.storage.size }}
+{{- end }}
+---
+# CloudNativePG Database CR — instructs the operator to run
+# CREATE DATABASE <databaseName> OWNER app on the referenced Cluster.
+# The operator also creates the "app" role and the <clusterName>-app secret
+# (host/port/username/password/dbname keys) that the deployment references
+# via the lfx-v1-sync-helper.cloudNativePGAppSecret helper.
+# Rendered for modes "database" and "cluster+database".
+#
+# metadata.name and spec.name are intentionally different: metadata.name is
+# a Kubernetes resource name (DNS-1123 label — no underscores) so replace
+# any underscores in databaseName with dashes for the resource name;
+# spec.name is the actual PostgreSQL database name and keeps the caller's
+# value verbatim so "v1_mappings" is preserved on the DB side.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: {{ $databaseName | replace "_" "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lfx-v1-sync-helper.labels" . | nindent 4 }}
+spec:
+  name: {{ $databaseName }}
+  owner: app
+  cluster:
+    name: {{ $clusterName }}
+{{- end }}

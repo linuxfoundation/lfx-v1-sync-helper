@@ -37,12 +37,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/auth0/go-auth0/management"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 const (
@@ -151,19 +151,19 @@ func collectEmailLinkCandidates(ctx context.Context, userSfid string) (candidate
 // loadBackfillCursor reads the cursor value from the v1-mappings KV bucket.
 // Returns ("", nil) when the key does not exist (first run).
 func loadBackfillCursor(ctx context.Context, cursorKey string) (string, error) {
-	entry, err := mappingsKV.Get(ctx, cursorKey)
+	entry, err := mappingStore.Get(ctx, cursorKey)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, ErrKeyNotFound) {
 			return "", nil
 		}
 		return "", fmt.Errorf("failed to read cursor %s: %w", cursorKey, err)
 	}
-	return strings.TrimSpace(string(entry.Value())), nil
+	return strings.TrimSpace(string(entry.Value)), nil
 }
 
 // saveBackfillCursor writes the cursor value to the v1-mappings KV bucket.
 func saveBackfillCursor(ctx context.Context, cursorKey, value string) error {
-	if _, err := mappingsKV.Put(ctx, cursorKey, []byte(value)); err != nil {
+	if _, err := mappingStore.Put(ctx, cursorKey, []byte(value)); err != nil {
 		return fmt.Errorf("failed to save cursor %s: %w", cursorKey, err)
 	}
 	return nil

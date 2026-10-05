@@ -14,7 +14,6 @@ import (
 
 	"github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
 	nats "github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // indexingEvent mirrors the IndexingEvent published by the indexer service after a
@@ -72,19 +71,19 @@ func processCommitteeIndexingEvent(ctx context.Context, subject string, data []b
 		}
 		projectEntry, err := getMappingEntryWithRetry(ctx, "project.uid."+projectUID)
 		if err != nil {
-			if errors.Is(err, jetstream.ErrKeyNotFound) {
+			if errors.Is(err, ErrKeyNotFound) {
 				logger.With("project_uid", projectUID, "committee_uid", event.ObjectID).
 					WarnContext(ctx, "no project mapping for project UID after bounded retry, skipping")
 				return nil // permanent: project not tracked in v1
 			}
 			return err // transient: KV unavailable, redeliver
 		}
-		if isTombstonedMapping(projectEntry.Value()) {
+		if isTombstonedMapping(projectEntry.Value) {
 			logger.With("project_uid", projectUID, "committee_uid", event.ObjectID).
 				WarnContext(ctx, "project mapping is tombstoned, skipping")
 			return nil
 		}
-		projectSFID := string(projectEntry.Value())
+		projectSFID := string(projectEntry.Value)
 		if projectSFID == "" {
 			logger.With("committee_uid", event.ObjectID).
 				WarnContext(ctx, "no project SFID found, skipping")
@@ -97,14 +96,14 @@ func processCommitteeIndexingEvent(ctx context.Context, subject string, data []b
 	case "updated":
 		entry, err := getMappingEntryWithRetry(ctx, "committee.uid."+event.ObjectID)
 		if err != nil {
-			if errors.Is(err, jetstream.ErrKeyNotFound) {
+			if errors.Is(err, ErrKeyNotFound) {
 				logger.With("committee_uid", event.ObjectID).
 					WarnContext(ctx, "no reverse mapping for committee UID after bounded retry, skipping update")
 				return nil // permanent: committee has no v1 counterpart
 			}
 			return err // transient: KV unavailable
 		}
-		projectSFID, committeeSFID, _ := splitTwoParts(string(entry.Value()))
+		projectSFID, committeeSFID, _ := splitTwoParts(string(entry.Value))
 		if projectSFID == "" || committeeSFID == "" {
 			logger.With("committee_uid", event.ObjectID).
 				WarnContext(ctx, "no project SFID or committee SFID found, skipping")
@@ -115,16 +114,32 @@ func processCommitteeIndexingEvent(ctx context.Context, subject string, data []b
 		return syncCommitteeUpdateToV1(ctx, event.ObjectID, projectSFID, committeeSFID, body.Data)
 
 	case "deleted":
+		// Suppress the indexer echo of our own v1→v2 DELETE at the
+		// EARLIEST point in the dispatch — before the reverse-mapping
+		// lookup. handleCommitteeDelete tombstones committee.uid.<uid>
+		// AFTER the v2 API call succeeds; if that tombstone lands
+		// before the indexer event arrives here, splitTwoParts("!del")
+		// below returns empty SFIDs and the branch returns nil without
+		// ever calling syncCommitteeDeleteToV1 — leaking the marker
+		// forever (PR #170 review). Consuming at the dispatch top
+		// converges every tombstone-vs-echo race outcome to a consumed
+		// marker.
+		if consumePendingMarker(ctx, markerV1ToV2, markerOpDelete, markerResourceCommittee, event.ObjectID) {
+			logger.With("committee_uid", event.ObjectID).
+				InfoContext(ctx, "skipping indexer echo of v1-originated committee delete (fresh v1_to_v2 pending marker); mappings already tombstoned by v1→v2 handler")
+			return nil
+		}
+
 		entry, err := getMappingEntryWithRetry(ctx, "committee.uid."+event.ObjectID)
 		if err != nil {
-			if errors.Is(err, jetstream.ErrKeyNotFound) {
+			if errors.Is(err, ErrKeyNotFound) {
 				logger.With("committee_uid", event.ObjectID).
 					WarnContext(ctx, "no reverse mapping for committee UID after bounded retry, skipping delete")
 				return nil // permanent: committee has no v1 counterpart
 			}
 			return err // transient: KV unavailable
 		}
-		projectSFID, committeeSFID, _ := splitTwoParts(string(entry.Value()))
+		projectSFID, committeeSFID, _ := splitTwoParts(string(entry.Value))
 		if projectSFID == "" || committeeSFID == "" {
 			logger.With("committee_uid", event.ObjectID).
 				WarnContext(ctx, "no project SFID or committee SFID found, skipping")
@@ -177,19 +192,19 @@ func processCommitteeMemberIndexingEvent(ctx context.Context, subject string, da
 		}
 		committeeEntry, err := getMappingEntryWithRetry(ctx, "committee.uid."+committeeUID)
 		if err != nil {
-			if errors.Is(err, jetstream.ErrKeyNotFound) {
+			if errors.Is(err, ErrKeyNotFound) {
 				logger.With("committee_uid", committeeUID, "member_uid", event.ObjectID).
 					WarnContext(ctx, "no committee mapping for committee UID after bounded retry, skipping")
 				return nil // permanent: committee has no v1 counterpart
 			}
 			return err // transient: KV unavailable, redeliver
 		}
-		if isTombstonedMapping(committeeEntry.Value()) {
+		if isTombstonedMapping(committeeEntry.Value) {
 			logger.With("committee_uid", committeeUID, "member_uid", event.ObjectID).
 				WarnContext(ctx, "committee mapping is tombstoned, skipping")
 			return nil
 		}
-		projectSFID, committeeSFID, ok := splitTwoParts(string(committeeEntry.Value()))
+		projectSFID, committeeSFID, ok := splitTwoParts(string(committeeEntry.Value))
 		if !ok || projectSFID == "" || committeeSFID == "" {
 			logger.With("committee_uid", committeeUID, "member_uid", event.ObjectID).
 				WarnContext(ctx, "committee reverse mapping has unexpected format, skipping")
@@ -203,16 +218,21 @@ func processCommitteeMemberIndexingEvent(ctx context.Context, subject string, da
 		reverseMappingKey := "committee_member.uid." + event.ObjectID
 		entry, err := getMappingEntryWithRetry(ctx, reverseMappingKey)
 		if err != nil {
-			if errors.Is(err, jetstream.ErrKeyNotFound) {
+			if errors.Is(err, ErrKeyNotFound) {
 				logger.With("member_uid", event.ObjectID, "subject", subject).
 					WarnContext(ctx, "no reverse mapping for committee member UID after bounded retry, cannot sync to v1")
 				return nil // permanent: member has no v1 counterpart
 			}
 			return err // transient: KV unavailable
 		}
-		projectSFID, committeeSFID, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(entry.Value()))
+		if isTombstonedMapping(entry.Value) {
+			logger.With("member_uid", event.ObjectID).
+				InfoContext(ctx, "committee member reverse mapping is tombstoned, skipping update sync (member previously deleted)")
+			return nil // permanent: member was deleted; nothing to sync
+		}
+		projectSFID, committeeSFID, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(entry.Value))
 		if !ok {
-			logger.With("mapping_value", string(entry.Value()), "member_uid", event.ObjectID).
+			logger.With("mapping_value", string(entry.Value), "member_uid", event.ObjectID).
 				WarnContext(ctx, "committee member reverse mapping has unexpected format, skipping")
 			return nil
 		}
@@ -227,19 +247,50 @@ func processCommitteeMemberIndexingEvent(ctx context.Context, subject string, da
 		return syncCommitteeMemberUpdateToV1(ctx, event.ObjectID, projectSFID, committeeSFID, memberSFID, body.Data)
 
 	case "deleted":
+		// Suppress the indexer echo of our own v1→v2 DELETE at the
+		// EARLIEST point in the dispatch — before the reverse-mapping
+		// lookup. handleCommitteeMemberDelete tombstones
+		// committee_member.uid.<uid> AFTER the v2 API call succeeds.
+		// For v1-originated deletes, consuming the pending marker here
+		// converges every tombstone-vs-echo race outcome to a consumed
+		// marker (PR #170 review). For v2-originated deletes there is
+		// no pending marker; the tombstone race is instead handled by
+		// the explicit isTombstonedMapping guard below.
+		if consumePendingMarker(ctx, markerV1ToV2, markerOpDelete, markerResourceCommitteeMember, event.ObjectID) {
+			logger.With("member_uid", event.ObjectID).
+				InfoContext(ctx, "skipping indexer echo of v1-originated committee member delete (fresh v1_to_v2 pending marker); mappings already tombstoned by v1→v2 handler")
+			return nil
+		}
+
 		reverseMappingKey := "committee_member.uid." + event.ObjectID
 		entry, err := getMappingEntryWithRetry(ctx, reverseMappingKey)
 		if err != nil {
-			if errors.Is(err, jetstream.ErrKeyNotFound) {
+			if errors.Is(err, ErrKeyNotFound) {
 				logger.With("member_uid", event.ObjectID, "subject", subject).
 					WarnContext(ctx, "no reverse mapping for committee member UID after bounded retry, cannot sync to v1")
 				return nil // permanent: member has no v1 counterpart
 			}
 			return err // transient: KV unavailable
 		}
-		projectSFID, committeeSFID, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(entry.Value()))
+		// A tombstoned reverse mapping means the member was already cleaned up before
+		// this delivery arrived. Two paths lead here:
+		//   - Re-delivered v2-originated delete: a prior delivery of this same event
+		//     already called syncCommitteeMemberDeleteToV1, which tombstones the
+		//     reverse mapping on success; the pending-marker check above doesn't apply
+		//     (v2-originated deletes never write a marker).
+		//   - Re-delivered v1-originated delete: handleCommitteeMemberDelete tombstoned
+		//     the mapping and wrote the pending marker; the first delivery of this event
+		//     consumed that marker (returned early above), so this re-delivery finds no
+		//     marker and reaches this guard instead.
+		// In both cases nothing remains to sync to v1.
+		if isTombstonedMapping(entry.Value) {
+			logger.With("member_uid", event.ObjectID).
+				InfoContext(ctx, "committee member reverse mapping already tombstoned, skipping re-delivered delete (mappings cleaned up by a prior delivery)")
+			return nil // permanent: already cleaned up
+		}
+		projectSFID, committeeSFID, recordSFID, contactSFID, ok := parseCommitteeMemberReverseMapping(string(entry.Value))
 		if !ok {
-			logger.With("mapping_value", string(entry.Value()), "member_uid", event.ObjectID).
+			logger.With("mapping_value", string(entry.Value), "member_uid", event.ObjectID).
 				WarnContext(ctx, "committee member reverse mapping has unexpected format, skipping")
 			return nil
 		}
@@ -280,10 +331,10 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 	// couldn't be fetched.
 	reverseKey := "committee.uid." + committeeUID
 	reverseEntry, reverseErr := getMappingEntryWithRetry(ctx, reverseKey)
-	if reverseErr != nil && !errors.Is(reverseErr, jetstream.ErrKeyNotFound) {
+	if reverseErr != nil && !errors.Is(reverseErr, ErrKeyNotFound) {
 		return reverseErr // transient: KV unavailable, redeliver
 	}
-	if reverseErr == nil && !isTombstonedMapping(reverseEntry.Value()) {
+	if reverseErr == nil && !isTombstonedMapping(reverseEntry.Value) {
 		log.DebugContext(ctx, "committee originated from v1 — skipping reverse sync")
 		return nil
 	}
@@ -327,17 +378,37 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 	}
 
 	// Store forward mapping (v1 SFID -> v2 UID) and reverse mapping (v2 UID -> projectSFID:committeeSFID).
-	// Put failures are logged as warnings; the V1 record was already created successfully and
-	// retrying the whole message would risk creating a duplicate.
+	//
+	// Both writes use putMappingWithRetry (handlers.go): the v1 record already
+	// exists, and losing either mapping is a durable inconsistency because core
+	// NATS will not redeliver this create event. Same treatment applied to
+	// syncProjectCreateToV1 in linuxfoundation/lfx-v1-sync-helper#160.
+	//
+	// The reverse mapping is the more critical of the two: it doubles as the
+	// create-path loop guard and drives the SFID lookup for subsequent
+	// update/delete events. Losing it means a replay would create a duplicate v1
+	// committee and any future v2 update / delete would be silently dropped. Its
+	// failure is escalated to ERROR with the SFID + UID so ops can reconcile
+	// manually (write the mapping directly or delete the stray v1 committee).
 	committeeSFID := result.ID
-	if _, err := mappingsKV.Put(ctx, "committee.sfid."+committeeSFID, []byte(committeeUID)); err != nil {
-		log.With(errKey, err, "committee_sfid", committeeSFID).
-			WarnContext(ctx, "failed to store committee forward mapping after v1 create")
+	if err := putMappingWithRetry(ctx, "committee.sfid."+committeeSFID, []byte(committeeUID)); err != nil {
+		if errors.Is(err, errPutRaceAbortedByTombstone) {
+			log.With(errKey, err, "committee_sfid", committeeSFID).
+				InfoContext(ctx, "committee forward mapping write aborted — delete raced with create; v1 record already deleted, mapping tombstoned, final state consistent")
+		} else {
+			log.With(errKey, err, "committee_sfid", committeeSFID).
+				ErrorContext(ctx, "failed to store committee forward mapping after v1 create — lookup_v1_mapping may return stale results until reconciled")
+		}
 	}
 	reverseMappingValue := projectSFID + ":" + committeeSFID
-	if _, err := mappingsKV.Put(ctx, "committee.uid."+committeeUID, []byte(reverseMappingValue)); err != nil {
-		log.With(errKey, err, "committee_sfid", committeeSFID).
-			WarnContext(ctx, "failed to store committee reverse mapping after v1 create")
+	if err := putMappingWithRetry(ctx, "committee.uid."+committeeUID, []byte(reverseMappingValue)); err != nil {
+		if errors.Is(err, errPutRaceAbortedByTombstone) {
+			log.With(errKey, err, "committee_sfid", committeeSFID).
+				InfoContext(ctx, "committee reverse mapping write aborted — delete raced with create; v1 record already deleted, mapping tombstoned, final state consistent")
+		} else {
+			log.With(errKey, err, "committee_sfid", committeeSFID).
+				ErrorContext(ctx, "failed to store committee reverse mapping after v1 create — v1 record is orphaned; future update/delete events will be dropped and a replay will duplicate; manual reconciliation required (write mapping or delete v1 record)")
+		}
 	}
 
 	log.With("committee_sfid", committeeSFID).InfoContext(ctx, "successfully created committee in v1 from indexer event")
@@ -347,6 +418,15 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 // syncCommitteeUpdateToV1 patches a v1 committee to match the v2 state.
 func syncCommitteeUpdateToV1(ctx context.Context, committeeUID, projectSFID, committeeSFID string, data map[string]any) error {
 	log := logger.With("committee_uid", committeeUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID)
+
+	// Suppress the indexer echo of our own v1→v2 UPDATE. See
+	// syncProjectUpdateToV1 for the full rationale — same shape,
+	// same failure mode without the check
+	// (linuxfoundation/lfx-self-serve#2007).
+	if consumePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceCommittee, committeeUID) {
+		log.InfoContext(ctx, "skipping indexer echo of v1-originated committee update (fresh v1_to_v2 pending marker)")
+		return nil
+	}
 
 	payload := projectServiceCommitteeUpdate{}
 	name, _ := data["name"].(string)
@@ -385,19 +465,43 @@ func syncCommitteeUpdateToV1(ctx context.Context, committeeUID, projectSFID, com
 }
 
 // syncCommitteeDeleteToV1 deletes a v1 committee that was deleted in v2.
+//
+// The v1_to_v2.delete marker is consumed by the dispatcher
+// (processCommitteeIndexingEvent case "deleted") BEFORE reaching this
+// function, so any v1-originated echo is short-circuited there. See
+// the dispatcher for why the consume cannot live here.
 func syncCommitteeDeleteToV1(ctx context.Context, committeeUID, projectSFID, committeeSFID string) error {
 	log := logger.With("committee_uid", committeeUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID)
 
+	// Record that we're about to delete the v1 committee so the
+	// resulting WAL soft-delete event can identify itself as our own
+	// round-trip echo. See syncProjectDeleteToV1 for the equivalent
+	// block. Keyed by v1 SFID so handleCommitteeDelete can consume
+	// BEFORE mapping lookup — the tombstones written below can
+	// complete before the WAL echo arrives.
+	writePendingMarker(ctx, markerV2ToV1, markerOpDelete, markerResourceCommittee, committeeSFID)
+
 	if err := deleteV1Committee(ctx, projectSFID, committeeSFID); err != nil {
+		// v1 DELETE failed. Roll back the marker so an unrelated
+		// v1-originated WAL soft-delete for the same committee SFID
+		// within the freshness window is not silenced by
+		// handleCommitteeDelete. See syncProjectDeleteToV1 for the
+		// equivalent block.
+		deletePendingMarker(ctx, markerV2ToV1, markerOpDelete, markerResourceCommittee, committeeSFID)
 		log.With(errKey, err).ErrorContext(ctx, "failed to delete committee in v1")
 		return err // transient: trigger redeliver
 	}
 
+	// Tombstones use putMappingWithRetry via tombstoneMapping (handlers.go). A
+	// terminal failure leaves the mapping live: the next create-path loop guard
+	// read for this UID would incorrectly skip a legitimate re-sync, and a
+	// replayed delete would look up a stale SFID against a v1 record that no
+	// longer exists. Escalated to ERROR so ops can reconcile.
 	if err := tombstoneMapping(ctx, "committee.sfid."+committeeSFID); err != nil {
-		log.With(errKey, err).WarnContext(ctx, "failed to tombstone committee forward mapping after v1 delete")
+		log.With(errKey, err).ErrorContext(ctx, "failed to tombstone committee forward mapping after v1 delete — mapping still points at a deleted v1 committee; manual reconciliation required")
 	}
 	if err := tombstoneMapping(ctx, "committee.uid."+committeeUID); err != nil {
-		log.With(errKey, err).WarnContext(ctx, "failed to tombstone committee reverse mapping after v1 delete")
+		log.With(errKey, err).ErrorContext(ctx, "failed to tombstone committee reverse mapping after v1 delete — create-path loop guard will skip legitimate re-sync until reconciled")
 	}
 
 	log.InfoContext(ctx, "successfully deleted committee in v1 from indexer event")
@@ -416,10 +520,10 @@ func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID,
 	// couldn't be fetched.
 	reverseKey := "committee_member.uid." + memberUID
 	reverseEntry, reverseErr := getMappingEntryWithRetry(ctx, reverseKey)
-	if reverseErr != nil && !errors.Is(reverseErr, jetstream.ErrKeyNotFound) {
+	if reverseErr != nil && !errors.Is(reverseErr, ErrKeyNotFound) {
 		return reverseErr // transient: KV unavailable, redeliver
 	}
-	if reverseErr == nil && !isTombstonedMapping(reverseEntry.Value()) {
+	if reverseErr == nil && !isTombstonedMapping(reverseEntry.Value) {
 		log.DebugContext(ctx, "committee member originated from v1 — skipping reverse sync")
 		return nil
 	}
@@ -492,18 +596,37 @@ func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID,
 	}
 
 	// Store forward mapping (v1 SFID -> committeeUID:memberUID) and reverse mapping (v2 UID -> projectSFID:committeeSFID:memberSFID).
-	// Put failures are logged as warnings; the V1 record was already created successfully and
-	// retrying the whole message would risk creating a duplicate.
+	//
+	// Both writes use putMappingWithRetry (handlers.go): the v1 record already
+	// exists, and losing either mapping is a durable inconsistency because core
+	// NATS will not redeliver this create event.
+	//
+	// The reverse mapping is the more critical of the two: it doubles as the
+	// create-path loop guard and drives the SFID triple lookup for subsequent
+	// update/delete events. Losing it means a replay would create a duplicate v1
+	// committee member and any future v2 update / delete would be silently
+	// dropped. Its failure is escalated to ERROR with the SFID + UID so ops can
+	// reconcile manually.
 	memberSFID := result.MemberID
 	forwardMappingValue := committeeUID + ":" + memberUID
-	if _, err := mappingsKV.Put(ctx, "committee_member.sfid."+memberSFID, []byte(forwardMappingValue)); err != nil {
-		log.With(errKey, err, "member_sfid", memberSFID).
-			WarnContext(ctx, "failed to store committee member forward mapping after v1 create")
+	if err := putMappingWithRetry(ctx, "committee_member.sfid."+memberSFID, []byte(forwardMappingValue)); err != nil {
+		if errors.Is(err, errPutRaceAbortedByTombstone) {
+			log.With(errKey, err, "member_sfid", memberSFID).
+				InfoContext(ctx, "committee member forward mapping write aborted — delete raced with create; v1 record already deleted, mapping tombstoned, final state consistent")
+		} else {
+			log.With(errKey, err, "member_sfid", memberSFID).
+				ErrorContext(ctx, "failed to store committee member forward mapping after v1 create — lookup_v1_mapping may return stale results until reconciled")
+		}
 	}
 	reverseMappingValue := projectSFID + ":" + committeeSFID + ":" + memberSFID
-	if _, err := mappingsKV.Put(ctx, "committee_member.uid."+memberUID, []byte(reverseMappingValue)); err != nil {
-		log.With(errKey, err, "member_sfid", memberSFID).
-			WarnContext(ctx, "failed to store committee member reverse mapping after v1 create")
+	if err := putMappingWithRetry(ctx, "committee_member.uid."+memberUID, []byte(reverseMappingValue)); err != nil {
+		if errors.Is(err, errPutRaceAbortedByTombstone) {
+			log.With(errKey, err, "member_sfid", memberSFID).
+				InfoContext(ctx, "committee member reverse mapping write aborted — delete raced with create; v1 record already deleted, mapping tombstoned, final state consistent")
+		} else {
+			log.With(errKey, err, "member_sfid", memberSFID).
+				ErrorContext(ctx, "failed to store committee member reverse mapping after v1 create — v1 record is orphaned; future update/delete events will be dropped and a replay will duplicate; manual reconciliation required (write mapping or delete v1 record)")
+		}
 	}
 
 	log.With("member_sfid", memberSFID).InfoContext(ctx, "successfully created committee member in v1 from indexer event")
@@ -513,6 +636,14 @@ func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID,
 // syncCommitteeMemberUpdateToV1 patches a v1 committee member to match the v2 state.
 func syncCommitteeMemberUpdateToV1(ctx context.Context, memberUID, projectSFID, committeeSFID, memberSFID string, data map[string]any) error {
 	log := logger.With("member_uid", memberUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID, "member_sfid", memberSFID)
+
+	// Suppress the indexer echo of our own v1→v2 UPDATE. See
+	// syncProjectUpdateToV1 for the full rationale
+	// (linuxfoundation/lfx-self-serve#2007).
+	if consumePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceCommitteeMember, memberUID) {
+		log.InfoContext(ctx, "skipping indexer echo of v1-originated committee member update (fresh v1_to_v2 pending marker)")
+		return nil
+	}
 
 	payload := projectServiceCommitteeMemberUpdate{}
 	if email, ok := data["email"].(string); ok {
@@ -581,18 +712,57 @@ func syncCommitteeMemberUpdateToV1(ctx context.Context, memberUID, projectSFID, 
 // actually exists and its value points back at this same memberUID — otherwise the
 // forward tombstone is skipped rather than risk tombstoning an unrelated mapping
 // (or a no-op) while the real v1-originated forward mapping stays live.
+//
+// The v1_to_v2.delete marker is consumed by the dispatcher
+// (processCommitteeMemberIndexingEvent case "deleted") BEFORE reaching
+// this function, so any v1-originated echo is short-circuited there.
+// See the dispatcher for why the consume cannot live here.
 func syncCommitteeMemberDeleteToV1(ctx context.Context, memberUID, projectSFID, committeeSFID, memberSFID, recordSFID string) error {
 	log := logger.With("member_uid", memberUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID, "member_sfid", memberSFID, "record_sfid", recordSFID)
 
+	// Record that we're about to delete the v1 committee member so the
+	// resulting WAL soft-delete event can identify itself as our own
+	// round-trip echo. See syncProjectDeleteToV1 for the equivalent
+	// block.
+	//
+	// Keyed by the platform-community__c record SFID — the key the WAL
+	// emits its soft-delete under and the sfid parameter that
+	// handleCommitteeMemberDelete receives before it consumes the
+	// marker BEFORE mapping lookup.
+	//
+	// Skipped when recordSFID is empty (v2-originated member with no
+	// record-sfid companion). In that narrow case the WAL echo falls
+	// back to the pre-fix retry-until-tombstone-lands cycle in
+	// handleCommitteeMemberDelete — an accepted degradation for an
+	// already-corrupted mapping state, not the common path.
+	if recordSFID != "" {
+		writePendingMarker(ctx, markerV2ToV1, markerOpDelete, markerResourceCommitteeMember, recordSFID)
+	} else {
+		log.WarnContext(ctx, "no record SFID available; skipping v2_to_v1 delete marker write — WAL echo may trigger the pre-fix retry-until-tombstone cycle")
+	}
+
 	if err := deleteV1CommitteeMember(ctx, projectSFID, committeeSFID, memberSFID); err != nil {
+		// v1 DELETE failed. Roll back the marker (if written) so an
+		// unrelated v1-originated WAL soft-delete for the same record
+		// SFID within the freshness window is not silenced by
+		// handleCommitteeMemberDelete. deletePendingMarker is a no-op
+		// on empty identifier, so the guard above is preserved.
+		if recordSFID != "" {
+			deletePendingMarker(ctx, markerV2ToV1, markerOpDelete, markerResourceCommitteeMember, recordSFID)
+		}
 		log.With(errKey, err).ErrorContext(ctx, "failed to delete committee member in v1")
 		return err // transient: trigger redeliver
 	}
 
+	// Tombstones use putMappingWithRetry via tombstoneMapping. Terminal failure
+	// leaves the mapping live: the create-path loop guard would incorrectly skip
+	// a legitimate re-sync, and a replayed delete would look up a stale SFID
+	// triple against a v1 record that no longer exists. Escalated to ERROR so
+	// ops can reconcile.
 	forwardSFID := recordSFID
 	if forwardSFID == "" {
-		if entry, err := mappingsKV.Get(ctx, "committee_member.sfid."+memberSFID); err == nil && !isTombstonedMapping(entry.Value()) {
-			if _, ownerUID, ok := splitTwoParts(string(entry.Value())); ok && ownerUID == memberUID {
+		if entry, err := mappingStore.Get(ctx, "committee_member.sfid."+memberSFID); err == nil && !isTombstonedMapping(entry.Value) {
+			if _, ownerUID, ok := splitTwoParts(string(entry.Value)); ok && ownerUID == memberUID {
 				forwardSFID = memberSFID
 			}
 		}
@@ -600,15 +770,15 @@ func syncCommitteeMemberDeleteToV1(ctx context.Context, memberUID, projectSFID, 
 	if forwardSFID == "" {
 		log.WarnContext(ctx, "cannot determine committee member forward mapping key, skipping forward tombstone")
 	} else if err := tombstoneMapping(ctx, "committee_member.sfid."+forwardSFID); err != nil {
-		log.With(errKey, err).WarnContext(ctx, "failed to tombstone committee member forward mapping after v1 delete")
+		log.With(errKey, err).ErrorContext(ctx, "failed to tombstone committee member forward mapping after v1 delete — mapping still points at a deleted v1 member; manual reconciliation required")
 	}
 	if recordSFID != "" {
 		if err := tombstoneMapping(ctx, committeeMemberRecordSFIDKey(memberUID)); err != nil {
-			log.With(errKey, err).WarnContext(ctx, "failed to tombstone committee member record sfid mapping after v1 delete")
+			log.With(errKey, err).ErrorContext(ctx, "failed to tombstone committee member record sfid mapping after v1 delete — manual reconciliation required")
 		}
 	}
 	if err := tombstoneMapping(ctx, "committee_member.uid."+memberUID); err != nil {
-		log.With(errKey, err).WarnContext(ctx, "failed to tombstone committee member reverse mapping after v1 delete")
+		log.With(errKey, err).ErrorContext(ctx, "failed to tombstone committee member reverse mapping after v1 delete — create-path loop guard will skip legitimate re-sync until reconciled")
 	}
 
 	log.InfoContext(ctx, "successfully deleted committee member in v1 from indexer event")
@@ -649,11 +819,28 @@ func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string
 //   - updated: patch the mapped v1 project.
 //   - deleted: delete the mapped v1 project and tombstone both mappings.
 //
-// The loop with the v1→v2 direction is broken on the v1 side by shouldSkipSync
-// (handlers.go): when the WAL re-emits our own v1 write, lastmodifiedbyid matches
-// our service's Auth0 client ID and handleProjectUpdate returns early. The create
-// path additionally uses the presence of a non-tombstoned reverse mapping as a
-// v1-origination signal to skip the write entirely.
+// The v1↔v2 write loop is closed on two axes:
+//
+//   - v2-originated UPDATE WAL echo: shouldSkipSync (handlers.go)
+//     catches the v1 PATCH we just issued when the WAL re-emits it —
+//     lastmodifiedbyid matches our service's Auth0 client ID and
+//     handleProjectUpdate returns early.
+//
+//   - v1-originated UPDATE indexer echo, v1-originated DELETE indexer
+//     echo, and v2-originated DELETE WAL echo (which bypasses
+//     shouldSkipSync on the handleKVPut soft-delete branch): pending
+//     operation markers under the "pending.*" namespace in v1-mappings
+//     (see pending_markers.go). The v1→v2 handler writes a marker
+//     before its v2 API call; syncProjectUpdateToV1 /
+//     syncProjectDeleteToV1 consume it before the v1 API call. In the
+//     opposite direction, syncProjectDeleteToV1 writes a marker keyed
+//     by v1 SFID before its v1 DELETE; handleProjectDelete consumes it
+//     BEFORE mapping lookup so a tombstone that races the WAL echo
+//     does not leak the marker.
+//
+// The create path additionally uses the presence of a non-tombstoned
+// reverse mapping as a v1-origination signal to skip the write
+// entirely.
 //
 // This handler covers the ProjectBase fields only. Settings-only fields
 // (mission_statement, announcement_date, executive_director, program_manager,
@@ -702,6 +889,22 @@ func projectIndexerEventHandler(msg *nats.Msg) {
 		syncProjectUpdateToV1(ctx, event.ObjectID, projectSFID, body.Data)
 
 	case "deleted":
+		// Suppress the indexer echo of our own v1→v2 DELETE at the
+		// EARLIEST point in the dispatch — before the reverse-mapping
+		// lookup. handleProjectDelete tombstones project.uid.<uid>
+		// AFTER the v2 API call succeeds; if that tombstone lands
+		// before the indexer event arrives here,
+		// lookupV1ProjectSFIDForEvent returns a "mapping tombstoned"
+		// error and the branch returns without ever calling
+		// syncProjectDeleteToV1 — leaking the marker forever
+		// (PR #170 review). Consuming at the dispatch top converges
+		// every tombstone-vs-echo race outcome to a consumed marker.
+		if consumePendingMarker(ctx, markerV1ToV2, markerOpDelete, markerResourceProject, event.ObjectID) {
+			logger.With("project_uid", event.ObjectID).
+				InfoContext(ctx, "skipping indexer echo of v1-originated project delete (fresh v1_to_v2 pending marker); mappings already tombstoned by v1→v2 handler")
+			return
+		}
+
 		projectSFID, err := lookupV1ProjectSFIDForEvent(ctx, event.ObjectID)
 		if err != nil {
 			return
@@ -731,7 +934,7 @@ func projectIndexerEventHandler(msg *nats.Msg) {
 // The read distinguishes four outcomes:
 //   - mapping present and non-tombstoned → skip (v1-originated or already synced)
 //   - mapping tombstoned → proceed with create (previously deleted)
-//   - mapping absent (jetstream.ErrKeyNotFound after retries) → proceed with create
+//   - mapping absent (ErrKeyNotFound after retries) → proceed with create
 //   - transient KV failure → skip and log at ERROR level rather than risk
 //     creating a duplicate v1 record when the mapping actually exists but is
 //     temporarily unreadable. Core NATS has no NAK for this indexer subject,
@@ -743,12 +946,12 @@ func syncProjectCreateToV1(ctx context.Context, projectUID string, data map[stri
 	entry, err := getMappingEntryWithRetry(ctx, reverseKey)
 	switch {
 	case err == nil:
-		if !isTombstonedMapping(entry.Value()) {
+		if !isTombstonedMapping(entry.Value) {
 			log.DebugContext(ctx, "project originated from v1 or already synced — skipping reverse sync")
 			return
 		}
 		// Tombstoned — proceed with create.
-	case errors.Is(err, jetstream.ErrKeyNotFound):
+	case errors.Is(err, ErrKeyNotFound):
 		// Genuine miss even after bounded retry — proceed with create.
 	default:
 		log.With(errKey, err).
@@ -793,12 +996,22 @@ func syncProjectCreateToV1(ctx context.Context, projectUID string, data map[stri
 	// failure is escalated to ERROR with the SFID + UID so ops can reconcile
 	// manually (write the mapping directly or delete the stray v1 record).
 	if err := putMappingWithRetry(ctx, "project.sfid."+projectSFID, []byte(projectUID)); err != nil {
-		log.With(errKey, err, "project_sfid", projectSFID).
-			ErrorContext(ctx, "failed to store project forward mapping after v1 create — lookup_v1_mapping may return stale results until reconciled")
+		if errors.Is(err, errPutRaceAbortedByTombstone) {
+			log.With(errKey, err, "project_sfid", projectSFID).
+				InfoContext(ctx, "project forward mapping write aborted — delete raced with create; v1 record already deleted, mapping tombstoned, final state consistent")
+		} else {
+			log.With(errKey, err, "project_sfid", projectSFID).
+				ErrorContext(ctx, "failed to store project forward mapping after v1 create — lookup_v1_mapping may return stale results until reconciled")
+		}
 	}
 	if err := putMappingWithRetry(ctx, reverseKey, []byte(projectSFID)); err != nil {
-		log.With(errKey, err, "project_sfid", projectSFID).
-			ErrorContext(ctx, "failed to store project reverse mapping after v1 create — v1 record is orphaned; future update/delete events will be dropped and a replay will duplicate; manual reconciliation required (write mapping or delete v1 record)")
+		if errors.Is(err, errPutRaceAbortedByTombstone) {
+			log.With(errKey, err, "project_sfid", projectSFID).
+				InfoContext(ctx, "project reverse mapping write aborted — delete raced with create; v1 record already deleted, mapping tombstoned, final state consistent")
+		} else {
+			log.With(errKey, err, "project_sfid", projectSFID).
+				ErrorContext(ctx, "failed to store project reverse mapping after v1 create — v1 record is orphaned; future update/delete events will be dropped and a replay will duplicate; manual reconciliation required (write mapping or delete v1 record)")
+		}
 	}
 
 	log.With("project_sfid", projectSFID).InfoContext(ctx, "successfully created project in v1 from indexer event")
@@ -808,11 +1021,31 @@ func syncProjectCreateToV1(ctx context.Context, projectUID string, data map[stri
 func syncProjectUpdateToV1(ctx context.Context, projectUID, projectSFID string, data map[string]any) {
 	log := logger.With("project_uid", projectUID, "project_sfid", projectSFID)
 
+	// Suppress the indexer echo of our own v1→v2 UPDATE. handleProjectUpdate
+	// writes this marker before it calls the v2 project-service PATCH; the
+	// v2 side then publishes an indexer event that routes here.
+	// Without this check we PATCH v1 back with the same values we just
+	// received from it, overwriting v1 lastmodifiedbyid with the sync-helper's
+	// own client id and destroying the provenance of the human who made the
+	// original v1 change. See linuxfoundation/lfx-self-serve#2007.
+	if consumePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceProject, projectUID) {
+		log.InfoContext(ctx, "skipping indexer echo of v1-originated project update (fresh v1_to_v2 pending marker)")
+		return
+	}
+
 	payload, err := mapV2DataToV1ProjectUpdatePayload(ctx, data)
 	if err != nil {
 		log.With(errKey, err).ErrorContext(ctx, "failed to map v2 project data to v1 update payload, skipping")
 		return
 	}
+
+	// NB: no v2_to_v1 update marker is written here. The WAL echo of
+	// this PATCH is caught by shouldSkipSync (handlers.go) via
+	// lastmodifiedbyid — the v1 project-service records
+	// <our-client>@clients on the row, which handleKVPut skips at the
+	// update-branch shouldSkipSync check before dispatching to
+	// handleProjectUpdate. Only the delete path needs a symmetric marker
+	// because handleKVPut's soft-delete branch bypasses shouldSkipSync.
 
 	if err := updateV1Project(ctx, projectSFID, *payload); err != nil {
 		log.With(errKey, err).ErrorContext(ctx, "failed to update project in v1")
@@ -823,19 +1056,49 @@ func syncProjectUpdateToV1(ctx context.Context, projectUID, projectSFID string, 
 }
 
 // syncProjectDeleteToV1 deletes a v1 project that was deleted in v2.
+//
+// The v1_to_v2.delete marker is consumed by the dispatcher
+// (projectIndexerEventHandler case "deleted") BEFORE reaching this
+// function, so any v1-originated echo is short-circuited there. See
+// the dispatcher for why the consume cannot live here.
 func syncProjectDeleteToV1(ctx context.Context, projectUID, projectSFID string) {
 	log := logger.With("project_uid", projectUID, "project_sfid", projectSFID)
 
+	// Record that we're about to delete the v1 project so the resulting
+	// WAL soft-delete event (which will fan out to handleProjectDelete
+	// via handleResourceDelete) can identify itself as our own
+	// round-trip echo. handleKVPut's shouldSkipSync check is bypassed
+	// on the soft-delete branch, so this marker is the only mechanism
+	// that closes the loop for v2-originated deletes.
+	//
+	// Keyed by v1 SFID (not v2 UID) so handleProjectDelete can consume
+	// the marker BEFORE mapping lookup. The mapping tombstones written
+	// below can complete before the WAL echo arrives, in which case
+	// handleProjectDelete would otherwise bail at the tombstoned-mapping
+	// check without ever reaching the marker consume — and the marker
+	// would leak forever with no consumer to clean it up.
+	writePendingMarker(ctx, markerV2ToV1, markerOpDelete, markerResourceProject, projectSFID)
+
 	if err := deleteV1Project(ctx, projectSFID); err != nil {
+		// v1 DELETE failed. Roll back the marker so an unrelated
+		// v1-originated WAL soft-delete for the same SFID within the
+		// freshness window is not silenced by handleProjectDelete. The
+		// tombstones below are skipped by the early return, so the
+		// mapping stays live and a legitimate v1-originated delete
+		// must still be able to drive the v2 DELETE.
+		deletePendingMarker(ctx, markerV2ToV1, markerOpDelete, markerResourceProject, projectSFID)
 		log.With(errKey, err).ErrorContext(ctx, "failed to delete project in v1")
 		return
 	}
 
+	// Tombstones use putMappingWithRetry via tombstoneMapping. Terminal failure
+	// leaves the mapping live and is escalated to ERROR so ops can reconcile —
+	// see the equivalent block in syncCommitteeDeleteToV1 for the failure mode.
 	if err := tombstoneMapping(ctx, "project.sfid."+projectSFID); err != nil {
-		log.With(errKey, err).WarnContext(ctx, "failed to tombstone project forward mapping after v1 delete")
+		log.With(errKey, err).ErrorContext(ctx, "failed to tombstone project forward mapping after v1 delete — mapping still points at a deleted v1 project; manual reconciliation required")
 	}
 	if err := tombstoneMapping(ctx, "project.uid."+projectUID); err != nil {
-		log.With(errKey, err).WarnContext(ctx, "failed to tombstone project reverse mapping after v1 delete")
+		log.With(errKey, err).ErrorContext(ctx, "failed to tombstone project reverse mapping after v1 delete — create-path loop guard will skip legitimate re-sync until reconciled")
 	}
 
 	log.InfoContext(ctx, "successfully deleted project in v1 from indexer event")
@@ -1037,7 +1300,7 @@ func mapV2DataToV1ProjectUpdatePayload(ctx context.Context, data map[string]any)
 // resolveV1ProjectSFIDFromUID looks up a v2 project UID in mappingsKV and returns
 // its v1 SFID. Returns an error when the key is missing or tombstoned. The
 // underlying KV error is wrapped with %w so callers can use errors.Is against
-// jetstream.ErrKeyNotFound to distinguish genuine misses from transient failures.
+// ErrKeyNotFound to distinguish genuine misses from transient failures.
 //
 // The Get is done through getMappingEntryWithRetry (handlers.go) so the same
 // bounded backoff protects parent / legal-parent SFID lookups here as
@@ -1050,10 +1313,10 @@ func resolveV1ProjectSFIDFromUID(ctx context.Context, projectUID string) (string
 	if err != nil {
 		return "", fmt.Errorf("mapping lookup failed: %w", err)
 	}
-	if isTombstonedMapping(entry.Value()) {
+	if isTombstonedMapping(entry.Value) {
 		return "", fmt.Errorf("mapping is tombstoned")
 	}
-	sfid := strings.TrimSpace(string(entry.Value()))
+	sfid := strings.TrimSpace(string(entry.Value))
 	if sfid == "" {
 		return "", fmt.Errorf("mapping value is empty")
 	}
@@ -1083,19 +1346,19 @@ func lookupV1ProjectSFIDForEvent(ctx context.Context, projectUID string) (string
 	entry, err := getMappingEntryWithRetry(ctx, "project.uid."+projectUID)
 	switch {
 	case err == nil:
-		if isTombstonedMapping(entry.Value()) {
+		if isTombstonedMapping(entry.Value) {
 			logger.With("project_uid", projectUID).
 				WarnContext(ctx, "v1 project SFID mapping is tombstoned, skipping event")
 			return "", fmt.Errorf("mapping tombstoned for %s", projectUID)
 		}
-		sfid := strings.TrimSpace(string(entry.Value()))
+		sfid := strings.TrimSpace(string(entry.Value))
 		if sfid == "" {
 			logger.With("project_uid", projectUID).
 				WarnContext(ctx, "v1 project SFID mapping is empty, skipping event")
 			return "", fmt.Errorf("mapping empty for %s", projectUID)
 		}
 		return sfid, nil
-	case errors.Is(err, jetstream.ErrKeyNotFound):
+	case errors.Is(err, ErrKeyNotFound):
 		logger.With("project_uid", projectUID).
 			WarnContext(ctx, "no v1 project SFID mapping found for event even after bounded retry, skipping")
 		return "", err
@@ -1214,11 +1477,11 @@ func committeeMemberRecordSFIDKey(memberUID string) string {
 // absent, tombstoned, or unreadable — all treated as "unknown", since this value is
 // only used to tombstone the forward mapping as a best effort on delete.
 func resolveCommitteeMemberRecordSFID(ctx context.Context, memberUID string) string {
-	entry, err := mappingsKV.Get(ctx, committeeMemberRecordSFIDKey(memberUID))
-	if err != nil || isTombstonedMapping(entry.Value()) {
+	entry, err := mappingStore.Get(ctx, committeeMemberRecordSFIDKey(memberUID))
+	if err != nil || isTombstonedMapping(entry.Value) {
 		return ""
 	}
-	return string(entry.Value())
+	return string(entry.Value)
 }
 
 // mapV2CategoryToV1 converts a v2 committee category to the equivalent v1 API value.

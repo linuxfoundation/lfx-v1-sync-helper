@@ -97,12 +97,22 @@ type ClientCredentialsTokenSource struct {
 	audience   string
 }
 
+// v1TokenFetchTimeout bounds a single Auth0 client-credentials token fetch.
+// Matches auth0CallTimeout (the other live Auth0 bound) in duration.
+const v1TokenFetchTimeout = 20 * time.Second
+
 // Token implements the oauth2.TokenSource interface to return a new access token
 func (c *ClientCredentialsTokenSource) Token() (*oauth2.Token, error) {
 	ctx := c.ctx
 	if ctx == nil {
 		ctx = context.TODO()
 	}
+	// Bound the fetch: oauth2.Transport calls Token() synchronously before the
+	// base RoundTripper sees the request, so the caller's request context can
+	// never interrupt a stalled Auth0 call. c.ctx is context.Background() in
+	// production, making this the only bound on token acquisition.
+	ctx, cancel := context.WithTimeout(ctx, v1TokenFetchTimeout)
+	defer cancel()
 
 	// Build and issue a request using Auth0 client credentials flow
 	body := oauth.LoginWithClientCredentialsRequest{
@@ -266,6 +276,11 @@ var errAmbiguousDefactoPrimaryEmail = errors.New("ambiguous de-facto primary alt
 func ResolveV1UserSFIDByUsername(ctx context.Context, username string) (string, error) {
 	return dbResolveUserSFIDByUsername(ctx, username)
 }
+
+// resolveV1UserSFIDByUsernameFn is injectable for tests: it lets
+// handleUserProfileUpdated be driven end-to-end (including its per-sfid
+// skills-reconcile ordering guarantee) without a live v1 platform DB.
+var resolveV1UserSFIDByUsernameFn = ResolveV1UserSFIDByUsername
 
 // lookupUserByUsername looks up a username live in the v1 platform database
 // and returns the resolved V1User and SFID in a single operation.
@@ -476,24 +491,24 @@ func resolveV1OrgID(ctx context.Context, name, website string) (string, error) {
 	return created.ID, nil
 }
 
-// getCachedV1Org retrieves an organization from the mappings KV cache
+// getCachedV1Org retrieves an organization from the mappings cache
 func getCachedV1Org(ctx context.Context, sfid string) (*V1Organization, error) {
 	cacheKey := orgCacheKeyPrefix + sfid
 
-	entry, err := mappingsKV.Get(ctx, cacheKey)
+	entry, err := mappingStore.Get(ctx, cacheKey)
 	if err != nil {
 		return nil, err // No cached entry
 	}
 
 	var org V1Organization
-	if err := json.Unmarshal(entry.Value(), &org); err != nil {
+	if err := json.Unmarshal(entry.Value, &org); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal cached organization: %w", err)
 	}
 
 	return &org, nil
 }
 
-// setCachedOrg stores an organization in the mappings KV cache
+// setCachedOrg stores an organization in the mappings cache
 func setCachedV1Org(ctx context.Context, sfid string, org *V1Organization) error {
 	cacheKey := orgCacheKeyPrefix + sfid
 
@@ -502,7 +517,7 @@ func setCachedV1Org(ctx context.Context, sfid string, org *V1Organization) error
 		return fmt.Errorf("failed to marshal organization for cache: %w", err)
 	}
 
-	_, err = mappingsKV.Put(ctx, cacheKey, data)
+	_, err = mappingStore.Put(ctx, cacheKey, data)
 	return err
 }
 
@@ -516,18 +531,18 @@ func acquireV1OrgLock(ctx context.Context, sfid string, maxRetries int) (bool, b
 		lockValue := strconv.FormatInt(time.Now().Unix(), 10)
 
 		// Try to create the lock (will fail if it already exists)
-		_, err := mappingsKV.Create(ctx, lockKey, []byte(lockValue))
+		_, err := mappingStore.Create(ctx, lockKey, []byte(lockValue))
 		if err == nil {
 			return true, waited // Successfully acquired lock
 		}
 
 		// Check if lock already exists and if it's stale
-		if entry, getErr := mappingsKV.Get(ctx, lockKey); getErr == nil {
-			if lockTimestamp, parseErr := strconv.ParseInt(string(entry.Value()), 10, 64); parseErr == nil {
+		if entry, getErr := mappingStore.Get(ctx, lockKey); getErr == nil {
+			if lockTimestamp, parseErr := strconv.ParseInt(string(entry.Value), 10, 64); parseErr == nil {
 				lockTime := time.Unix(lockTimestamp, 0)
 				if time.Since(lockTime) > orgLockTimeout {
 					// Lock is stale, try to update it
-					if _, updateErr := mappingsKV.Put(ctx, lockKey, []byte(lockValue)); updateErr == nil {
+					if _, updateErr := mappingStore.Put(ctx, lockKey, []byte(lockValue)); updateErr == nil {
 						return true, waited
 					}
 				}
@@ -547,7 +562,7 @@ func acquireV1OrgLock(ctx context.Context, sfid string, maxRetries int) (bool, b
 // releaseOrgLock releases an organization refresh lock
 func releaseV1OrgLock(ctx context.Context, sfid string) error {
 	lockKey := orgLockKeyPrefix + sfid
-	return mappingsKV.Delete(ctx, lockKey)
+	return mappingStore.Delete(ctx, lockKey)
 }
 
 // refreshOrgInBackground refreshes organization data in the background

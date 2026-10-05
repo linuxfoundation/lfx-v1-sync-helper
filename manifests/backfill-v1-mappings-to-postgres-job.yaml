@@ -1,0 +1,174 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+#
+# One-shot Job to copy the entire v1-mappings NATS KV bucket into the
+# Postgres v1_mappings table. First step of the LFXV2-2985 migration off
+# NATS KV; run this after the release containing the pgxpool + schema
+# bootstrap has been deployed and BEFORE flipping
+# V1_MAPPINGS_STORE_MODE to "dual" or "postgres" on the app deployment.
+#
+# One-shot: this manifest is applied manually via kubectl apply — it is
+# NOT managed by argocd and runs on demand only. Re-runs are safe FOR
+# UPSERT SEMANTICS (mapping_value / tombstoned / version on conflict),
+# but they intentionally do NOT converge on native DEL/PURGE. When a
+# key's latest KV revision is a NATS-level DEL or PURGE the backfill
+# excludes it from the INSERT via WHERE NOT deleted, but it does not
+# DELETE any pre-existing v1_mappings row for that key. This is the
+# desired behaviour for the initial cutover (target is empty, nothing
+# to delete) and for the pending online-mutation path where the online
+# DELETE handler owns removals — but it means an operator MUST NOT
+# treat a successful re-run as convergence with the live KV state.
+# The pre-cutover diff scan (follow-up ticket) is responsible for
+# catching any drift left behind.
+#
+# Dry run: to preview scan/classification counts without writing to
+# Postgres, add "--dry-run" to args below before applying. Remove it
+# for the live run.
+#
+# Credentials: --backfill-v1-mappings-to-postgres uses LoadMinimalConfig
+# (main.go), which only reads NATS_URL / NATS_FETCH_MAX_WAIT /
+# BACKFILL_V1_MAPPINGS_* and the V1_MAPPINGS_PG* env quintuple (or
+# V1_MAPPINGS_DATABASE_URL). No Heimdall or Auth0 credentials are
+# required — the process never initializes the JWT or v1 API clients
+# and exits before the HTTP server starts.
+#
+# Postgres config: the sections below cover the two supported patterns.
+# Uncomment ONE of the two blocks that matches how the target Postgres
+# is provisioned in the target environment. The chart provisions a
+# CloudNativePG Cluster + Database when database.mode is
+# "cluster+database" (standalone) or "database" (umbrella); either way
+# the CNPG operator creates a Secret named <clusterName>-app with
+# host/port/username/password keys. In the "external" path the DSN
+# comes from a single-key Secret and is exposed as V1_MAPPINGS_DATABASE_URL.
+#
+# Deploy with:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-v1-mappings-to-postgres-job.yaml
+#
+# Monitor:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper logs -f --timestamps=true job/backfill-v1-mappings-to-postgres
+#
+# Cancel:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-v1-mappings-to-postgres
+#
+# Clean up (auto-cleans after 1h via ttlSecondsAfterFinished):
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-v1-mappings-to-postgres
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: backfill-v1-mappings-to-postgres
+  namespace: v1-sync-helper
+  labels:
+    app.kubernetes.io/name: lfx-v1-sync-helper
+    app.kubernetes.io/component: backfill
+spec:
+  # 1h retention is enough to grab logs / retry after a failed run;
+  # increase if forensic access to the finished pod is needed for longer.
+  ttlSecondsAfterFinished: 3600
+  # Zero retries — the job is idempotent but slow, and a failed run
+  # usually needs operator inspection before re-attempting.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lfx-v1-sync-helper
+        app.kubernetes.io/component: backfill
+    spec:
+      restartPolicy: Never
+      # The backfill's deferred staging-table DROP fires on every exit
+      # path (success or error) via a fresh 30s context (see
+      # backfill_v1_mappings_pg.go). Under a `kubectl delete job` the
+      # in-flight scanner + COPY + advisory-lock release also consume
+      # part of the grace period, and the K8s default (30s) is not
+      # enough to guarantee the DROP completes before SIGKILL — which
+      # would leave a multi-gigabyte UNLOGGED staging table behind for
+      # every cancelled run. 120s = ~30s NATS/COPY quiesce + 30s DROP
+      # + 30s pool close + comfortable margin, and matches the intent
+      # documented on the defaultDualMirrorDrainTimeout + chart
+      # terminationGracePeriodSeconds pair used by the long-running
+      # service pod.
+      terminationGracePeriodSeconds: 120
+      serviceAccountName: v1-sync-helper-sa
+      containers:
+        - name: backfill
+          # XXX: Replace with the image SHA for the release you want to run against.
+          # Find the current prod image with:
+          #   kubectl --context lfx-v2-prod -n v1-sync-helper get deployment \
+          #     -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'
+          image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:latest
+          imagePullPolicy: IfNotPresent
+          args: ["--backfill-v1-mappings-to-postgres"]
+          env:
+            - name: NATS_URL
+              value: "nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
+            # NATS_FETCH_MAX_WAIT bounds each next_by_subj GetMsg call.
+            # Defaults to 120s (defaultNATSFetchMaxWait); raise if logs
+            # show scan-timeout warnings under load.
+            # - name: NATS_FETCH_MAX_WAIT
+            #   value: "2m"
+            # BACKFILL_V1_MAPPINGS_WORKERS controls scanner concurrency.
+            # Default 8, clamped [1, 64]. Higher counts reduce wall-clock
+            # but increase NATS server CPU; the prod incident that
+            # motivated LFXV2-2985 showed the server saturating around
+            # ~350% CPU, so leave headroom.
+            # - name: BACKFILL_V1_MAPPINGS_WORKERS
+            #   value: "8"
+            # BACKFILL_V1_MAPPINGS_BATCH_SIZE is the number of rows the
+            # writer buffers before flushing to the UNLOGGED staging
+            # table via pgx.CopyFrom. Default 50000.
+            # - name: BACKFILL_V1_MAPPINGS_BATCH_SIZE
+            #   value: "50000"
+            #
+            # --- Postgres credentials — pick ONE of the two patterns ---
+            #
+            # (A) CloudNativePG operator-provisioned Secret (typical when
+            #     the chart is installed with database.mode=database or
+            #     cluster+database). Replace <clusterName> with
+            #     .Values.database.cloudNativePG.clusterName from the
+            #     release you are targeting.
+            # - name: V1_MAPPINGS_PGHOST
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: <clusterName>-app
+            #       key: host
+            # - name: V1_MAPPINGS_PGPORT
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: <clusterName>-app
+            #       key: port
+            # - name: V1_MAPPINGS_PGUSER
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: <clusterName>-app
+            #       key: username
+            # - name: V1_MAPPINGS_PGPASSWORD
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: <clusterName>-app
+            #       key: password
+            # - name: V1_MAPPINGS_PGDATABASE
+            #   value: "v1_mappings"
+            #
+            # (B) External Postgres via a single-key Secret containing a
+            #     libpq URL. Set database.external.secretName and
+            #     database.external.secretKey in the chart values, or use
+            #     a bespoke Secret you manage out of band.
+            # - name: V1_MAPPINGS_DATABASE_URL
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: v1-sync-helper-database-url
+            #       key: url
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "50m"
+            # The writer's peak memory is dominated by the batch buffer
+            # (default 50k rows × ~120 bytes ≈ 6 MiB) plus the scanner
+            # channel (workers × 1024 records ≈ 1 MiB at defaults).
+            # 512Mi headroom is comfortable for the default tuning; raise
+            # if BACKFILL_V1_MAPPINGS_BATCH_SIZE is materially increased.
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          securityContext:
+            allowPrivilegeEscalation: false

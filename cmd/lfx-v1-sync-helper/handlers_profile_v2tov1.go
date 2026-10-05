@@ -93,7 +93,7 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 	// ResolveV1UserSFIDByUsername uses the encoded secondary-index key
 	// (matching what handleMergedUserUpdate writes) and validates the resolved
 	// SFID by fetching the user and confirming the username still matches.
-	sfid, err := ResolveV1UserSFIDByUsername(ctx, v1Username)
+	sfid, err := resolveV1UserSFIDByUsernameFn(ctx, v1Username)
 	if err != nil {
 		log.With(errKey, err).ErrorContext(ctx, "failed to resolve v1 user SFID")
 		return
