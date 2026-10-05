@@ -18,6 +18,7 @@ import (
 
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -69,12 +70,20 @@ func main() {
 	var syncUsersFile = flag.String("sync-users-file", "", "sync profile and alternate emails for each username listed in a file (one per line), then exit")
 	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-*, --sync-user, and --sync-users-file)")
 	var backfillLimit = flag.Int("limit", 1000, "maximum number of users to process per backfill run (applicable with --backfill-alternate-emails and --backfill-profiles)")
+	var auth0Rate = flag.Float64("auth0-rate", defaultAuth0RateLimit, "users per second to pace the backfill and batch-sync loops (applicable with --backfill-alternate-emails, --backfill-profiles, and --sync-users-file)")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
 		os.Exit(2)
 	}
 	flag.Parse()
+
+	// Apply the pacing override before any one-shot loop consumes a token.
+	if *auth0Rate <= 0 {
+		slog.Error("--auth0-rate must be greater than zero")
+		os.Exit(1)
+	}
+	auth0RateLimiter.SetLimit(rate.Limit(*auth0Rate))
 
 	// Enforce mutual exclusion across all one-shot flags.
 	oneShotCount := 0

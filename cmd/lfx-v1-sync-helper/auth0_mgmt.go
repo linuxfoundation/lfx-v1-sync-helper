@@ -151,10 +151,20 @@ func buildAuth0Metadata(existing map[string]interface{}, v1Data map[string]any, 
 	return patch
 }
 
-// auth0RateLimiter throttles Auth0 Management API calls in the backfill outer
-// loops (one token consumed per user before processing). Not used on the live
-// handler path, which relies on NACK-based backoff instead.
-var auth0RateLimiter = rate.NewLimiter(rate.Limit(10), 1)
+// auth0RateLimiter throttles Auth0 Management API calls in the backfill and
+// batch-sync outer loops (one token consumed per user before processing). Not
+// used on the live handler path, which relies on NACK-based backoff instead.
+//
+// Burst is 1, so this is a strict pacer with no catch-up allowance: a token
+// regenerates every 1/rate seconds and the bucket never holds more than one.
+// The default of 2/s is a 500ms floor, chosen to match observed per-user work
+// (~0.55s) rather than to cap the API — in practice it rarely blocks. Lower it
+// with --auth0-rate to deliberately slow a run down.
+var auth0RateLimiter = rate.NewLimiter(rate.Limit(defaultAuth0RateLimit), 1)
+
+// defaultAuth0RateLimit is the per-user token rate, in users per second, used
+// by the backfill and batch-sync loops unless --auth0-rate overrides it.
+const defaultAuth0RateLimit = 2
 
 // luceneQuoteEscape escapes the two characters that have meaning inside an
 // Auth0 v3 search-engine quoted phrase: backslash and double-quote.

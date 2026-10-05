@@ -595,8 +595,8 @@ type syncUsersFileResult struct {
 
 // syncUsersFromFile reads a newline-delimited file of usernames and runs
 // syncSingleUser for each one, reusing the same authenticated clients for the
-// entire batch. A 500ms delay between users avoids hammering Auth0/platform
-// APIs. Errors on individual users are logged but do not abort the batch.
+// entire batch. Pacing uses the same auth0RateLimiter as the backfill loops.
+// Errors on individual users are logged but do not abort the batch.
 func syncUsersFromFile(ctx context.Context, path string, dryRun bool) (syncUsersFileResult, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -622,6 +622,13 @@ func syncUsersFromFile(ctx context.Context, path string, dryRun bool) (syncUsers
 
 	var result syncUsersFileResult
 	for i, username := range usernames {
+		// Pace entries, not exits: the limiter only waits for the remainder of
+		// the window after the previous user's work, so elapsed work counts
+		// toward the interval instead of being added to it.
+		if err := auth0RateLimiter.Wait(ctx); err != nil {
+			return result, fmt.Errorf("rate limiter: %w", err)
+		}
+
 		result.processed++
 
 		logger.With(
@@ -640,11 +647,6 @@ func syncUsersFromFile(ctx context.Context, path string, dryRun bool) (syncUsers
 			).Warn("user sync failed, continuing")
 		} else {
 			result.succeeded++
-		}
-
-		// Brief delay between users to avoid API rate limits.
-		if i < len(usernames)-1 {
-			time.Sleep(500 * time.Millisecond)
 		}
 	}
 
