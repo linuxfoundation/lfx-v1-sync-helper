@@ -47,6 +47,10 @@ case "$WAVE" in
   8) SLUGS="o3de,gql,broadband-fund,daos-fund,murmur-project,p4-fund,socbb,tars" ;;
   9) SLUGS="openinfra-foundation,yocto,cephfoundation,tla,xen,ebpf,finops,device-automation-bus-fund,dronecode,kernelci,lf-charities,netdev-foundation,opifund" ;;
   10) SLUGS="akrites,aousd,app-defense-alliance,appia,c2pa,configurator-file-type-project,elisa,financial-services-open-source-ai-fund,green-software,lfai-onnx,overture,spaceone" ;;
+  # The audit lists tlf, the top-level Linux Foundation entity, in wave 11. It
+  # is excluded: extraction matches base projects through the project spine, so
+  # a top-level entity would pull in a far broader population than a foundation
+  # wave covers. That population is handled by a separate all-users strategy.
   11) SLUGS="lfresearch,iovisor,jdf,alpha-omega-foundation,alphaomega,lfcf,oneapi,openchami,operator-sdk,quantum-ir,r-hub,rcons,spdx,uepf" ;;
   *) echo "error: unknown wave '$WAVE' (waves 0-11, 4b, 5b, or 7b)" >&2; exit 1 ;;
 esac
