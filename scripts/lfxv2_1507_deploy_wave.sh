@@ -49,7 +49,9 @@ CONTEXT="prod-lfx-v2"
 NAMESPACE="v1-sync-helper"
 CONFIGMAP="sync-users-batch-list"
 JOB_NAME="sync-users-batch"
-RESOLVED_MAX_AGE_DAYS=14
+# resolved.csv must be regenerated as part of preparing each wave, so treat
+# anything older than an hour as belonging to a previous wave's preparation.
+RESOLVED_MAX_AGE_SECONDS=3600
 
 if [ ! -f "$CATEGORIZED" ]; then
     echo "error: $CATEGORIZED not found; run scripts/lfxv2_1507_wave_usernames.sh $WAVE first" >&2
@@ -72,13 +74,15 @@ else
         echo "       Re-run scripts/lfxv2_1507_wave_usernames.sh $WAVE, or pass --force." >&2
         [ -n "$FORCE" ] || exit 1
     fi
-    resolved_age_days=$(( ( $(date +%s) - $(stat -f %m resolved.csv) ) / 86400 ))
-    if [ "$resolved_age_days" -gt "$RESOLVED_MAX_AGE_DAYS" ]; then
-        echo "error: resolved.csv is ${resolved_age_days} days old (limit ${RESOLVED_MAX_AGE_DAYS})." >&2
+    resolved_age=$(( $(date +%s) - $(stat -f %m resolved.csv) ))
+    if [ "$resolved_age" -gt "$RESOLVED_MAX_AGE_SECONDS" ]; then
+        echo "error: resolved.csv is $(( resolved_age / 60 )) minutes old (limit $(( RESOLVED_MAX_AGE_SECONDS / 60 )))." >&2
+        echo "       It must be regenerated as part of preparing this wave; a copy" >&2
+        echo "       from an earlier wave does not reflect current remediations." >&2
         echo "       Regenerate it per LFXV2-2662_SCRIPTS.md, or pass --force." >&2
         [ -n "$FORCE" ] || exit 1
     fi
-    echo "resolved.csv: ${resolved_age_days}d old, $(( $(wc -l < resolved.csv) - 1 )) rows"
+    echo "resolved.csv: $(( resolved_age / 60 ))m old, $(( $(wc -l < resolved.csv) - 1 )) rows"
 fi
 
 # Extract clean usernames from this wave.
