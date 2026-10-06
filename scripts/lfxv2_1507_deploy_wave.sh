@@ -11,7 +11,7 @@
 # ConfigMap in the target namespace.
 #
 # Usage:
-#   scripts/lfxv2_1507_deploy_wave.sh <wave> [--dry-run]
+#   scripts/lfxv2_1507_deploy_wave.sh <wave> [--dry-run] [--force]
 #
 # Prerequisites:
 #   - lfxv2_1507_wave<N>_categorized.csv must exist (run wave_usernames.sh
@@ -19,20 +19,66 @@
 #   - Prior waves' categorized CSVs (wave0, wave1, ...) should be present
 #     for deduplication.
 #   - aws-vault and kubectl context configured for prod.
+#
+# --force skips the resolved.csv freshness check. It does not skip the
+# running-Job check, which guards against corrupting a run in progress.
 
 set -eu
 
-WAVE="${1:?usage: $0 <wave> [--dry-run]}"
-DRY_RUN="${2:-}"
+# Usernames are not all ASCII: at least one carries CJK characters. Dedup
+# compares usernames byte-wise, so pin the collation to keep comparisons
+# here consistent with any external verification of the same sets.
+LC_ALL=C
+export LC_ALL
+
+WAVE="${1:?usage: $0 <wave> [--dry-run] [--force]}"
+shift
+DRY_RUN=""
+FORCE=""
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY_RUN="--dry-run" ;;
+        --force) FORCE="--force" ;;
+        *) echo "error: unknown option '$arg'" >&2; exit 1 ;;
+    esac
+done
+
 CATEGORIZED="lfxv2_1507_wave${WAVE}_categorized.csv"
 CLEAN_TXT="lfxv2_1507_wave${WAVE}_clean.txt"
 CONTEXT="prod-lfx-v2"
 NAMESPACE="v1-sync-helper"
 CONFIGMAP="sync-users-batch-list"
+JOB_NAME="sync-users-batch"
+RESOLVED_MAX_AGE_DAYS=14
 
 if [ ! -f "$CATEGORIZED" ]; then
     echo "error: $CATEGORIZED not found; run scripts/lfxv2_1507_wave_usernames.sh $WAVE first" >&2
     exit 1
+fi
+
+# resolved.csv freshness. It is a per-batch triage artifact, not a census,
+# and it goes stale silently: a wave 5 account tripped the de-facto-primary
+# guard because the copy on disk predated its remediation. Two failure modes
+# are checked, both fatal without --force.
+if [ ! -f resolved.csv ]; then
+    echo "error: resolved.csv not found, so $CATEGORIZED carries no LFXV2-2662" >&2
+    echo "       exclusions. Regenerate it before deploying, or pass --force." >&2
+    [ -n "$FORCE" ] || exit 1
+else
+    # The categorized CSV must be newer than the list it was screened against.
+    if [ resolved.csv -nt "$CATEGORIZED" ]; then
+        echo "error: resolved.csv is newer than $CATEGORIZED, so the wave was" >&2
+        echo "       screened against an older flagged-account list." >&2
+        echo "       Re-run scripts/lfxv2_1507_wave_usernames.sh $WAVE, or pass --force." >&2
+        [ -n "$FORCE" ] || exit 1
+    fi
+    resolved_age_days=$(( ( $(date +%s) - $(stat -f %m resolved.csv) ) / 86400 ))
+    if [ "$resolved_age_days" -gt "$RESOLVED_MAX_AGE_DAYS" ]; then
+        echo "error: resolved.csv is ${resolved_age_days} days old (limit ${RESOLVED_MAX_AGE_DAYS})." >&2
+        echo "       Regenerate it per LFXV2-2662_SCRIPTS.md, or pass --force." >&2
+        [ -n "$FORCE" ] || exit 1
+    fi
+    echo "resolved.csv: ${resolved_age_days}d old, $(( $(wc -l < resolved.csv) - 1 )) rows"
 fi
 
 # Extract clean usernames from this wave.
@@ -99,7 +145,20 @@ if [ "$DRY_RUN" = "--dry-run" ]; then
     exit 0
 fi
 
-# Delete existing ConfigMap if present (ignore errors).
+# A running Job mounts this ConfigMap. Replacing it mid-run would feed the
+# next wave's usernames to the current pod, so refuse while one is active.
+# --force does not override this.
+job_active=$(aws-vault exec lfx-prod -s -- kubectl --context="$CONTEXT" -n "$NAMESPACE" \
+    get "job/$JOB_NAME" -o jsonpath='{.status.active}' 2>/dev/null || true)
+if [ -n "$job_active" ] && [ "$job_active" != "0" ]; then
+    echo "error: job/$JOB_NAME has ${job_active} active pod(s); a run is in progress." >&2
+    echo "       Wait for it to finish, then delete the Job and the ConfigMap" >&2
+    echo "       in separate commands before deploying the next wave." >&2
+    exit 1
+fi
+
+# Delete existing ConfigMap if present (ignore errors). The ConfigMap has no
+# TTL, unlike the Job, so a finished run always leaves one behind.
 aws-vault exec lfx-prod -s -- kubectl --context="$CONTEXT" -n "$NAMESPACE" \
     delete configmap "$CONFIGMAP" 2>/dev/null || true
 
