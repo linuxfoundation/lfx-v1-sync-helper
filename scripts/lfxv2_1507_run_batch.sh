@@ -5,7 +5,7 @@
 # LFXV2-1507: Delete any existing batch sync Job and create a fresh one.
 #
 # Assumes the sync-users-batch-list ConfigMap is already created (via
-# lfxv2_1507_deploy_wave.sh). Deletes the prior Job if present, then
+# lfxv2_1507_deploy_chunk.sh). Deletes the prior Job if present, then
 # applies the manifest.
 #
 # Usage:
@@ -28,7 +28,7 @@ fi
 # Verify the ConfigMap exists.
 if ! aws-vault exec lfx-prod -s -- kubectl --context="$CONTEXT" -n "$NAMESPACE" \
     get configmap sync-users-batch-list >/dev/null 2>&1; then
-    echo "error: ConfigMap sync-users-batch-list not found; run scripts/lfxv2_1507_deploy_wave.sh first" >&2
+    echo "error: ConfigMap sync-users-batch-list not found; run scripts/lfxv2_1507_deploy_chunk.sh first" >&2
     exit 1
 fi
 

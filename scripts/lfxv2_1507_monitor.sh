@@ -17,9 +17,10 @@
 #
 # Usage:
 #   scripts/lfxv2_1507_monitor.sh [--save-log]
-#   scripts/lfxv2_1507_monitor.sh --pod <pod-name> [--since <hours>]
+#   scripts/lfxv2_1507_monitor.sh --pod <pod-name> [--since <hours>] [--out <file>]
 #
-# With --save-log, the full log is written to sync-users-batch-<timestamp>.log.
+# With --save-log, the full log is written to sync-users-batch-<timestamp>.log,
+# or to the path given by --out.
 # With --pod, polling is skipped and the log is collected straight from
 # CloudWatch. This works after the Job's ttlSecondsAfterFinished has removed
 # it, so a finished run can still be collected hours later.
@@ -29,13 +30,15 @@ set -eu
 SAVE_LOG=false
 POD_NAME=""
 SINCE_HOURS=24
+LOGFILE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --save-log) SAVE_LOG=true; shift ;;
         --pod)      POD_NAME="${2:?--pod requires a pod name}"; SAVE_LOG=true; shift 2 ;;
         --since)    SINCE_HOURS="${2:?--since requires hours}"; shift 2 ;;
-        *) echo "usage: $0 [--save-log] | --pod <pod-name> [--since <hours>]" >&2; exit 2 ;;
+        --out)      LOGFILE="${2:?--out requires a file}"; SAVE_LOG=true; shift 2 ;;
+        *) echo "usage: $0 [--save-log] | --pod <pod-name> [--since <hours>] [--out <file>]" >&2; exit 2 ;;
     esac
 done
 
@@ -244,7 +247,7 @@ if [ -z "$POD_NAME" ]; then
     exit 1
 fi
 
-logfile="sync-users-batch-$(date -u +%Y%m%dT%H%M%SZ).log"
+logfile="${LOGFILE:-sync-users-batch-$(date -u +%Y%m%dT%H%M%SZ).log}"
 echo "collecting full log from CloudWatch..."
 if ! fetch_cloudwatch_log "$POD_NAME" "$logfile"; then
     echo "  CloudWatch collection failed; falling back to kubectl logs (MAY BE TRUNCATED)" >&2
