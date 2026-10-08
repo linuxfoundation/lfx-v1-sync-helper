@@ -202,8 +202,8 @@ type syncUsersFileResult struct {
 
 // syncUserTimeout bounds a single syncSingleUser call within a batch run, so
 // one stalled upstream request cannot stall the remaining cohort
-// indefinitely.
-const syncUserTimeout = 2 * time.Minute
+// indefinitely. Declared as a var (not const) so tests can shorten it.
+var syncUserTimeout = 2 * time.Minute
 
 // readUsernames reads a newline-delimited file of usernames, skipping blank
 // lines and lines starting with "#". Extracted from syncUsersFromFile so the

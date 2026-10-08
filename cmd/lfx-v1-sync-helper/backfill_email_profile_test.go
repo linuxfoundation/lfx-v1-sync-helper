@@ -282,8 +282,46 @@ func TestSyncUsersFromFileContextCancellation(t *testing.T) {
 	}
 }
 
-func TestSyncUserTimeout(t *testing.T) {
-	if syncUserTimeout <= 0 {
-		t.Fatalf("syncUserTimeout = %v, want a positive bound", time.Duration(syncUserTimeout))
+func TestSyncUsersFromFileStalledUserTimesOut(t *testing.T) {
+	origFn := syncSingleUserFn
+	origLimiter := auth0RateLimiter
+	origTimeout := syncUserTimeout
+	t.Cleanup(func() {
+		syncSingleUserFn = origFn
+		auth0RateLimiter = origLimiter
+		syncUserTimeout = origTimeout
+	})
+	auth0RateLimiter = rate.NewLimiter(rate.Inf, 1)
+	syncUserTimeout = 20 * time.Millisecond
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "users.txt")
+	if err := os.WriteFile(path, []byte("alice\nbob\n"), 0o600); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+
+	var seen []string
+	syncSingleUserFn = func(ctx context.Context, username string, _ bool) error {
+		seen = append(seen, username)
+		if username == "alice" {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}
+
+	result, err := syncUsersFromFile(context.Background(), path, false)
+	if err != nil {
+		t.Fatalf("syncUsersFromFile() error = %v", err)
+	}
+
+	if len(seen) != 2 {
+		t.Fatalf("processed users = %+v, want both users attempted", seen)
+	}
+	if result.failed != 1 {
+		t.Errorf("failed = %d, want 1 (the stalled user should be cancelled and counted as failed)", result.failed)
+	}
+	if result.succeeded != 1 {
+		t.Errorf("succeeded = %d, want 1", result.succeeded)
 	}
 }
