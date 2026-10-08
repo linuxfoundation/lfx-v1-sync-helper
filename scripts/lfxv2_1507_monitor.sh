@@ -190,6 +190,12 @@ if [ -z "$POD_NAME" ]; then
     [ -n "$POD_NAME" ] && echo "  pod: $POD_NAME" && echo ""
 
     while true; do
+        if ! kubectl_cmd get job "$JOB_NAME" >/dev/null 2>&1; then
+            echo "error: job/$JOB_NAME not found; it may have finished and been removed." >&2
+            echo "       collect its log with: $0 --pod <pod-name> [--since <hours>]" >&2
+            exit 1
+        fi
+
         # Check job completion via jsonpath on conditions. Kubernetes jobs set
         # condition type=Complete or type=Failed with status=True.
         status=""
