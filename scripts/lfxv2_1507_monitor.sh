@@ -190,7 +190,13 @@ if [ -z "$POD_NAME" ]; then
     [ -n "$POD_NAME" ] && echo "  pod: $POD_NAME" && echo ""
 
     while true; do
+        # The Job is removed ttlSecondsAfterFinished after it ends. With a
+        # known pod, its log is still in CloudWatch.
         if ! kubectl_cmd get job "$JOB_NAME" >/dev/null 2>&1; then
+            if [ -n "$POD_NAME" ]; then
+                status="Removed"
+                break
+            fi
             echo "error: job/$JOB_NAME not found; it may have finished and been removed." >&2
             echo "       collect its log with: $0 --pod <pod-name> [--since <hours>]" >&2
             exit 1
