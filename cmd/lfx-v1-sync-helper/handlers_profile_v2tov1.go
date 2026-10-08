@@ -140,8 +140,8 @@ func handleUserProfileUpdated(msg *nats.Msg) {
 	// failure on a user's last skills edit can therefore leave v1 and v2
 	// permanently diverged for that user until their next v2 skills edit.
 	// This is an accepted trade-off for now, mirroring the asymmetry that
-	// --backfill-profiles only reconciles v1->v2, not v2->v1; revisit if
-	// this proves to matter in practice.
+	// --sync-user / --sync-users-file only reconcile v1->v2, not v2->v1;
+	// revisit if this proves to matter in practice.
 	//
 	// event.Metadata is a snapshot taken at publish time, and event.Timestamp
 	// is assigned by auth-service only after its own write completes — it

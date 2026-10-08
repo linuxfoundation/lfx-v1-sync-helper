@@ -79,8 +79,6 @@ func main() {
 	var bind = flag.String("bind", "", "interface to bind on")
 	var doBackfillACSProject = flag.Bool("backfill-acs-project", false, "backfill ACS user grants to v2 project settings, then exit")
 	var doBackfillACSOrg = flag.Bool("backfill-acs-org", false, "backfill ACS org grants to v2 b2b_org settings, then exit")
-	var doBackfillAltEmails = flag.Bool("backfill-alternate-emails", false, "backfill v1 alternate emails to Auth0 linked identities, then exit")
-	var doBackfillProfiles = flag.Bool("backfill-profiles", false, "backfill v1 profile fields to Auth0 user_metadata, then exit")
 	var doBackfillWorkspaces = flag.Bool("backfill-workspaces", false, "backfill legacy workspaces into v2 member-service, then exit")
 	var doBackfillCommitteeMemberMappings = flag.Bool("backfill-committee-member-mappings", false, "repair committee-member reverse mappings that store the record sfid instead of the contact SFID, then exit")
 	var doBackfillCommitteeMemberNames = flag.Bool("backfill-committee-member-names", false, "populate first_name/last_name on V2 committee members that have no name (members without an LFX account at sync time), then exit")
@@ -97,8 +95,8 @@ func main() {
 	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
 	var syncUsersFile = flag.String("sync-users-file", "", "sync profile and alternate emails for each username listed in a file (one per line), then exit")
 	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-*, --sync-user, and --sync-users-file)")
-	var backfillLimit = flag.Int("limit", 1000, "maximum number of records (users, projects, or committees) to process per backfill run (applicable with --backfill-alternate-emails, --backfill-profiles, --backfill-projects, and --backfill-committees; 0 = unlimited for --backfill-projects and --backfill-committees)")
-	var auth0Rate = flag.Float64("auth0-rate", defaultAuth0RateLimit, "users per second to pace the backfill and batch-sync loops (applicable with --backfill-alternate-emails, --backfill-profiles, and --sync-users-file)")
+	var backfillLimit = flag.Int("limit", 1000, "maximum number of records (projects or committees) to process per backfill run (applicable with --backfill-projects and --backfill-committees; 0 = unlimited)")
+	var auth0Rate = flag.Float64("auth0-rate", defaultAuth0RateLimit, "users per second to pace the --sync-users-file loop")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -126,13 +124,13 @@ func main() {
 
 	// Enforce mutual exclusion across all one-shot flags.
 	oneShotCount := 0
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *doBackfillAltEmails, *doBackfillProfiles, *syncUser != "", *syncUsersFile != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doBackfillV1MappingsToPG, *doBackfillProjects, *doBackfillCommittees} {
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *syncUser != "", *syncUsersFile != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doBackfillV1MappingsToPG, *doBackfillProjects, *doBackfillCommittees} {
 		if b {
 			oneShotCount++
 		}
 	}
 	if oneShotCount > 1 {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-alternate-emails, --backfill-profiles, --backfill-committee-member-mappings, --backfill-committee-member-names, --backfill-v1-mappings-to-postgres, --backfill-projects, --backfill-committees, --sync-user, and --sync-users-file are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-committee-member-mappings, --backfill-committee-member-names, --backfill-v1-mappings-to-postgres, --backfill-projects, --backfill-committees, --sync-user, and --sync-users-file are mutually exclusive")
 		os.Exit(2)
 	}
 
@@ -415,38 +413,6 @@ func main() {
 			os.Exit(1)
 		}
 		logger.Info("ACS org grants backfill completed successfully")
-		os.Exit(0)
-	}
-
-	// Handle --backfill-alternate-emails flag: link v1 verified alternate emails to Auth0, then exit.
-	if *doBackfillAltEmails {
-		logger.With("limit", *backfillLimit, "dry_run", *dryRun).Info("starting alternate-emails backfill")
-		result, err := backfillAlternateEmails(ctx, *backfillLimit, *dryRun)
-		if err != nil {
-			logger.With(errKey, err).Error("error during alternate-emails backfill")
-			os.Exit(1)
-		}
-		logger.With(
-			"users_processed", result.usersProcessed,
-			"emails_linked", result.emailsLinked,
-			"emails_skipped", result.emailsSkipped,
-		).Info("alternate-emails backfill completed successfully")
-		os.Exit(0)
-	}
-
-	// Handle --backfill-profiles flag: sync v1 profile fields to Auth0 user_metadata, then exit.
-	if *doBackfillProfiles {
-		logger.With("limit", *backfillLimit, "dry_run", *dryRun).Info("starting profiles backfill")
-		result, err := backfillProfiles(ctx, *backfillLimit, *dryRun)
-		if err != nil {
-			logger.With(errKey, err).Error("error during profiles backfill")
-			os.Exit(1)
-		}
-		logger.With(
-			"users_processed", result.usersProcessed,
-			"users_updated", result.usersUpdated,
-			"users_skipped", result.usersSkipped,
-		).Info("profiles backfill completed successfully")
 		os.Exit(0)
 	}
 

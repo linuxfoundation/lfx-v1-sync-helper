@@ -33,8 +33,8 @@ var userSkillsStaleGuard staleEventGuard
 //
 // v1Data is nil for a true hard KV delete with no recoverable payload (see
 // handleKVDelete); without a payload there is no lfid to resolve, so this is
-// a no-op — any resulting drift is corrected by the next --backfill-profiles
-// pass, which re-reads skills for every user.
+// a no-op — any resulting drift must be corrected manually, via --sync-user
+// or --sync-users-file, which re-read skills for the affected user(s).
 // Returns true if the operation should be retried, false otherwise.
 func handleUserSkillsUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	if v1Data == nil {
