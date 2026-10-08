@@ -22,9 +22,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // getAlternateEmailsForUserFn is injectable for tests.
@@ -87,11 +89,18 @@ func collectEmailLinkCandidates(ctx context.Context, userSfid string) (candidate
 	return candidates, qualifying, sawPrimary, rejected, nil
 }
 
+// syncSingleUserFn is injectable for tests.
+var syncSingleUserFn = syncSingleUser
+
 // syncSingleUser performs a full sync (profile + alternate emails) for a single
 // user identified by their Auth0 username. Intended for debugging and targeted
-// re-sync without a full backfill run.
+// re-sync without a full backfill run. Profile sync and email linking failures
+// are logged individually but accumulated and returned as a single combined
+// error, so a failure in either phase marks the user as failed rather than
+// succeeding silently.
 func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 	auth0UserID := mapUsernameToAuthSub(username)
+	var errs []error
 
 	logger.With("username", username, "auth0_user_id", auth0UserID, "dry_run", dryRun).
 		Info("starting single-user sync")
@@ -123,6 +132,7 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 	} else if updated, err := syncProfileToAuth0Fn(ctx, auth0UserID, auth0User, v1Data, true, dryRun); err != nil {
 		logger.With("error", err, "auth0_user_id", auth0UserID).
 			Warn("profile sync failed")
+		errs = append(errs, fmt.Errorf("syncing profile: %w", err))
 	} else if updated {
 		if dryRun {
 			logger.With("auth0_user_id", auth0UserID).Info("[dry-run] would sync profile")
@@ -169,6 +179,7 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 		if linked, err := linkEmailIdentityFn(ctx, auth0User, c.email); err != nil {
 			logger.With("error", err, "auth0_user_id", auth0UserID, "email", c.email).
 				Warn("failed to link email, skipping")
+			errs = append(errs, fmt.Errorf("linking email %s: %w", c.email, err))
 		} else if linked {
 			logger.With("auth0_user_id", auth0UserID, "email", c.email).
 				Info("linked email identity")
@@ -179,26 +190,28 @@ func syncSingleUser(ctx context.Context, username string, dryRun bool) error {
 	}
 
 	logger.With("username", username, "auth0_user_id", auth0UserID).Info("single-user sync complete")
-	return nil
+	return errors.Join(errs...)
 }
 
 // syncUsersFileResult holds summary counters for a batch --sync-users-file run.
 type syncUsersFileResult struct {
-	processed      int
-	succeeded      int
-	failed         int
-	emailsLinked   int
-	profilesSynced int
+	processed int
+	succeeded int
+	failed    int
 }
 
-// syncUsersFromFile reads a newline-delimited file of usernames and runs
-// syncSingleUser for each one, reusing the same authenticated clients for the
-// entire batch. Pacing uses the same auth0RateLimiter as the backfill loops.
-// Errors on individual users are logged but do not abort the batch.
-func syncUsersFromFile(ctx context.Context, path string, dryRun bool) (syncUsersFileResult, error) {
+// syncUserTimeout bounds a single syncSingleUser call within a batch run, so
+// one stalled upstream request cannot stall the remaining cohort
+// indefinitely.
+const syncUserTimeout = 2 * time.Minute
+
+// readUsernames reads a newline-delimited file of usernames, skipping blank
+// lines and lines starting with "#". Extracted from syncUsersFromFile so the
+// parsing rules are independently testable.
+func readUsernames(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return syncUsersFileResult{}, fmt.Errorf("opening users file: %w", err)
+		return nil, fmt.Errorf("opening users file: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // Best-effort close on read-only file.
 
@@ -212,7 +225,19 @@ func syncUsersFromFile(ctx context.Context, path string, dryRun bool) (syncUsers
 		usernames = append(usernames, line)
 	}
 	if err := scanner.Err(); err != nil {
-		return syncUsersFileResult{}, fmt.Errorf("reading users file: %w", err)
+		return nil, fmt.Errorf("reading users file: %w", err)
+	}
+	return usernames, nil
+}
+
+// syncUsersFromFile reads a newline-delimited file of usernames and runs
+// syncSingleUser for each one, reusing the same authenticated clients for the
+// entire batch. Pacing uses the same auth0RateLimiter as the backfill loops.
+// Errors on individual users are logged but do not abort the batch.
+func syncUsersFromFile(ctx context.Context, path string, dryRun bool) (syncUsersFileResult, error) {
+	usernames, err := readUsernames(path)
+	if err != nil {
+		return syncUsersFileResult{}, err
 	}
 
 	logger.With("file", path, "users", len(usernames), "dry_run", dryRun).
@@ -236,7 +261,10 @@ func syncUsersFromFile(ctx context.Context, path string, dryRun bool) (syncUsers
 			"dry_run", dryRun,
 		).Info("syncing user")
 
-		if err := syncSingleUser(ctx, username, dryRun); err != nil {
+		userCtx, cancel := context.WithTimeout(ctx, syncUserTimeout)
+		err := syncSingleUserFn(userCtx, username, dryRun)
+		cancel()
+		if err != nil {
 			result.failed++
 			logger.With(
 				"error", err,

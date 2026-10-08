@@ -438,8 +438,6 @@ func main() {
 			"users_processed", result.processed,
 			"users_succeeded", result.succeeded,
 			"users_failed", result.failed,
-			"emails_linked", result.emailsLinked,
-			"profiles_synced", result.profilesSynced,
 		).Info("batch user sync completed")
 		if result.failed > 0 {
 			os.Exit(1)
