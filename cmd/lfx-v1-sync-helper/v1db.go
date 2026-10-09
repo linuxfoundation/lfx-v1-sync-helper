@@ -257,6 +257,135 @@ func dbGetSkillsForUser(ctx context.Context, lfid string) ([]string, error) {
 	return names, nil
 }
 
+// accountRow maps the organization columns we need from either
+// salesforce_b2b."Account" (B2B, Stitch-replicated from Salesforce) or
+// salesforce.account (B2C). Queries alias the source columns onto these
+// names, since the two tables use different identifier casing.
+type accountRow struct {
+	ID          string         `bun:"id"`
+	Name        sql.NullString `bun:"name"`
+	Website     sql.NullString `bun:"website"`
+	Domain      sql.NullString `bun:"account_domain"`
+	DomainAlias sql.NullString `bun:"domain_alias"`
+	CreatedDate sql.NullTime   `bun:"createddate"`
+	IsDeleted   sql.NullBool   `bun:"isdeleted"`
+}
+
+// accountDomainCandidateLimit caps domain candidate queries. The SQL
+// prefilter matches domain aliases by substring, so callers confirm each
+// candidate in Go.
+const accountDomainCandidateLimit = 100
+
+// normalizedWebsiteSQL returns a SQL expression that normalizes a website
+// column the same way normalizeDomain does in Go: trim, lowercase, strip an
+// http(s):// scheme and a www. prefix, and drop any path component.
+func normalizedWebsiteSQL(column string) string {
+	return fmt.Sprintf(`split_part(regexp_replace(lower(btrim(%s)), '^(https?://)?(www\.)?', ''), '/', 1)`, column)
+}
+
+// b2bAccountSelect returns a select over live salesforce_b2b."Account" rows.
+func b2bAccountSelect(rows any) *bun.SelectQuery {
+	return v1DB.NewSelect().Model(rows).
+		ModelTableExpr(`salesforce_b2b."Account" AS ba`).
+		ColumnExpr(`ba."Id" AS id`).
+		ColumnExpr(`ba."Name" AS name`).
+		ColumnExpr(`ba."Website" AS website`).
+		ColumnExpr(`ba."Account_Domain__c" AS account_domain`).
+		ColumnExpr(`ba."IsDeleted" AS isdeleted`).
+		Where(`ba."IsDeleted" IS NOT TRUE`)
+}
+
+// b2cAccountSelect returns a select over salesforce.account rows, including
+// soft-deleted rows (callers filter on isdeleted as needed).
+func b2cAccountSelect(rows any) *bun.SelectQuery {
+	return v1DB.NewSelect().Model(rows).
+		ModelTableExpr(`salesforce.account AS a`).
+		ColumnExpr(`a.sfid AS id`).
+		ColumnExpr(`a.name AS name`).
+		ColumnExpr(`a.website AS website`).
+		ColumnExpr(`a.account_domain__c AS account_domain`).
+		ColumnExpr(`a.domain_alias__c AS domain_alias`).
+		ColumnExpr(`a.createddate AS createddate`).
+		ColumnExpr(`a.isdeleted AS isdeleted`)
+}
+
+// dbLookupB2BAccountByID fetches a live salesforce_b2b."Account" row by its
+// 18-char Salesforce ID. Returns (nil, nil) on miss.
+func dbLookupB2BAccountByID(ctx context.Context, id string) (*accountRow, error) {
+	if id == "" {
+		return nil, nil
+	}
+	row := &accountRow{}
+	qCtx, cancel := withQueryTimeout(ctx)
+	defer cancel()
+	err := b2bAccountSelect(row).
+		Where(`ba."Id" = ?`, id).
+		Limit(1).
+		Scan(qCtx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to query b2b account by id: %w", err)
+	}
+	return row, nil
+}
+
+// dbLookupB2CAccountBySFID fetches a salesforce.account row by sfid,
+// including soft-deleted rows. Returns (nil, nil) on miss.
+func dbLookupB2CAccountBySFID(ctx context.Context, sfid string) (*accountRow, error) {
+	if sfid == "" {
+		return nil, nil
+	}
+	row := &accountRow{}
+	qCtx, cancel := withQueryTimeout(ctx)
+	defer cancel()
+	err := b2cAccountSelect(row).
+		Where("a.sfid = ?", sfid).
+		Limit(1).
+		Scan(qCtx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to query b2c account by sfid: %w", err)
+	}
+	return row, nil
+}
+
+// dbFindB2CAccountCandidatesByDomain returns live salesforce.account rows,
+// excluding excludeSFIDs, whose normalized website or primary domain
+// matches domain (which must already be normalized with normalizeDomain)
+// case-insensitively, or whose domain aliases contain domain as a
+// substring. Alias candidates must be confirmed by the caller.
+func dbFindB2CAccountCandidatesByDomain(ctx context.Context, domain string, excludeSFIDs []string) ([]accountRow, error) {
+	if domain == "" {
+		return nil, nil
+	}
+	var rows []accountRow
+	qCtx, cancel := withQueryTimeout(ctx)
+	defer cancel()
+	q := b2cAccountSelect(&rows).
+		Where("a.isdeleted IS NOT TRUE").
+		WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.
+				Where(normalizedWebsiteSQL("a.website")+" = ?", domain).
+				WhereOr(normalizedWebsiteSQL("a.account_domain__c")+" = ?", domain).
+				WhereOr("strpos(lower(a.domain_alias__c), ?) > 0", domain)
+		})
+	if len(excludeSFIDs) > 0 {
+		q = q.Where("a.sfid NOT IN (?)", bun.List(excludeSFIDs))
+	}
+	err := q.
+		OrderExpr("a.sfid ASC").
+		Limit(accountDomainCandidateLimit).
+		Scan(qCtx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query b2c account candidates by domain: %w", err)
+	}
+	return rows, nil
+}
+
 // emailRowIsActive reports whether an alternate email row is usable: active
 // and not carrying a ".old" deactivation suffix. Mirrors activeEmailFilter
 // for callers that fetch all rows and filter in Go.
