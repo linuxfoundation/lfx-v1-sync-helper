@@ -93,6 +93,21 @@ resolve_pod_name() {
     echo "$_p"
 }
 
+# Find the most recently logging pod of the Job in CloudWatch.
+latest_cloudwatch_pod() {
+    run_insights_query /tmp/lfxv2_1507_pods.json "fields kubernetes.pod_name
+| filter kubernetes.namespace_name = \"$NAMESPACE\"
+| filter kubernetes.pod_name like /^$JOB_NAME-[a-z0-9]{5}\$/
+| stats max(@timestamp) as last by kubernetes.pod_name
+| sort last desc
+| limit 1" >&2 || return 0
+    python3 -c "
+import json
+d=json.load(open('/tmp/lfxv2_1507_pods.json'),strict=False)
+for r in d['results'][:1]:
+    print({c['field']:c.get('value','') for c in r}.get('kubernetes.pod_name',''))"
+}
+
 # Fetch every event for a pod's log stream from CloudWatch into $2.
 #
 # Termination is on the forward token ceasing to advance. get-log-events can
@@ -151,6 +166,8 @@ print(d.get('nextForwardToken',''))")
             [ "$_next" = "$_token" ] && break
             _token="$_next"
             _page=$((_page + 1))
+            _got=$(wc -l < /tmp/lfxv2_1507_events.jsonl | tr -d ' ')
+            echo "    fetched $_got/$_expected events..."
         done
     done
 
@@ -193,13 +210,18 @@ if [ -z "$POD_NAME" ]; then
         # The Job is removed ttlSecondsAfterFinished after it ends. With a
         # known pod, its log is still in CloudWatch.
         if ! kubectl_cmd get job "$JOB_NAME" >/dev/null 2>&1; then
-            if [ -n "$POD_NAME" ]; then
-                status="Removed"
-                break
+            if [ -z "$POD_NAME" ]; then
+                echo "job/$JOB_NAME not found; looking up its most recent pod in CloudWatch..."
+                POD_NAME=$(latest_cloudwatch_pod)
+                if [ -z "$POD_NAME" ]; then
+                    echo "error: no $JOB_NAME pod found in the last $SINCE_HOURS hours." >&2
+                    echo "       collect its log with: $0 --pod <pod-name> [--since <hours>]" >&2
+                    exit 1
+                fi
+                echo "  pod: $POD_NAME"
             fi
-            echo "error: job/$JOB_NAME not found; it may have finished and been removed." >&2
-            echo "       collect its log with: $0 --pod <pod-name> [--since <hours>]" >&2
-            exit 1
+            status="Removed"
+            break
         fi
 
         # Check job completion via jsonpath on conditions. Kubernetes jobs set
