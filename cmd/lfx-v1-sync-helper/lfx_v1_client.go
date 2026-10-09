@@ -18,6 +18,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,26 +26,17 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/auth0/go-auth0/authentication"
 	"github.com/auth0/go-auth0/authentication/oauth"
+	sfidvalidator "github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/vmihailenco/msgpack/v5"
 	"golang.org/x/oauth2"
-)
-
-const (
-	// Cache settings for organization lookups
-	orgCacheKeyPrefix         = "v1_org."
-	orgLockKeyPrefix          = "v1_org_lock."
-	orgCacheExpiry            = 30 * time.Minute // Treat org data as fresh for 30 minutes
-	orgCacheStaleWhileRefresh = 6 * time.Hour    // Use stale data up to 6 hours with background refresh
-	orgLockTimeout            = 10 * time.Second // Lock timeout for concurrent requests
-	orgLockRetryInterval      = 1 * time.Second  // Retry interval when lock exists
-	orgLockRetryAttempts      = 3                // Number of lock acquisition retry attempts
 )
 
 var (
@@ -64,12 +56,11 @@ type V1User struct {
 	Avatar    string `json:"Avatar"`
 }
 
-// V1Organization represents an organization from the LFX v1 Organization Service
+// V1Organization represents an organization from the LFX v1 Organization Service.
 type V1Organization struct {
-	ID          string    `json:"ID"`
-	Name        string    `json:"Name"`
-	Domain      string    `json:"Domains"`
-	LastFetched time.Time `json:"_last_fetched"` // Internal field for cache management
+	ID     string `json:"ID"`
+	Name   string `json:"Name"`
+	Domain string `json:"Domains"`
 }
 
 // V1OrganizationResponse represents the API response from v1 Organization Service
@@ -77,11 +68,6 @@ type V1OrganizationResponse struct {
 	ID     string `json:"ID"`
 	Name   string `json:"Name"`
 	Domain string `json:"Domains"`
-}
-
-// V1OrganizationListResponse represents the list response from GET /v1/orgs/search
-type V1OrganizationListResponse struct {
-	Data []V1OrganizationResponse `json:"Data"`
 }
 
 // V1OrganizationCreateRequest is the request body for POST /v1/orgs
@@ -315,46 +301,6 @@ func ResolveV1UserSFIDByEmail(ctx context.Context, email string) (string, error)
 	return dbResolveUserSFIDByEmail(ctx, email)
 }
 
-// getOrganizationFromV1API fetches organization information from the LFX v1 Organization Service
-func getV1OrganizationFromOrgSvc(ctx context.Context, sfid string) (*V1Organization, error) {
-	url := fmt.Sprintf("%sorganization-service/v1/orgs/%s", cfg.LFXAPIGateway.String(), sfid)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	resp, err := v1HTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("v1 Organization Service returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var orgResponse V1OrganizationResponse
-	if err := json.Unmarshal(body, &orgResponse); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal organization response: %w", err)
-	}
-
-	// Convert to internal organization format with cache timestamp
-	org := &V1Organization{
-		ID:          orgResponse.ID,
-		Name:        orgResponse.Name,
-		Domain:      orgResponse.Domain,
-		LastFetched: time.Now().UTC(),
-	}
-
-	return org, nil
-}
-
 // normalizeDomain strips protocol, www prefix, and any path component from a website
 // string and lowercases it, producing a bare hostname suitable for exact domain comparison.
 func normalizeDomain(website string) string {
@@ -367,58 +313,6 @@ func normalizeDomain(website string) string {
 		s = s[:i]
 	}
 	return s
-}
-
-// searchV1OrgsByWebsite searches for organizations in the v1 Organization Service by website.
-// Returns the organization whose domain exactly matches the search website, or nil if none found.
-// The org-service search uses a substring LIKE query, so results may include unrelated orgs
-// whose website merely contains the search term; this function filters to an exact domain match.
-func searchV1OrgsByWebsite(ctx context.Context, website string) (*V1Organization, error) {
-	baseURL := fmt.Sprintf("%sorganization-service/v1/orgs/search", cfg.LFXAPIGateway.String())
-	params := url.Values{}
-	params.Set("website", website)
-	fullURL := baseURL + "?" + params.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create org search request: %w", err)
-	}
-
-	resp, err := v1HTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send org search request: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read org search response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("org service returned status %d searching by website=%q: %s", resp.StatusCode, website, string(body))
-	}
-
-	var listResp V1OrganizationListResponse
-	if err := json.Unmarshal(body, &listResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal org search response: %w", err)
-	}
-
-	searchDomain := normalizeDomain(website)
-	for _, org := range listResp.Data {
-		if normalizeDomain(org.Domain) == searchDomain {
-			return &V1Organization{
-				ID:          org.ID,
-				Name:        org.Name,
-				Domain:      org.Domain,
-				LastFetched: time.Now().UTC(),
-			}, nil
-		}
-	}
-
-	logger.With("website", website, "result_count", len(listResp.Data)).
-		DebugContext(ctx, "org search returned no exact domain match, falling through to org creation")
-	return nil, nil
 }
 
 // createV1OrgInOrgSvc creates a new organization in the v1 Organization Service.
@@ -457,24 +351,26 @@ func createV1OrgInOrgSvc(ctx context.Context, name, website string) (*V1Organiza
 	}
 
 	return &V1Organization{
-		ID:          orgResp.ID,
-		Name:        orgResp.Name,
-		Domain:      orgResp.Domain,
-		LastFetched: time.Now().UTC(),
+		ID:     orgResp.ID,
+		Name:   orgResp.Name,
+		Domain: orgResp.Domain,
 	}, nil
 }
 
-// resolveV1OrgID resolves a v1 Organization SFID by searching by website first.
-// If not found and both name and website are provided, it creates a new org.
-// Returns empty string (no error) if the org cannot be found and there is insufficient data to create one.
+// resolveV1OrgID resolves a v1 B2C account SFID for a v2 organization by
+// searching salesforce.account by website domain (see
+// searchV1B2CAccountByDomain). If no account matches and both name and
+// website are provided, it creates a new org via the v1 Organization
+// Service. Returns empty string (no error) if the org cannot be found and
+// there is insufficient data to create one.
 func resolveV1OrgID(ctx context.Context, name, website string) (string, error) {
 	if website != "" {
-		org, err := searchV1OrgsByWebsite(ctx, website)
+		accountSFID, err := searchV1B2CAccountByDomainFn(ctx, normalizeDomain(website))
 		if err != nil {
 			return "", fmt.Errorf("org search failed: %w", err)
 		}
-		if org != nil {
-			return org.ID, nil
+		if accountSFID != "" {
+			return accountSFID, nil
 		}
 	}
 
@@ -491,193 +387,222 @@ func resolveV1OrgID(ctx context.Context, name, website string) (string, error) {
 	return created.ID, nil
 }
 
-// getCachedV1Org retrieves an organization from the mappings cache
-func getCachedV1Org(ctx context.Context, sfid string) (*V1Organization, error) {
-	cacheKey := orgCacheKeyPrefix + sfid
-
-	entry, err := mappingStore.Get(ctx, cacheKey)
-	if err != nil {
-		return nil, err // No cached entry
-	}
-
-	var org V1Organization
-	if err := json.Unmarshal(entry.Value, &org); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal cached organization: %w", err)
-	}
-
-	return &org, nil
+// v1IndividualPlaceholderAccountSFIDs are v1 placeholder accounts used for
+// individuals with no organization affiliation. They resolve to no
+// organization.
+var v1IndividualPlaceholderAccountSFIDs = []string{
+	"0014100001NrJWnAAN", // Individual - No Account.
+	"001QP00000d1O8QYAU", // Individual - No Account 20.
+	"001Kc000002THcsIAG", // individual with no account.
 }
 
-// setCachedOrg stores an organization in the mappings cache
-func setCachedV1Org(ctx context.Context, sfid string, org *V1Organization) error {
-	cacheKey := orgCacheKeyPrefix + sfid
+// isIndividualPlaceholderAccount reports whether sfid (normalized to 18
+// chars) is one of v1IndividualPlaceholderAccountSFIDs.
+func isIndividualPlaceholderAccount(sfid string) bool {
+	return slices.Contains(v1IndividualPlaceholderAccountSFIDs, sfid)
+}
 
-	data, err := json.Marshal(org)
-	if err != nil {
-		return fmt.Errorf("failed to marshal organization for cache: %w", err)
+// normalizeAccountSFID trims an account SFID and normalizes it to 18 chars
+// when it is a valid Salesforce ID.
+func normalizeAccountSFID(accountSFID string) string {
+	id := strings.TrimSpace(accountSFID)
+	if normalized, err := sfidvalidator.Normalize18(id); err == nil {
+		return normalized
+	}
+	return id
+}
+
+// v1OrgMatch is a v1 organization resolved from the v1 platform database.
+// B2BOrgID is set only when the match is a live salesforce_b2b."Account"
+// (a true Salesforce account); it is empty for B2C-only salesforce.account
+// matches. Name and Domain are set for both.
+type v1OrgMatch struct {
+	B2BOrgID string
+	Name     string
+	Domain   string
+}
+
+// newV1OrgMatch builds a v1OrgMatch from an account row, or returns nil when
+// the row has no name. Domain prefers the SFDC-derived primary domain and
+// falls back to the normalized website.
+func newV1OrgMatch(row *accountRow, isB2B bool) *v1OrgMatch {
+	name := strings.TrimSpace(row.Name.String)
+	if name == "" {
+		return nil
+	}
+	domain := strings.TrimSpace(row.Domain.String)
+	if domain == "" {
+		domain = normalizeDomain(row.Website.String)
+	}
+	match := &v1OrgMatch{Name: name, Domain: domain}
+	if isB2B {
+		match.B2BOrgID = row.ID
+	}
+	return match
+}
+
+// resolveV1OrgBySFIDFn is the v1 account SFID resolver. Tests may replace it
+// to stub database lookups.
+var resolveV1OrgBySFIDFn = resolveV1OrgBySFID
+
+// resolveV1OrgBySFID resolves a v1 account SFID to an organization using the
+// v1 platform database. A live salesforce_b2b."Account" with the same ID is
+// preferred; otherwise a live salesforce.account row is used. Returns
+// (nil, nil) when the account is an individual placeholder, is missing, or
+// is soft-deleted. Errors are returned only for database failures.
+func resolveV1OrgBySFID(ctx context.Context, accountSFID string) (*v1OrgMatch, error) {
+	id := normalizeAccountSFID(accountSFID)
+	if id == "" || isIndividualPlaceholderAccount(id) {
+		return nil, nil
 	}
 
-	_, err = mappingStore.Put(ctx, cacheKey, data)
-	return err
-}
-
-// acquireOrgLock attempts to acquire a lock for organization refresh operations with retries
-// Returns (acquired, waited) where waited indicates if any retry attempts were made
-func acquireV1OrgLock(ctx context.Context, sfid string, maxRetries int) (bool, bool) {
-	lockKey := orgLockKeyPrefix + sfid
-	var waited bool
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		lockValue := strconv.FormatInt(time.Now().Unix(), 10)
-
-		// Try to create the lock (will fail if it already exists)
-		_, err := mappingStore.Create(ctx, lockKey, []byte(lockValue))
-		if err == nil {
-			return true, waited // Successfully acquired lock
-		}
-
-		// Check if lock already exists and if it's stale
-		if entry, getErr := mappingStore.Get(ctx, lockKey); getErr == nil {
-			if lockTimestamp, parseErr := strconv.ParseInt(string(entry.Value), 10, 64); parseErr == nil {
-				lockTime := time.Unix(lockTimestamp, 0)
-				if time.Since(lockTime) > orgLockTimeout {
-					// Lock is stale, try to update it
-					if _, updateErr := mappingStore.Put(ctx, lockKey, []byte(lockValue)); updateErr == nil {
-						return true, waited
-					}
-				}
-			}
-		}
-
-		// If this isn't the last attempt, wait before retrying
-		if attempt < maxRetries {
-			waited = true
-			time.Sleep(orgLockRetryInterval)
-		}
-	}
-
-	return false, waited // Failed to acquire lock after all attempts
-}
-
-// releaseOrgLock releases an organization refresh lock
-func releaseV1OrgLock(ctx context.Context, sfid string) error {
-	lockKey := orgLockKeyPrefix + sfid
-	return mappingStore.Delete(ctx, lockKey)
-}
-
-// refreshOrgInBackground refreshes organization data in the background
-func refreshV1OrgInBackground(ctx context.Context, sfid string) {
-	go func() {
-		// Acquire lock for this refresh operation
-		acquired, _ := acquireV1OrgLock(ctx, sfid, 1)
-		if !acquired {
-			return // Another process is already refreshing
-		}
-
-		defer func() {
-			if releaseErr := releaseV1OrgLock(ctx, sfid); releaseErr != nil {
-				logger.With(errKey, releaseErr, "org_sfid", sfid).WarnContext(ctx, "failed to release organization cache lock")
-			}
-		}()
-
-		// Fetch fresh organization data
-		org, err := getV1OrganizationFromOrgSvc(ctx, sfid)
+	if strings.HasPrefix(id, "001") {
+		b2b, err := dbLookupB2BAccountByID(ctx, id)
 		if err != nil {
-			logger.With(errKey, err, "org_sfid", sfid).WarnContext(ctx, "background organization refresh failed")
-			return
+			return nil, err
 		}
-
-		// Update cache
-		if err := setCachedV1Org(ctx, sfid, org); err != nil {
-			logger.With(errKey, err, "org_sfid", sfid).WarnContext(ctx, "failed to update organization cache after refresh")
-		} else {
-			logger.With("org_sfid", sfid, "name", org.Name).DebugContext(ctx, "organization cache refreshed in background")
+		if b2b != nil {
+			return newV1OrgMatch(b2b, true), nil
 		}
-	}()
-}
-
-// lookupOrg retrieves organization information with caching and refresh logic
-func lookupV1Org(ctx context.Context, sfid string) (*V1Organization, error) {
-	if sfid == "" {
-		return nil, fmt.Errorf("organization SFID cannot be empty")
 	}
 
-	// Try to get from cache first
-	cachedOrg, err := getCachedV1Org(ctx, sfid)
-	if err == nil {
-		age := time.Since(cachedOrg.LastFetched)
-		// See if cache is still within the "stale" window.
-		if age <= orgCacheStaleWhileRefresh {
-			if age > orgCacheExpiry {
-				// Cache is stale: refresh in background.
-				refreshV1OrgInBackground(ctx, sfid)
-			}
-			return cachedOrg, nil
-		}
-		// Fall through if cache is *too* old (past "stale" window).
-	}
-
-	// Try to acquire lock.
-	acquired, waited := acquireV1OrgLock(ctx, sfid, orgLockRetryAttempts)
-
-	if acquired {
-		// We got the lock, set up defer to release it
-		defer func() {
-			if releaseErr := releaseV1OrgLock(ctx, sfid); releaseErr != nil {
-				logger.With(errKey, releaseErr, "org_sfid", sfid).WarnContext(ctx, "failed to release organization lookup lock")
-			}
-		}()
-	}
-
-	// If we waited, check cache again - another process might have populated it
-	if waited {
-		if freshOrg, cacheErr := getCachedV1Org(ctx, sfid); cacheErr == nil {
-			if time.Since(freshOrg.LastFetched) <= orgCacheExpiry {
-				// Cache is now fresh, return it
-				return freshOrg, nil
-			}
-		}
-		// Fall through to fetch fresh data.
-	}
-
-	// Fetch from API
-	org, err := getV1OrganizationFromOrgSvc(ctx, sfid)
+	b2c, err := dbLookupB2CAccountBySFID(ctx, id)
 	if err != nil {
-		// Cache the error state to avoid repeated failed lookups
-		errorOrg := &V1Organization{
-			ID:          sfid,
-			Name:        "", // Empty name indicates error state
-			Domain:      "",
-			LastFetched: time.Now().UTC(),
-		}
-		if cacheErr := setCachedV1Org(ctx, sfid, errorOrg); cacheErr != nil {
-			logger.With(errKey, cacheErr, "org_sfid", sfid).WarnContext(ctx, "failed to cache error state for organization")
-		}
 		return nil, err
 	}
-
-	// Validate required fields
-	if org.Name == "" {
-		logger.With("org_sfid", sfid).WarnContext(ctx, "v1 organization has empty name")
-		// Cache the invalid state
-		invalidOrg := &V1Organization{
-			ID:          sfid,
-			Name:        "", // Empty name indicates invalid state
-			Domain:      "",
-			LastFetched: time.Now().UTC(),
-		}
-		if cacheErr := setCachedV1Org(ctx, sfid, invalidOrg); cacheErr != nil {
-			logger.With(errKey, cacheErr, "org_sfid", sfid).WarnContext(ctx, "failed to cache invalid state for organization")
-		}
-		return nil, fmt.Errorf("organization %s has invalid data (empty name)", sfid)
+	if b2c == nil || b2c.IsDeleted.Bool {
+		logger.With("account_sfid", id).
+			DebugContext(ctx, "v1 account not found or soft-deleted, treating as individual")
+		return nil, nil
 	}
+	return newV1OrgMatch(b2c, false), nil
+}
 
-	// Cache the valid organization data
-	if err := setCachedV1Org(ctx, sfid, org); err != nil {
-		logger.With(errKey, err, "org_sfid", sfid).WarnContext(ctx, "failed to cache organization data")
+// lookupLiveV1B2CAccountSFIDFn is the live salesforce.account SFID check.
+// Tests may replace it to stub database lookups.
+var lookupLiveV1B2CAccountSFIDFn = lookupLiveV1B2CAccountSFID
+
+// lookupLiveV1B2CAccountSFID returns the 18-char sfid of the live,
+// non-placeholder salesforce.account row for accountSFID, or "" when there
+// is none. Errors are returned only for database failures.
+func lookupLiveV1B2CAccountSFID(ctx context.Context, accountSFID string) (string, error) {
+	id := normalizeAccountSFID(accountSFID)
+	if id == "" || isIndividualPlaceholderAccount(id) {
+		return "", nil
 	}
+	row, err := dbLookupB2CAccountBySFID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if row == nil || row.IsDeleted.Bool {
+		return "", nil
+	}
+	return row.ID, nil
+}
 
-	return org, nil
+// domainAliasSeparator splits salesforce.account domain_alias__c values,
+// which are comma- and/or newline-separated lists.
+var domainAliasSeparator = regexp.MustCompile(`[\s,]+`)
+
+// parseDomainAliases returns the distinct normalized domains in a
+// domain_alias__c value. Tokens without a dot (such as the "--- Merged
+// Data:" markers left by account merges) are skipped.
+func parseDomainAliases(aliases string) []string {
+	var domains []string
+	for _, token := range domainAliasSeparator.Split(aliases, -1) {
+		domain := normalizeDomain(token)
+		if !strings.Contains(domain, ".") || slices.Contains(domains, domain) {
+			continue
+		}
+		domains = append(domains, domain)
+	}
+	return domains
+}
+
+// accountMatchesPrimaryDomain reports whether row's normalized website or
+// primary domain exactly matches domain.
+func accountMatchesPrimaryDomain(row *accountRow, domain string) bool {
+	return normalizeDomain(row.Website.String) == domain ||
+		normalizeDomain(row.Domain.String) == domain
+}
+
+// accountMatchesDomain reports whether row's normalized website, primary
+// domain, or any domain alias exactly matches domain.
+func accountMatchesDomain(row *accountRow, domain string) bool {
+	return accountMatchesPrimaryDomain(row, domain) ||
+		slices.Contains(parseDomainAliases(row.DomainAlias.String), domain)
+}
+
+// searchV1B2CAccountByDomainFn is the salesforce.account domain search.
+// Tests may replace it to stub database lookups.
+var searchV1B2CAccountByDomainFn = searchV1B2CAccountByDomain
+
+// searchV1B2CAccountByDomain returns the sfid of the live salesforce.account
+// whose website, primary domain, or domain aliases match domain (which must
+// already be normalized with normalizeDomain), case-insensitively. When
+// several accounts match, see compareAccountsForDomainMatch for which one
+// wins. Returns "" when none match.
+func searchV1B2CAccountByDomain(ctx context.Context, domain string) (string, error) {
+	if domain == "" {
+		return "", nil
+	}
+	candidates, err := dbFindB2CAccountCandidatesByDomain(ctx, domain, v1IndividualPlaceholderAccountSFIDs)
+	if err != nil {
+		return "", err
+	}
+	var matches []accountRow
+	for i := range candidates {
+		if accountMatchesDomain(&candidates[i], domain) {
+			matches = append(matches, candidates[i])
+		}
+	}
+	if len(matches) == 0 {
+		return "", nil
+	}
+	slices.SortStableFunc(matches, func(a, b accountRow) int {
+		return compareAccountsForDomainMatch(a, b, domain)
+	})
+	if len(matches) > 1 {
+		ids := make([]string, 0, len(matches))
+		for _, row := range matches {
+			ids = append(ids, row.ID)
+		}
+		logger.With(
+			"domain", domain,
+			"candidate_ids", ids,
+			"selected_account_sfid", matches[0].ID,
+		).WarnContext(ctx, "multiple v1 accounts match domain, selecting by match rank, alias count, and age")
+	}
+	return matches[0].ID, nil
+}
+
+// compareAccountsForDomainMatch orders accounts matching domain so that
+// website or primary domain matches come before alias-only matches (alias
+// lists roll up subsidiary domains onto parent accounts), then by descending
+// domain alias count, then ascending createddate (missing dates last), then
+// ascending sfid.
+func compareAccountsForDomainMatch(a, b accountRow, domain string) int {
+	aPrimary, bPrimary := accountMatchesPrimaryDomain(&a, domain), accountMatchesPrimaryDomain(&b, domain)
+	if aPrimary != bPrimary {
+		if aPrimary {
+			return -1
+		}
+		return 1
+	}
+	if c := cmp.Compare(len(parseDomainAliases(b.DomainAlias.String)), len(parseDomainAliases(a.DomainAlias.String))); c != 0 {
+		return c
+	}
+	switch {
+	case a.CreatedDate.Valid && !b.CreatedDate.Valid:
+		return -1
+	case !a.CreatedDate.Valid && b.CreatedDate.Valid:
+		return 1
+	case a.CreatedDate.Valid && b.CreatedDate.Valid:
+		if c := a.CreatedDate.Time.Compare(b.CreatedDate.Time); c != 0 {
+			return c
+		}
+	}
+	return cmp.Compare(a.ID, b.ID)
 }
 
 // projectServiceCommitteeCreate is the request body for POST /v2/projects/{projectId}/committees.

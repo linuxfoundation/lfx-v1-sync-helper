@@ -152,6 +152,14 @@ Boot ordering (`main.go`): NATS + KV bucket handles → a KV-backed `mappingStor
 
 **Chart wiring.** The Postgres cluster is provisioned by `charts/lfx-v1-sync-helper/templates/database.yaml`, selected via `.Values.database.mode` (`external` | `database` | `cluster+database`). The app deployment forwards CNPG operator-managed `<clusterName>-app` Secret keys (or external Secret keys, or a single-key `V1_MAPPINGS_DATABASE_URL`) as `V1_MAPPINGS_*` env vars (distinct from `V1_DB_*`, which addresses the read-only Salesforce replica) and the service composes the libpq DSN in-process via `Config.ResolveV1MappingsDatabaseURL` — never as a literal env-var value, to avoid leaking the password through `kubectl describe pod`. When `database.mode=external` with no `secretName`, the deployment injects `V1_MAPPINGS_STORE_MODE=kv` automatically so a chart install without Postgres wiring still boots. Setting `.Values.app.environment.V1_MAPPINGS_STORE_MODE.value` overrides that safety fallback.
 
+#### v1 Organization Resolution (`lfx_v1_client.go`, `v1db.go`)
+
+v1 org reads go directly to the v1 platform Postgres replica (`V1_DB_*`); there is no org cache. Only org **creation** (`createV1OrgInOrgSvc`) uses the v1 Organization Service API.
+
+- **v1→v2** (`resolveV1OrgBySFIDFn`, used by Auth0 profile sync and committee member mapping): the SFID is normalized to 18 chars; the three "Individual" placeholder accounts (`v1IndividualPlaceholderAccountSFIDs`), missing accounts, and soft-deleted accounts resolve to no org. A live `salesforce_b2b."Account"` row (checked for `001` IDs only) is preferred and sets `B2BOrgID`; otherwise a live `salesforce.account` row supplies name/domain with no ID. Committee member `organization.id` is only ever a B2B ID. Profile sync leaves the Auth0 organization untouched when no org resolves; only a DB error fails the user.
+- **v2→v1** (`resolveOrgIDFromEventData` → `resolveV1OrgID`): searches only B2C `salesforce.account`, the table v1 committee member org IDs reference. An SFID-shaped v2 `organization.id` is forwarded only if it is a live, non-placeholder `salesforce.account` row. Otherwise `searchV1B2CAccountByDomain` matches the normalized domain case-insensitively against `website`, `account_domain__c`, and parsed `domain_alias__c` entries (SQL substring prefilter, confirmed in Go). Multiple matches are ordered by `compareAccountsForDomainMatch`: website/primary-domain matches before alias-only matches (alias lists roll subsidiary domains up onto parents), then most aliases, oldest `createddate`, lowest `sfid`. No match → create via the API.
+- The case-insensitive search cannot use any existing index and reads the whole `salesforce.account` table (~300 ms in prod).
+
 ### Python ETL (Meltano)
 
 #### Configuration Structure

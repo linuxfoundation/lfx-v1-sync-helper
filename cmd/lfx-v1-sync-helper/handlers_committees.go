@@ -1061,34 +1061,41 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 
 	// Map organization information.
 	if accountSFID, ok := v1Data["account__c"].(string); ok && accountSFID != "" {
-		// Look up organization information from v1 Organization Service.
-		org, err := lookupV1Org(ctx, accountSFID)
+		// Resolve organization information from the v1 platform database.
+		org, err := resolveV1OrgBySFIDFn(ctx, accountSFID)
 		if err != nil {
 			logger.With(errKey, err, "account_sfid", accountSFID).WarnContext(ctx, "failed to lookup organization, leaving empty")
 			// Organization lookup failed, leave Organization field nil.
-		} else if org.Name != "" {
-			// Successfully fetched organization data.
+		} else if org != nil {
 			orgName := org.Name
 			orgStruct := &struct {
 				ID      *string
 				Name    *string
 				Website *string
 			}{
-				// NOTE: This is highly irregular - we are adding v1 identifiers
-				// into v2. Everywhere else (except v1 meetings) we've made a
-				// clean break with new UUIDs. This v1 SFID was added to the
-				// service in order to implement external Data Lake queries.
-				// However, as we are not expecting to migrate the v1
-				// Organization Service into LFX One, this should get changed in
-				// the future. There *will* be a concept of B2B-engaged
-				// organizations managed in LFX One, requiring some kind of
-				// role-assignment journey, and thus a service that is somewhere
-				// between the v1 Organization Service and Member Service in
-				// terms of functionality. However, principally-B2C engagements
-				// like committee membership will be expected to use something
-				// like "domain" or "Clearbit ID" as the unique identifier.
-				ID:   &accountSFID,
 				Name: &orgName,
+			}
+
+			// NOTE: This is highly irregular - we are adding v1 identifiers
+			// into v2. Everywhere else (except v1 meetings) we've made a
+			// clean break with new UUIDs. This v1 SFID was added to the
+			// service in order to implement external Data Lake queries.
+			// However, as we are not expecting to migrate the v1
+			// Organization Service into LFX One, this should get changed in
+			// the future. There *will* be a concept of B2B-engaged
+			// organizations managed in LFX One, requiring some kind of
+			// role-assignment journey, and thus a service that is somewhere
+			// between the v1 Organization Service and Member Service in
+			// terms of functionality. However, principally-B2C engagements
+			// like committee membership will be expected to use something
+			// like "domain" or "Clearbit ID" as the unique identifier.
+			//
+			// Only a true Salesforce account (salesforce_b2b."Account") is
+			// stored as the organization ID; B2C-only organizations carry
+			// name and website without an ID.
+			if org.B2BOrgID != "" {
+				b2bOrgID := org.B2BOrgID
+				orgStruct.ID = &b2bOrgID
 			}
 
 			// Parse website URL from Domain attribute.
@@ -1246,24 +1253,31 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID s
 
 	// Map organization information.
 	if accountSFID, ok := v1Data["account__c"].(string); ok && accountSFID != "" {
-		// Look up organization information from v1 Organization Service.
-		org, err := lookupV1Org(ctx, accountSFID)
+		// Resolve organization information from the v1 platform database.
+		org, err := resolveV1OrgBySFIDFn(ctx, accountSFID)
 		if err != nil {
 			logger.With(errKey, err, "account_sfid", accountSFID).WarnContext(ctx, "failed to lookup organization, leaving empty")
 			// Organization lookup failed, leave Organization field nil.
-		} else if org.Name != "" {
-			// Successfully fetched organization data.
+		} else if org != nil {
 			orgName := org.Name
 			orgStruct := &struct {
 				ID      *string
 				Name    *string
 				Website *string
 			}{
-				// NOTE: This is highly irregular - we are adding v1 identifiers into v2.
-				// (Please see additional commentary in the corresponding code in
-				// the above mapping function for the member "create" payload.)
-				ID:   &accountSFID,
 				Name: &orgName,
+			}
+
+			// NOTE: This is highly irregular - we are adding v1 identifiers into v2.
+			// (Please see additional commentary in the corresponding code in
+			// the above mapping function for the member "create" payload.)
+			//
+			// Only a true Salesforce account (salesforce_b2b."Account") is
+			// stored as the organization ID; B2C-only organizations carry
+			// name and website without an ID.
+			if org.B2BOrgID != "" {
+				b2bOrgID := org.B2BOrgID
+				orgStruct.ID = &b2bOrgID
 			}
 
 			// Parse website URL from Domain attribute.

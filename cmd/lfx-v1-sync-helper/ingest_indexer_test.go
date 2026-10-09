@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"reflect"
 	"testing"
 )
@@ -12,6 +13,11 @@ import (
 func TestResolveOrgIDFromEventData_keepsSFID(t *testing.T) {
 	ctx := t.Context()
 	sfid := "0014100000Te2ovAAB"
+	orig := lookupLiveV1B2CAccountSFIDFn
+	t.Cleanup(func() { lookupLiveV1B2CAccountSFIDFn = orig })
+	lookupLiveV1B2CAccountSFIDFn = func(_ context.Context, accountSFID string) (string, error) {
+		return accountSFID, nil
+	}
 	data := map[string]any{
 		"organization": map[string]any{
 			"id":   sfid,

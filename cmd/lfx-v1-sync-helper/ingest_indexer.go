@@ -785,11 +785,12 @@ func syncCommitteeMemberDeleteToV1(ctx context.Context, memberUID, projectSFID, 
 	return nil
 }
 
-// resolveOrgIDFromEventData extracts and resolves an organization SFID from committee member event data.
-// Returns empty string (no error) if no organization data is present or fields are all empty.
-// Only 15- or 18-char Salesforce ID-shaped organization.id values are sent to v1 as
-// OrganizationID; any other organization.id value is ignored so sync can resolve from
-// name/website or proceed without org.
+// resolveOrgIDFromEventData extracts and resolves a v1 B2C account SFID from
+// committee member event data. Returns empty string (no error) if no
+// organization data is present or fields are all empty. A 15- or 18-char
+// Salesforce ID-shaped organization.id is sent to v1 as OrganizationID only
+// when it is a live salesforce.account row; any other organization.id value
+// is ignored so sync can resolve from name/website or proceed without org.
 func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string, error) {
 	org, ok := data["organization"].(map[string]any)
 	if !ok {
@@ -805,7 +806,15 @@ func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string
 		orgID = ""
 	}
 	if orgID != "" {
-		return orgID, nil
+		accountSFID, err := lookupLiveV1B2CAccountSFIDFn(ctx, orgID)
+		if err != nil {
+			return "", fmt.Errorf("failed to look up v1 account %s: %w", orgID, err)
+		}
+		if accountSFID != "" {
+			return accountSFID, nil
+		}
+		logger.With("organization_id", orgID, "organization_name", orgName, "organization_website", orgWebsite).
+			InfoContext(ctx, "organization id is not a live v1 account, resolving from name/website")
 	}
 	return resolveV1OrgID(ctx, orgName, orgWebsite)
 }
