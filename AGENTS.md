@@ -391,26 +391,6 @@ Re-emits v1 `platform-collaboration__c` rows that have no live `committee.sfid.*
 - **Summary log fields**: `scanned`, `mappings_live`, `mappings_tombstoned`, `low_mappings_count`, `candidates`, `emitted`, `remaining_unmapped`, `errors`, plus the `skipped_*` breakdown (`skipped_already_mapped`, `skipped_tombstoned`, `skipped_soft_deleted`, `skipped_empty_value`, `skipped_undecodable`, `skipped_no_sfid`, `skipped_missing_required`, `skipped_v2_authored`, `skipped_parent_unmapped`, `skipped_revision_race`, `skipped_limit`, `skipped_missing`, `skipped_settle_timeout`, `skipped_name_conflict`), `name_conflicts` (count of `res.nameConflicts`), and `duplicate_names` (count of `res.duplicateNames`) (shared via `backfillCommitteesResult.logFields()`). `remaining_unmapped` is recomputed from final settle state at the end of a live run.
 - **Manifest**: `manifests/backfill-committees-job.yaml`, shipped dry-run by default with `--check-committee-names`. `--check-committee-names` is always on in the shipped Job for the same reason `--check-slugs` is always on for projects: a committee created successfully but whose mapping write then silently fails would look unmapped to a rerun and be re-emitted as a duplicate create. **Deployment-order prerequisite**: since `--check-committee-names` is always on, this manifest must not be applied until `lfx-v2-committee-service` PR #209 (which adds the `lfx.committee-api.name_to_uid` subject the check depends on) is merged and deployed to the target environment — otherwise every lookup gets "no responders" and the job (including a dry run) hard-errors before reporting any counters. This is an operational ordering note, not a code gate.
 
-### `--backfill-alternate-emails [--limit N] [--dry-run]` (`backfill_email_profile.go`)
-
-Iterates Auth0 users (Username-Password-Authentication connection only), sorted by `updated_at` ascending, and links any v1 verified alternate emails not yet linked as Auth0 email-connection identities.
-
-- **Cursor**: stored at `v1-mappings` key `backfill.alternate-emails.cursor` (updated_at of last processed user). Re-run to advance. Uses an inclusive range query so the last user of the previous run is re-processed on the next run; all operations are idempotent.
-- **Per-user flow**: resolves v1 SFID via a live PostgreSQL query on `salesforce.merged_user` → fetches alternate email rows from `salesforce.alternate_email__c` → calls `linkEmailIdentity` for each verified, active, non-primary email.
-- **`--limit N`** (default 1000): caps users processed per run.
-- **Summary log fields**: `users_processed`, `emails_linked`, `emails_skipped`, `errors`.
-- **Manifest**: `manifests/backfill-alternate-emails-job.yaml`.
-
-### `--backfill-profiles [--limit N] [--dry-run]` (`backfill_email_profile.go`)
-
-Iterates Auth0 users (same connection filter and sort), syncs v1 profile fields (name, title, address, org, skills, etc.) to Auth0 `user_metadata` via `syncProfileToAuth0`. No-ops when nothing has changed.
-
-- **Cursor**: stored at `v1-mappings` key `backfill.profiles.cursor.v2`. Same inclusive-cursor behavior as `--backfill-alternate-emails`. Versioned to `.v2` when skills were added to this backfill: `user_skills` is WAL-only with no other path into Auth0 for historical rows, so reusing the pre-skills cursor would silently skip backfilling skills for users a prior run already passed. The old `backfill.profiles.cursor` key is left in place, unused.
-- **`--limit N`** (default 1000): caps users processed per run.
-- **Summary log fields**: `users_processed`, `users_updated`, `users_skipped`, `errors`.
-- **Manifest**: `manifests/backfill-profiles-job.yaml`.
-- **Replaces** the removed `PROFILE_SYNC_BACKFILL` environment variable.
-
 ### `--sync-user <username> [--dry-run]` (`backfill_email_profile.go`)
 
 Performs a full sync (profile + alternate emails) for a single user identified by their Auth0 username. Useful for debugging or targeted re-sync without a full backfill run.
@@ -418,6 +398,13 @@ Performs a full sync (profile + alternate emails) for a single user identified b
 > **The username is not the part after `auth0|`.** An Auth0 `user_id` of the form `auth0|<suffix>` is minted by the LDAP REST Proxy (the custom component fronting LDAP and Drupal for Auth0), which sanitizes the LDAP uid so the resulting identifier is within Auth0's spec. For uids that need no sanitizing the suffix happens to equal the username, which makes the two look interchangeable — but any uid that did need sanitizing (for example one containing a space, or a UTF-8 symbol, which may be present from historical, less-conservative signup requirements) is replaced by an opaque hash. Deriving a username by stripping the `auth0|` prefix has never been safe.
 >
 > When a username must be recovered from Auth0 logs, read the `user_name` field, which carries the real uid.
+
+### `--sync-users-file <path> [--dry-run]` (`backfill_email_profile.go`)
+
+Runs `syncSingleUser` for each username listed in a newline-delimited file (blank lines and `#`-prefixed lines are ignored), reusing the same authenticated clients for the whole batch. Paced by the shared `auth0RateLimiter` (see `--auth0-rate`). A per-user failure is logged and counted but does not abort the batch.
+
+- **Summary log fields**: `processed`, `succeeded`, `failed`.
+- **LFXV2-1507**: this is the targeted-cohort replacement for the retired Auth0-cursor-driven "all users" backfills (`--backfill-alternate-emails` / `--backfill-profiles`, removed). Those walked the *entire* Auth0 population via a persisted `updated_at` cursor in `v1-mappings`; `--sync-users-file` instead takes an explicit username list (e.g. a wave or chunk of affected users identified ad hoc), which is both faster (skips users with nothing to sync) and avoids depending on a v1-mappings cursor across the ongoing KV→Postgres migration (LFXV2-2985). There is intentionally no equivalent full-population walk anymore — operators are expected to build the username list themselves (e.g. from a query against the affected population) and drive it through this flag.
 
 ### `--backfill-v1-mappings-to-postgres [--dry-run]` (`backfill_v1_mappings_pg.go`)
 

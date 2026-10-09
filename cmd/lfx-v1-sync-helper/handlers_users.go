@@ -69,7 +69,7 @@ func normalizeUserIdentifier(s string) string {
 // are logged and dropped. WithNoRetries is set on the management client so
 // the handler controls retry behaviour directly.
 //
-// Bulk profile backfill is handled separately by --backfill-profiles.
+// Targeted re-sync is handled separately by --sync-user / --sync-users-file.
 func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	sfid, ok := v1Data["sfid"].(string)
 	if !ok || sfid == "" {
