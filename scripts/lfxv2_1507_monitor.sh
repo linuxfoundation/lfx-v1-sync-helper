@@ -144,17 +144,26 @@ for r in d['results']:
         [ -n "$_stream" ] || continue
         _token=""
         _page=0
-        while [ "$_page" -lt 500 ]; do
+        _fails=0
+        while :; do
             if [ -z "$_token" ]; then
-                aws_cmd logs get-log-events --log-group-name "$LOG_GROUP" \
-                    --log-stream-name "$_stream" --start-from-head \
-                    --limit 10000 --output json > /tmp/lfxv2_1507_page.json 2>/dev/null || break
+                set -- --start-from-head
             else
-                aws_cmd logs get-log-events --log-group-name "$LOG_GROUP" \
-                    --log-stream-name "$_stream" --start-from-head \
-                    --limit 10000 --next-token "$_token" \
-                    --output json > /tmp/lfxv2_1507_page.json 2>/dev/null || break
+                set -- --start-from-head --next-token "$_token"
             fi
+            if ! aws_cmd logs get-log-events --log-group-name "$LOG_GROUP" \
+                    --log-stream-name "$_stream" --limit 10000 "$@" \
+                    --output json > /tmp/lfxv2_1507_page.json 2>/tmp/lfxv2_1507_page.err; then
+                _fails=$((_fails + 1))
+                if [ "$_fails" -ge 5 ]; then
+                    echo "    *** giving up on $_stream after $_fails errors: $(head -c 300 /tmp/lfxv2_1507_page.err)" >&2
+                    break
+                fi
+                echo "    page error (attempt $_fails), retrying: $(head -c 200 /tmp/lfxv2_1507_page.err)" >&2
+                sleep $((_fails * 5))
+                continue
+            fi
+            _fails=0
             _next=$(python3 -c "
 import json
 d=json.load(open('/tmp/lfxv2_1507_page.json'),strict=False)
