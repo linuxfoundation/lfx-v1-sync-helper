@@ -329,6 +329,10 @@ blocked=$(echo "$LOG" | grep -c '"Auth0 user is blocked' || true)
 # "no v1 SFID found for username \"x\""), so a quoted pattern never matches.
 no_sfid=$(echo "$failures" | grep -c 'no v1 SFID' || true)
 not_found=$(echo "$failures" | grep -c '404 Not Found' || true)
+# Missing v1 orgs are matched loosely because the lookup backend (and thus
+# the exact error text) may change; the resolve-org phrase is the stable part.
+org_re='resolve v1 org.*(404|not found)'
+org_missing=$(echo "$failures" | grep -Eic "$org_re" || true)
 
 echo "=== log-based counts ==="
 echo "  emails linked/would-link:   $linked"
@@ -340,8 +344,9 @@ echo ""
 echo "=== failure taxonomy ==="
 echo "  no v1 SFID (LFID-only, no-op):        $no_sfid"
 echo "  Auth0 404 (legacy LDAP-only, no-op):  $not_found"
-known=$((no_sfid + not_found))
+echo "  v1 org not found (profile skipped):   $org_missing"
+known=$((no_sfid + not_found + org_missing))
 if [ "$failed_users" -gt "$known" ]; then
-    echo "  *** $((failed_users - known)) failure(s) match neither known mode -- investigate ***"
-    echo "$failures" | grep -v 'no v1 SFID' | grep -v '404 Not Found' | head -10
+    echo "  *** $((failed_users - known)) failure(s) match no known mode -- investigate ***"
+    echo "$failures" | grep -v 'no v1 SFID' | grep -v '404 Not Found' | grep -Eiv "$org_re" | head -10
 fi
