@@ -14,6 +14,7 @@ metadata:
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
     helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    tags.datadoghq.com/service: {{ .Chart.Name }}
 spec:
   schedule: {{ .Values.meltano.postgresEtl.schedule | quote }}
   concurrencyPolicy: {{ .Values.meltano.postgresEtl.concurrencyPolicy }}

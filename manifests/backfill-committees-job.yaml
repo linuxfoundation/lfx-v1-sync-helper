@@ -1,0 +1,109 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+#
+# One-shot Job to re-emit v1 platform-collaboration__c (committee) rows that
+# have no v2 mapping. handleCommitteeUpdate permanently drops (ACKs, no
+# redelivery) a committee create whose parent project has no live
+# project.sfid.* mapping at the time the message is processed — see
+# cmd/lfx-v1-sync-helper/backfill_committees.go for why this is a real,
+# permanent gap and not a timing/propagation issue. Re-PUTs the existing
+# v1-objects value so the running deployment's durable KV consumer creates
+# each committee in v2 — no create logic is duplicated in this job.
+#
+# Run this after --backfill-projects has completed and settled: committees
+# whose parent project is still unmapped are reported as
+# skipped_parent_unmapped rather than resolved, since this job does not
+# order or wait across levels the way the project backfill does.
+#
+# One-shot: this manifest is applied manually via kubectl apply — it is NOT
+# managed by argocd and runs on demand only.
+#
+# Dry run: args below default to --dry-run. Remove it for the live run, after
+# reviewing the counters in the dry-run logs (scanned/candidates/emitted/
+# remaining_unmapped/skipped_parent_unmapped/skipped_name_conflict).
+#
+# --check-committee-names is always on: it skips candidates whose project UID
+# + name already resolves to a v2 committee via NATS
+# lfx.committee-api.name_to_uid (lfx-v2-committee-service#209) — a lost
+# mapping that needs repair, not a duplicate create. Without it, a committee
+# created successfully but whose mapping write then silently failed would
+# look unmapped to a rerun and be re-emitted as a duplicate create.
+#
+# PREREQUISITE: do not apply this manifest until lfx-v2-committee-service#209
+# (the PR that adds the lfx.committee-api.name_to_uid subject) is merged and
+# deployed to the target environment. Since --check-committee-names is always
+# on, running this job first would leave every --check-committee-names lookup
+# with "no responders" and hard-error the job (including a dry run) before it
+# reports any counters. This is a deployment-order note only — it does not
+# gate or block anything in this repo.
+#
+# Credentials: --backfill-committees uses LoadMinimalConfig (main.go), which
+# only reads NATS_URL / NATS_FETCH_MAX_WAIT / AUTH0_CLIENT_ID (the latter for
+# shouldSkipSync's loop-prevention check) — it never initializes the Heimdall
+# clients or any v2 API client, and the process exits before the HTTP server
+# starts. So this manifest intentionally carries only the one secretKeyRef
+# below; do not add Heimdall credentials here, this job cannot use them.
+#
+# Deploy with:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper apply -f manifests/backfill-committees-job.yaml
+#
+# Monitor (create success appears in the DEPLOYMENT's logs, not this Job's —
+# this Job only re-emits; the deployment's durable consumer does the create):
+#   kubectl --context lfx-v2-prod -n v1-sync-helper logs -f --timestamps=true job/backfill-committees
+#   kubectl --context lfx-v2-prod -n v1-sync-helper logs -f --timestamps=true deployment/lfx-v1-sync-helper-app | grep 'creating new committee'
+#
+# Cancel:
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-committees
+#
+# Clean up (auto-cleans after 1h via ttlSecondsAfterFinished):
+#   kubectl --context lfx-v2-prod -n v1-sync-helper delete job backfill-committees
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: backfill-committees
+  namespace: v1-sync-helper
+  labels:
+    app.kubernetes.io/name: lfx-v1-sync-helper
+    app.kubernetes.io/component: backfill
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lfx-v1-sync-helper
+        app.kubernetes.io/component: backfill
+    spec:
+      restartPolicy: Never
+      serviceAccountName: v1-sync-helper-sa
+      containers:
+        - name: backfill
+          # XXX: Replace with the image SHA for the release you want to run against.
+          # Find the current prod image with:
+          #   kubectl --context lfx-v2-prod -n v1-sync-helper get deployment \
+          #     -o jsonpath='{.items[0].spec.template.spec.containers[0].image}'
+          image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:latest
+          imagePullPolicy: Always
+          args: ["--backfill-committees", "--check-committee-names", "--dry-run"]
+          env:
+            - name: NATS_URL
+              value: "nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
+            # Optional: raise if logs show scan-timeout warnings. Defaults to 2m
+            # (defaultNATSFetchMaxWait) if unset.
+            # - name: NATS_FETCH_MAX_WAIT
+            #   value: "2m"
+            - name: AUTH0_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  key: client_id
+                  name: v1-sync-helper-secrets
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "10m"
+            limits:
+              memory: "512Mi"
+              cpu: "200m"
+          securityContext:
+            allowPrivilegeEscalation: false

@@ -69,7 +69,7 @@ func normalizeUserIdentifier(s string) string {
 // are logged and dropped. WithNoRetries is set on the management client so
 // the handler controls retry behaviour directly.
 //
-// Bulk profile backfill is handled separately by --backfill-profiles.
+// Targeted re-sync is handled separately by --sync-user / --sync-users-file.
 func handleMergedUserUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
 	sfid, ok := v1Data["sfid"].(string)
 	if !ok || sfid == "" {
@@ -173,7 +173,9 @@ func syncMergedUserProfile(ctx context.Context, key, auth0UserID string, v1Data 
 		return false
 	}
 
-	if _, err := syncProfileToAuth0Fn(syncCtx, auth0UserID, auth0User, v1Data, false); err != nil {
+	// includeSkills=false: this live path races handleUserSkillsUpdate's own
+	// live write of the same field (see syncProfileToAuth0's doc comment).
+	if _, err := syncProfileToAuth0Fn(syncCtx, auth0UserID, auth0User, v1Data, false, false); err != nil {
 		if isRetryableAuth0Error(err) {
 			logger.With(errKey, err, "key", key, "auth0_user_id", auth0UserID).
 				WarnContext(ctx, "retryable Auth0 error during profile sync, NACKing for redelivery")
