@@ -188,14 +188,15 @@ Freely bump `go.mod`'s `go` directive to the latest available *patch*
 release (e.g. `1.X.Y` → `1.X.{Y+1}`) to pick up security fixes. Do **not**
 bump the *minor* version (e.g. `1.X.x` → `1.{X+1}.x`) unless the user
 explicitly asks for it, **and** you've validated it against the Go version
-MegaLinter itself bundles -- MegaLinter's `golangci-lint` and `govulncheck`
-(pulled in via its `osv-scanner` check) are guaranteed to lag behind the
-latest Go release by some amount (their binaries are built against
-whatever Go version was current when that MegaLinter flavor tag was cut),
-and a `go.mod` directive newer than what they were built with breaks them
+MegaLinter itself bundles -- MegaLinter's `golangci-lint` binary is
+statically compiled against a specific Go version and refuses to analyze a
+module whose `go.mod` directive is newer than that. (This is a property of
+`golangci-lint` itself, not of MegaLinter's `osv-scanner`/`trivy`-based
+`REPOSITORY_OSV_SCANNER` check, which is a separate, unrelated linter.) A
+`go.mod` directive newer than what `golangci-lint` was built with breaks it
 outright. This is a hard ceiling with no environment-variable workaround --
 `GOTOOLCHAIN: auto` only affects invocations of the `go` command itself
-and does nothing for these precompiled binaries' own internal version
+and does nothing for this precompiled binary's own internal version
 checks (confirmed empirically: setting it in both the workflow and
 `.mega-linter.yml` still failed).
 
@@ -214,7 +215,11 @@ curl -s "https://raw.githubusercontent.com/oxsecurity/megalinter/<tag>/flavors/<
   | grep -i 'GO_ALPINE_VERSION'
 ```
 
-`go.mod`'s `go` directive must never exceed that bundled version. Staying
+`go.mod`'s `go` directive must never exceed that bundled version. Note this
+is a proxy for what `golangci-lint`'s own binary was built with, not a
+guarantee -- if a MegaLinter run still fails after following this
+procedure, check `golangci-lint --version` inside the pinned MegaLinter
+image directly to see the Go version it actually reports. Staying
 one minor version behind it (rather than matching its minor *and* patch
 exactly) leaves room to always take the latest patch release for security
 fixes without ever being blocked by MegaLinter's own bundled patch version
