@@ -118,6 +118,7 @@ platform_users AS (
     FROM fivetran_ingest.sfdc_connector_prod_salesforce.merged_user
     WHERE
         _fivetran_deleted = FALSE
+        AND COALESCE(isdeleted, FALSE) = FALSE
         AND username__c IS NOT NULL
         AND username__c <> ''
 ),
@@ -140,9 +141,16 @@ auth0_accounts AS (
 
 -- Match-any: does v1's (normalized) value equal ANY of the user's linked
 -- github identity nicknames, and how many identities does the user have.
+-- Grouped by platform_users.contact_sfid (the real per-record primary key),
+-- not by auth0_accounts.auth0_username: since the join above is
+-- case-insensitive, two different SFIDs with case-variant usernames (e.g.
+-- "Alice"/"alice") can both match the same Auth0 account, and grouping by
+-- the shared Auth0 username would collapse their distinct GithubID values
+-- into one shared match result — hiding whichever record's drift didn't
+-- happen to match.
 auth0_github_match AS (
     SELECT
-        auth0_accounts.auth0_username AS platform_username,
+        platform_users.contact_sfid,
         COUNT(github_identity_nicknames.identity_index) AS identity_count,
         BOOLOR_AGG(
             LOWER(github_identity_nicknames.github_nickname) = LOWER(platform_users.v1_github_username)
@@ -152,7 +160,7 @@ auth0_github_match AS (
         ON LOWER(auth0_accounts.auth0_username) = LOWER(platform_users.platform_username)
     LEFT JOIN github_identity_nicknames
         ON github_identity_nicknames.users_id = auth0_accounts.users_id
-    GROUP BY auth0_accounts.auth0_username
+    GROUP BY platform_users.contact_sfid
 )
 
 SELECT
@@ -175,5 +183,5 @@ LEFT JOIN auth0_accounts
 LEFT JOIN auth0_github_latest
     ON auth0_github_latest.users_id = auth0_accounts.users_id
 LEFT JOIN auth0_github_match
-    ON LOWER(auth0_github_match.platform_username) = LOWER(platform_users.platform_username)
+    ON auth0_github_match.contact_sfid = platform_users.contact_sfid
 ORDER BY category, platform_users.platform_username;

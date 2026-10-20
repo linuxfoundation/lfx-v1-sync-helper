@@ -54,6 +54,15 @@ if ! [[ "$BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
+# Likewise reject a missing/invalid --sleep up front: `sleep` accepts
+# fractional seconds (e.g. "0.5"), so validate against that shape rather than
+# requiring an integer. An invalid value would otherwise fail `sleep` only
+# after the first batch of PATCHes had already been applied.
+if ! [[ "$SLEEP_SECONDS" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "Error: --sleep must be a non-negative number of seconds, got \"$SLEEP_SECONDS\"." >&2
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ -z "$CSV_FILE" ]]; then
@@ -71,7 +80,7 @@ if [[ -z "$CSV_FILE" ]]; then
     snowsql --accountname "$SNOWFLAKE_ACCOUNT" --username "$SNOWFLAKE_USER" \
         --warehouse "$SNOWFLAKE_WAREHOUSE" --rolename "$SNOWFLAKE_ROLE" \
         --private-key-path "$SNOWFLAKE_PRIVATE_KEY_PATH" \
-        -o friendly=false -o header=true -o timing=false \
+        -o friendly=false -o header=true -o timing=false -o exit_on_error=true \
         -o output_format=csv -o output_file="$CSV_FILE" \
         -f "$SCRIPT_DIR/ghops534_github_id_audit.sql"
 fi
@@ -105,6 +114,13 @@ if [[ "$APPLY" == "true" ]]; then
         echo "Error: failed to obtain M2M access token: $TOKEN_RESPONSE" >&2
         exit 1
     fi
+
+    # A private, exclusively-created temp file for PATCH response bodies:
+    # the previous fixed /tmp path was opened without exclusive creation, so
+    # a pre-existing symlink there could redirect curl's output elsewhere,
+    # and concurrent runs would overwrite each other's response bodies.
+    PATCH_RESP_FILE="$(mktemp)"
+    trap 'rm -f "$PATCH_RESP_FILE"' EXIT
 fi
 
 COUNTS_OK=0
@@ -182,7 +198,7 @@ while IFS=$'\x1f' read -r platform_username contact_sfid v1_github_id auth0_gith
     # writes that value straight through with no URL wrapping. The
     # URL-formatted majority in the DB today comes from some other
     # (older/manual) write path, not this one.
-    HTTP_CODE=$(curl -s -o /tmp/ghops534_patch_resp.json -w "%{http_code}" \
+    HTTP_CODE=$(curl -s -o "$PATCH_RESP_FILE" -w "%{http_code}" \
         -X PATCH "${API_GATEWAY_BASE}/user-service/v1/users/${contact_sfid}" \
         -H "Authorization: Bearer ${ACCESS_TOKEN}" \
         -H "Content-Type: application/json" \
@@ -190,7 +206,7 @@ while IFS=$'\x1f' read -r platform_username contact_sfid v1_github_id auth0_gith
 
     if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "204" ]]; then
         echo "  ERROR: PATCH HTTP $HTTP_CODE for $platform_username" >&2
-        cat /tmp/ghops534_patch_resp.json >&2
+        cat "$PATCH_RESP_FILE" >&2
         echo "" >&2
         COUNTS_ERRORS=$((COUNTS_ERRORS + 1))
     else
