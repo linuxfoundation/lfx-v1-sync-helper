@@ -135,7 +135,11 @@ COUNT=0
 ROWS_SEEN=0
 
 CSV_READER_FIFO="$(mktemp -u)"
-mkfifo "$CSV_READER_FIFO"
+# Explicit 0600 permissions: the CSV rows piped through this FIFO include
+# platform usernames, SFIDs, and GitHub identities, so a default
+# umask-derived mode (e.g. 0644 under a typical 022 umask) would let other
+# local users on the shared temp directory read this data in transit.
+mkfifo -m 600 "$CSV_READER_FIFO"
 
 python3 -c "
 import csv, signal, sys
