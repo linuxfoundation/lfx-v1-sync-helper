@@ -1060,47 +1060,77 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 	}
 
 	// Map organization information.
-	if accountSFID, ok := v1Data["account__c"].(string); ok && accountSFID != "" {
-		// Look up organization information from v1 Organization Service.
-		org, err := lookupV1Org(ctx, accountSFID)
-		if err != nil {
-			logger.With(errKey, err, "account_sfid", accountSFID).WarnContext(ctx, "failed to lookup organization, leaving empty")
-			// Organization lookup failed, leave Organization field nil.
-		} else if org.Name != "" {
-			// Successfully fetched organization data.
-			orgName := org.Name
-			orgStruct := &struct {
-				ID      *string
-				Name    *string
-				Website *string
-			}{
-				// NOTE: This is highly irregular - we are adding v1 identifiers
-				// into v2. Everywhere else (except v1 meetings) we've made a
-				// clean break with new UUIDs. This v1 SFID was added to the
-				// service in order to implement external Data Lake queries.
-				// However, as we are not expecting to migrate the v1
-				// Organization Service into LFX One, this should get changed in
-				// the future. There *will* be a concept of B2B-engaged
-				// organizations managed in LFX One, requiring some kind of
-				// role-assignment journey, and thus a service that is somewhere
-				// between the v1 Organization Service and Member Service in
-				// terms of functionality. However, principally-B2C engagements
-				// like committee membership will be expected to use something
-				// like "domain" or "Clearbit ID" as the unique identifier.
-				ID:   &accountSFID,
-				Name: &orgName,
-			}
-
-			// Parse website URL from Domain attribute.
-			if websiteURL := parseWebsiteURL(org.Domain); websiteURL != "" {
-				orgStruct.Website = &websiteURL
-			}
-
-			payload.Organization = orgStruct
-		}
-	}
+	payload.Organization = mapV1MemberOrganization(ctx, v1Data)
 
 	return payload, nil
+}
+
+// mapV1MemberOrganization maps the account__c of a v1 platform-community__c
+// record to the organization struct shared by the committee member create and
+// update payloads. It returns nil when account__c is absent or empty.
+//
+// When the v1 Organization Service lookup fails, or returns an empty name
+// (which is how lookupV1Org reports a cached error/invalid entry, with a nil
+// error), the organization is still sent with only its ID set. The Committee
+// Service resolves SFID-shaped IDs against b2b_org itself (normalizing the ID
+// when found, clearing it when not), so the ID alone is enough for it to
+// decide. Dropping the organization entirely would instead get the member
+// rejected on voting-enabled or business-email-required committees, even when
+// the account exists in b2b_org.
+func mapV1MemberOrganization(ctx context.Context, v1Data map[string]any) *struct {
+	ID      *string
+	Name    *string
+	Website *string
+} {
+	accountSFID, ok := v1Data["account__c"].(string)
+	if !ok || accountSFID == "" {
+		return nil
+	}
+
+	orgStruct := &struct {
+		ID      *string
+		Name    *string
+		Website *string
+	}{
+		// NOTE: This is highly irregular - we are adding v1 identifiers
+		// into v2. Everywhere else (except v1 meetings) we've made a
+		// clean break with new UUIDs. This v1 SFID was added to the
+		// service in order to implement external Data Lake queries.
+		// However, as we are not expecting to migrate the v1
+		// Organization Service into LFX One, this should get changed in
+		// the future. There *will* be a concept of B2B-engaged
+		// organizations managed in LFX One, requiring some kind of
+		// role-assignment journey, and thus a service that is somewhere
+		// between the v1 Organization Service and Member Service in
+		// terms of functionality. However, principally-B2C engagements
+		// like committee membership will be expected to use something
+		// like "domain" or "Clearbit ID" as the unique identifier.
+		ID: &accountSFID,
+	}
+
+	// Look up organization information from v1 Organization Service.
+	org, err := lookupV1Org(ctx, accountSFID)
+	switch {
+	case err != nil:
+		logger.With(errKey, err, "account_sfid", accountSFID).WarnContext(ctx, "failed to lookup organization, sending account SFID only")
+		return orgStruct
+	case org == nil || org.Name == "":
+		// lookupV1Org reports a cached error/invalid entry as an org with an
+		// empty name and a nil error.
+		logger.With("account_sfid", accountSFID).WarnContext(ctx, "organization lookup returned no name (cached lookup failure), sending account SFID only")
+		return orgStruct
+	}
+
+	// Successfully fetched organization data.
+	orgName := org.Name
+	orgStruct.Name = &orgName
+
+	// Parse website URL from Domain attribute.
+	if websiteURL := parseWebsiteURL(org.Domain); websiteURL != "" {
+		orgStruct.Website = &websiteURL
+	}
+
+	return orgStruct
 }
 
 // applyRowNames sets FirstName and LastName on the pointed-to *string values
@@ -1244,36 +1274,11 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID s
 		}
 	}
 
-	// Map organization information.
-	if accountSFID, ok := v1Data["account__c"].(string); ok && accountSFID != "" {
-		// Look up organization information from v1 Organization Service.
-		org, err := lookupV1Org(ctx, accountSFID)
-		if err != nil {
-			logger.With(errKey, err, "account_sfid", accountSFID).WarnContext(ctx, "failed to lookup organization, leaving empty")
-			// Organization lookup failed, leave Organization field nil.
-		} else if org.Name != "" {
-			// Successfully fetched organization data.
-			orgName := org.Name
-			orgStruct := &struct {
-				ID      *string
-				Name    *string
-				Website *string
-			}{
-				// NOTE: This is highly irregular - we are adding v1 identifiers into v2.
-				// (Please see additional commentary in the corresponding code in
-				// the above mapping function for the member "create" payload.)
-				ID:   &accountSFID,
-				Name: &orgName,
-			}
-
-			// Parse website URL from Domain attribute.
-			if websiteURL := parseWebsiteURL(org.Domain); websiteURL != "" {
-				orgStruct.Website = &websiteURL
-			}
-
-			payload.Organization = orgStruct
-		}
-	}
+	// Map organization information. When the v1 organization lookup fails this
+	// yields an ID-only organization; updateCommitteeMember then carries the
+	// name and website over from the current v2 member when the organization
+	// ID is unchanged (see preserveCurrentMemberOrgDetails).
+	payload.Organization = mapV1MemberOrganization(ctx, v1Data)
 
 	return payload, nil
 }

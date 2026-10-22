@@ -5,9 +5,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 )
@@ -529,6 +535,254 @@ func TestNewsletterCategoryRoundTrip(t *testing.T) {
 			got := mapV2CategoryToV1(*category)
 			if got != tt.want {
 				t.Fatalf("mapV2CategoryToV1(mapTypeToCategory(%q)) = %q, want %q", tt.typeVal, got, tt.want)
+			}
+		})
+	}
+}
+
+// setupMemberOrgLookupTest points the v1 Organization Service lookup at a
+// test server that always responds with orgStatus/orgBody, backed by a fresh
+// fake mapping store (which also holds the org cache). It returns the store
+// and a counter of org-service requests. Not safe for t.Parallel: it swaps
+// package globals, restored on Cleanup.
+func setupMemberOrgLookupTest(t *testing.T, orgStatus int, orgBody string) (*fakeMappingStore, *atomic.Int32) {
+	t.Helper()
+	store := newFakeMappingStore()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(orgStatus)
+		_, _ = io.WriteString(w, orgBody)
+	}))
+	t.Cleanup(srv.Close)
+	gateway, err := url.Parse(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	origCfg, origClient, origStore, origLogger := cfg, v1HTTPClient, mappingStore, logger
+	cfg = &Config{LFXAPIGateway: gateway}
+	v1HTTPClient = srv.Client()
+	v1HTTPClient.Timeout = 5 * time.Second
+	mappingStore = store
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	t.Cleanup(func() {
+		cfg, v1HTTPClient, mappingStore, logger = origCfg, origClient, origStore, origLogger
+	})
+	return store, &calls
+}
+
+// seedCachedV1Org writes a fresh org cache entry so lookupV1Org returns it
+// without calling the v1 Organization Service.
+func seedCachedV1Org(t *testing.T, store *fakeMappingStore, org V1Organization) {
+	t.Helper()
+	org.LastFetched = time.Now().UTC()
+	data, err := json.Marshal(org)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(t.Context(), orgCacheKeyPrefix+org.ID, data); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestMapV1CommitteeMemberOrganization covers organization mapping on both the
+// committee member create and update payloads: a failed or nameless v1
+// Organization Service lookup must still send the account SFID as an ID-only
+// organization (so the Committee Service can resolve it against b2b_org),
+// rather than silently dropping the organization.
+func TestMapV1CommitteeMemberOrganization(t *testing.T) {
+	const accountSFID = "001000000000001AAA"
+
+	tests := []struct {
+		name        string
+		orgStatus   int
+		orgBody     string
+		cached      *V1Organization
+		v1Data      map[string]any
+		wantNil     bool
+		wantName    string
+		wantWebsite string
+		wantCalls   int32
+	}{
+		{
+			name:      "lookup error sends ID only",
+			orgStatus: http.StatusNotFound,
+			orgBody:   `{"message":"not found"}`,
+			v1Data:    map[string]any{"account__c": accountSFID},
+			wantCalls: 1,
+		},
+		{
+			name:      "cached empty name sends ID only",
+			orgStatus: http.StatusInternalServerError,
+			cached:    &V1Organization{ID: accountSFID},
+			v1Data:    map[string]any{"account__c": accountSFID},
+			wantCalls: 0,
+		},
+		{
+			name:        "successful lookup sends full organization",
+			orgStatus:   http.StatusInternalServerError,
+			cached:      &V1Organization{ID: accountSFID, Name: "Example Org", Domain: "example.org"},
+			v1Data:      map[string]any{"account__c": accountSFID},
+			wantName:    "Example Org",
+			wantWebsite: "http://example.org",
+			wantCalls:   0,
+		},
+		{
+			name:      "no account sends no organization",
+			orgStatus: http.StatusInternalServerError,
+			v1Data:    map[string]any{"account__c": ""},
+			wantNil:   true,
+			wantCalls: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		for _, op := range []string{"create", "update"} {
+			t.Run(tc.name+"/"+op, func(t *testing.T) {
+				store, calls := setupMemberOrgLookupTest(t, tc.orgStatus, tc.orgBody)
+				if tc.cached != nil {
+					seedCachedV1Org(t, store, *tc.cached)
+				}
+
+				var org *struct {
+					ID      *string
+					Name    *string
+					Website *string
+				}
+				switch op {
+				case "create":
+					payload, err := mapV1DataToCommitteeMemberCreatePayload(t.Context(), "cmt-uid", tc.v1Data)
+					if err != nil {
+						t.Fatalf("map create payload: %v", err)
+					}
+					org = payload.Organization
+				case "update":
+					payload, err := mapV1DataToCommitteeMemberUpdatePayload(t.Context(), "cmt-uid", "member-uid", tc.v1Data)
+					if err != nil {
+						t.Fatalf("map update payload: %v", err)
+					}
+					org = payload.Organization
+				}
+
+				if got := calls.Load(); got != tc.wantCalls {
+					t.Errorf("org service calls = %d, want %d", got, tc.wantCalls)
+				}
+				if tc.wantNil {
+					if org != nil {
+						t.Fatalf("Organization = %+v, want nil", org)
+					}
+					return
+				}
+				if org == nil {
+					t.Fatal("Organization = nil, want non-nil")
+				}
+				if got := stringPtrToString(org.ID); got != accountSFID {
+					t.Errorf("Organization.ID = %q, want %q", got, accountSFID)
+				}
+				if tc.wantName == "" {
+					if org.Name != nil {
+						t.Errorf("Organization.Name = %q, want nil", *org.Name)
+					}
+				} else if got := stringPtrToString(org.Name); got != tc.wantName {
+					t.Errorf("Organization.Name = %q, want %q", got, tc.wantName)
+				}
+				if tc.wantWebsite == "" {
+					if org.Website != nil {
+						t.Errorf("Organization.Website = %q, want nil", *org.Website)
+					}
+				} else if got := stringPtrToString(org.Website); got != tc.wantWebsite {
+					t.Errorf("Organization.Website = %q, want %q", got, tc.wantWebsite)
+				}
+			})
+		}
+	}
+}
+
+// TestPreserveCurrentMemberOrgDetails verifies that an ID-only organization on
+// an update payload keeps the current v2 name/website only when the current
+// member has the same organization ID, and that the result then compares equal
+// (no spurious update).
+func TestPreserveCurrentMemberOrgDetails(t *testing.T) {
+	type org = struct {
+		ID      *string
+		Name    *string
+		Website *string
+	}
+	const sfid = "001000000000001AAA"
+
+	tests := []struct {
+		name        string
+		current     *org
+		update      *org
+		wantName    *string
+		wantWebsite *string
+		wantEqual   bool
+	}{
+		{
+			name:        "same ID, ID-only update keeps current details",
+			current:     &org{ID: sptr(sfid), Name: sptr("Example Org"), Website: sptr("http://example.org")},
+			update:      &org{ID: sptr(sfid)},
+			wantName:    sptr("Example Org"),
+			wantWebsite: sptr("http://example.org"),
+			wantEqual:   true,
+		},
+		{
+			name:      "different ID leaves update ID-only",
+			current:   &org{ID: sptr("001000000000000AAA"), Name: sptr("Other")},
+			update:    &org{ID: sptr(sfid)},
+			wantEqual: false,
+		},
+		{
+			name:      "current without ID leaves update ID-only",
+			current:   &org{Name: sptr("Example Org")},
+			update:    &org{ID: sptr(sfid)},
+			wantEqual: false,
+		},
+		{
+			name:      "no current organization leaves update ID-only",
+			current:   nil,
+			update:    &org{ID: sptr(sfid)},
+			wantEqual: false,
+		},
+		{
+			name:      "update with name is not overridden",
+			current:   &org{ID: sptr(sfid), Name: sptr("Old Name"), Website: sptr("http://old.example")},
+			update:    &org{ID: sptr(sfid), Name: sptr("New Name")},
+			wantName:  sptr("New Name"),
+			wantEqual: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			current := &committeeservice.CommitteeMemberFullWithReadonlyAttributes{
+				Email:        sptr("member@example.org"),
+				AppointedBy:  "None",
+				Status:       "Active",
+				Organization: tc.current,
+			}
+			update := &committeeservice.UpdateCommitteeMemberPayload{
+				Email:        "member@example.org",
+				AppointedBy:  "None",
+				Status:       "Active",
+				Organization: tc.update,
+			}
+
+			preserveCurrentMemberOrgDetails(current, update)
+
+			if got := stringPtrToString(update.Organization.ID); got != sfid {
+				t.Errorf("Organization.ID = %q, want %q", got, sfid)
+			}
+			if (update.Organization.Name == nil) != (tc.wantName == nil) || stringPtrToString(update.Organization.Name) != stringPtrToString(tc.wantName) {
+				t.Errorf("Organization.Name = %v, want %v", update.Organization.Name, tc.wantName)
+			}
+			if (update.Organization.Website == nil) != (tc.wantWebsite == nil) || stringPtrToString(update.Organization.Website) != stringPtrToString(tc.wantWebsite) {
+				t.Errorf("Organization.Website = %v, want %v", update.Organization.Website, tc.wantWebsite)
+			}
+			if got := committeeMembersEqual(current, update); got != tc.wantEqual {
+				t.Errorf("committeeMembersEqual = %v, want %v", got, tc.wantEqual)
 			}
 		})
 	}

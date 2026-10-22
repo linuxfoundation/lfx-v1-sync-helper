@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 )
@@ -201,6 +202,11 @@ func updateCommitteeMember(ctx context.Context, payload *committeeservice.Update
 		return false, wrapCommitteeServiceError("failed to fetch current committee member", err)
 	}
 
+	// If the v1 organization lookup failed, the payload carries an ID-only
+	// organization; keep the current name/website for the same organization
+	// rather than wiping them with this full-replacement update.
+	preserveCurrentMemberOrgDetails(currentMember, payload)
+
 	// Check if member has changes (basic comparison).
 	memberChanged := !committeeMembersEqual(currentMember, payload)
 
@@ -279,6 +285,32 @@ func deleteCommitteeMember(ctx context.Context, committeeUID, memberUID string, 
 	}
 
 	return nil
+}
+
+// preserveCurrentMemberOrgDetails fills in the organization name and website on
+// an update payload from the current v2 committee member when the payload has
+// an ID-only organization (what mapV1MemberOrganization produces when the v1
+// Organization Service lookup fails) and the current member has the same
+// organization ID. The committee member update is a full replacement, so
+// without this an unavailable v1 lookup would wipe a previously-synced name
+// and website, and the name/website difference would also make every such
+// v1 event look like a change. When the IDs differ (or the current member has
+// no organization ID), the current details may belong to a different
+// organization, so the payload is left ID-only.
+func preserveCurrentMemberOrgDetails(current *committeeservice.CommitteeMemberFullWithReadonlyAttributes, update *committeeservice.UpdateCommitteeMemberPayload) {
+	if current == nil || current.Organization == nil || update == nil || update.Organization == nil {
+		return
+	}
+	if update.Organization.Name != nil || update.Organization.Website != nil {
+		return
+	}
+	updateID := strings.TrimSpace(stringPtrToString(update.Organization.ID))
+	currentID := strings.TrimSpace(stringPtrToString(current.Organization.ID))
+	if updateID == "" || currentID != updateID {
+		return
+	}
+	update.Organization.Name = current.Organization.Name
+	update.Organization.Website = current.Organization.Website
 }
 
 // committeeMembersEqual compares a committee member with an update payload for equality.
