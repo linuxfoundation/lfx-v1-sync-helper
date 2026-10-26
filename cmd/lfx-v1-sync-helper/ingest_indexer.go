@@ -518,13 +518,14 @@ func mapV2DataToV1CommitteeUpdatePayload(data map[string]any) projectServiceComm
 	} else if fullSnapshot {
 		payload.JoinMode = new(string)
 	}
-	if mailingListEmail, ok := data["mailing_list"].(string); ok {
+	// The v1 API validates MailingList as an email address even when it is empty,
+	// so an empty value is rejected with a 422 and fails the whole PATCH. A
+	// cleared mailing list cannot be written to v1; leave the v1 value alone.
+	if mailingListEmail, ok := data["mailing_list"].(string); ok && mailingListEmail != "" {
 		payload.MailingList = &mailingListEmail
-	} else if mailingListEmail, ok := data["mailing_list_email"].(string); ok {
+	} else if mailingListEmail, ok := data["mailing_list_email"].(string); ok && mailingListEmail != "" {
 		// Accept older events using the v1-facing key as well.
 		payload.MailingList = &mailingListEmail
-	} else if fullSnapshot {
-		payload.MailingList = new(string)
 	}
 	if chatChannel, ok := data["chat_channel"].(string); ok {
 		payload.ChatChannel = &chatChannel

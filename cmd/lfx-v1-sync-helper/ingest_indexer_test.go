@@ -74,8 +74,12 @@ func TestCommitteeUpdateClearVsOmit(t *testing.T) {
 			"mailing_list_email": "", "chat_channel": "", "sso_group_name": "",
 		}, map[string]any{
 			"Description": "", "CommitteeWebsite": "", "JoinMode": "",
-			"MailingList": "", "ChatChannel": "",
+			"ChatChannel": "",
 		}},
+		{"empty mailing list is never sent", map[string]any{"mailing_list": ""}, map[string]any{}},
+		{"empty v2 mailing list does not mask the v1-facing key", map[string]any{
+			"mailing_list": "", "mailing_list_email": "list@example.invalid",
+		}, map[string]any{"MailingList": "list@example.invalid"}},
 		{"non-empty values", map[string]any{"description": "new", "category": "Newsletter"}, map[string]any{"Description": "new", "Category": "Newsletter"}},
 		{"generated SSO name passes through", map[string]any{"sso_group_name": "project-committee"}, map[string]any{"SSOGroupName": "project-committee"}},
 		{"v2 mailing list key", map[string]any{"mailing_list": "list@example.invalid"}, map[string]any{"MailingList": "list@example.invalid"}},
@@ -127,7 +131,7 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 	}{
 		{"omitted cleared fields", base, map[string]any{
 			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
-			"MailingList": "", "ChatChannel": "", "JoinMode": "", "PublicEnabled": false,
+			"ChatChannel": "", "JoinMode": "", "PublicEnabled": false,
 		}},
 		{"populated mailing list", func() committeeSnapshot {
 			value := base
