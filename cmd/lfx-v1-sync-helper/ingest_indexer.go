@@ -382,6 +382,10 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 	if displayName, ok := data["display_name"].(string); ok {
 		payload.PublicName = displayName
 	}
+	// v1 defaults EnableVoting to false when omitted, so v2 voting must be sent explicitly.
+	if enableVoting, ok := data["enable_voting"].(bool); ok {
+		payload.EnableVoting = &enableVoting
+	}
 
 	log.With("payload_category", payload.Category).InfoContext(ctx, "creating committee in v1")
 
@@ -545,6 +549,11 @@ func mapV2DataToV1CommitteeUpdatePayload(data map[string]any) projectServiceComm
 	if displayName, ok := data["display_name"].(string); ok && displayName != "" {
 		// v1 cannot clear public_name through PATCH (empty means unchanged), so never send an empty name.
 		payload.PublicName = &displayName
+	}
+	// Like PublicEnabled, v1 only changes EnableVoting when it is present, so send it only when
+	// the event carries it; a legacy partial body must not flip voting.
+	if enableVoting, ok := data["enable_voting"].(bool); ok {
+		payload.EnableVoting = &enableVoting
 	}
 	return payload
 }

@@ -688,6 +688,7 @@ type projectServiceCommitteeCreate struct {
 	Website         string `json:"CommitteeWebsite,omitempty"`
 	CommitteeID     string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
 	SSOGroupEnabled *bool  `json:"SSOGroupEnabled,omitempty"`
+	EnableVoting    *bool  `json:"EnableVoting,omitempty"`
 	PublicEnabled   *bool  `json:"PublicEnabled,omitempty"`
 	PublicName      string `json:"PublicName,omitempty"`
 	SSOGroupName    string `json:"SSOGroupName,omitempty"`
@@ -704,6 +705,7 @@ type projectServiceCommitteeUpdate struct {
 	Website         *string `json:"CommitteeWebsite,omitempty"`
 	CommitteeID     *string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
 	SSOGroupEnabled *bool   `json:"SSOGroupEnabled,omitempty"`
+	EnableVoting    *bool   `json:"EnableVoting,omitempty"`
 	PublicEnabled   *bool   `json:"PublicEnabled,omitempty"`
 	PublicName      *string `json:"PublicName,omitempty"`
 	SSOGroupName    *string `json:"SSOGroupName,omitempty"`
