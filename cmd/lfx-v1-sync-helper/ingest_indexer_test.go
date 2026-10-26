@@ -73,9 +73,11 @@ func TestCommitteeUpdateClearVsOmit(t *testing.T) {
 			"description": "", "website": "", "join_mode": "",
 			"mailing_list_email": "", "chat_channel": "", "sso_group_name": "",
 		}, map[string]any{
-			"Description": "", "CommitteeWebsite": "", "JoinMode": "",
+			"Description": "", "CommitteeWebsite": "",
 			"ChatChannel": "",
 		}},
+		{"empty join mode is never sent", map[string]any{"join_mode": ""}, map[string]any{}},
+		{"non-empty join mode is sent", map[string]any{"join_mode": "invite_only"}, map[string]any{"JoinMode": "invite_only"}},
 		{"empty mailing list is never sent", map[string]any{"mailing_list": ""}, map[string]any{}},
 		{"empty v2 mailing list does not mask the v1-facing key", map[string]any{
 			"mailing_list": "", "mailing_list_email": "list@example.invalid",
@@ -131,7 +133,7 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 	}{
 		{"omitted cleared fields", base, map[string]any{
 			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
-			"ChatChannel": "", "JoinMode": "", "PublicEnabled": false,
+			"ChatChannel": "", "PublicEnabled": false,
 		}},
 		{"populated mailing list", func() committeeSnapshot {
 			value := base
@@ -140,7 +142,15 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 			return value
 		}(), map[string]any{
 			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
-			"MailingList": "list@example.invalid", "ChatChannel": "", "JoinMode": "", "PublicEnabled": false,
+			"MailingList": "list@example.invalid", "ChatChannel": "", "PublicEnabled": false,
+		}},
+		{"populated join mode", func() committeeSnapshot {
+			value := base
+			value.JoinMode = "open"
+			return value
+		}(), map[string]any{
+			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
+			"ChatChannel": "", "JoinMode": "open", "PublicEnabled": false,
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -172,6 +182,9 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 				}
 				if list, ok := trimmed["mailing_list"].(string); ok {
 					want["MailingList"] = list
+				}
+				if joinMode, ok := trimmed["join_mode"].(string); ok {
+					want["JoinMode"] = joinMode
 				}
 				assertUpdateJSON(t, mapV2DataToV1CommitteeUpdatePayload(trimmed), want)
 			}

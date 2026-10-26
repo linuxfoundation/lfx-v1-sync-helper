@@ -513,10 +513,11 @@ func mapV2DataToV1CommitteeUpdatePayload(data map[string]any) projectServiceComm
 	} else if fullSnapshot {
 		payload.Website = new(string)
 	}
-	if joinMode, ok := data["join_mode"].(string); ok {
+	// The v1 API validates JoinMode as an enum (open, invite_only, application,
+	// closed), so an empty value is rejected with a 422 and fails the whole PATCH.
+	// A committee with no join_mode (older records) cannot be cleared; omit it.
+	if joinMode, ok := data["join_mode"].(string); ok && joinMode != "" {
 		payload.JoinMode = &joinMode
-	} else if fullSnapshot {
-		payload.JoinMode = new(string)
 	}
 	// The v1 API validates MailingList as an email address even when it is empty,
 	// so an empty value is rejected with a 422 and fails the whole PATCH. A
