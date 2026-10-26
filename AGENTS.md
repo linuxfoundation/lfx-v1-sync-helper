@@ -169,10 +169,10 @@ Boot ordering (`main.go`): NATS + KV bucket handles → a KV-backed `mappingStor
   - On update, `PublicEnabled` is sent only when the event carries `public`, so a partial or legacy event cannot flip visibility. `PublicName` is sent only when non-empty, because v1 PATCH treats an empty name as unchanged and cannot clear it. v1 clears `public_name` itself when `PublicEnabled` is `false`, and fills it with the committee name when `PublicEnabled` is `true` and no name is sent.
   - This only affects future writes. Committees already out of sync need a separate, per-record repair that decides the source of truth from the last deliberate edit, not from timestamps (the sync client rewrites `lastmodifieddate` on both sides).
 
-#### Committee update payload: empty `MailingList` — lfx-self-serve-ops#945
+#### Committee update payload: empty `MailingList` and `JoinMode` — lfx-self-serve-ops#945
 
-- **An empty `MailingList` is never sent to v1** (`mapV2DataToV1CommitteeUpdatePayload`). The v1 committee PATCH validates `MailingList` as an email even when it is empty (422 `MailingList in body must be of type email`), which rejects the whole request, and v2 omits `mailing_list` entirely for a committee that has none, so every such committee hit it.
-  - The other empty committee text fields are accepted but ignored by v1 (it only writes non-empty strings), so a v2 clear of those does not reach v1 either. A cleared mailing list also stays in v1.
+- **An empty `MailingList` or `JoinMode` is never sent to v1** (`mapV2DataToV1CommitteeUpdatePayload`). The v1 committee PATCH validates both before the handler runs, and one invalid field rejects the whole request. `MailingList` must be an email (422 code 601), and `JoinMode` must be one of `open | invite_only | application | closed` (422 code 606). v2 omits `mailing_list` for a committee that has none, and older committees have no `join_mode`, so each hit this. v1 reports one validation error at a time, so fixing one field can reveal the next.
+  - The other empty committee text fields (`Description`, `CommitteeWebsite`, `ChatChannel`) pass v1 validation but are ignored (it only writes non-empty strings), so a v2 clear of those does not reach v1. A cleared mailing list or join mode also stays in v1.
 
 ### Python ETL (Meltano)
 
