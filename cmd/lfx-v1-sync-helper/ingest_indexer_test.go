@@ -133,7 +133,7 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 	}{
 		{"omitted cleared fields", base, map[string]any{
 			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
-			"ChatChannel": "", "PublicEnabled": false,
+			"ChatChannel": "", "PublicEnabled": false, "EnableVoting": false,
 		}},
 		{"populated mailing list", func() committeeSnapshot {
 			value := base
@@ -142,7 +142,7 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 			return value
 		}(), map[string]any{
 			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
-			"MailingList": "list@example.invalid", "ChatChannel": "", "PublicEnabled": false,
+			"MailingList": "list@example.invalid", "ChatChannel": "", "PublicEnabled": false, "EnableVoting": false,
 		}},
 		{"populated join mode", func() committeeSnapshot {
 			value := base
@@ -150,7 +150,15 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 			return value
 		}(), map[string]any{
 			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
-			"ChatChannel": "", "JoinMode": "open", "PublicEnabled": false,
+			"ChatChannel": "", "JoinMode": "open", "PublicEnabled": false, "EnableVoting": false,
+		}},
+		{"voting enabled", func() committeeSnapshot {
+			value := base
+			value.EnableVoting = true
+			return value
+		}(), map[string]any{
+			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
+			"ChatChannel": "", "PublicEnabled": false, "EnableVoting": true,
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -168,7 +176,7 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 				t.Fatal("empty description should be omitted by committee-service serialization")
 			}
 			assertUpdateJSON(t, mapV2DataToV1CommitteeUpdatePayload(event.Data), tt.want)
-			for _, missing := range []string{"updated_at", "sso_group_enabled", "total_members", "total_voting_repos", "has_mailing_list", "public"} {
+			for _, missing := range []string{"updated_at", "sso_group_enabled", "total_members", "total_voting_repos", "has_mailing_list", "public", "enable_voting"} {
 				trimmed := make(map[string]any, len(event.Data))
 				for key, value := range event.Data {
 					if key != missing {
@@ -179,6 +187,9 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 				want := map[string]any{"Name": "Committee", "Category": "Other"}
 				if missing != "public" {
 					want["PublicEnabled"] = false
+				}
+				if enableVoting, ok := trimmed["enable_voting"].(bool); ok {
+					want["EnableVoting"] = enableVoting
 				}
 				if list, ok := trimmed["mailing_list"].(string); ok {
 					want["MailingList"] = list
@@ -634,6 +645,60 @@ func TestV2CommitteePublicWrittenToV1Update(t *testing.T) {
 			}
 			if got := requests[0].Body["PublicName"]; got != tt.wantName {
 				t.Errorf("PublicName = %v, want %v", got, tt.wantName)
+			}
+		})
+	}
+}
+
+func TestV2CommitteeEnableVotingWrittenToV1Create(t *testing.T) {
+	tests := []struct {
+		name string
+		data map[string]any
+		want any
+	}{
+		{"voting enabled", map[string]any{"name": "Committee", "category": "Other", "enable_voting": true}, true},
+		{"voting disabled", map[string]any{"name": "Committee", "category": "Other", "enable_voting": false}, false},
+		{"legacy event without enable_voting", map[string]any{"name": "Committee", "category": "Other"}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := setupSyncTest(t, 201, `{"ID":"committee-sfid"}`)
+			if err := syncCommitteeCreateToV1(t.Context(), "committee-uid", "project-a", tt.data); err != nil {
+				t.Fatal(err)
+			}
+			requests := h.recordedRequests()
+			if len(requests) != 1 {
+				t.Fatalf("v1 create requests = %+v", requests)
+			}
+			if got := requests[0].Body["EnableVoting"]; got != tt.want {
+				t.Errorf("EnableVoting = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestV2CommitteeEnableVotingWrittenToV1Update(t *testing.T) {
+	tests := []struct {
+		name string
+		data map[string]any
+		want any
+	}{
+		{"enable voting", map[string]any{"name": "Committee", "enable_voting": true}, true},
+		{"disable voting", map[string]any{"name": "Committee", "enable_voting": false}, false},
+		{"partial event leaves voting untouched", map[string]any{"name": "Committee"}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := setupSyncTest(t, 200, `{}`)
+			if err := syncCommitteeUpdateToV1(t.Context(), "committee-uid", "project-a", "committee-sfid", tt.data); err != nil {
+				t.Fatal(err)
+			}
+			requests := h.recordedRequests()
+			if len(requests) != 1 {
+				t.Fatalf("v1 update requests = %+v", requests)
+			}
+			if got := requests[0].Body["EnableVoting"]; got != tt.want {
+				t.Errorf("EnableVoting = %v, want %v", got, tt.want)
 			}
 		})
 	}

@@ -174,6 +174,12 @@ Boot ordering (`main.go`): NATS + KV bucket handles → a KV-backed `mappingStor
 - **An empty `MailingList` or `JoinMode` is never sent to v1** (`mapV2DataToV1CommitteeUpdatePayload`). The v1 committee PATCH validates both before the handler runs, and one invalid field rejects the whole request. `MailingList` must be an email (422 code 601), and `JoinMode` must be one of `open | invite_only | application | closed` (422 code 606). v2 omits `mailing_list` for a committee that has none, and older committees have no `join_mode`, so each hit this. v1 reports one validation error at a time, so fixing one field can reveal the next.
   - The other empty committee text fields (`Description`, `CommitteeWebsite`, `ChatChannel`) pass v1 validation but are ignored (it only writes non-empty strings), so a v2 clear of those does not reach v1. A cleared mailing list or join mode also stays in v1.
 
+#### Committee voting enabled — lfx-self-serve-ops#946
+
+- **v2 → v1** (`syncCommitteeCreateToV1` / `mapV2DataToV1CommitteeUpdatePayload`): v2 `enable_voting` is sent as `EnableVoting`, on create and on update. Before this, v2 → v1 never sent it, so a committee created or edited in v2 kept v1's default `false`. v1 → v2 already maps `enable_voting__c` (`handlers_committees.go`).
+  - On update, `EnableVoting` is sent only when the event carries `enable_voting`, like `PublicEnabled`, so a partial or legacy event cannot flip voting. v2 serializes it without `omitempty`, so every full committee snapshot carries it.
+  - Because v2 is now authoritative on every update, a committee whose v1 value was changed in v1 and never reached v2 would be overwritten by the next v2 edit. Reconcile such committees first (`committee-cli sync committee-fields --from=v1 --field=enable_voting`) before deploying a change that sends the field.
+
 ### Python ETL (Meltano)
 
 #### Configuration Structure
