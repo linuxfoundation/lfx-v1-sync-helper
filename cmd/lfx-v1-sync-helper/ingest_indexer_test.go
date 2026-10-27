@@ -74,8 +74,10 @@ func TestCommitteeUpdateClearVsOmit(t *testing.T) {
 			"mailing_list_email": "", "chat_channel": "", "sso_group_name": "",
 		}, map[string]any{
 			"Description": "", "CommitteeWebsite": "",
-			"ChatChannel": "",
+			"ChatChannel": "NONE",
 		}},
+		{"non-empty chat channel is sent unchanged", map[string]any{"chat_channel": "https://example.org/chat"}, map[string]any{"ChatChannel": "https://example.org/chat"}},
+		{"partial event without chat channel does not clear", map[string]any{"name": "Committee"}, map[string]any{"Name": "Committee"}},
 		{"empty join mode is never sent", map[string]any{"join_mode": ""}, map[string]any{}},
 		{"non-empty join mode is sent", map[string]any{"join_mode": "invite_only"}, map[string]any{"JoinMode": "invite_only"}},
 		{"empty mailing list is never sent", map[string]any{"mailing_list": ""}, map[string]any{}},
@@ -133,7 +135,7 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 	}{
 		{"omitted cleared fields", base, map[string]any{
 			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
-			"ChatChannel": "", "PublicEnabled": false, "EnableVoting": false,
+			"ChatChannel": "NONE", "PublicEnabled": false, "EnableVoting": false,
 		}},
 		{"populated mailing list", func() committeeSnapshot {
 			value := base
@@ -142,7 +144,7 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 			return value
 		}(), map[string]any{
 			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
-			"MailingList": "list@example.invalid", "ChatChannel": "", "PublicEnabled": false, "EnableVoting": false,
+			"MailingList": "list@example.invalid", "ChatChannel": "NONE", "PublicEnabled": false, "EnableVoting": false,
 		}},
 		{"populated join mode", func() committeeSnapshot {
 			value := base
@@ -150,7 +152,7 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 			return value
 		}(), map[string]any{
 			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
-			"ChatChannel": "", "JoinMode": "open", "PublicEnabled": false, "EnableVoting": false,
+			"ChatChannel": "NONE", "JoinMode": "open", "PublicEnabled": false, "EnableVoting": false,
 		}},
 		{"voting enabled", func() committeeSnapshot {
 			value := base
@@ -158,7 +160,7 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 			return value
 		}(), map[string]any{
 			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
-			"ChatChannel": "", "PublicEnabled": false, "EnableVoting": true,
+			"ChatChannel": "NONE", "PublicEnabled": false, "EnableVoting": true,
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -699,6 +701,32 @@ func TestV2CommitteeEnableVotingWrittenToV1Update(t *testing.T) {
 			}
 			if got := requests[0].Body["EnableVoting"]; got != tt.want {
 				t.Errorf("EnableVoting = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestV2CommitteeChatChannelWrittenToV1Update(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		data map[string]any
+		want any
+	}{
+		{"clear", map[string]any{"chat_channel": ""}, "NONE"},
+		{"set", map[string]any{"chat_channel": "https://example.org/chat"}, "https://example.org/chat"},
+		{"partial event preserves", map[string]any{"name": "Committee"}, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := setupSyncTest(t, 200, `{}`)
+			if err := syncCommitteeUpdateToV1(t.Context(), "committee-uid", "project-a", "committee-sfid", tt.data); err != nil {
+				t.Fatal(err)
+			}
+			requests := h.recordedRequests()
+			if len(requests) != 1 {
+				t.Fatalf("v1 update requests = %+v", requests)
+			}
+			if got := requests[0].Body["ChatChannel"]; got != tt.want {
+				t.Errorf("ChatChannel = %v, want %v", got, tt.want)
 			}
 		})
 	}

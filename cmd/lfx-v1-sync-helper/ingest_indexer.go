@@ -533,9 +533,15 @@ func mapV2DataToV1CommitteeUpdatePayload(data map[string]any) projectServiceComm
 		payload.MailingList = &mailingListEmail
 	}
 	if chatChannel, ok := data["chat_channel"].(string); ok {
+		if chatChannel == "" {
+			// The v1 PATCH ignores empty strings; NONE explicitly clears this field.
+			chatChannel = "NONE"
+		}
 		payload.ChatChannel = &chatChannel
 	} else if fullSnapshot {
-		payload.ChatChannel = new(string)
+		// Optional fields disappear from full indexer snapshots when cleared.
+		clearChatChannel := "NONE"
+		payload.ChatChannel = &clearChatChannel
 	}
 	if ssoGroupName, ok := data["sso_group_name"].(string); ok && ssoGroupName != "" {
 		// Generated v2 identifier, not user-clearable. Never write back an empty name.
