@@ -5,13 +5,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	projectclient "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/http/project_service/client"
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
+	"github.com/patrickmn/go-cache"
 	goahttp "goa.design/goa/v3/http"
 )
 
@@ -458,4 +461,69 @@ func TestPreserveV2OnlyBaseFields(t *testing.T) {
 			t.Error("projectBasesEqual = true, want false when the contact email differs")
 		}
 	})
+}
+
+// TestUpdateProjectSendsPreservedContactEmail drives updateProject itself, so
+// removing or reordering its preserveV2OnlyBaseFields call fails here: an
+// unrelated v1 edit must still send the existing v2 contact_email on the
+// full-replace UpdateProjectBase PUT.
+func TestUpdateProjectSendsPreservedContactEmail(t *testing.T) {
+	const (
+		uid   = "9b610a05-dfb5-4c46-95d2-8e184981d524"
+		email = "contact@example.org"
+	)
+
+	origFetch := fetchProjectBase
+	origClient := projectClient
+	origCache := jwtTokenCache
+	t.Cleanup(func() {
+		fetchProjectBase = origFetch
+		projectClient = origClient
+		jwtTokenCache = origCache
+	})
+
+	fetchProjectBase = func(_ context.Context, _ string) (*projectservice.ProjectBase, string, error) {
+		return &projectservice.ProjectBase{
+			UID:          stringToStringPtr(uid),
+			Name:         stringToStringPtr("Test Project"),
+			Slug:         stringToStringPtr("test-project"),
+			Description:  stringToStringPtr("before"),
+			ContactEmail: stringToStringPtr(email),
+		}, "1", nil
+	}
+
+	// Pre-seed the token cache so generateCachedJWTToken never calls the real
+	// JWT signer. Cache key format: "jwt-<audience>-<v1Principal>".
+	jwtTokenCache = cache.New(5*time.Minute, 10*time.Minute)
+	jwtTokenCache.Set("jwt-"+projectServiceAudience+"-", "test-token", cache.DefaultExpiration)
+
+	var sent map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+			t.Errorf("decode PUT body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{"uid": uid, "slug": "test-project", "name": "Test Project"}); err != nil {
+			t.Errorf("encode stub body: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	projectClient = &projectservice.Client{UpdateProjectBaseEndpoint: projectClientAgainst(t, srv).UpdateProjectBase()}
+
+	projectUID := uid
+	mutated, err := updateProject(context.Background(), &projectservice.UpdateProjectBasePayload{
+		UID:         &projectUID,
+		Name:        "Test Project",
+		Slug:        "test-project",
+		Description: "changed in v1",
+	}, nil, staffClearFlags{}, "")
+	if err != nil {
+		t.Fatalf("updateProject() error = %v", err)
+	}
+	if !mutated {
+		t.Fatal("updateProject() mutated = false, want the description change to issue UpdateProjectBase")
+	}
+	if got := sent["contact_email"]; got != email {
+		t.Errorf("PUT body contact_email = %v, want %q", got, email)
+	}
 }
