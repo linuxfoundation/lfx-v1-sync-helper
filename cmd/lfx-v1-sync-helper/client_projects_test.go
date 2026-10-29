@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 
@@ -327,41 +328,95 @@ func TestHydrateSettingsPayload(t *testing.T) {
 	}
 }
 
-// TestCreateProjectAcceptsDigitLeadingSlug is the regression test for
+// TestProjectResponsesAcceptDigitLeadingSlug is the regression test for
 // lfx-self-serve-ops#1212: project-service accepts slugs that start with a
-// digit (e.g. "3mf-working-group") and returns them in its 201 response. A
-// generated client older than project-service v0.10.0 validated that response
-// against the old letter-first slug pattern, so a create that succeeded
-// server-side was reported as failed and no v1->v2 mapping was written.
-func TestCreateProjectAcceptsDigitLeadingSlug(t *testing.T) {
-	const slug = "3mf-working-group"
-	srv := projectServiceStub(t, http.StatusCreated, map[string]string{
-		"uid":  "9b610a05-dfb5-4c46-95d2-8e184981d524",
-		"slug": slug,
-		"name": "3MF Working Group",
-	})
+// digit (e.g. "3mf-working-group") and returns them in its responses. A
+// generated client older than project-service v0.10.0 validated those
+// responses against the old letter-first slug pattern, so a create that
+// succeeded server-side was reported as failed and no v1->v2 mapping was
+// written. The update path (updateProject: GetOneProjectBase, then
+// UpdateProjectBase) decodes the same field, so it is covered too.
+func TestProjectResponsesAcceptDigitLeadingSlug(t *testing.T) {
+	const (
+		uid  = "9b610a05-dfb5-4c46-95d2-8e184981d524"
+		slug = "3mf-working-group"
+		name = "3MF Working Group"
+	)
+	token := "test-token"
+	projectUID := uid
+
+	tests := []struct {
+		name   string
+		status int
+		call   func(c *projectclient.Client) (any, error)
+	}{
+		{
+			name:   "create-project",
+			status: http.StatusCreated,
+			call: func(c *projectclient.Client) (any, error) {
+				return c.CreateProject()(context.Background(), &projectservice.CreateProjectPayload{
+					BearerToken: &token, Name: name, Slug: slug,
+				})
+			},
+		},
+		{
+			name:   "get-one-project-base",
+			status: http.StatusOK,
+			call: func(c *projectclient.Client) (any, error) {
+				return c.GetOneProjectBase()(context.Background(), &projectservice.GetOneProjectBasePayload{
+					BearerToken: &token, UID: &projectUID,
+				})
+			},
+		},
+		{
+			name:   "update-project-base",
+			status: http.StatusOK,
+			call: func(c *projectclient.Client) (any, error) {
+				return c.UpdateProjectBase()(context.Background(), &projectservice.UpdateProjectBasePayload{
+					BearerToken: &token, UID: &projectUID, Name: name, Slug: slug,
+				})
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := projectServiceStub(t, tc.status, map[string]string{"uid": uid, "slug": slug, "name": name})
+
+			res, err := tc.call(projectClientAgainst(t, srv))
+			if err != nil {
+				t.Fatalf("%s error = %v, want the %d response to decode", tc.name, err, tc.status)
+			}
+
+			var got *string
+			switch r := res.(type) {
+			case *projectservice.ProjectFull:
+				got = r.Slug
+			case *projectservice.GetOneProjectBaseResult:
+				if r.Project != nil {
+					got = r.Project.Slug
+				}
+			case *projectservice.ProjectBase:
+				got = r.Slug
+			default:
+				t.Fatalf("%s result is %T, want a decoded project", tc.name, res)
+			}
+			if got == nil || *got != slug {
+				t.Errorf("Slug = %v, want %q", got, slug)
+			}
+		})
+	}
+}
+
+// projectClientAgainst builds the real generated project-service HTTP client
+// against srv, the same way initGoaClients does.
+func projectClientAgainst(t *testing.T, srv *httptest.Server) *projectclient.Client {
+	t.Helper()
 
 	u, err := url.Parse(srv.URL)
 	if err != nil {
 		t.Fatalf("parse test server URL: %v", err)
 	}
-	client := projectclient.NewClient(u.Scheme, u.Host, srv.Client(), goahttp.RequestEncoder, goahttp.ResponseDecoder, false)
 
-	token := "test-token"
-	res, err := client.CreateProject()(context.Background(), &projectservice.CreateProjectPayload{
-		BearerToken: &token,
-		Name:        "3MF Working Group",
-		Slug:        slug,
-	})
-	if err != nil {
-		t.Fatalf("CreateProject() error = %v, want the 201 response to decode", err)
-	}
-
-	project, ok := res.(*projectservice.ProjectFull)
-	if !ok {
-		t.Fatalf("CreateProject() result is %T, want *projectservice.ProjectFull", res)
-	}
-	if project.Slug == nil || *project.Slug != slug {
-		t.Errorf("Slug = %v, want %q", project.Slug, slug)
-	}
+	return projectclient.NewClient(u.Scheme, u.Host, srv.Client(), goahttp.RequestEncoder, goahttp.ResponseDecoder, false)
 }
