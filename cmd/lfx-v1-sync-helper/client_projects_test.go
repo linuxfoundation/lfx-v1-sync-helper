@@ -420,3 +420,42 @@ func projectClientAgainst(t *testing.T, srv *httptest.Server) *projectclient.Cli
 
 	return projectclient.NewClient(u.Scheme, u.Host, srv.Client(), goahttp.RequestEncoder, goahttp.ResponseDecoder, false)
 }
+
+// TestPreserveV2OnlyBaseFields guards against an unrelated v1 edit erasing a
+// contact email set in v2: UpdateProjectBase replaces the whole base document,
+// so an omitted contact_email is stored as empty.
+func TestPreserveV2OnlyBaseFields(t *testing.T) {
+	current := &projectservice.ProjectBase{ContactEmail: stringToStringPtr("contact@example.org")}
+
+	t.Run("unset in v1 keeps the v2 email", func(t *testing.T) {
+		payload := &projectservice.UpdateProjectBasePayload{Description: "changed in v1"}
+		preserveV2OnlyBaseFields(payload, current)
+		if got := stringPtrToString(payload.ContactEmail); got != "contact@example.org" {
+			t.Errorf("ContactEmail = %q, want the current v2 email", got)
+		}
+	})
+
+	t.Run("set in the payload wins", func(t *testing.T) {
+		payload := &projectservice.UpdateProjectBasePayload{ContactEmail: stringToStringPtr("new@example.org")}
+		preserveV2OnlyBaseFields(payload, current)
+		if got := stringPtrToString(payload.ContactEmail); got != "new@example.org" {
+			t.Errorf("ContactEmail = %q, want the payload's email", got)
+		}
+	})
+
+	t.Run("preserved email is not a base change", func(t *testing.T) {
+		payload := &projectservice.UpdateProjectBasePayload{}
+		preserveV2OnlyBaseFields(payload, current)
+		updated := &projectservice.ProjectBase{ContactEmail: payload.ContactEmail}
+		if !projectBasesEqual(current, updated) {
+			t.Error("projectBasesEqual = false, want true when only the preserved email is carried over")
+		}
+	})
+
+	t.Run("changed email is a base change", func(t *testing.T) {
+		updated := &projectservice.ProjectBase{ContactEmail: stringToStringPtr("new@example.org")}
+		if projectBasesEqual(current, updated) {
+			t.Error("projectBasesEqual = true, want false when the contact email differs")
+		}
+	})
+}
