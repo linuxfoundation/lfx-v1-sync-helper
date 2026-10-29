@@ -4,9 +4,14 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/url"
 	"testing"
 
+	projectclient "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/http/project_service/client"
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
+	goahttp "goa.design/goa/v3/http"
 )
 
 func TestProjectSettingsWriteMayBeNeeded(t *testing.T) {
@@ -319,5 +324,44 @@ func TestHydrateSettingsPayload(t *testing.T) {
 				t.Errorf("Auditors not hydrated from current")
 			}
 		})
+	}
+}
+
+// TestCreateProjectAcceptsDigitLeadingSlug is the regression test for
+// lfx-self-serve-ops#1212: project-service accepts slugs that start with a
+// digit (e.g. "3mf-working-group") and returns them in its 201 response. A
+// generated client older than project-service v0.10.0 validated that response
+// against the old letter-first slug pattern, so a create that succeeded
+// server-side was reported as failed and no v1->v2 mapping was written.
+func TestCreateProjectAcceptsDigitLeadingSlug(t *testing.T) {
+	const slug = "3mf-working-group"
+	srv := projectServiceStub(t, http.StatusCreated, map[string]string{
+		"uid":  "9b610a05-dfb5-4c46-95d2-8e184981d524",
+		"slug": slug,
+		"name": "3MF Working Group",
+	})
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	client := projectclient.NewClient(u.Scheme, u.Host, srv.Client(), goahttp.RequestEncoder, goahttp.ResponseDecoder, false)
+
+	token := "test-token"
+	res, err := client.CreateProject()(context.Background(), &projectservice.CreateProjectPayload{
+		BearerToken: &token,
+		Name:        "3MF Working Group",
+		Slug:        slug,
+	})
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v, want the 201 response to decode", err)
+	}
+
+	project, ok := res.(*projectservice.ProjectFull)
+	if !ok {
+		t.Fatalf("CreateProject() result is %T, want *projectservice.ProjectFull", res)
+	}
+	if project.Slug == nil || *project.Slug != slug {
+		t.Errorf("Slug = %v, want %q", project.Slug, slug)
 	}
 }
