@@ -91,6 +91,8 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 		return false, fmt.Errorf("failed to fetch current project base: %w", err)
 	}
 
+	preserveV2OnlyBaseFields(basePayload, currentBase)
+
 	// Create updated base for comparison.
 	updatedBase := &projectservice.ProjectBase{
 		UID:                        currentBase.UID,
@@ -115,6 +117,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 		LogoURL:                    basePayload.LogoURL,
 		RepositoryURL:              basePayload.RepositoryURL,
 		WebsiteURL:                 basePayload.WebsiteURL,
+		ContactEmail:               basePayload.ContactEmail,
 		CreatedAt:                  currentBase.CreatedAt, // Preserve system-managed fields.
 		UpdatedAt:                  currentBase.UpdatedAt,
 	}
@@ -313,7 +316,18 @@ func projectBasesEqual(a, b *projectservice.ProjectBase) bool {
 		stringPtrToString(a.FormationDate) == stringPtrToString(b.FormationDate) &&
 		stringPtrToString(a.LogoURL) == stringPtrToString(b.LogoURL) &&
 		stringPtrToString(a.RepositoryURL) == stringPtrToString(b.RepositoryURL) &&
-		stringPtrToString(a.WebsiteURL) == stringPtrToString(b.WebsiteURL)
+		stringPtrToString(a.WebsiteURL) == stringPtrToString(b.WebsiteURL) &&
+		stringPtrToString(a.ContactEmail) == stringPtrToString(b.ContactEmail)
+}
+
+// preserveV2OnlyBaseFields copies base fields that v1 does not sync from the
+// current v2 project into an outgoing update. UpdateProjectBase replaces the
+// whole base document, so a field left nil here would be cleared by any
+// unrelated v1 edit.
+func preserveV2OnlyBaseFields(basePayload *projectservice.UpdateProjectBasePayload, currentBase *projectservice.ProjectBase) {
+	if basePayload.ContactEmail == nil {
+		basePayload.ContactEmail = currentBase.ContactEmail
+	}
 }
 
 // stringSliceEqual compares two string slices for equality.

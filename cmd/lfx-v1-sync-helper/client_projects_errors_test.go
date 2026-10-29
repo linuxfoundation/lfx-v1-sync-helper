@@ -13,13 +13,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
-	projectclient "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/http/project_service/client"
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
-	goahttp "goa.design/goa/v3/http"
 )
 
 // TestGeneratedClientErrorsRenderEmpty pins the upstream behaviour this whole
@@ -32,6 +29,7 @@ func TestGeneratedClientErrorsRenderEmpty(t *testing.T) {
 	for _, err := range []error{
 		&projectservice.BadRequestError{Code: "400", Message: "bad slug"},
 		&projectservice.ConflictError{Code: "409", Message: "slug exists"},
+		&projectservice.ForbiddenError{Code: "403", Message: "denied"},
 		&projectservice.InternalServerError{Code: "500", Message: "boom"},
 		&projectservice.NotFoundError{Code: "404", Message: "gone"},
 		&projectservice.ServiceUnavailableError{Code: "503", Message: "later"},
@@ -60,6 +58,11 @@ func TestWrapProjectServiceErrorReportsCause(t *testing.T) {
 			name: "message only",
 			err:  &projectservice.ConflictError{Message: "slug already taken"},
 			want: "failed to create project: Conflict: slug already taken",
+		},
+		{
+			name: "forbidden",
+			err:  &projectservice.ForbiddenError{Code: "403", Message: "parent change not allowed"},
+			want: "failed to create project: Forbidden (403): parent change not allowed",
 		},
 		{
 			name: "code only",
@@ -133,6 +136,37 @@ func TestWrapProjectServiceErrorFindsCauseThroughWrapping(t *testing.T) {
 	}
 }
 
+// TestForbiddenIsDecodedWithCause covers the 403 that project-service v0.10.0
+// added to update-project-base (e.g. a denied parent change): decoded by the
+// real client, its generated Error() is empty, so the wrapper must still
+// surface the code and message.
+func TestForbiddenIsDecodedWithCause(t *testing.T) {
+	srv := projectServiceStub(t, http.StatusForbidden, map[string]string{
+		"code":    "403",
+		"message": "not allowed to change the parent project",
+	})
+
+	token := "test-token"
+	uid := "9b610a05-dfb5-4c46-95d2-8e184981d524"
+	_, err := projectClientAgainst(t, srv).UpdateProjectBase()(context.Background(), &projectservice.UpdateProjectBasePayload{
+		BearerToken: &token,
+		UID:         &uid,
+		Name:        "Test Project",
+		Slug:        "test-project",
+	})
+
+	var forbidden *projectservice.ForbiddenError
+	if !errors.As(err, &forbidden) {
+		t.Fatalf("decoded error is %T (%v), want *projectservice.ForbiddenError", err, err)
+	}
+
+	got := wrapProjectServiceError("failed to update project base", err).Error()
+	want := "failed to update project base: Forbidden (403): not allowed to change the parent project"
+	if got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
 // createProjectAgainst drives the real generated project-service client
 // against srv, returning whatever error the client's own HTTP decoding
 // produced. Client construction mirrors initGoaClients, so the error reaching
@@ -141,15 +175,8 @@ func TestWrapProjectServiceErrorFindsCauseThroughWrapping(t *testing.T) {
 func createProjectAgainst(t *testing.T, srv *httptest.Server) error {
 	t.Helper()
 
-	u, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("parse test server URL: %v", err)
-	}
-
-	client := projectclient.NewClient(u.Scheme, u.Host, srv.Client(), goahttp.RequestEncoder, goahttp.ResponseDecoder, false)
-
 	token := "test-token"
-	_, err = client.CreateProject()(context.Background(), &projectservice.CreateProjectPayload{
+	_, err := projectClientAgainst(t, srv).CreateProject()(context.Background(), &projectservice.CreateProjectPayload{
 		BearerToken: &token,
 		Name:        "Test Project",
 		Slug:        "test-project",
