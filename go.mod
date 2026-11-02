@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 module github.com/linuxfoundation/lfx-v1-sync-helper
 
-go 1.26.0
+go 1.27.3
 
 require (
 	github.com/akamensky/base58 v0.0.0-20210829145138-ce8bf8802e8f
@@ -17,7 +17,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/linuxfoundation/lfx-v2-committee-service v0.4.26
-	github.com/linuxfoundation/lfx-v2-project-service v0.8.8
+	github.com/linuxfoundation/lfx-v2-project-service v0.10.0
 	github.com/nats-io/nats.go v1.52.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/uptrace/bun v1.2.18

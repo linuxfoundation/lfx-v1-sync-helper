@@ -183,6 +183,7 @@ func initGoaClients(cfg *Config) error {
 		projectHTTPClient.UpdateProjectBase(),
 		projectHTTPClient.UpdateProjectSettings(),
 		projectHTTPClient.DeleteProject(),
+		projectHTTPClient.ResolveProjectSlug(),
 		projectHTTPClient.Readyz(),
 		projectHTTPClient.Livez(),
 		projectHTTPClient.CreateProjectLink(),
