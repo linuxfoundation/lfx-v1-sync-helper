@@ -426,7 +426,17 @@ Echo/loop guards:
 - **Auth0 M2M attribution.** The v1 write sets `lastmodifiedbyid = "{AUTH0_CLIENT_ID}@clients"`, which `shouldSkipSync` skips when the change replicates back through WAL → `v1-objects` KV, so our own v1 write never bounces into v2.
 - **Heimdall origin skip (partial).** Events whose actor is `{HEIMDALL_CLIENT_ID}@clients` are dropped on receipt. This only covers the v1→v2 writes that fall back to the service account (empty/`platform`/unknown-Salesforce principals): v1→v2 normally impersonates the real v1 user, so the actor is usually that user's LFID.
 
-Delivery: the subscription is core NATS (matching `lfx.user_profile.updated`), so there is no redelivery. A transient failure — v1 DB unavailable during contact resolution, or a 5xx from the gateway — is logged as an error and the event is dropped; recovering that project's staff state requires a fresh edit or a manual backfill.
+Delivery: the subscription is core NATS (matching `lfx.user_profile.updated`), so there is no redelivery. A transient failure — v1 DB unavailable during contact resolution, or a 5xx from the gateway — is logged as an error and the event is dropped; recovering that project's staff state requires a fresh edit or the reviewed repair below. Enabling the subscription only handles *future* edits: it never revisits drift that already exists.
+
+#### Reviewed project staff repair (lfx-self-serve#5034)
+
+`--reconcile-project-staff-file` is a one-shot that compares `executive_director` and `program_manager` between LFX One and PCC for an explicit list of project UIDs (at most 1000; it never scans every project). It reuses this bridge's contact resolution and partial PATCH rather than replaying events.
+
+- **Report (default).** Reads only, and writes a JSON report with one entry per project and role: an outcome code (`in_sync`, `drift`, `unresolved_contact`, `no_project_mapping`, …), an action (`assign` or `clear`) for drift, and the versions observed (v2 settings ETag, `v1-objects` revision, mapping revision), plus a per-report salted fingerprint binding each drift target. It contains no names, emails, usernames or contact SFIDs.
+- **Reviewed apply.** A reviewer checks the actual assignments in both UIs and marks individual roles `approved`; a clear also needs `clearApproved`. `--apply-project-staff` re-checks every recorded version and resolved-target fingerprint, refuses anything that moved, and PATCHes only the approved roles, LFX One wins. PCC-wins and unclear cases are left for manual disposition by not approving them.
+- **Limits.** An LFX One assignee that cannot be resolved to a v1 contact is reported as `unresolved_contact` and never becomes a clear. The v1 PATCH has no compare-and-swap, so an apply needs an approved edit freeze across PCC and LFX One, settled replication and a single repair writer. A timeout or 5xx stops the run with the outcome `unconfirmed`, and the next step is a fresh report, never a retry of the old approval. Opportunity owner is never touched.
+
+Merging or deploying this tooling does not repair any live data: each environment needs its own report, review, approved apply and confirming report. The exact flags, report schema and runbook are in [`cmd/lfx-v1-sync-helper/README.md`](cmd/lfx-v1-sync-helper/README.md#project-staff-reconciliation-lfx-self-serve5034). Companion work: the LFX One staff save fix ([lfx-self-serve#5033](https://github.com/linuxfoundation/lfx-self-serve/issues/5033)) and the production rollout of this bridge ([lfx-v2-argocd#1995](https://github.com/linuxfoundation/lfx-v2-argocd/issues/1995)).
 
 ```mermaid
 sequenceDiagram

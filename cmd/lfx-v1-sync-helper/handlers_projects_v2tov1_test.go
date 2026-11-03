@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/linuxfoundation/lfx-v2-project-service/pkg/events"
@@ -455,6 +457,76 @@ func TestHandleProjectSettingsUpdated_InvalidEventSkips(t *testing.T) {
 	}
 }
 
+// The reconciliation reads the same v1 record as the bridge, plus its
+// v1-objects revision; the bridge's field reader must return the same staff.
+func TestHandleProjectSettingsUpdated_VersionedSnapshotMatchesFieldReader(t *testing.T) {
+	origKV := v1KV
+	kv := newFakeKV()
+	v1KV = kv
+	t.Cleanup(func() { v1KV = origKV })
+
+	key := "salesforce-project__c." + bridgeTestProjectSFID
+	kv.data[key] = []byte(`{"sfid":"` + bridgeTestProjectSFID + `","executive_director__c":" 0034100001oQRLDAA4 ","program_manager__c":"` + bridgeTestPMSFID + `"}`)
+	kv.rev[key] = 12
+
+	snapshot, err := readV1ProjectStaffSnapshot(t.Context(), bridgeTestProjectSFID)
+	if err != nil || snapshot == nil {
+		t.Fatalf("readV1ProjectStaffSnapshot = %v, %v", snapshot, err)
+	}
+	if snapshot.revision != 12 {
+		t.Errorf("revision = %d, want 12", snapshot.revision)
+	}
+	if got := snapshot.staff["executive_director__c"]; got != "0034100001oQRLDAA4" {
+		t.Errorf("executive_director__c = %q, want trimmed value", got)
+	}
+	staff, err := getV1ProjectStaffSFIDs(t.Context(), bridgeTestProjectSFID)
+	if err != nil || staff["program_manager__c"] != bridgeTestPMSFID || staff["executive_director__c"] != "0034100001oQRLDAA4" {
+		t.Errorf("getV1ProjectStaffSFIDs = %v, %v; want the snapshot's staff", staff, err)
+	}
+
+	kv.data[key] = []byte(`{"sfid":"` + bridgeTestProjectSFID + `","isdeleted":true}`)
+	if snapshot, err := readV1ProjectStaffSnapshot(t.Context(), bridgeTestProjectSFID); err != nil || snapshot != nil {
+		t.Errorf("soft-deleted record = %v, %v; want nil, nil", snapshot, err)
+	}
+	if staff, err := getV1ProjectStaffSFIDs(t.Context(), "a0941000002wABSENT"); err != nil || staff != nil {
+		t.Errorf("absent record = %v, %v; want nil, nil", staff, err)
+	}
+}
+
+// Bridge logs name the staff field, never the person or the contact SFID.
+func TestHandleProjectSettingsUpdated_LogsOmitStaffIdentity(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	var logs bytes.Buffer
+	logger = slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	resolveV1UserSFIDByUsername = func(_ context.Context, username string) (string, error) {
+		if username == "canary-pm-username" {
+			return bridgeTestPMSFID, nil
+		}
+		return "", nil
+	}
+
+	msg := settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{},
+		events.ProjectSettings{
+			ExecutiveDirector: &events.UserInfo{Name: "Canary Manual", Email: "canary-manual@example.invalid"},
+			ProgramManager:    &events.UserInfo{Username: "canary-pm-username", Email: "canary-pm@example.invalid"},
+		})
+	handleProjectSettingsUpdated(msg)
+
+	if spy.patchCalls != 1 || spy.lastBody["ProgramManagerID"] != bridgeTestPMSFID {
+		t.Fatalf("PATCH calls = %d body = %v; want the resolved PM only", spy.patchCalls, spy.lastBody)
+	}
+	out := logs.String()
+	for _, value := range []string{"canary-manual@example.invalid", "Canary Manual", "canary-pm-username", "canary-pm@example.invalid", bridgeTestPMSFID} {
+		if strings.Contains(out, value) {
+			t.Errorf("logs contain staff identity value %q", value)
+		}
+	}
+	if !strings.Contains(out, "ProgramManagerID") || !strings.Contains(out, `"field":"executive_director"`) {
+		t.Errorf("logs should still name the fields: %s", out)
+	}
+}
+
 func TestStaffUserInfosEqual(t *testing.T) {
 	staffpm := &events.UserInfo{Username: "staffpm", Email: "staffpm@example.com"}
 	tests := []struct {
@@ -520,6 +592,12 @@ func TestPatchV1ProjectStaff(t *testing.T) {
 			}
 			if !tc.wantNotFnd && tc.wantErr && errors.Is(err, errV1ProjectNotFound) {
 				t.Errorf("error = %v, must not wrap errV1ProjectNotFound", err)
+			}
+			if !tc.wantNotFnd && tc.wantErr {
+				var statusErr *v1ProjectStaffStatusError
+				if !errors.As(err, &statusErr) || statusErr.status != tc.status {
+					t.Errorf("error = %v, want *v1ProjectStaffStatusError with status %d", err, tc.status)
+				}
 			}
 			if spy.patchCalls != 1 {
 				t.Fatalf("PATCH calls = %d, want 1", spy.patchCalls)

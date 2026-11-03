@@ -38,6 +38,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -61,6 +62,28 @@ const v1ProjectStaffSyncTimeout = 30 * time.Second
 // project is platform-native (lf... SFID) with no Salesforce-backed record, so
 // there is nothing to sync to. Warn and skip — retrying cannot help.
 var errV1ProjectNotFound = errors.New("v1 project not found")
+
+// v1ProjectStaffStatusError is any other non-success response from the v1
+// project-service PATCH. It carries the status code so the project staff
+// reconciliation can tell a rejected request (4xx) from one whose outcome is
+// unknown (5xx, e.g. a gateway timeout after v1 may have written).
+type v1ProjectStaffStatusError struct {
+	sfid   string
+	status int
+	body   string
+}
+
+func (e *v1ProjectStaffStatusError) Error() string {
+	return fmt.Sprintf("project-service returned status %d for project %s: %s", e.status, e.sfid, e.body)
+}
+
+// v1ProjectStaffSnapshot is the staff view of a live v1 project record:
+// executive_director__c / program_manager__c values keyed by field name, and
+// the v1-objects KV revision they were read at.
+type v1ProjectStaffSnapshot struct {
+	staff    map[string]string
+	revision uint64
+}
 
 // Function-variable seams for tests (pattern: fetchProjectBase in
 // client_projects.go, lookupUserByUsernameForACS in lfx_v1_client.go).
@@ -91,6 +114,19 @@ var (
 	// values (trimmed; absent fields map to ""). Returns (nil, nil) when the
 	// record is absent, deleted, or soft-deleted.
 	getV1ProjectStaffSFIDs = func(ctx context.Context, sfid string) (map[string]string, error) {
+		snapshot, err := readV1ProjectStaffSnapshot(ctx, sfid)
+		if err != nil || snapshot == nil {
+			return nil, err
+		}
+		return snapshot.staff, nil
+	}
+
+	// readV1ProjectStaffSnapshot is getV1ProjectStaffSFIDs plus the v1-objects
+	// KV revision the staff values were read at, so the project staff
+	// reconciliation (reconcile_project_staff.go) can reject an approval made
+	// against an older record. Returns (nil, nil) when the record is absent,
+	// deleted, or soft-deleted.
+	readV1ProjectStaffSnapshot = func(ctx context.Context, sfid string) (*v1ProjectStaffSnapshot, error) {
 		entry, err := v1KV.Get(ctx, "salesforce-project__c."+sfid)
 		if err != nil {
 			if err == jetstream.ErrKeyNotFound || err == jetstream.ErrKeyDeleted {
@@ -117,7 +153,7 @@ var (
 				staff[field] = strings.TrimSpace(v)
 			}
 		}
-		return staff, nil
+		return &v1ProjectStaffSnapshot{staff: staff, revision: entry.Revision()}, nil
 	}
 
 	// resolveV1UserSFIDByUsername / resolveV1UserSFIDByEmail alias the live v1
@@ -244,7 +280,8 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 		return
 	}
 
-	log.With("fields", payload).InfoContext(ctx, "synced v2 project staff to v1")
+	// Log field names only: the values are contact SFIDs.
+	log.With("fields", staffPayloadFieldNames(payload)).InfoContext(ctx, "synced v2 project staff to v1")
 }
 
 // staffUserInfosEqual compares event staff snapshots by identity fields
@@ -258,6 +295,17 @@ func staffUserInfosEqual(a, b *events.UserInfo) bool {
 		return false
 	}
 	return a.Username == b.Username && a.Email == b.Email
+}
+
+// staffPayloadFieldNames returns the sorted keys of a staff PATCH payload, so
+// logs can say which fields were written without the contact SFIDs.
+func staffPayloadFieldNames(payload map[string]string) []string {
+	names := make([]string, 0, len(payload))
+	for name := range payload {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // staffValueOrNone maps an empty v1 staff field value to the API's clear
@@ -304,7 +352,8 @@ func resolveV1StaffSFID(ctx context.Context, log *slog.Logger, info *events.User
 			return sfid, nil
 		}
 	}
-	log.With("field", field, "username", info.Username, "email", info.Email).
+	// The username and email identify the person, so only the field is logged.
+	log.With("field", field).
 		WarnContext(ctx, "could not resolve v1 contact for staff user, leaving v1 field unchanged")
 	return "", nil
 }
@@ -343,7 +392,7 @@ func patchV1ProjectStaff(ctx context.Context, sfid string, fields map[string]str
 		return fmt.Errorf("%w: %s", errV1ProjectNotFound, sfid)
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("project-service returned status %d for project %s: %s", resp.StatusCode, sfid, string(respBody))
+		return &v1ProjectStaffStatusError{sfid: sfid, status: resp.StatusCode, body: string(respBody)}
 	}
 
 	return nil

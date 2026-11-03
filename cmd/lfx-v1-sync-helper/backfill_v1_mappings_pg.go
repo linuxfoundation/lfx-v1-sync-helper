@@ -392,13 +392,13 @@ func backfillV1MappingsToPostgres(ctx context.Context, pool *pgxpool.Pool, dryRu
 	// Writer: runs concurrently draining recCh; a writer error cancels
 	// scanCtx via setErr so scanners see the cancellation on their next
 	// send and exit promptly rather than blocking on a full channel.
-	writerDone := make(chan error, 1)
+	writerDone := make(chan struct{})
 	go func() {
 		wErr := v1MappingsWriter(scanCtx, pool, recCh, batchSize, dryRun, &res, stagingTable)
 		if wErr != nil {
 			setErr(fmt.Errorf("staging writer: %w", wErr))
 		}
-		writerDone <- wErr
+		close(writerDone)
 	}()
 
 	scannerWG.Wait()
