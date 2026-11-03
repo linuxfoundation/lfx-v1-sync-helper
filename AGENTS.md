@@ -180,6 +180,12 @@ Boot ordering (`main.go`): NATS + KV bucket handles → a KV-backed `mappingStor
   - On update, `EnableVoting` is sent only when the event carries `enable_voting`, like `PublicEnabled`, so a partial or legacy event cannot flip voting. v2 serializes it without `omitempty`, so every full committee snapshot carries it.
   - Because v2 is now authoritative on every update, a committee whose v1 value was changed in v1 and never reached v2 would be overwritten by the next v2 edit. Reconcile such committees first (`committee-cli sync committee-fields --from=v1 --field=enable_voting`) before deploying a change that sends the field.
 
+#### Committee SSO group enabled — lfx-self-serve-ops#1251
+
+- **v2 → v1** (`syncCommitteeCreateToV1` / `mapV2DataToV1CommitteeUpdatePayload`): v2 `sso_group_enabled` is sent as `SSOGroupEnabled` on create and update. Previously both paths omitted it, leaving v1 at its default `false` on create and unchanged on later updates. v1 → v2 already maps the flag (`handlers_committees.go`).
+  - Explicit `true` and `false` are preserved. Absent, null, or malformed values are omitted so partial/legacy events cannot change the v1 setting. Full committee snapshots always carry the boolean.
+  - This does not automatically repair existing drift. Confirm the last deliberate edit and intended setting before reconciliation; timestamps alone are not a source-of-truth signal because sync writes update them. Reconcile v1-authoritative mismatches before deploying, since subsequent v2 updates will now send the flag.
+
 ### Python ETL (Meltano)
 
 #### Configuration Structure
