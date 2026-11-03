@@ -64,11 +64,57 @@ maxAckPending: 1000
 |`lfx.committee.created`|Create committee in v1 via Project Service API|
 |`lfx.committee.updated`|Update committee in v1 via Project Service API|
 |`lfx.committee.deleted`|Delete committee in v1 via Project Service API|
+|`lfx.committee_settings.created`|Sync current business-email requirement to v1|
+|`lfx.committee_settings.updated`|Sync current business-email requirement to v1|
 |`lfx.committee_member.created`|Add member to committee in v1 via Project Service API|
 |`lfx.committee_member.updated`|Update committee member in v1 via Project Service API|
 |`lfx.committee_member.deleted`|Remove member from committee in v1 via Project Service API|
 
-Loop detection prevents infinite sync cycles: if a non-tombstoned reverse mapping already exists for the object UID, the event originated from v1 and is skipped.
+Create-loop detection skips creates with a live reverse mapping. Update echoes use
+pending-operation markers; v1 WAL echoes of v2 writes are skipped by the sync
+client's `lastmodifiedbyid` identity.
+
+#### Committee business-email requirement
+
+`business_email_required` lives in v2 committee **settings**, not the base record.
+v1 updates therefore perform a separate, ETag-protected settings read/update,
+including when no committee-base field changed. Other scalar settings are
+preserved and writer/auditor lists are omitted, so the service leaves them alone.
+Each settings sync re-reads the current v1 replica record, rather than trusting
+an old WAL delivery. Every existing-committee update also refreshes base input
+before base work, including absent/null-flag events, so a retried base or settings
+failure cannot revert a newer committee rename. Echo detection uses the original
+WAL message's editor, not the refreshed row's editor: a settings-only PATCH can
+make a pending human rename service-authored without syncing it. Normal base
+comparison skips already-completed work without discarding pending changes.
+Deleted/missing records or an absent/malformed flag do not
+change v2 settings; replica read failures are retried. Transient base failures
+also retry instead of acknowledging the settings change without processing it.
+Successful base bookkeeping and SSO-name writeback complete before settings
+sync, so a settings failure cannot bypass those steps.
+A v2 settings NotFound is INFO-logged and skipped; retries cannot create the
+missing settings record. Other settings failures continue to retry.
+
+For v2-created committees, current settings are read before creating the v1
+record. A missing settings record uses the v1 default only after confirming
+that the v2 base still exists; a deleted base is skipped. Later settings
+create/update events PATCH only `BusinessEmailRequired`
+in v1, using current v2 state rather than a stale event snapshot. Missing reverse
+mappings are retried with a 30-second delay (up to the existing three deliveries)
+only when the live committee's parent project has a live v1 mapping. This allows
+an in-flight base create to finish without retrying settings on proven v2-only
+committees. Settings deletes and tombstoned mappings
+never produce a PATCH. Settings have their own pending-marker namespace so a
+settings echo cannot consume the committee-base marker. Create markers are
+separate from update markers, so an immediate v2 settings edit is not swallowed
+by the pending echo of a v1 create.
+
+**Deployment:** the `committee_events` stream must include
+`lfx.committee_settings.>` before starting the updated consumer. The Helm chart
+adds this subject; installations managing the stream separately or overriding
+its subjects must add it themselves. Existing historical drift is not replayed
+or repaired automatically. Confirm each mismatched record's intended value
+before rollout; subsequent events can now propagate changes in both directions.
 
 ## Configuration
 

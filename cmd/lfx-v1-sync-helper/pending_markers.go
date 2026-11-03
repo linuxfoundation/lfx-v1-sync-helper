@@ -82,8 +82,12 @@
 //	handler and consumed by the v2→v1 (indexer) handler.
 //	v2_to_v1 markers are the reverse.
 //
-// op         = "update" | "delete"
-// type       = "project" | "committee" | "committee_member"
+// op         = "create" (committee settings only) | "update" | "delete"
+// type       = "project" | "committee" | "committee_member" | "committee_settings"
+//
+// Committee settings use their own namespace so their indexer echoes cannot
+// consume the committee-base marker. The settings-created echo of a v1 create
+// also consumes a v1_to_v2.create.committee_settings marker.
 // identifier depends on the (direction, op) pair:
 //
 //   - v1_to_v2.update, v1_to_v2.delete, and v2_to_v1.update
@@ -158,6 +162,7 @@ const (
 type markerOp string
 
 const (
+	markerOpCreate markerOp = "create"
 	markerOpUpdate markerOp = "update"
 	markerOpDelete markerOp = "delete"
 )
@@ -167,9 +172,10 @@ const (
 type markerResource string
 
 const (
-	markerResourceProject         markerResource = "project"
-	markerResourceCommittee       markerResource = "committee"
-	markerResourceCommitteeMember markerResource = "committee_member"
+	markerResourceProject           markerResource = "project"
+	markerResourceCommittee         markerResource = "committee"
+	markerResourceCommitteeSettings markerResource = "committee_settings"
+	markerResourceCommitteeMember   markerResource = "committee_member"
 )
 
 const (

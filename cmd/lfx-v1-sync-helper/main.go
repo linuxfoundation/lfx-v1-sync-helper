@@ -742,7 +742,7 @@ func main() {
 
 	// Subscribe to indexer domain events for bidirectional committee sync via a durable
 	// JetStream consumer on the committee-events stream. The stream captures
-	// lfx.committee.> and lfx.committee_member.> subjects published by the indexer service
+	// lfx.committee.>, lfx.committee_member.> and lfx.committee_settings.> subjects published by the indexer service
 	// after every successful OpenSearch write. Using JetStream gives at-least-once delivery,
 	// replacing the at-most-once core NATS QueueSubscribe that could silently drop events.
 	committeeEventsStreamName := "committee_events"
@@ -761,11 +761,12 @@ func main() {
 		FilterSubjects: []string{
 			"lfx.committee.>",
 			"lfx.committee_member.>",
+			"lfx.committee_settings.>",
 		},
 		MaxDeliver:    3,
 		AckWait:       30 * time.Second,
 		MaxAckPending: 100,
-		Description:   "Indexer committee/committee-member event consumer for v1-sync-helper",
+		Description:   "Indexer committee/committee-member/settings event consumer for v1-sync-helper",
 	})
 	if err != nil {
 		logger.With(errKey, err, "consumer", committeeEventsConsumerName, "stream", committeeEventsStreamName).Error("error creating committee-events consumer")

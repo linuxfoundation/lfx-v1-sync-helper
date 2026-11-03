@@ -144,6 +144,9 @@ func TestHandleCommitteeUpdateRetriesUnmappedParent(t *testing.T) {
 		"sfid": childSFID, "mailing_list__c": "Child", "project_name__c": "project-a",
 		"committee_id": "new-parent", "lastmodifiedbyid": "v1-editor",
 	}
+	fetchV1CommitteeData = func(context.Context, string) (map[string]any, bool, error) {
+		return v1Data, true, nil
+	}
 	if !handleCommitteeUpdate(t.Context(), "platform-collaboration__c."+childSFID, v1Data) {
 		t.Fatal("missing parent on update must NACK for redelivery")
 	}

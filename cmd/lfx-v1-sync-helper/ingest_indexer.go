@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
+	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 	nats "github.com/nats-io/nats.go"
 )
 
@@ -389,6 +390,32 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 	// v1 defaults EnableVoting to false when omitted, so v2 voting must be sent explicitly.
 	if enableVoting, ok := data["enable_voting"].(bool); ok {
 		payload.EnableVoting = &enableVoting
+	}
+
+	// The committee base event excludes settings. Fetch them before creation
+	// rather than creating with v1's false default and waiting for another event.
+	settings, _, err := fetchCommitteeSettings(ctx, committeeUID)
+	if err == nil {
+		payload.BusinessEmailRequired = &settings.BusinessEmailRequired
+	} else {
+		var notFound *committeeservice.NotFoundError
+		if !errors.As(err, &notFound) {
+			return err
+		}
+		// A legacy live committee may lack settings, but a delayed create can
+		// also arrive after deletion. Confirm the base is still live before
+		// falling back to v1's default, so we never recreate a deleted committee.
+		base, _, baseErr := fetchCommitteeBase(ctx, committeeUID)
+		if errors.As(baseErr, &notFound) {
+			return nil
+		}
+		if baseErr != nil {
+			return baseErr
+		}
+		if base == nil {
+			return fmt.Errorf("empty committee base response for %s", committeeUID)
+		}
+		log.InfoContext(ctx, "committee has no settings; using v1 default for business email requirement")
 	}
 
 	log.With("payload_category", payload.Category).InfoContext(ctx, "creating committee in v1")

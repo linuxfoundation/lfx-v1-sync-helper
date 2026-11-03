@@ -30,6 +30,7 @@ type fakeMsg struct {
 	nacked   bool
 	ackCalls int
 	nakCalls int
+	nakDelay time.Duration
 }
 
 func (m *fakeMsg) Subject() string                           { return m.subject }
@@ -48,10 +49,10 @@ func (m *fakeMsg) Nak() error {
 	m.nakCalls++
 	return nil
 }
-func (m *fakeMsg) NakWithDelay(time.Duration) error { return m.Nak() }
-func (m *fakeMsg) InProgress() error                { return nil }
-func (m *fakeMsg) Term() error                      { return nil }
-func (m *fakeMsg) TermWithReason(string) error      { return nil }
+func (m *fakeMsg) NakWithDelay(delay time.Duration) error { m.nakDelay = delay; return m.Nak() }
+func (m *fakeMsg) InProgress() error                      { return nil }
+func (m *fakeMsg) Term() error                            { return nil }
+func (m *fakeMsg) TermWithReason(string) error            { return nil }
 
 // errProc is a committeeEventProcessor that always returns a transient error.
 func errProc(_ context.Context, _ string, _ []byte) error {
@@ -66,7 +67,7 @@ func okProc(_ context.Context, _ string, _ []byte) error {
 // TestCommitteeEventsIngestHandler_UnknownSubject verifies that an unrecognised
 // subject is ACKed (not retried) regardless of the processor outcome.
 func TestCommitteeEventsIngestHandler_UnknownSubject(t *testing.T) {
-	h := newCommitteeEventsIngestHandler(errProc, errProc)
+	h := newCommitteeEventsIngestHandler(errProc, errProc, errProc)
 	msg := &fakeMsg{subject: "lfx.project.created", data: []byte(`{}`)}
 	h(msg)
 	if !msg.acked {
@@ -80,7 +81,7 @@ func TestCommitteeEventsIngestHandler_UnknownSubject(t *testing.T) {
 // TestCommitteeEventsIngestHandler_CommitteeSubject_TransientError verifies that a
 // transient error from the committee processor causes a NAK so JetStream redelivers.
 func TestCommitteeEventsIngestHandler_CommitteeSubject_TransientError(t *testing.T) {
-	h := newCommitteeEventsIngestHandler(errProc, okProc)
+	h := newCommitteeEventsIngestHandler(errProc, okProc, okProc)
 	msg := &fakeMsg{subject: "lfx.committee.updated", data: []byte(`{}`)}
 	h(msg)
 	if msg.acked {
@@ -94,7 +95,7 @@ func TestCommitteeEventsIngestHandler_CommitteeSubject_TransientError(t *testing
 // TestCommitteeEventsIngestHandler_CommitteeSubject_Success verifies that a
 // successful (nil-error) committee processor result causes an ACK.
 func TestCommitteeEventsIngestHandler_CommitteeSubject_Success(t *testing.T) {
-	h := newCommitteeEventsIngestHandler(okProc, errProc)
+	h := newCommitteeEventsIngestHandler(okProc, errProc, okProc)
 	msg := &fakeMsg{subject: "lfx.committee.created", data: []byte(`{}`)}
 	h(msg)
 	if !msg.acked {
@@ -108,7 +109,7 @@ func TestCommitteeEventsIngestHandler_CommitteeSubject_Success(t *testing.T) {
 // TestCommitteeEventsIngestHandler_MemberSubject_TransientError verifies that a
 // transient error from the member processor causes a NAK.
 func TestCommitteeEventsIngestHandler_MemberSubject_TransientError(t *testing.T) {
-	h := newCommitteeEventsIngestHandler(okProc, errProc)
+	h := newCommitteeEventsIngestHandler(okProc, errProc, okProc)
 	msg := &fakeMsg{subject: "lfx.committee_member.deleted", data: []byte(`{}`)}
 	h(msg)
 	if msg.acked {
@@ -122,7 +123,7 @@ func TestCommitteeEventsIngestHandler_MemberSubject_TransientError(t *testing.T)
 // TestCommitteeEventsIngestHandler_MemberSubject_Success verifies that a
 // successful member processor result causes an ACK.
 func TestCommitteeEventsIngestHandler_MemberSubject_Success(t *testing.T) {
-	h := newCommitteeEventsIngestHandler(errProc, okProc)
+	h := newCommitteeEventsIngestHandler(errProc, okProc, okProc)
 	msg := &fakeMsg{subject: "lfx.committee_member.created", data: []byte(`{}`)}
 	h(msg)
 	if !msg.acked {
@@ -142,11 +143,12 @@ func TestCommitteeEventsIngestHandler_InvalidJSON_ACKs(t *testing.T) {
 	}{
 		{"committee subject", "lfx.committee.created"},
 		{"committee_member subject", "lfx.committee_member.created"},
+		{"committee_settings subject", "lfx.committee_settings.created"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Use the real process functions: invalid JSON returns nil immediately.
-			h := newCommitteeEventsIngestHandler(processCommitteeIndexingEvent, processCommitteeMemberIndexingEvent)
+			h := newCommitteeEventsIngestHandler(processCommitteeIndexingEvent, processCommitteeMemberIndexingEvent, processCommitteeSettingsIndexingEvent)
 			msg := &fakeMsg{subject: tt.subject, data: []byte(`not valid json`)}
 			h(msg)
 			if !msg.acked {
@@ -166,7 +168,7 @@ func TestCommitteeEventsIngestHandler_Dispatch(t *testing.T) {
 	trackCommittee := func(_ context.Context, _ string, _ []byte) error { committeeHit = true; return nil }
 	trackMember := func(_ context.Context, _ string, _ []byte) error { memberHit = true; return nil }
 
-	h := newCommitteeEventsIngestHandler(trackCommittee, trackMember)
+	h := newCommitteeEventsIngestHandler(trackCommittee, trackMember, okProc)
 
 	h(&fakeMsg{subject: "lfx.committee.updated", data: []byte(`{}`)})
 	if !committeeHit {
