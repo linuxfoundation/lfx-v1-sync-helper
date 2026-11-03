@@ -135,7 +135,7 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 	}{
 		{"omitted cleared fields", base, map[string]any{
 			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
-			"ChatChannel": "NONE", "PublicEnabled": false, "EnableVoting": false,
+			"ChatChannel": "NONE", "PublicEnabled": false, "EnableVoting": false, "SSOGroupEnabled": false,
 		}},
 		{"populated mailing list", func() committeeSnapshot {
 			value := base
@@ -144,7 +144,7 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 			return value
 		}(), map[string]any{
 			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
-			"MailingList": "list@example.invalid", "ChatChannel": "NONE", "PublicEnabled": false, "EnableVoting": false,
+			"MailingList": "list@example.invalid", "ChatChannel": "NONE", "PublicEnabled": false, "EnableVoting": false, "SSOGroupEnabled": false,
 		}},
 		{"populated join mode", func() committeeSnapshot {
 			value := base
@@ -152,7 +152,7 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 			return value
 		}(), map[string]any{
 			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
-			"ChatChannel": "NONE", "JoinMode": "open", "PublicEnabled": false, "EnableVoting": false,
+			"ChatChannel": "NONE", "JoinMode": "open", "PublicEnabled": false, "EnableVoting": false, "SSOGroupEnabled": false,
 		}},
 		{"voting enabled", func() committeeSnapshot {
 			value := base
@@ -160,7 +160,15 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 			return value
 		}(), map[string]any{
 			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
-			"ChatChannel": "NONE", "PublicEnabled": false, "EnableVoting": true,
+			"ChatChannel": "NONE", "PublicEnabled": false, "EnableVoting": true, "SSOGroupEnabled": false,
+		}},
+		{"SSO group enabled", func() committeeSnapshot {
+			value := base
+			value.SSOGroupEnabled = true
+			return value
+		}(), map[string]any{
+			"Name": "Committee", "Category": "Other", "Description": "", "CommitteeWebsite": "",
+			"ChatChannel": "NONE", "PublicEnabled": false, "EnableVoting": false, "SSOGroupEnabled": true,
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -192,6 +200,9 @@ func TestCommitteeUpdateClearsFromSerializedSnapshot(t *testing.T) {
 				}
 				if enableVoting, ok := trimmed["enable_voting"].(bool); ok {
 					want["EnableVoting"] = enableVoting
+				}
+				if ssoEnabled, ok := trimmed["sso_group_enabled"].(bool); ok {
+					want["SSOGroupEnabled"] = ssoEnabled
 				}
 				if list, ok := trimmed["mailing_list"].(string); ok {
 					want["MailingList"] = list
@@ -701,6 +712,58 @@ func TestV2CommitteeEnableVotingWrittenToV1Update(t *testing.T) {
 			}
 			if got := requests[0].Body["EnableVoting"]; got != tt.want {
 				t.Errorf("EnableVoting = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestV2CommitteeSSOGroupEnabledWrittenToV1(t *testing.T) {
+	c := indexerSyncCase{
+		resource: markerResourceCommittee, uid: "committee-uid", sfid: "committee-sfid",
+		path: "/project-service/v2/projects/project-sfid/committees", reverse: "project-sfid:committee-sfid",
+	}
+	for _, action := range []string{"created", "updated"} {
+		t.Run(action, func(t *testing.T) {
+			for _, tt := range []struct {
+				name    string
+				present bool
+				value   any
+				want    any
+			}{
+				{name: "enabled", present: true, value: true, want: true},
+				{name: "disabled", present: true, value: false, want: false},
+				{name: "absent"},
+				{name: "null", present: true},
+				{name: "malformed", present: true, value: "true"},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					status, method, path := 201, "POST", c.path
+					if action == "updated" {
+						status, method, path = 200, "PATCH", c.path+"/"+c.sfid
+					}
+					h := setupSyncTest(t, status, `{"ID":"committee-sfid"}`)
+					c.seedParent(t, h)
+					if action == "updated" {
+						h.seed(t, "committee.uid."+c.uid, c.reverse)
+					}
+					data := map[string]any{"name": "Committee", "project_uid": "project-uid"}
+					want := map[string]any{"Name": "Committee"}
+					if action == "created" {
+						data["category"] = "Other"
+						want["Category"] = "Other"
+					}
+					if tt.present {
+						data["sso_group_enabled"] = tt.value
+					}
+					if tt.want != nil {
+						want["SSOGroupEnabled"] = tt.want
+					}
+					if !c.dispatch(t, action, data) {
+						t.Fatal("successful committee sync should ACK")
+					}
+					assertSyncRequest(t, h, method, path, want)
+					h.assertMapping(t, "committee.uid."+c.uid, c.reverse)
+				})
 			}
 		})
 	}
