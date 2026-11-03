@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -785,6 +786,68 @@ func TestReconcileProjectStaff(t *testing.T) {
 	})
 }
 
+func TestWaitProjectStaffConvergence(t *testing.T) {
+	setup := func(t *testing.T, timeout, readLimit time.Duration) {
+		t.Helper()
+		origRead := readV1ProjectStaffSnapshot
+		origTimeout, origReadLimit, origInterval := projectStaffConvergenceTimeout, projectStaffConvergenceReadLimit, projectStaffConvergenceInterval
+		t.Cleanup(func() {
+			readV1ProjectStaffSnapshot = origRead
+			projectStaffConvergenceTimeout, projectStaffConvergenceReadLimit, projectStaffConvergenceInterval = origTimeout, origReadLimit, origInterval
+		})
+		projectStaffConvergenceTimeout = timeout
+		projectStaffConvergenceReadLimit = readLimit
+		projectStaffConvergenceInterval = 10 * time.Millisecond
+	}
+
+	t.Run("stalled read respects overall deadline", func(t *testing.T) {
+		setup(t, 30*time.Millisecond, 300*time.Millisecond)
+		start := time.Now()
+		readV1ProjectStaffSnapshot = func(ctx context.Context, _ string) (*v1ProjectStaffSnapshot, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok || deadline.After(start.Add(projectStaffConvergenceTimeout+20*time.Millisecond)) {
+				t.Errorf("read deadline = %s, want the overall convergence deadline", deadline)
+			}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		if waitProjectStaffConvergence(t.Context(), staffTestSFIDA, map[string]string{"executive_director__c": staffCanaryEDContact}) {
+			t.Fatal("a stalled read must not report convergence")
+		}
+		if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+			t.Errorf("convergence took %s, want the 30ms overall budget, not the 300ms read budget", elapsed)
+		}
+	})
+
+	t.Run("late poll inherits the same deadline", func(t *testing.T) {
+		setup(t, 80*time.Millisecond, 400*time.Millisecond)
+		var firstDeadline time.Time
+		calls := 0
+		readV1ProjectStaffSnapshot = func(ctx context.Context, _ string) (*v1ProjectStaffSnapshot, error) {
+			calls++
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Fatal("convergence read has no deadline")
+			}
+			if calls == 1 {
+				firstDeadline = deadline
+				return &v1ProjectStaffSnapshot{staff: map[string]string{}}, nil
+			}
+			if !deadline.Equal(firstDeadline) {
+				t.Errorf("late read deadline = %s, want original %s", deadline, firstDeadline)
+			}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		if waitProjectStaffConvergence(t.Context(), staffTestSFIDA, map[string]string{"executive_director__c": staffCanaryEDContact}) {
+			t.Fatal("unreplicated fields must not report convergence")
+		}
+		if calls != 2 {
+			t.Errorf("read calls = %d, want an initial poll and one stalled late poll", calls)
+		}
+	})
+}
+
 func TestProjectStaffReconcileOptions(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, content string) string {
@@ -841,6 +904,9 @@ func TestProjectStaffReconcileOptions(t *testing.T) {
 		{"apply without plan", projectStaffReconcileOptions{selectionPath: selection, apply: true, emitRate: 2}, "requires --project-staff-approved-plan", 0, 0},
 		{"apply with dry-run", projectStaffReconcileOptions{selectionPath: selection, apply: true, approvedPlanPath: goodPlan, dryRun: true, emitRate: 2}, "contradicts", 0, 0},
 		{"zero emit rate", projectStaffReconcileOptions{selectionPath: selection, reportPath: newReport(), emitRate: 0}, "--emit-rate", 0, 0},
+		{"NaN emit rate", projectStaffReconcileOptions{selectionPath: selection, reportPath: newReport(), emitRate: math.NaN()}, "--emit-rate", 0, 0},
+		{"positive infinite emit rate", projectStaffReconcileOptions{selectionPath: selection, reportPath: newReport(), emitRate: math.Inf(1)}, "--emit-rate", 0, 0},
+		{"negative infinite emit rate", projectStaffReconcileOptions{selectionPath: selection, reportPath: newReport(), emitRate: math.Inf(-1)}, "--emit-rate", 0, 0},
 		{"report path is the plan", projectStaffReconcileOptions{selectionPath: selection, apply: true, approvedPlanPath: goodPlan, reportPath: goodPlan, emitRate: 2}, "must not be the approved plan", 0, 0},
 		{"report path exists", projectStaffReconcileOptions{selectionPath: selection, reportPath: existing, emitRate: 2}, "already exists", 0, 0},
 		{"missing selection file", projectStaffReconcileOptions{selectionPath: filepath.Join(dir, "absent.txt"), reportPath: newReport(), emitRate: 2}, "no such file", 0, 0},

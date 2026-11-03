@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -177,8 +178,8 @@ func (o projectStaffReconcileOptions) validate() error {
 	if o.selectionPath == "" {
 		return errors.New("--project-staff-report, --apply-project-staff and --project-staff-approved-plan require --reconcile-project-staff-file")
 	}
-	if o.emitRate <= 0 {
-		return fmt.Errorf("--emit-rate must be greater than 0, got %v", o.emitRate)
+	if o.emitRate <= 0 || math.IsNaN(o.emitRate) || math.IsInf(o.emitRate, 0) {
+		return fmt.Errorf("--emit-rate must be finite and greater than 0, got %v", o.emitRate)
 	}
 	if !o.apply {
 		if o.approvedPlanPath != "" {
@@ -943,12 +944,13 @@ func applyProjectStaffGroup(ctx context.Context, mappings projectStaffMappingRea
 // waitProjectStaffConvergence polls the replicated v1 record until every
 // patched field holds its target, for at most projectStaffConvergenceTimeout.
 func waitProjectStaffConvergence(ctx context.Context, sfid string, targets map[string]string) bool {
-	deadline := time.Now().Add(projectStaffConvergenceTimeout)
-	for {
+	ctx, cancel := context.WithTimeout(ctx, projectStaffConvergenceTimeout)
+	defer cancel()
+	for ctx.Err() == nil {
 		readCtx, cancel := context.WithTimeout(ctx, projectStaffConvergenceReadLimit)
 		snapshot, err := readV1ProjectStaffSnapshot(readCtx, sfid)
 		cancel()
-		if err == nil && snapshot != nil {
+		if err == nil && snapshot != nil && ctx.Err() == nil {
 			converged := true
 			for field, target := range targets {
 				if staffValueOrNone(snapshot.staff[field]) != target {
@@ -960,15 +962,13 @@ func waitProjectStaffConvergence(ctx context.Context, sfid string, targets map[s
 				return true
 			}
 		}
-		if !time.Now().Add(projectStaffConvergenceInterval).Before(deadline) {
-			return false
-		}
 		select {
 		case <-ctx.Done():
 			return false
 		case <-time.After(projectStaffConvergenceInterval):
 		}
 	}
+	return false
 }
 
 // logProjectStaffEntry logs one entry: resource identifiers, role and codes only.
