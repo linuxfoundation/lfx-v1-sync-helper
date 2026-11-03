@@ -30,6 +30,7 @@ func setupHandlerMarkerTest(t *testing.T) *fakeMappingStore {
 	origLogger := logger
 	origFetchProject := fetchProjectBase
 	origFetchCommittee := fetchCommitteeBase
+	origFetchV1Committee := fetchV1CommitteeData
 
 	cfg = &Config{Auth0ClientID: "test-client-id"}
 	mappingStore = fake
@@ -41,6 +42,7 @@ func setupHandlerMarkerTest(t *testing.T) *fakeMappingStore {
 		logger = origLogger
 		fetchProjectBase = origFetchProject
 		fetchCommitteeBase = origFetchCommittee
+		fetchV1CommitteeData = origFetchV1Committee
 	})
 	return fake
 }
@@ -275,6 +277,9 @@ func TestHandleCommitteeUpdate_MarkerCleanedOnFetchBaseError(t *testing.T) {
 		"description__c":   "desc",
 		"project_name__c":  projectSFID,
 		"lastmodifiedbyid": "0050M000009AbcDEQ", // not our client id → shouldSkipSync false
+	}
+	fetchV1CommitteeData = func(context.Context, string) (map[string]any, bool, error) {
+		return v1Data, true, nil
 	}
 
 	handleCommitteeUpdate(context.Background(), "platform-collaboration__c."+committeeSFID, v1Data)

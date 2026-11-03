@@ -5,11 +5,35 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
+	goahttp "goa.design/goa/v3/http"
 )
+
+// Transient base failures must not ACK a WAL event before its independent
+// settings update runs. Keep validation/auth/not-found failures permanent.
+func isRetryableCommitteeSyncError(err error) bool {
+	if isTransientStoreErr(err) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var (
+		conflict    *committeeservice.ConflictError
+		internal    *committeeservice.InternalServerError
+		unavailable *committeeservice.ServiceUnavailableError
+		network     net.Error
+		client      *goahttp.ClientError
+	)
+	if errors.As(err, &conflict) || errors.As(err, &internal) || errors.As(err, &unavailable) || errors.As(err, &network) {
+		return true
+	}
+	return errors.As(err, &client) && (client.Temporary || client.Timeout || client.Fault)
+}
 
 // committeeServiceError carries the detail a generated committee-service
 // client error renders as the empty string.

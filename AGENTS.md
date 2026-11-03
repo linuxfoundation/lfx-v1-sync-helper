@@ -186,6 +186,39 @@ Boot ordering (`main.go`): NATS + KV bucket handles → a KV-backed `mappingStor
   - Explicit `true` and `false` are preserved. Absent, null, or malformed values are omitted so partial/legacy events cannot change the v1 setting. Full committee snapshots always carry the boolean.
   - This does not automatically repair existing drift. Confirm the last deliberate edit and intended setting before reconciliation; timestamps alone are not a source-of-truth signal because sync writes update them. Reconcile v1-authoritative mismatches before deploying, since subsequent v2 updates will now send the flag.
 
+#### Committee business email required — lfx-self-serve-ops#1253
+
+- **v1 → v2:** create maps `business_email_required__c` as before; existing committees also call
+  `updateCommitteeSettingsFromV1`, even when the base is unchanged. The setting and editor are re-read from the
+  current `v1-objects` record so an old WAL redelivery cannot reuse a superseded payload; deleted/missing records
+  and absent/null/malformed flags do nothing. KV failures retry. The v2 settings update uses a fresh read and ETag,
+  preserves other scalar settings, and omits writer/auditor lists (the service preserves absent lists).
+  All updates to existing committees refresh base fields before any base API call too, including events with an
+  absent/null flag, preventing base or settings retries from reverting a newer rename. Echo suppression uses the
+  original WAL message's editor only: a refreshed service-authored row may retain a pending human rename after a
+  settings-only PATCH. Normal base comparison determines completed work; a matching base is a no-op while pending
+  settings work still completes (e.g. after SSO-name writeback).
+  Transient base read/update failures NACK the WAL event instead of losing the pending settings change.
+  Successful base mapping and SSO-name writeback complete before the independently retryable settings update.
+  A v2 settings NotFound is logged at INFO and skipped rather than retried; creating a missing settings record is
+  separate repair work. Other settings errors still retry.
+- **v2 → v1:** create fetches current v2 settings before the v1 POST and sends explicit `BusinessEmailRequired`.
+  A settings NotFound falls back to the v1 default only after confirming the committee base still exists; deleted
+  bases are skipped and transient failures retry. Settings create/update events on `lfx.committee_settings.>` in
+  `committee_events` PATCH only that field, using current settings rather than a stale event snapshot.
+  Deleted/tombstoned committees are skipped. Missing reverse mappings retry only when the live base's parent
+  project has a live v1 mapping; proven v2-only committees are ACKed without warning/retry churn.
+  Eligible mapping races use a 30-second delayed NAK within the existing three-delivery limit, including updates
+  that arrive while a base create is still in flight.
+- **Echo suppression:** v1 settings writes use `pending.v1_to_v2.update.committee_settings.<uid>` and v1 creates
+  use the separate `create` operation, so a settings update cannot consume a create or committee-base marker.
+  Failed settings writes remove their marker. v2→v1 WAL echoes use the existing `shouldSkipSync` service-identity
+  guard. Pending-marker concurrency/freshness caveats still apply.
+- **Rollout:** update the chart-owned stream subjects to include `lfx.committee_settings.>` before the new
+  consumer starts. If stream creation is disabled or subjects are overridden, update the externally managed stream
+  as well. This does not replay old settings or repair existing drift automatically: reconcile intentional v1/v2
+  differences before rollout, since subsequent events can now propagate either side's flag.
+
 ### Python ETL (Meltano)
 
 #### Configuration Structure

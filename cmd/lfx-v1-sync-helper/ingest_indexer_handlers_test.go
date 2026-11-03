@@ -38,7 +38,7 @@ func indexerSyncCases() []indexerSyncCase {
 			resource: markerResourceCommittee, uid: "committee-uid", sfid: "committee-sfid",
 			path: "/project-service/v2/projects/project-sfid/committees", reverse: "project-sfid:committee-sfid",
 			create:   map[string]any{"project_uid": "project-uid", "name": "Committee", "category": "Other", "description": "Created"},
-			wantPost: map[string]any{"Name": "Committee", "Category": "Other", "Description": "Created"},
+			wantPost: map[string]any{"Name": "Committee", "Category": "Other", "Description": "Created", "BusinessEmailRequired": false},
 		},
 	}
 }
@@ -59,7 +59,7 @@ func (c indexerSyncCase) dispatch(t *testing.T, action string, data map[string]a
 		return true // Core NATS project handler has no ACK/NAK result.
 	}
 	msg := &fakeMsg{subject: subject, data: payload}
-	newCommitteeEventsIngestHandler(processCommitteeIndexingEvent, processCommitteeMemberIndexingEvent)(msg)
+	newCommitteeEventsIngestHandler(processCommitteeIndexingEvent, processCommitteeMemberIndexingEvent, processCommitteeSettingsIndexingEvent)(msg)
 	if msg.ackCalls+msg.nakCalls != 1 {
 		t.Fatalf("committee delivery must ACK or NAK exactly once: %+v", msg)
 	}
