@@ -23,6 +23,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
+	"golang.org/x/oauth2"
 )
 
 // Synthetic fixtures. The canary values stand in for staff identity and must
@@ -1115,5 +1116,41 @@ func TestReconcileProjectStaffAmbiguousContact(t *testing.T) {
 			env.assertNoCanaries(t, ambiguous)
 			env.assertNoCanaries(t, applied)
 		})
+	}
+}
+
+// A synchronous token fetch delays dispatch before the base transport sees
+// the PATCH, just as the production client-credentials token source does.
+type delayedStaffTokenSource struct{ delay time.Duration }
+
+func (s delayedStaffTokenSource) Token() (*oauth2.Token, error) {
+	time.Sleep(s.delay)
+	return &oauth2.Token{AccessToken: "synthetic-token", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour)}, nil
+}
+
+func TestReconcileProjectStaffOAuthPacing(t *testing.T) {
+	env := setupProjectStaffTest(t)
+	uids := []string{staffTestProjectA, staffTestProjectB}
+	env.seedProject(t, staffTestProjectA, staffTestSFIDA, canaryED(), nil, staffCanaryOldContact, "")
+	env.seedProject(t, staffTestProjectB, staffTestSFIDB, canaryED(), nil, staffCanaryOldContact, "")
+	report, _ := runReport(t, env, uids...)
+	in := approve(t, report, uids, func(e projectStaffReportEntry) bool { return e.Role == projectStaffRoleExecutiveDirector }, false)
+	in.opts.emitRate = 2
+	v1HTTPClient.Transport = &oauth2.Transport{
+		Source: oauth2.ReuseTokenSource(nil, delayedStaffTokenSource{delay: 600 * time.Millisecond}),
+		Base:   v1HTTPClient.Transport,
+	}
+	_, res, err := reconcileProjectStaff(t.Context(), in, env.store)
+	if err != nil || res.failed() {
+		t.Fatalf("apply: err=%v outcomes=%v", err, res.outcomes)
+	}
+	env.mu.Lock()
+	times := append([]time.Time(nil), env.patchTimes...)
+	env.mu.Unlock()
+	if len(times) != 2 {
+		t.Fatalf("PATCH calls = %d, want 2", len(times))
+	}
+	if gap := times[1].Sub(times[0]); gap < 450*time.Millisecond {
+		t.Errorf("PATCH gap = %s, want >= ~500ms despite the first token fetch", gap)
 	}
 }

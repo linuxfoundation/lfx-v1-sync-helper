@@ -1134,3 +1134,35 @@ func TestV1StaffWriteLogAcknowledgementEvidence(t *testing.T) {
 		}
 	})
 }
+
+func TestHandleProjectSettingsUpdated_UnconfirmedWriteAfterRejectedAttempt(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		firstStatus    int
+		wantPatches    int
+		wantLastTarget string
+	}{
+		{"unknown B must be sent again", http.StatusBadGateway, 3, "0034100001newED"},
+		{"confirmed B need not be sent again", http.StatusOK, 2, "0034100001pccED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := setupStaffBridgeTest(t, tc.firstStatus)
+			replicatedED := "0034100001origED"
+			staleStaffReplica(t, &replicatedED)
+			original := &events.UserInfo{Username: "stafforiginal"}
+			assigned := &events.UserInfo{Username: "staffnew"}
+			rejected := &events.UserInfo{Username: "staffpcc"}
+			handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+				events.ProjectSettings{ExecutiveDirector: original}, events.ProjectSettings{ExecutiveDirector: assigned}))
+			spy.patchStatus = http.StatusUnprocessableEntity
+			handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+				events.ProjectSettings{ExecutiveDirector: assigned}, events.ProjectSettings{ExecutiveDirector: rejected}))
+			spy.patchStatus = http.StatusOK
+			handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+				events.ProjectSettings{ExecutiveDirector: rejected}, events.ProjectSettings{ExecutiveDirector: assigned}))
+			if spy.patchCalls != tc.wantPatches || spy.lastBody["ExecutiveDirectorID"] != tc.wantLastTarget {
+				t.Fatalf("PATCH calls = %d, body = %v; want %d with last target %s", spy.patchCalls, spy.lastBody, tc.wantPatches, tc.wantLastTarget)
+			}
+		})
+	}
+}

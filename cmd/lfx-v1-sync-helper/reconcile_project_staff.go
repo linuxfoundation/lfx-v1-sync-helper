@@ -43,7 +43,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
-	"golang.org/x/time/rate"
 
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
 	"github.com/linuxfoundation/lfx-v2-project-service/pkg/events"
@@ -840,7 +839,8 @@ func reportProjectStaff(ctx context.Context, in *projectStaffReconcileInput, map
 // stops at the first PATCH whose outcome is unknown; the remaining approvals
 // are reported as not_attempted and need a fresh report and review.
 func applyProjectStaff(ctx context.Context, in *projectStaffReconcileInput, mappings projectStaffMappingReader, report *projectStaffReport, res *projectStaffReconcileResult) error {
-	limiter := rate.NewLimiter(rate.Limit(in.opts.emitRate), 1)
+	writeInterval := time.Duration(math.Ceil(float64(time.Second) / in.opts.emitRate))
+	var nextPatchAt time.Time
 	var stopErr error
 	for _, group := range in.approvals {
 		res.projects++
@@ -852,7 +852,7 @@ func applyProjectStaff(ctx context.Context, in *projectStaffReconcileInput, mapp
 			}
 			continue
 		}
-		entries, err := applyProjectStaffGroup(ctx, mappings, limiter, group)
+		entries, err := applyProjectStaffGroup(ctx, mappings, writeInterval, &nextPatchAt, group)
 		for _, entry := range entries {
 			logProjectStaffEntry(ctx, entry)
 		}
@@ -866,7 +866,7 @@ func applyProjectStaff(ctx context.Context, in *projectStaffReconcileInput, mapp
 
 // applyProjectStaffGroup re-checks one project against its approved versions
 // and PATCHes only the approved roles that still differ the same way.
-func applyProjectStaffGroup(ctx context.Context, mappings projectStaffMappingReader, limiter *rate.Limiter, group projectStaffApprovalGroup) ([]projectStaffReportEntry, error) {
+func applyProjectStaffGroup(ctx context.Context, mappings projectStaffMappingReader, writeInterval time.Duration, nextPatchAt *time.Time, group projectStaffApprovalGroup) ([]projectStaffReportEntry, error) {
 	entries := append([]projectStaffReportEntry(nil), group.entries...)
 	setAll := func(idx []int, outcome, reason string) {
 		for _, i := range idx {
@@ -941,16 +941,32 @@ func applyProjectStaffGroup(ctx context.Context, mappings projectStaffMappingRea
 		return entries, nil
 	}
 
-	// Pace the actual writes, not the reads: a slow observation must not
-	// replenish a token and allow two PATCHes to be sent back-to-back.
-	// The operation deadline also bounds this wait; no request was sent if
-	// it cannot complete, so preserve the other roles' classified outcomes.
-	if err := limiter.Wait(opCtx); err != nil {
+	// Space PATCHes from the preceding request's completion, not a token
+	// consumed before authentication. A slow OAuth fetch must not refill the
+	// write allowance and permit back-to-back dispatches. Waiting still shares
+	// this project's operation budget; no request is sent if it cannot fit.
+	if delay := time.Until(*nextPatchAt); delay > 0 {
+		if deadline, ok := opCtx.Deadline(); ok && nextPatchAt.After(deadline) {
+			setAll(patched, projectStaffOutcomeNotAttempted, "")
+			return entries, context.DeadlineExceeded
+		}
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-opCtx.Done():
+			setAll(patched, projectStaffOutcomeNotAttempted, "")
+			return entries, opCtx.Err()
+		case <-timer.C:
+		}
+	}
+	if err := opCtx.Err(); err != nil {
 		setAll(patched, projectStaffOutcomeNotAttempted, "")
 		return entries, err
 	}
 
-	if err := patchV1ProjectStaff(opCtx, group.projectSFID, payload); err != nil {
+	err := patchV1ProjectStaff(opCtx, group.projectSFID, payload)
+	*nextPatchAt = time.Now().Add(writeInterval)
+	if err != nil {
 		var statusErr *v1ProjectStaffStatusError
 		switch {
 		case errors.Is(err, errV1ProjectNotFound):

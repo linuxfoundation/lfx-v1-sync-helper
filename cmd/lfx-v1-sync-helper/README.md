@@ -262,7 +262,7 @@ exact approved report.
 | `--project-staff-report <path>` | New report file, created with mode `0600`. The run fails up front if the file exists. Required for a report run; optional with `--apply-project-staff`, where it records the apply results. |
 | `--apply-project-staff` | Default `false`. PATCHes v1 for approved roles. Requires `--project-staff-approved-plan`. Rejected together with `--dry-run`. |
 | `--project-staff-approved-plan <path>` | The reviewed report. Only accepted with `--apply-project-staff`. |
-| `--emit-rate <n>` | Shared flag, default 2. At most `n` project PATCHes per second, one project at a time. Apply requires at least `1/30` per second (use `0.03334` or faster), so the pacing interval fits the 30-second operation budget. |
+| `--emit-rate <n>` | Shared flag, default 2. At most `n` project PATCHes per second, one project at a time. The next PATCH waits at least `1/n` seconds after the preceding PATCH returns, so OAuth delays cannot refill a reserved slot. Apply requires at least `1/30` per second (use `0.03334` or faster), so the pacing interval fits the 30-second operation budget. |
 
 The shared `--dry-run` flag (default `false`) never makes this command write:
 without `--apply-project-staff` the run is report-only either way. Flag and file

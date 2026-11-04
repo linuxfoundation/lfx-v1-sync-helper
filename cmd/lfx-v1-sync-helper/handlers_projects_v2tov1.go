@@ -109,6 +109,7 @@ type v1StaffWrite struct {
 	at               time.Time
 	dispatchRevision uint64
 	baseline         string
+	confirmed        bool
 }
 
 // Retain the newest observed replica briefly after retiring an attempt. A
@@ -145,9 +146,9 @@ func v1StaffWriteKey(sfid, field string) string {
 }
 
 // current compares against the latest unacknowledged write. A snapshot only
-// updates replica freshness; only WAL deliveries acknowledge attempts. When a
-// newer replica disagrees with a pending write, their ordering is uncertain:
-// the caller must send the requested value even if it matches that write.
+// updates replica freshness; only WAL deliveries acknowledge attempts. An
+// unconfirmed PATCH never proves equality. A newer disagreeing replica also
+// makes the ordering uncertain, even after a successful PATCH response.
 func (l *v1StaffWriteLog) current(sfid, field, replicated string, revision uint64, now time.Time) (value string, pending, uncertain bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -176,7 +177,7 @@ func (l *v1StaffWriteLog) current(sfid, field, replicated string, revision uint6
 	}
 	l.writes[key] = writes
 	latest := writes[len(writes)-1]
-	return latest.value, true, observed && replica.revision > latest.dispatchRevision && replica.value != latest.value
+	return latest.value, true, !latest.confirmed || (observed && replica.revision > latest.dispatchRevision && replica.value != latest.value)
 }
 
 // record runs BEFORE the HTTP request: WAL may acknowledge a successful
@@ -212,6 +213,20 @@ func (l *v1StaffWriteLog) record(sfid string, fields map[string]string, revision
 		})
 	}
 	return l.nextID
+}
+
+// confirm records a successful HTTP response without restoring an attempt
+// that WAL already retired while the request was in flight.
+func (l *v1StaffWriteLog) confirm(id uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, writes := range l.writes {
+		for i := range writes {
+			if writes[i].id == id {
+				writes[i].confirmed = true
+			}
+		}
+	}
 }
 
 func (l *v1StaffWriteLog) discard(id uint64) {
@@ -510,6 +525,7 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 		log.With(errKey, err).ErrorContext(ctx, "failed to patch v1 project staff")
 		return
 	}
+	recentV1StaffWrites.confirm(writeID)
 
 	// Log field names only: the values are contact SFIDs.
 	log.With("fields", staffPayloadFieldNames(payload)).InfoContext(ctx, "synced v2 project staff to v1")
