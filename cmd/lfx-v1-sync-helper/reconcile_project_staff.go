@@ -371,7 +371,10 @@ func readProjectStaffReport(path string) (*projectStaffReport, error) {
 	if err := dec.Decode(&plan); err != nil {
 		return nil, fmt.Errorf("%s: invalid report: %w", flagName, err)
 	}
-	if dec.More() {
+	// More checks for another array/object element, not end-of-input; a
+	// second decode must see EOF so stray delimiters cannot be ignored.
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("%s: trailing data after the report", flagName)
 	}
 	if plan.SchemaVersion != projectStaffReportSchemaVersion {
@@ -851,11 +854,6 @@ func applyProjectStaffGroup(ctx context.Context, mappings projectStaffMappingRea
 		return entries, nil
 	}
 
-	if err := limiter.Wait(ctx); err != nil {
-		setAll(pending, projectStaffOutcomeNotAttempted, "")
-		return entries, err
-	}
-
 	log := logger.With("project_uid", group.projectUID)
 	opCtx, cancel := context.WithTimeout(ctx, projectStaffOperationTimeout)
 	defer cancel()
@@ -908,6 +906,15 @@ func applyProjectStaffGroup(ctx context.Context, mappings projectStaffMappingRea
 	}
 	if len(payload) == 0 {
 		return entries, nil
+	}
+
+	// Pace the actual writes, not the reads: a slow observation must not
+	// replenish a token and allow two PATCHes to be sent back-to-back.
+	// The operation deadline also bounds this wait; no request was sent if
+	// it cannot complete, so preserve the other roles' classified outcomes.
+	if err := limiter.Wait(opCtx); err != nil {
+		setAll(patched, projectStaffOutcomeNotAttempted, "")
+		return entries, err
 	}
 
 	if err := patchV1ProjectStaff(opCtx, group.projectSFID, payload); err != nil {

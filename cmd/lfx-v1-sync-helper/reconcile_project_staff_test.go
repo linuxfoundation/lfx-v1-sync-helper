@@ -67,6 +67,7 @@ type staffTestEnv struct {
 	contacts    map[string]string // username or email -> contact SFID
 	lookupErr   error
 	patches     []staffTestPatch
+	patchTimes  []time.Time
 	patchStatus int
 	patchDelay  time.Duration
 	replicate   bool // apply a successful PATCH to the v1 snapshot
@@ -107,6 +108,7 @@ func setupProjectStaffTest(t *testing.T) *staffTestEnv {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		env.mu.Lock()
 		env.patches = append(env.patches, staffTestPatch{path: r.URL.Path, body: body})
+		env.patchTimes = append(env.patchTimes, time.Now())
 		status, delay, replicate := env.patchStatus, env.patchDelay, env.replicate
 		env.mu.Unlock()
 		if delay > 0 {
@@ -648,6 +650,71 @@ func TestReconcileProjectStaff(t *testing.T) {
 		}
 	})
 
+	t.Run("slow reads do not allow back-to-back PATCHes", func(t *testing.T) {
+		env := setupProjectStaffTest(t)
+		uids := []string{staffTestProjectA, staffTestProjectB}
+		env.seedProject(t, staffTestProjectA, staffTestSFIDA, canaryED(), nil, staffCanaryOldContact, "")
+		env.seedProject(t, staffTestProjectB, staffTestSFIDB, canaryED(), nil, staffCanaryOldContact, "")
+		report, _ := runReport(t, env, uids...)
+		in := approve(t, report, uids, func(e projectStaffReportEntry) bool { return e.Role == projectStaffRoleExecutiveDirector }, false)
+		in.opts.emitRate = 2
+		fetch := reconcileFetchProjectSettingsFn
+		reconcileFetchProjectSettingsFn = func(ctx context.Context, uid string) (*projectservice.ProjectSettings, string, error) {
+			if uid == staffTestProjectA {
+				select {
+				case <-time.After(600 * time.Millisecond):
+				case <-ctx.Done():
+					return nil, "", ctx.Err()
+				}
+			}
+			return fetch(ctx, uid)
+		}
+
+		_, res, err := reconcileProjectStaff(t.Context(), in, env.store)
+		if err != nil || res.failed() {
+			t.Fatalf("apply: err=%v outcomes=%v", err, res.outcomes)
+		}
+		env.mu.Lock()
+		times := append([]time.Time(nil), env.patchTimes...)
+		env.mu.Unlock()
+		if len(times) != 2 {
+			t.Fatalf("PATCH calls = %d, want 2", len(times))
+		}
+		if gap := times[1].Sub(times[0]); gap < 450*time.Millisecond {
+			t.Errorf("PATCH gap = %s, want >= ~500ms at rate 2/s even after a slow read", gap)
+		}
+	})
+
+	t.Run("pacing wait cannot exceed the operation budget", func(t *testing.T) {
+		env := setupProjectStaffTest(t)
+		const third = "77777777-7777-4777-8777-777777777777"
+		uids := []string{staffTestProjectA, staffTestProjectB, third}
+		for i, uid := range uids {
+			env.seedProject(t, uid, fmt.Sprintf("a0941000002wPACE%02d", i), canaryED(), nil, "", "")
+		}
+		report, _ := runReport(t, env, uids...)
+		in := approve(t, report, uids, func(e projectStaffReportEntry) bool { return e.Role == projectStaffRoleExecutiveDirector }, false)
+		in.opts.emitRate = 1
+		projectStaffOperationTimeout = 250 * time.Millisecond
+
+		applied, res, err := reconcileProjectStaff(t.Context(), in, env.store)
+		if err == nil || !res.failed() {
+			t.Fatalf("spent pacing budget: err=%v failed=%t, want failed run", err, res.failed())
+		}
+		if n := len(env.patchCalls()); n != 1 {
+			t.Errorf("PATCH calls = %d, want only the first project", n)
+		}
+		for i, uid := range uids {
+			want := projectStaffOutcomeNotAttempted
+			if i == 0 {
+				want = projectStaffOutcomePatched
+			}
+			if got := entryFor(t, applied, uid, projectStaffRoleExecutiveDirector); got.Outcome != want {
+				t.Errorf("project %d outcome = %s, want %s", i, got.Outcome, want)
+			}
+		}
+	})
+
 	t.Run("approved plan validation", func(t *testing.T) {
 		base := func() *projectStaffReport {
 			return &projectStaffReport{
@@ -782,6 +849,50 @@ func TestReconcileProjectStaff(t *testing.T) {
 		// A written report round-trips as an approval input.
 		if _, err := readProjectStaffReport(path); err != nil {
 			t.Errorf("report does not read back: %v", err)
+		}
+	})
+
+	t.Run("approved plan consumes the entire JSON document", func(t *testing.T) {
+		env := setupProjectStaffTest(t)
+		env.seedProject(t, staffTestProjectA, staffTestSFIDA, canaryED(), nil, staffCanaryOldContact, "")
+		report, _ := runReport(t, env, staffTestProjectA)
+		report.Entries[0].Approved = true
+		data, err := json.Marshal(report)
+		if err != nil {
+			t.Fatal(err)
+		}
+		selection := filepath.Join(t.TempDir(), "selection.txt")
+		if err := os.WriteFile(selection, []byte(staffTestProjectA+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cases := []struct {
+			name, suffix string
+			wantErr      bool
+		}{
+			{"EOF", "", false},
+			{"whitespace", " \t\r\n", false},
+			{"closing bracket", "]", true},
+			{"closing brace", "}", true},
+			{"garbage", " not-json", true},
+			{"second object", "{}", true},
+			{"second scalar", " true", true},
+			{"second null", " null", true},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "plan.json")
+				if err := os.WriteFile(path, append(append([]byte(nil), data...), tc.suffix...), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				in, err := prepareProjectStaffReconcile(projectStaffReconcileOptions{selectionPath: selection, apply: true, approvedPlanPath: path, emitRate: 2})
+				if tc.wantErr {
+					if err == nil || !strings.Contains(err.Error(), "trailing data") {
+						t.Fatalf("err = %v, want trailing data rejection", err)
+					}
+				} else if err != nil || len(in.approvals) != 1 {
+					t.Fatalf("valid plan rejected: input=%v err=%v", in, err)
+				}
+			})
 		}
 	})
 }
