@@ -191,6 +191,11 @@ func (o projectStaffReconcileOptions) validate() error {
 		}
 		return nil
 	}
+	// Pacing shares the per-project operation budget. Reject intervals that
+	// can never fit before starting clients or sending the first PATCH.
+	if minimum := 1 / projectStaffOperationTimeout.Seconds(); o.emitRate < minimum {
+		return fmt.Errorf("--emit-rate must be at least %g per second (one write per %s operation budget)", minimum, projectStaffOperationTimeout)
+	}
 	if o.dryRun {
 		return errors.New("--dry-run contradicts --apply-project-staff; omit --apply-project-staff for a report-only run")
 	}

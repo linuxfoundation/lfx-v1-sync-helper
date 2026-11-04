@@ -677,15 +677,15 @@ func TestV1StaffWriteLogAcknowledgements(t *testing.T) {
 		for i := 0; i < 2; i++ {
 			l.observeReplication("project", map[string]any{field: "B"}, 2)
 		}
-		if got, pending := l.current("project", field, "B", 2, now); got != "B" || !pending {
+		if got, pending, _ := l.current("project", field, "B", 2, now); got != "B" || !pending {
 			t.Fatalf("duplicate acknowledgement retired a later write: %q, %t", got, pending)
 		}
 		l.observeReplication("project", map[string]any{field: "A"}, 3)
-		if got, pending := l.current("project", field, "A", 3, now); got != "B" || !pending {
+		if got, pending, _ := l.current("project", field, "A", 3, now); got != "B" || !pending {
 			t.Fatalf("earlier revert retired latest write: %q, %t", got, pending)
 		}
 		l.observeReplication("project", map[string]any{field: "B"}, 4)
-		if _, pending := l.current("project", field, "C", 5, now); pending {
+		if _, pending, _ := l.current("project", field, "C", 5, now); pending {
 			t.Fatal("acknowledged writes must not shadow a later PCC edit")
 		}
 	})
@@ -695,7 +695,7 @@ func TestV1StaffWriteLogAcknowledgements(t *testing.T) {
 		rejected := l.record("project", map[string]string{field: "C"}, 1, now)
 		l.observeReplication("project", map[string]any{field: "B"}, 2)
 		l.discard(rejected)
-		if _, pending := l.current("project", field, "D", 3, now); pending {
+		if _, pending, _ := l.current("project", field, "D", 3, now); pending {
 			t.Fatal("rejection restored an already acknowledged earlier write")
 		}
 	})
@@ -703,11 +703,11 @@ func TestV1StaffWriteLogAcknowledgements(t *testing.T) {
 		l := newV1StaffWriteLog()
 		l.record("project", map[string]string{field: "B"}, 5, now)
 		l.observeReplication("project", map[string]any{field: "B"}, 5)
-		if got, pending := l.current("project", field, "A", 5, now); got != "B" || !pending {
+		if got, pending, _ := l.current("project", field, "A", 5, now); got != "B" || !pending {
 			t.Fatal("old replica revision retired an unreplicated write")
 		}
 		l.observeReplication("project", map[string]any{field: "B"}, 6)
-		if _, pending := l.current("project", field, "B", 6, now); pending {
+		if _, pending, _ := l.current("project", field, "B", 6, now); pending {
 			t.Fatal("new acknowledgement did not retire write")
 		}
 	})
@@ -716,14 +716,14 @@ func TestV1StaffWriteLogAcknowledgements(t *testing.T) {
 		l.record("project", map[string]string{field: v1ClearStaffValue, "program_manager__c": "PM"}, 1, now)
 		l.observeReplication("project", map[string]any{}, 2)
 		l.observeReplication("project", map[string]any{field: false}, 3)
-		if _, pending := l.current("project", field, "A", 1, now); !pending {
+		if _, pending, _ := l.current("project", field, "A", 1, now); !pending {
 			t.Fatal("missing/malformed field acknowledged a clear")
 		}
 		l.observeReplication("project", map[string]any{field: nil}, 4)
-		if _, pending := l.current("project", field, "C", 5, now); pending {
+		if _, pending, _ := l.current("project", field, "C", 5, now); pending {
 			t.Fatal("null did not acknowledge a clear")
 		}
-		if got, pending := l.current("project", "program_manager__c", "old", 5, now); got != "PM" || !pending {
+		if got, pending, _ := l.current("project", "program_manager__c", "old", 5, now); got != "PM" || !pending {
 			t.Fatal("ED acknowledgement retired PM")
 		}
 	})
@@ -921,23 +921,134 @@ func TestV1StaffWriteLogObservedReplica(t *testing.T) {
 	l := newV1StaffWriteLog()
 	l.record("project", map[string]string{field: "B"}, 1, now)
 	l.observeReplication("project", map[string]any{field: "B"}, 2)
-	if got, pending := l.current("project", field, "A", 1, now); got != "B" || pending {
+	if got, pending, _ := l.current("project", field, "A", 1, now); got != "B" || pending {
 		t.Fatalf("old snapshot replaced acknowledged B@2: %q, pending=%t", got, pending)
 	}
 	// A new revert registered from the stale read must inherit B's revision.
 	l.record("project", map[string]string{field: "A"}, 1, now)
 	l.observeReplication("project", map[string]any{field: "A"}, 2)
-	if got, pending := l.current("project", field, "A", 1, now); got != "A" || !pending {
+	if got, pending, _ := l.current("project", field, "A", 1, now); got != "A" || !pending {
 		t.Fatalf("old acknowledgement retired new revert: %q, pending=%t", got, pending)
 	}
 	l.observeReplication("project", map[string]any{field: "A"}, 3)
-	if got, pending := l.current("project", field, "B", 2, now); got != "A" || pending {
+	if got, pending, _ := l.current("project", field, "B", 2, now); got != "A" || pending {
 		t.Fatalf("old snapshot replaced acknowledged revert: %q, pending=%t", got, pending)
 	}
-	if got, pending := l.current("project", field, "C", 4, now); got != "C" || pending {
+	if got, pending, _ := l.current("project", field, "C", 4, now); got != "C" || pending {
 		t.Fatalf("newer PCC snapshot must win: %q, pending=%t", got, pending)
 	}
-	if got, pending := l.current("project", field, "old", 1, now.Add(v1StaffWriteFreshness+time.Second)); got != "old" || pending {
+	if got, pending, _ := l.current("project", field, "old", 1, now.Add(v1StaffWriteFreshness+time.Second)); got != "old" || pending {
 		t.Fatalf("expired observations must not shadow the replica: %q, pending=%t", got, pending)
+	}
+}
+
+// A point read can overtake the KV callback. It is not proof that the
+// pending write failed to replicate, nor may it block its queued WAL ack.
+func TestHandleProjectSettingsUpdated_SnapshotOvertakesWALAcknowledgements(t *testing.T) {
+	for _, repeated := range []bool{false, true} {
+		name := "PCC snapshot overtakes a pending write"
+		if repeated {
+			name = "final B snapshot overtakes B A B deliveries"
+		}
+		t.Run(name, func(t *testing.T) {
+			spy := setupStaffBridgeTest(t, http.StatusOK)
+			const field = "executive_director__c"
+			replicatedED := "0034100001origED"
+			staleStaffReplica(t, &replicatedED)
+			revision := uint64(1)
+			readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+				return &v1ProjectStaffSnapshot{staff: map[string]string{field: replicatedED}, revision: revision}, nil
+			}
+			original := &events.UserInfo{Username: "stafforiginal"}
+			assigned := &events.UserInfo{Username: "staffnew"}
+			pcc := &events.UserInfo{Username: "staffpcc"}
+			handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+				events.ProjectSettings{ExecutiveDirector: original}, events.ProjectSettings{ExecutiveDirector: assigned}))
+			if repeated {
+				handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+					events.ProjectSettings{ExecutiveDirector: assigned}, events.ProjectSettings{ExecutiveDirector: original}))
+				handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+					events.ProjectSettings{ExecutiveDirector: original}, events.ProjectSettings{ExecutiveDirector: assigned}))
+				replicatedED, revision = "0034100001newED", 4
+				// Reading final B@4 must not consume the first B and strand A,B.
+				handleProjectSettingsUpdated(settingsUpdatedMsg(t, "v1-user",
+					events.ProjectSettings{ExecutiveDirector: original}, events.ProjectSettings{ExecutiveDirector: assigned}))
+			}
+			replicatedED, revision = "0034100001pccED", revision+2
+			// The PCC-to-v2 event is service-authored and deliberately skipped.
+			handleProjectSettingsUpdated(settingsUpdatedMsg(t, cfg.HeimdallClientID+"@clients",
+				events.ProjectSettings{ExecutiveDirector: assigned}, events.ProjectSettings{ExecutiveDirector: pcc}))
+			before := spy.patchCalls
+			handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+				events.ProjectSettings{ExecutiveDirector: pcc}, events.ProjectSettings{ExecutiveDirector: assigned}))
+			if spy.patchCalls != before+1 || spy.lastBody["ExecutiveDirectorID"] != "0034100001newED" {
+				t.Errorf("PATCH calls = %d, body = %v; want reassignment despite the older pending B", spy.patchCalls, spy.lastBody)
+			}
+			// Deliver the earlier records only now, followed by the new write.
+			replicateBridgeStaff(t, 2, map[string]any{field: "0034100001newED"})
+			if repeated {
+				replicateBridgeStaff(t, 3, map[string]any{field: "0034100001origED"})
+				replicateBridgeStaff(t, 4, map[string]any{field: "0034100001newED"})
+			}
+			replicateBridgeStaff(t, revision, map[string]any{field: replicatedED})
+			replicateBridgeStaff(t, revision+1, map[string]any{field: "0034100001newED"})
+			if writes := recentV1StaffWrites.writes[v1StaffWriteKey(bridgeTestProjectSFID, field)]; len(writes) != 0 {
+				t.Fatalf("%d attempts still pending after complete WAL replication", len(writes))
+			}
+		})
+	}
+}
+
+func TestV1StaffWriteLogSnapshotDoesNotBlockWAL(t *testing.T) {
+	const field = "executive_director__c"
+	now := time.Now()
+	l := newV1StaffWriteLog()
+	l.record("project", map[string]string{field: "B"}, 1, now)
+	l.current("project", field, "C", 3, now)
+	l.observeReplication("project", map[string]any{field: "B"}, 2)
+	if writes := l.writes[v1StaffWriteKey("project", field)]; len(writes) != 0 {
+		t.Fatal("newer snapshot blocked an older queued WAL acknowledgement")
+	}
+	if replica := l.observed[v1StaffWriteKey("project", field)]; replica.value != "C" || replica.revision != 3 {
+		t.Fatalf("older WAL replaced newer snapshot evidence: %+v", replica)
+	}
+}
+
+func TestV1StaffWriteLogRepeatedSnapshotBeforeWAL(t *testing.T) {
+	const field = "executive_director__c"
+	now := time.Now()
+	l := newV1StaffWriteLog()
+	for _, value := range []string{"B", "A", "B"} {
+		l.record("project", map[string]string{field: value}, 1, now)
+	}
+	l.current("project", field, "B", 4, now)
+	key := v1StaffWriteKey("project", field)
+	for _, delivery := range []struct {
+		value    string
+		revision uint64
+		pending  int
+	}{
+		{"B", 2, 2},
+		{"B", 2, 2}, // duplicate must not consume the final B
+		{"A", 3, 1},
+		{"B", 4, 0},
+	} {
+		l.observeReplication("project", map[string]any{field: delivery.value}, delivery.revision)
+		if got := len(l.writes[key]); got != delivery.pending {
+			t.Fatalf("after %s@%d: %d pending, want %d", delivery.value, delivery.revision, got, delivery.pending)
+		}
+	}
+	if got, pending, uncertain := l.current("project", field, "C", 5, now); got != "C" || pending || uncertain {
+		t.Fatalf("fully replicated attempts shadowed PCC C@5: %q, pending=%t uncertain=%t", got, pending, uncertain)
+	}
+	// A new write inherits the snapshot floor, not the lagging WAL watermark.
+	l.record("project", map[string]string{field: "B"}, 1, now)
+	l.observeReplication("project", map[string]any{field: "B"}, 4)
+	if got := len(l.writes[key]); got != 1 {
+		t.Fatalf("old WAL retired a new attempt: %d pending, want 1", got)
+	}
+	l.observeReplication("project", map[string]any{field: "B"}, 6)
+	if len(l.writes[key]) != 0 {
+		t.Fatal("new WAL did not retire the new attempt")
 	}
 }

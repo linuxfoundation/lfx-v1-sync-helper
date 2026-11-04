@@ -262,7 +262,7 @@ exact approved report.
 | `--project-staff-report <path>` | New report file, created with mode `0600`. The run fails up front if the file exists. Required for a report run; optional with `--apply-project-staff`, where it records the apply results. |
 | `--apply-project-staff` | Default `false`. PATCHes v1 for approved roles. Requires `--project-staff-approved-plan`. Rejected together with `--dry-run`. |
 | `--project-staff-approved-plan <path>` | The reviewed report. Only accepted with `--apply-project-staff`. |
-| `--emit-rate <n>` | Shared flag, default 2. At most `n` project PATCHes per second, one project at a time. |
+| `--emit-rate <n>` | Shared flag, default 2. At most `n` project PATCHes per second, one project at a time. Apply requires at least `1/30` per second (use `0.03334` or faster), so the pacing interval fits the 30-second operation budget. |
 
 The shared `--dry-run` flag (default `false`) never makes this command write:
 without `--apply-project-staff` the run is report-only either way. Flag and file
@@ -414,9 +414,10 @@ lfx-v1-sync-helper --reconcile-project-staff-file cohort.txt \
   --project-staff-report staff-report-after.json
 ```
 
-Each project gets a 30-second deadline for its re-reads and PATCH. After a
-successful PATCH the command polls `v1-objects` for up to 60 seconds until the
-new values have replicated.
+Each project gets a 30-second deadline for its re-reads, pacing wait and PATCH.
+The minimum rate only ensures the pacing interval can fit that budget; slow
+reads can still exhaust it. After a successful PATCH the command polls
+`v1-objects` for up to 60 seconds until the new values have replicated.
 
 Apply outcomes:
 
@@ -432,7 +433,7 @@ Apply outcomes:
 | `rejected` | v1 returned another 4xx (`reason`: `http_<status>`). Nothing written. The run continues. | Investigate. |
 | `patched_unconverged` | The PATCH succeeded but `v1-objects` did not show it within the window. | Fresh report after replication settles. |
 | `unconfirmed` | Timeout, transport error or 5xx: v1 may or may not have written. **The run stops.** | Check the project in PCC and LFX One, then a fresh report and review. Never re-run the old approval. |
-| `not_attempted` | Not reached because an earlier project was `unconfirmed`, or the run was cancelled. | Fresh report and review. |
+| `not_attempted` | No PATCH sent because the operation/pacing budget was exhausted, an earlier project stopped the run, or the run was cancelled. | Fresh report and review; check the rate and read latency if pacing exhausted the budget. |
 | `error` | A re-read failed. Nothing written. | Fresh report. |
 
 The run exits `0` only when every approved role ended `patched`, `now_in_sync`

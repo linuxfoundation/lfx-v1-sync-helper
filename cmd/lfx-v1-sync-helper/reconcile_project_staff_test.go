@@ -267,16 +267,16 @@ func reportInput(uids ...string) *projectStaffReconcileInput {
 }
 
 // approve marks the report entries selected by pick as approved (and
-// clear-approved when clear is true), validates the plan and returns an
+// clear-approved when allowClear is true), validates the plan and returns an
 // apply input, as a reviewer editing the report would.
-func approve(t *testing.T, report *projectStaffReport, uids []string, pick func(projectStaffReportEntry) bool, clear bool) *projectStaffReconcileInput {
+func approve(t *testing.T, report *projectStaffReport, uids []string, pick func(projectStaffReportEntry) bool, allowClear bool) *projectStaffReconcileInput {
 	t.Helper()
 	plan := *report
 	plan.Entries = append([]projectStaffReportEntry(nil), report.Entries...)
 	for i := range plan.Entries {
 		if pick(plan.Entries[i]) {
 			plan.Entries[i].Approved = true
-			plan.Entries[i].ClearApproved = clear && plan.Entries[i].Action == projectStaffActionClear
+			plan.Entries[i].ClearApproved = allowClear && plan.Entries[i].Action == projectStaffActionClear
 		}
 	}
 	approvals, err := validateProjectStaffApprovals(&plan, uids)
@@ -1008,6 +1008,11 @@ func TestProjectStaffReconcileOptions(t *testing.T) {
 		{"report-only with shared dry-run", projectStaffReconcileOptions{selectionPath: selection, reportPath: newReport(), dryRun: true, emitRate: 2}, "", 2, 0},
 		{"apply", projectStaffReconcileOptions{selectionPath: selection, apply: true, approvedPlanPath: goodPlan, emitRate: 2}, "", 2, 1},
 		{"apply with results report", projectStaffReconcileOptions{selectionPath: selection, apply: true, approvedPlanPath: goodPlan, reportPath: newReport(), emitRate: 2}, "", 2, 1},
+		{"slow report-only rate", projectStaffReconcileOptions{selectionPath: selection, reportPath: newReport(), emitRate: 1.0 / 60}, "", 2, 0},
+		{"apply rate at minimum", projectStaffReconcileOptions{selectionPath: selection, apply: true, approvedPlanPath: goodPlan, emitRate: 1 / projectStaffOperationTimeout.Seconds()}, "", 2, 1},
+		{"apply rate just below minimum", projectStaffReconcileOptions{selectionPath: selection, apply: true, approvedPlanPath: goodPlan, emitRate: math.Nextafter(1/projectStaffOperationTimeout.Seconds(), 0)}, "--emit-rate must be at least", 0, 0},
+		{"one write per minute", projectStaffReconcileOptions{selectionPath: selection, apply: true, approvedPlanPath: goodPlan, emitRate: 1.0 / 60}, "--emit-rate must be at least", 0, 0},
+		{"smallest finite rate", projectStaffReconcileOptions{selectionPath: selection, apply: true, approvedPlanPath: goodPlan, emitRate: math.SmallestNonzeroFloat64}, "--emit-rate must be at least", 0, 0},
 		{"report flag without selection", projectStaffReconcileOptions{reportPath: newReport(), emitRate: 2}, "require --reconcile-project-staff-file", 0, 0},
 		{"apply flag without selection", projectStaffReconcileOptions{apply: true, emitRate: 2}, "require --reconcile-project-staff-file", 0, 0},
 		{"report-only without report file", projectStaffReconcileOptions{selectionPath: selection, emitRate: 2}, "--project-staff-report is required", 0, 0},

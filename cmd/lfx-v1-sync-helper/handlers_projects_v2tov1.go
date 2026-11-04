@@ -111,11 +111,14 @@ type v1StaffWrite struct {
 
 // Retain the newest observed replica briefly after retiring an attempt. A
 // settings callback may still hold an older snapshot read before that WAL
-// acknowledgement arrived on the independent KV subscription.
+// acknowledgement arrived on the independent KV subscription. ackRevision
+// tracks delivery progress separately: a newer point read must not block
+// queued WAL records from acknowledging older attempts.
 type v1StaffReplica struct {
-	value    string
-	revision uint64
-	at       time.Time
+	value       string
+	revision    uint64
+	ackRevision uint64
+	at          time.Time
 }
 
 // v1StaffWriteLog records the bridge's recent staff PATCHes per project and v1
@@ -138,29 +141,38 @@ func v1StaffWriteKey(sfid, field string) string {
 	return sfid + "/" + field
 }
 
-// current compares against the latest unacknowledged write. Keep earlier
-// attempts too: acknowledgement of B must not retire a later revert to A.
-func (l *v1StaffWriteLog) current(sfid, field, replicated string, revision uint64, now time.Time) (string, bool) {
+// current compares against the latest unacknowledged write. A snapshot only
+// updates replica freshness; only WAL deliveries acknowledge attempts. When a
+// newer replica disagrees with a pending write, their ordering is uncertain:
+// the caller must send the requested value even if it matches that write.
+func (l *v1StaffWriteLog) current(sfid, field, replicated string, revision uint64, now time.Time) (value string, pending, uncertain bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	key := v1StaffWriteKey(sfid, field)
-	if replica, ok := l.observed[key]; ok && now.Sub(replica.at) > v1StaffWriteFreshness {
-		delete(l.observed, key)
-	}
-	l.acknowledgeLocked(key, replicated, revision, now)
-	if replica, ok := l.observed[key]; ok && replica.revision > revision {
-		replicated = replica.value
-	}
 	writes := l.writes[key]
 	for len(writes) > 0 && now.Sub(writes[0].at) > v1StaffWriteFreshness {
 		writes = writes[1:]
 	}
+	replica, observed := l.observed[key]
+	if observed && now.Sub(replica.at) > v1StaffWriteFreshness {
+		delete(l.observed, key)
+		observed = false
+	}
+	if revision > 0 && (!observed || revision > replica.revision) && (len(writes) > 0 || observed) {
+		replica.value, replica.revision, replica.at = replicated, revision, now
+		l.observed[key] = replica
+		observed = true
+	}
+	if observed && replica.revision > revision {
+		replicated = replica.value
+	}
 	if len(writes) == 0 {
 		delete(l.writes, key)
-		return replicated, false
+		return replicated, false, false
 	}
 	l.writes[key] = writes
-	return writes[len(writes)-1].value, true
+	latest := writes[len(writes)-1]
+	return latest.value, true, observed && replica.revision > latest.revision && replica.value != latest.value
 }
 
 // record runs BEFORE the HTTP request: WAL may acknowledge a successful
@@ -225,11 +237,16 @@ func (l *v1StaffWriteLog) acknowledgeLocked(key, value string, revision uint64, 
 		observed = false
 	}
 	// Track only roles this process recently wrote, not the entire v1 roster.
-	// Never let an unknown, older or duplicate revision replace newer evidence.
-	if revision == 0 || (observed && revision <= replica.revision) || (len(writes) == 0 && !observed) {
+	// Snapshot freshness and delivery progress are independent. An older WAL
+	// delivery may still acknowledge an attempt without replacing a newer read.
+	if revision == 0 || (observed && revision <= replica.ackRevision) || (len(writes) == 0 && !observed) {
 		return
 	}
-	l.observed[key] = v1StaffReplica{value: value, revision: revision, at: now}
+	if !observed || revision > replica.revision {
+		replica.value, replica.revision, replica.at = value, revision, now
+	}
+	replica.ackRevision = revision
+	l.observed[key] = replica
 	for i, w := range writes {
 		if revision > w.revision && value == w.value {
 			writes = writes[i+1:]
@@ -449,11 +466,11 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 			// clearing it would silently drop the PCC assignment.
 			continue
 		}
-		current, ownWrite := recentV1StaffWrites.current(sfid, field.v1Field, staffValueOrNone(snapshot.staff[field.v1Field]), snapshot.revision, now)
+		current, ownWrite, uncertain := recentV1StaffWrites.current(sfid, field.v1Field, staffValueOrNone(snapshot.staff[field.v1Field]), snapshot.revision, now)
 		if ownWrite {
-			log.With("field", field.name).DebugContext(ctx, "v1-objects has not replicated this bridge's last write for the field, comparing against that write")
+			log.With("field", field.name).DebugContext(ctx, "comparing staff against the outstanding write and replica evidence")
 		}
-		if target == current {
+		if target == current && !uncertain {
 			log.With("field", field.name).DebugContext(ctx, "staff field already matches v1 state, omitting from v1 write")
 			continue
 		}

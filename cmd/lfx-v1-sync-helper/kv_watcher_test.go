@@ -105,7 +105,7 @@ func TestKVMessageHandlerStaffReplicationRevision(t *testing.T) {
 			if !msg.acked {
 				t.Fatal("service-authored WAL echo was not ACKed")
 			}
-			if _, pending := recentV1StaffWrites.current(bridgeTestProjectSFID, field, "C", 7, now); pending != tc.wantPending {
+			if _, pending, _ := recentV1StaffWrites.current(bridgeTestProjectSFID, field, "C", 7, now); pending != tc.wantPending {
 				t.Fatalf("pending=%t, want %t", pending, tc.wantPending)
 			}
 		})
