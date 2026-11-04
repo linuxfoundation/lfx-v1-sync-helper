@@ -99,10 +99,23 @@ type v1ProjectStaffSnapshot struct {
 	revision uint64
 }
 
-// v1StaffWrite is one staff value this process sent to v1 and when.
+// v1StaffWrite is one attempted staff value. revision is the replica revision
+// already observed before dispatch (and later acknowledgements), so a stale
+// or redelivered WAL record cannot retire a newer outstanding attempt.
 type v1StaffWrite struct {
-	value string
-	at    time.Time
+	id       uint64
+	value    string
+	at       time.Time
+	revision uint64
+}
+
+// Retain the newest observed replica briefly after retiring an attempt. A
+// settings callback may still hold an older snapshot read before that WAL
+// acknowledgement arrived on the independent KV subscription.
+type v1StaffReplica struct {
+	value    string
+	revision uint64
+	at       time.Time
 }
 
 // v1StaffWriteLog records the bridge's recent staff PATCHes per project and v1
@@ -111,48 +124,146 @@ type v1StaffWrite struct {
 // replication lag window, which the rollout runbook covers with a staff-edit
 // freeze across pod transitions.
 type v1StaffWriteLog struct {
-	mu     sync.Mutex
-	writes map[string]v1StaffWrite
+	mu       sync.Mutex
+	nextID   uint64
+	writes   map[string][]v1StaffWrite
+	observed map[string]v1StaffReplica
 }
 
 func newV1StaffWriteLog() *v1StaffWriteLog {
-	return &v1StaffWriteLog{writes: map[string]v1StaffWrite{}}
+	return &v1StaffWriteLog{writes: map[string][]v1StaffWrite{}, observed: map[string]v1StaffReplica{}}
 }
 
 func v1StaffWriteKey(sfid, field string) string {
 	return sfid + "/" + field
 }
 
-// current returns the value to compare a role against: the bridge's own last
-// write while it is fresh and v1-objects does not show it yet, otherwise the
-// replicated value. A write that has replicated or expired is forgotten.
-func (l *v1StaffWriteLog) current(sfid, field, replicated string, now time.Time) (string, bool) {
+// current compares against the latest unacknowledged write. Keep earlier
+// attempts too: acknowledgement of B must not retire a later revert to A.
+func (l *v1StaffWriteLog) current(sfid, field, replicated string, revision uint64, now time.Time) (string, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	key := v1StaffWriteKey(sfid, field)
-	w, ok := l.writes[key]
-	if !ok {
-		return replicated, false
+	if replica, ok := l.observed[key]; ok && now.Sub(replica.at) > v1StaffWriteFreshness {
+		delete(l.observed, key)
 	}
-	if w.value == replicated || now.Sub(w.at) > v1StaffWriteFreshness {
+	l.acknowledgeLocked(key, replicated, revision, now)
+	if replica, ok := l.observed[key]; ok && replica.revision > revision {
+		replicated = replica.value
+	}
+	writes := l.writes[key]
+	for len(writes) > 0 && now.Sub(writes[0].at) > v1StaffWriteFreshness {
+		writes = writes[1:]
+	}
+	if len(writes) == 0 {
 		delete(l.writes, key)
 		return replicated, false
 	}
-	return w.value, true
+	l.writes[key] = writes
+	return writes[len(writes)-1].value, true
 }
 
-// record remembers the values sent for each v1 field and drops expired
-// entries so the log stays bounded by the projects edited within the window.
-func (l *v1StaffWriteLog) record(sfid string, fields map[string]string, now time.Time) {
+// record runs BEFORE the HTTP request: WAL may acknowledge a successful
+// write before the HTTP response returns. The ID lets a rejected request
+// remove only its own attempt, preserving older unacknowledged writes.
+func (l *v1StaffWriteLog) record(sfid string, fields map[string]string, revision uint64, now time.Time) uint64 {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for key, w := range l.writes {
-		if now.Sub(w.at) > v1StaffWriteFreshness {
+	for key, writes := range l.writes {
+		for len(writes) > 0 && now.Sub(writes[0].at) > v1StaffWriteFreshness {
+			writes = writes[1:]
+		}
+		if len(writes) == 0 {
 			delete(l.writes, key)
+		} else {
+			l.writes[key] = writes
 		}
 	}
+	for key, replica := range l.observed {
+		if now.Sub(replica.at) > v1StaffWriteFreshness {
+			delete(l.observed, key)
+		}
+	}
+	l.nextID++
 	for field, value := range fields {
-		l.writes[v1StaffWriteKey(sfid, field)] = v1StaffWrite{value: value, at: now}
+		key := v1StaffWriteKey(sfid, field)
+		floor := revision
+		if replica, ok := l.observed[key]; ok && replica.revision > floor {
+			floor = replica.revision
+		}
+		l.writes[key] = append(l.writes[key], v1StaffWrite{id: l.nextID, value: value, at: now, revision: floor})
+	}
+	return l.nextID
+}
+
+func (l *v1StaffWriteLog) discard(id uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for key, writes := range l.writes {
+		for i, w := range writes {
+			if w.id == id {
+				writes = append(writes[:i], writes[i+1:]...)
+				break
+			}
+		}
+		if len(writes) == 0 {
+			delete(l.writes, key)
+		} else {
+			l.writes[key] = writes
+		}
+	}
+}
+
+// acknowledgeLocked consumes the oldest matching attempt, not a later
+// attempt with the same value. Advance surviving attempts' revision floors
+// so re-reading/redelivering this acknowledgement cannot consume them too.
+func (l *v1StaffWriteLog) acknowledgeLocked(key, value string, revision uint64, now time.Time) {
+	writes := l.writes[key]
+	replica, observed := l.observed[key]
+	if observed && now.Sub(replica.at) > v1StaffWriteFreshness {
+		delete(l.observed, key)
+		observed = false
+	}
+	// Track only roles this process recently wrote, not the entire v1 roster.
+	// Never let an unknown, older or duplicate revision replace newer evidence.
+	if revision == 0 || (observed && revision <= replica.revision) || (len(writes) == 0 && !observed) {
+		return
+	}
+	l.observed[key] = v1StaffReplica{value: value, revision: revision, at: now}
+	for i, w := range writes {
+		if revision > w.revision && value == w.value {
+			writes = writes[i+1:]
+			break
+		}
+	}
+	if len(writes) == 0 {
+		delete(l.writes, key)
+		return
+	}
+	for i := range writes {
+		if revision > writes[i].revision {
+			writes[i].revision = revision
+		}
+	}
+	l.writes[key] = writes
+}
+
+// observeReplication is called for project KV puts before echo suppression,
+// including our own service-authored WAL records. Missing/malformed fields
+// are not acknowledgements; explicit null and empty strings represent clears.
+func (l *v1StaffWriteLog) observeReplication(sfid string, data map[string]any, revision uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, field := range []string{"executive_director__c", "program_manager__c"} {
+		value, present := data[field]
+		if !present {
+			continue
+		}
+		text, ok := value.(string)
+		if !ok && value != nil {
+			continue
+		}
+		l.acknowledgeLocked(v1StaffWriteKey(sfid, field), staffValueOrNone(strings.TrimSpace(text)), revision, staffWriteNow())
 	}
 }
 
@@ -294,12 +405,12 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 
 	// Compare against current v1 state (AC-4): a PCC-originated edit already
 	// has the new values in v1, making this bridge write a no-op.
-	v1Staff, err := getV1ProjectStaffSFIDs(ctx, sfid)
+	snapshot, err := readV1ProjectStaffSnapshot(ctx, sfid)
 	if err != nil {
 		log.With(errKey, err).ErrorContext(ctx, "failed to read current v1 project record")
 		return
 	}
-	if v1Staff == nil {
+	if snapshot == nil {
 		log.WarnContext(ctx, "no live v1 project record in v1-objects, skipping staff sync")
 		return
 	}
@@ -338,7 +449,7 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 			// clearing it would silently drop the PCC assignment.
 			continue
 		}
-		current, ownWrite := recentV1StaffWrites.current(sfid, field.v1Field, staffValueOrNone(v1Staff[field.v1Field]), now)
+		current, ownWrite := recentV1StaffWrites.current(sfid, field.v1Field, staffValueOrNone(snapshot.staff[field.v1Field]), snapshot.revision, now)
 		if ownWrite {
 			log.With("field", field.name).DebugContext(ctx, "v1-objects has not replicated this bridge's last write for the field, comparing against that write")
 		}
@@ -355,22 +466,22 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 		return
 	}
 
+	writeID := recentV1StaffWrites.record(sfid, written, snapshot.revision, now)
 	if err := patchV1ProjectStaff(ctx, sfid, payload); err != nil {
 		if errors.Is(err, errV1ProjectNotFound) {
+			recentV1StaffWrites.discard(writeID)
 			log.WarnContext(ctx, "project has no Salesforce-backed v1 record (platform-native), skipping staff sync")
 			return
 		}
-		// A 5xx, timeout or transport error may still have reached v1, so
-		// remember the values: a later revert is then re-sent, which is safe
-		// either way. A 4xx was rejected and leaves v1 unchanged.
+		// A 5xx, timeout or transport error may still have reached v1; keep
+		// the attempt. Only an explicit rejection removes it.
 		var statusErr *v1ProjectStaffStatusError
-		if !errors.As(err, &statusErr) || statusErr.status >= http.StatusInternalServerError {
-			recentV1StaffWrites.record(sfid, written, now)
+		if errors.As(err, &statusErr) && statusErr.status < http.StatusInternalServerError {
+			recentV1StaffWrites.discard(writeID)
 		}
 		log.With(errKey, err).ErrorContext(ctx, "failed to patch v1 project staff")
 		return
 	}
-	recentV1StaffWrites.record(sfid, written, now)
 
 	// Log field names only: the values are contact SFIDs.
 	log.With("fields", staffPayloadFieldNames(payload)).InfoContext(ctx, "synced v2 project staff to v1")

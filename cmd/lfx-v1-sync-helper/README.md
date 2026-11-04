@@ -355,6 +355,7 @@ Report outcomes:
 | `in_sync` | v1 already holds the resolved LFX One value. |
 | `drift` | The values differ; `action` says what an approval would do. |
 | `unresolved_contact` | LFX One has a person with no v1 contact (often a manual entry). Not repairable here, and never treated as a clear. |
+| `ambiguous_contact` | The username or email matches more than one distinct live v1 contact. Nothing is written; an ambiguous username never falls back to email. Duplicate email rows for one contact are not ambiguous. |
 | `no_project_mapping` | No live `project.uid.*` mapping. |
 | `no_v1_record` | No live `salesforce-project__c` record in `v1-objects`. |
 | `v2_project_not_found` | The project settings do not exist in v2. |
@@ -426,6 +427,7 @@ Apply outcomes:
 | `clear_not_approved` | Approved clear without `clearApproved`. | Approve explicitly if intended. |
 | `stale_mapping`, `stale_v2`, `stale_v1`, `stale_action`, `stale_target` | A project version, action or resolved contact changed since the review. Nothing written. | Fresh report and review. |
 | `unresolved_contact`, `no_v1_record`, `v2_project_not_found` | The project cannot be compared any more. Nothing written. | Investigate, then a fresh report. |
+| `ambiguous_contact` | A reviewed identifier now has multiple live contact owners. Nothing written, even if the recorded project versions are unchanged. | Resolve the ambiguity manually, then generate and review a fresh report. |
 | `v1_project_not_found` | v1 returned 404 (platform-native project). | None in v1. |
 | `rejected` | v1 returned another 4xx (`reason`: `http_<status>`). Nothing written. The run continues. | Investigate. |
 | `patched_unconverged` | The PATCH succeeded but `v1-objects` did not show it within the window. | Fresh report after replication settles. |

@@ -145,7 +145,7 @@ func setupProjectStaffTest(t *testing.T) *staffTestEnv {
 
 	origCfg, origLogger, origClient := cfg, logger, v1HTTPClient
 	origSnapshot, origFetch := readV1ProjectStaffSnapshot, reconcileFetchProjectSettingsFn
-	origByUsername, origByEmail := resolveV1UserSFIDByUsername, resolveV1UserSFIDByEmail
+	origByUsername, origByEmail := reconcileResolveStaffByUsername, reconcileResolveStaffByEmail
 	origOp, origConv, origInterval := projectStaffOperationTimeout, projectStaffConvergenceTimeout, projectStaffConvergenceInterval
 
 	cfg = &Config{LFXAPIGateway: gateway, V1MappingsStoreMode: V1MappingsStoreModeKV}
@@ -184,13 +184,13 @@ func setupProjectStaffTest(t *testing.T) *staffTestEnv {
 		}
 		return env.contacts[id], nil
 	}
-	resolveV1UserSFIDByUsername = resolve
-	resolveV1UserSFIDByEmail = resolve
+	reconcileResolveStaffByUsername = resolve
+	reconcileResolveStaffByEmail = resolve
 
 	t.Cleanup(func() {
 		cfg, logger, v1HTTPClient = origCfg, origLogger, origClient
 		readV1ProjectStaffSnapshot, reconcileFetchProjectSettingsFn = origSnapshot, origFetch
-		resolveV1UserSFIDByUsername, resolveV1UserSFIDByEmail = origByUsername, origByEmail
+		reconcileResolveStaffByUsername, reconcileResolveStaffByEmail = origByUsername, origByEmail
 		projectStaffOperationTimeout, projectStaffConvergenceTimeout, projectStaffConvergenceInterval = origOp, origConv, origInterval
 	})
 	return env
@@ -1066,5 +1066,49 @@ func TestProjectStaffReconcileOptions(t *testing.T) {
 
 	if (projectStaffReconcileOptions{dryRun: true, emitRate: 2}).requested() {
 		t.Error("the shared --dry-run and --emit-rate flags alone must not select this command")
+	}
+}
+
+func TestReconcileProjectStaffAmbiguousContact(t *testing.T) {
+	for _, identifier := range []string{"username", "email"} {
+		t.Run(identifier, func(t *testing.T) {
+			env := setupProjectStaffTest(t)
+			env.seedProject(t, staffTestProjectA, staffTestSFIDA, canaryED(), nil, staffCanaryOldContact, "")
+			report, _ := runReport(t, env, staffTestProjectA)
+			approved := approve(t, report, []string{staffTestProjectA}, isRole(staffTestProjectA, projectStaffRoleExecutiveDirector), false)
+			emailCalls := 0
+			if identifier == "username" {
+				reconcileResolveStaffByUsername = func(context.Context, string) (string, error) {
+					return "", errAmbiguousProjectStaffContact
+				}
+				reconcileResolveStaffByEmail = func(context.Context, string) (string, error) {
+					emailCalls++
+					return staffCanaryEDContact, nil
+				}
+			} else {
+				reconcileResolveStaffByUsername = func(context.Context, string) (string, error) { return "", nil }
+				reconcileResolveStaffByEmail = func(context.Context, string) (string, error) {
+					return "", errAmbiguousProjectStaffContact
+				}
+			}
+
+			ambiguous, res := runReport(t, env, staffTestProjectA)
+			entry := entryFor(t, ambiguous, staffTestProjectA, projectStaffRoleExecutiveDirector)
+			if entry.Outcome != projectStaffOutcomeAmbiguousContact || entry.Action != "" || entry.TargetFingerprint != "" || res.failed() {
+				t.Fatalf("ambiguous report entry = %+v, failed=%t", entry, res.failed())
+			}
+			// Even a previously approved, version-unchanged target must now be
+			// skipped if its identifier acquired another owner after the report.
+			applied, result, err := reconcileProjectStaff(t.Context(), approved, env.store)
+			if err != nil || !result.failed() || entryFor(t, applied, staffTestProjectA, projectStaffRoleExecutiveDirector).Outcome != projectStaffOutcomeAmbiguousContact {
+				t.Fatalf("ambiguous apply: result=%+v err=%v", result, err)
+			}
+			if len(env.patchCalls()) != 0 || emailCalls != 0 {
+				t.Fatalf("ambiguous target must not PATCH or fall back: patches=%d fallback=%d", len(env.patchCalls()), emailCalls)
+			}
+			env.assertNoMappingWrites(t)
+			env.assertNoCanaries(t, ambiguous)
+			env.assertNoCanaries(t, applied)
+		})
 	}
 }

@@ -35,6 +35,7 @@ type staffBridgeSpy struct {
 	lastPath    string
 	lastBody    map[string]string
 	patchStatus int
+	onPatch     func()
 }
 
 // setupStaffBridgeTest initialises the package-level globals and
@@ -52,6 +53,9 @@ func setupStaffBridgeTest(t *testing.T, patchStatus int) *staffBridgeSpy {
 		spy.lastPath = r.URL.Path
 		spy.lastBody = map[string]string{}
 		_ = json.NewDecoder(r.Body).Decode(&spy.lastBody)
+		if spy.onPatch != nil {
+			spy.onPatch()
+		}
 		w.WriteHeader(spy.patchStatus)
 	}))
 	t.Cleanup(srv.Close)
@@ -60,7 +64,7 @@ func setupStaffBridgeTest(t *testing.T, patchStatus int) *staffBridgeSpy {
 	origLogger := logger
 	origV1HTTPClient := v1HTTPClient
 	origGetSFID := getV1ProjectSFIDByUID
-	origGetStaff := getV1ProjectStaffSFIDs
+	origSnapshot := readV1ProjectStaffSnapshot
 	origByUsername := resolveV1UserSFIDByUsername
 	origByEmail := resolveV1UserSFIDByEmail
 	origWrites := recentV1StaffWrites
@@ -78,8 +82,8 @@ func setupStaffBridgeTest(t *testing.T, patchStatus int) *staffBridgeSpy {
 	v1HTTPClient = srv.Client()
 
 	getV1ProjectSFIDByUID = func(context.Context, string) (string, error) { return bridgeTestProjectSFID, nil }
-	getV1ProjectStaffSFIDs = func(context.Context, string) (map[string]string, error) {
-		return map[string]string{}, nil
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{}, revision: 1}, nil
 	}
 	resolveV1UserSFIDByUsername = func(context.Context, string) (string, error) { return "", nil }
 	resolveV1UserSFIDByEmail = func(context.Context, string) (string, error) { return "", nil }
@@ -90,7 +94,7 @@ func setupStaffBridgeTest(t *testing.T, patchStatus int) *staffBridgeSpy {
 		logger = origLogger
 		v1HTTPClient = origV1HTTPClient
 		getV1ProjectSFIDByUID = origGetSFID
-		getV1ProjectStaffSFIDs = origGetStaff
+		readV1ProjectStaffSnapshot = origSnapshot
 		resolveV1UserSFIDByUsername = origByUsername
 		resolveV1UserSFIDByEmail = origByEmail
 		recentV1StaffWrites = origWrites
@@ -229,8 +233,8 @@ func TestHandleProjectSettingsUpdated_NoDiffVsV1Skips(t *testing.T) {
 	spy := setupStaffBridgeTest(t, http.StatusOK)
 	resolveV1UserSFIDByUsername = func(context.Context, string) (string, error) { return bridgeTestPMSFID, nil }
 	// AC-4: v1 already holds the resolved value (PCC-originated edit).
-	getV1ProjectStaffSFIDs = func(context.Context, string) (map[string]string, error) {
-		return map[string]string{"program_manager__c": bridgeTestPMSFID}, nil
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{"program_manager__c": bridgeTestPMSFID}, revision: 1}, nil
 	}
 
 	msg := settingsUpdatedMsg(t, "test-actor",
@@ -245,8 +249,8 @@ func TestHandleProjectSettingsUpdated_NoDiffVsV1Skips(t *testing.T) {
 
 func TestHandleProjectSettingsUpdated_ClearWritesNone(t *testing.T) {
 	spy := setupStaffBridgeTest(t, http.StatusOK)
-	getV1ProjectStaffSFIDs = func(context.Context, string) (map[string]string, error) {
-		return map[string]string{"program_manager__c": bridgeTestPMSFID}, nil
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{"program_manager__c": bridgeTestPMSFID}, revision: 1}, nil
 	}
 
 	msg := settingsUpdatedMsg(t, "test-actor",
@@ -268,8 +272,8 @@ func TestHandleProjectSettingsUpdated_ClearWritesNone(t *testing.T) {
 // leave the existing v1 assignment alone rather than clearing it.
 func TestHandleProjectSettingsUpdated_UnresolvableUserLeavesV1Unchanged(t *testing.T) {
 	spy := setupStaffBridgeTest(t, http.StatusOK)
-	getV1ProjectStaffSFIDs = func(context.Context, string) (map[string]string, error) {
-		return map[string]string{"program_manager__c": bridgeTestPMSFID}, nil
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{"program_manager__c": bridgeTestPMSFID}, revision: 1}, nil
 	}
 	// Default seams resolve nothing for this user.
 
@@ -361,7 +365,7 @@ func TestHandleProjectSettingsUpdated_ResolutionErrorAborts(t *testing.T) {
 func TestHandleProjectSettingsUpdated_MissingV1RecordSkips(t *testing.T) {
 	spy := setupStaffBridgeTest(t, http.StatusOK)
 	resolveV1UserSFIDByUsername = func(context.Context, string) (string, error) { return bridgeTestPMSFID, nil }
-	getV1ProjectStaffSFIDs = func(context.Context, string) (map[string]string, error) { return nil, nil }
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) { return nil, nil }
 
 	msg := settingsUpdatedMsg(t, "test-actor",
 		events.ProjectSettings{},
@@ -397,8 +401,8 @@ func TestHandleProjectSettingsUpdated_EDChangeOmitsUnchangedPM(t *testing.T) {
 		}
 		return "", nil
 	}
-	getV1ProjectStaffSFIDs = func(context.Context, string) (map[string]string, error) {
-		return map[string]string{"program_manager__c": bridgeTestPMSFID}, nil
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{"program_manager__c": bridgeTestPMSFID}, revision: 1}, nil
 	}
 
 	msg := settingsUpdatedMsg(t, "test-actor",
@@ -434,8 +438,8 @@ func TestHandleProjectSettingsUpdated_StaleReplicaDoesNotRevertSiblingField(t *t
 	}
 	// v1 already carries the new ED from the first edit, but the KV replica
 	// still holds the previous one because the WAL pipeline has not caught up.
-	getV1ProjectStaffSFIDs = func(context.Context, string) (map[string]string, error) {
-		return map[string]string{"executive_director__c": "0034100001staleED"}, nil
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{"executive_director__c": "0034100001staleED"}, revision: 1}, nil
 	}
 
 	ed := &events.UserInfo{Username: "staffed"}
@@ -464,8 +468,8 @@ func staleStaffReplica(t *testing.T, replicatedED *string) {
 	resolveV1UserSFIDByUsername = func(_ context.Context, username string) (string, error) {
 		return contacts[username], nil
 	}
-	getV1ProjectStaffSFIDs = func(context.Context, string) (map[string]string, error) {
-		return map[string]string{"executive_director__c": *replicatedED}, nil
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{"executive_director__c": *replicatedED}, revision: 1}, nil
 	}
 }
 
@@ -533,10 +537,11 @@ func TestHandleProjectSettingsUpdated_ReplicatedWriteNoLongerShadowsV1(t *testin
 	// The write replicates, then is superseded by a PCC edit whose v1->v2 echo
 	// arrives after v1-objects carries it.
 	replicatedED = "0034100001newED"
-	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "v1-user",
-		events.ProjectSettings{},
-		events.ProjectSettings{ExecutiveDirector: assigned}))
+	replicateBridgeStaff(t, 2, map[string]any{"executive_director__c": replicatedED})
 	replicatedED = "0034100001pccED"
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{"executive_director__c": replicatedED}, revision: 3}, nil
+	}
 	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "v1-user",
 		events.ProjectSettings{ExecutiveDirector: assigned},
 		events.ProjectSettings{ExecutiveDirector: &events.UserInfo{Username: "staffpcc"}}))
@@ -602,6 +607,126 @@ func TestHandleProjectSettingsUpdated_FailedWriteOutcome(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Replication acknowledgements pass through the real KV handler, which must
+// retire them before shouldSkipSync drops service-authored WAL echoes.
+func replicateBridgeStaff(t *testing.T, revision uint64, fields map[string]any) {
+	t.Helper()
+	fields["lastmodifiedbyid"] = cfg.Auth0ClientID + "@clients"
+	data, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handleKVPut(t.Context(), &fakeKVEntry{key: "salesforce-project__c." + bridgeTestProjectSFID, value: data, revision: revision}) {
+		t.Error("own WAL echo must not request retry")
+	}
+}
+
+func TestHandleProjectSettingsUpdated_WALAckBeforeHTTPResponse(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	replicatedED := "0034100001origED"
+	staleStaffReplica(t, &replicatedED)
+	spy.onPatch = func() {
+		replicateBridgeStaff(t, 2, map[string]any{"executive_director__c": "0034100001newED"})
+	}
+	assigned := &events.UserInfo{Username: "staffnew"}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ExecutiveDirector: &events.UserInfo{Username: "stafforiginal"}},
+		events.ProjectSettings{ExecutiveDirector: assigned}))
+	replicatedED = "0034100001pccED"
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{"executive_director__c": replicatedED}, revision: 3}, nil
+	}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "v1-user",
+		events.ProjectSettings{ExecutiveDirector: assigned},
+		events.ProjectSettings{ExecutiveDirector: &events.UserInfo{Username: "staffpcc"}}))
+	if spy.patchCalls != 1 {
+		t.Fatalf("PATCH calls = %d, want initial write only after early WAL acknowledgement", spy.patchCalls)
+	}
+}
+
+func TestHandleProjectSettingsUpdated_RejectedLaterWritePreservesPending(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	replicatedED := "0034100001origED"
+	staleStaffReplica(t, &replicatedED)
+	original := &events.UserInfo{Username: "stafforiginal"}
+	assigned := &events.UserInfo{Username: "staffnew"}
+	rejected := &events.UserInfo{Username: "staffpcc"}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ExecutiveDirector: original}, events.ProjectSettings{ExecutiveDirector: assigned}))
+	spy.patchStatus = http.StatusBadRequest
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ExecutiveDirector: assigned}, events.ProjectSettings{ExecutiveDirector: rejected}))
+	spy.patchStatus = http.StatusOK
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ExecutiveDirector: rejected}, events.ProjectSettings{ExecutiveDirector: original}))
+	if spy.patchCalls != 3 || spy.lastBody["ExecutiveDirectorID"] != replicatedED {
+		t.Fatalf("PATCH calls = %d, body = %v; want revert after rejected later write", spy.patchCalls, spy.lastBody)
+	}
+}
+
+func TestV1StaffWriteLogAcknowledgements(t *testing.T) {
+	const field = "executive_director__c"
+	now := time.Now()
+	t.Run("old and duplicate acknowledgements preserve later attempts", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		l.record("project", map[string]string{field: "B"}, 1, now)
+		l.record("project", map[string]string{field: "A"}, 1, now)
+		l.record("project", map[string]string{field: "B"}, 1, now)
+		for i := 0; i < 2; i++ {
+			l.observeReplication("project", map[string]any{field: "B"}, 2)
+		}
+		if got, pending := l.current("project", field, "B", 2, now); got != "B" || !pending {
+			t.Fatalf("duplicate acknowledgement retired a later write: %q, %t", got, pending)
+		}
+		l.observeReplication("project", map[string]any{field: "A"}, 3)
+		if got, pending := l.current("project", field, "A", 3, now); got != "B" || !pending {
+			t.Fatalf("earlier revert retired latest write: %q, %t", got, pending)
+		}
+		l.observeReplication("project", map[string]any{field: "B"}, 4)
+		if _, pending := l.current("project", field, "C", 5, now); pending {
+			t.Fatal("acknowledged writes must not shadow a later PCC edit")
+		}
+	})
+	t.Run("acknowledgement before rejection is not restored", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		l.record("project", map[string]string{field: "B"}, 1, now)
+		rejected := l.record("project", map[string]string{field: "C"}, 1, now)
+		l.observeReplication("project", map[string]any{field: "B"}, 2)
+		l.discard(rejected)
+		if _, pending := l.current("project", field, "D", 3, now); pending {
+			t.Fatal("rejection restored an already acknowledged earlier write")
+		}
+	})
+	t.Run("stale WAL cannot acknowledge a new attempt", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		l.record("project", map[string]string{field: "B"}, 5, now)
+		l.observeReplication("project", map[string]any{field: "B"}, 5)
+		if got, pending := l.current("project", field, "A", 5, now); got != "B" || !pending {
+			t.Fatal("old replica revision retired an unreplicated write")
+		}
+		l.observeReplication("project", map[string]any{field: "B"}, 6)
+		if _, pending := l.current("project", field, "B", 6, now); pending {
+			t.Fatal("new acknowledgement did not retire write")
+		}
+	})
+	t.Run("partial fields and null clear acknowledgements", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		l.record("project", map[string]string{field: v1ClearStaffValue, "program_manager__c": "PM"}, 1, now)
+		l.observeReplication("project", map[string]any{}, 2)
+		l.observeReplication("project", map[string]any{field: false}, 3)
+		if _, pending := l.current("project", field, "A", 1, now); !pending {
+			t.Fatal("missing/malformed field acknowledged a clear")
+		}
+		l.observeReplication("project", map[string]any{field: nil}, 4)
+		if _, pending := l.current("project", field, "C", 5, now); pending {
+			t.Fatal("null did not acknowledge a clear")
+		}
+		if got, pending := l.current("project", "program_manager__c", "old", 5, now); got != "PM" || !pending {
+			t.Fatal("ED acknowledgement retired PM")
+		}
+	})
 }
 
 func TestHandleProjectSettingsUpdated_InvalidEventSkips(t *testing.T) {
@@ -764,5 +889,55 @@ func TestPatchV1ProjectStaff(t *testing.T) {
 				t.Errorf("ProgramManagerID = %q, want %q", got, v1ClearStaffValue)
 			}
 		})
+	}
+}
+
+func TestHandleProjectSettingsUpdated_WALAckAfterSnapshotPreservesRevert(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	replicatedED := "0034100001origED"
+	staleStaffReplica(t, &replicatedED)
+	original := &events.UserInfo{Username: "stafforiginal"}
+	assigned := &events.UserInfo{Username: "staffnew"}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ExecutiveDirector: original}, events.ProjectSettings{ExecutiveDirector: assigned}))
+
+	resolve := resolveV1UserSFIDByUsername
+	resolveV1UserSFIDByUsername = func(ctx context.Context, username string) (string, error) {
+		// The handler has already read A@1. WAL now acknowledges B@2,
+		// retiring B before current compares the revert against that old read.
+		replicateBridgeStaff(t, 2, map[string]any{"executive_director__c": "0034100001newED"})
+		return resolve(ctx, username)
+	}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ExecutiveDirector: assigned}, events.ProjectSettings{ExecutiveDirector: original}))
+	if spy.patchCalls != 2 || spy.lastBody["ExecutiveDirectorID"] != replicatedED {
+		t.Fatalf("PATCH calls = %d, body = %v; want revert despite WAL acknowledging after snapshot read", spy.patchCalls, spy.lastBody)
+	}
+}
+
+func TestV1StaffWriteLogObservedReplica(t *testing.T) {
+	const field = "executive_director__c"
+	now := time.Now()
+	l := newV1StaffWriteLog()
+	l.record("project", map[string]string{field: "B"}, 1, now)
+	l.observeReplication("project", map[string]any{field: "B"}, 2)
+	if got, pending := l.current("project", field, "A", 1, now); got != "B" || pending {
+		t.Fatalf("old snapshot replaced acknowledged B@2: %q, pending=%t", got, pending)
+	}
+	// A new revert registered from the stale read must inherit B's revision.
+	l.record("project", map[string]string{field: "A"}, 1, now)
+	l.observeReplication("project", map[string]any{field: "A"}, 2)
+	if got, pending := l.current("project", field, "A", 1, now); got != "A" || !pending {
+		t.Fatalf("old acknowledgement retired new revert: %q, pending=%t", got, pending)
+	}
+	l.observeReplication("project", map[string]any{field: "A"}, 3)
+	if got, pending := l.current("project", field, "B", 2, now); got != "A" || pending {
+		t.Fatalf("old snapshot replaced acknowledged revert: %q, pending=%t", got, pending)
+	}
+	if got, pending := l.current("project", field, "C", 4, now); got != "C" || pending {
+		t.Fatalf("newer PCC snapshot must win: %q, pending=%t", got, pending)
+	}
+	if got, pending := l.current("project", field, "old", 1, now.Add(v1StaffWriteFreshness+time.Second)); got != "old" || pending {
+		t.Fatalf("expired observations must not shadow the replica: %q, pending=%t", got, pending)
 	}
 }

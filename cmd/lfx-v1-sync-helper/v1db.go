@@ -207,6 +207,56 @@ func dbResolveUserSFIDByEmail(ctx context.Context, email string) (string, error)
 	return row.LeadOrContactID.String, nil
 }
 
+// errAmbiguousProjectStaffContact means an identifier belongs to more than
+// one live contact. Reconciliation must leave that role for manual review.
+var errAmbiguousProjectStaffContact = errors.New("ambiguous project staff contact")
+
+// These lookups are deliberately stricter than the general v1 resolvers: a
+// reviewed repair must not choose one owner of a shared identifier. DISTINCT
+// avoids treating duplicate email rows for the same contact as ambiguous; two
+// distinct results are enough to reject the match without enumerating users.
+func dbResolveUniqueStaffSFIDByUsername(ctx context.Context, username string) (string, error) {
+	normalized := normalizeUserIdentifier(username)
+	if normalized == "" {
+		return "", nil
+	}
+	q := v1DB.NewSelect().Model((*mergedUserRow)(nil)).
+		ColumnExpr("DISTINCT mu.sfid").
+		Where("LOWER(mu.username__c) = ?", normalized).
+		Where("mu.isdeleted IS NOT TRUE").
+		Where("mu.sfid IS NOT NULL")
+	return resolveUniqueStaffContact(ctx, q)
+}
+
+func dbResolveUniqueStaffSFIDByEmail(ctx context.Context, email string) (string, error) {
+	normalized := normalizeUserIdentifier(email)
+	if normalized == "" {
+		return "", nil
+	}
+	q := activeEmailFilter(v1DB.NewSelect().Model((*alternateEmailRow)(nil))).
+		ColumnExpr("DISTINCT ae.leadorcontactid").
+		Where("LOWER(ae.alternate_email_address__c) = ?", normalized).
+		Where("ae.leadorcontactid IS NOT NULL")
+	return resolveUniqueStaffContact(ctx, q)
+}
+
+func resolveUniqueStaffContact(ctx context.Context, q *bun.SelectQuery) (string, error) {
+	qCtx, cancel := withQueryTimeout(ctx)
+	defer cancel()
+	var contacts []string
+	if err := q.Limit(2).Scan(qCtx, &contacts); err != nil {
+		return "", fmt.Errorf("query unique project staff contact: %w", err)
+	}
+	switch len(contacts) {
+	case 0:
+		return "", nil
+	case 1:
+		return contacts[0], nil
+	default:
+		return "", errAmbiguousProjectStaffContact
+	}
+}
+
 // dbGetAlternateEmailsForUser returns all live (not soft-deleted) alternate
 // email rows for a user, primary-flagged rows first. Inactive rows are
 // included so callers can apply their own active/verified policies.

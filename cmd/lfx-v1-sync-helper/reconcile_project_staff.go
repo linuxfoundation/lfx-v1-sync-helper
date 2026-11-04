@@ -73,6 +73,7 @@ const (
 	projectStaffOutcomeInSync            = "in_sync"
 	projectStaffOutcomeDrift             = "drift"
 	projectStaffOutcomeUnresolvedContact = "unresolved_contact"
+	projectStaffOutcomeAmbiguousContact  = "ambiguous_contact"
 	projectStaffOutcomeNoProjectMapping  = "no_project_mapping"
 	projectStaffOutcomeNoV1Record        = "no_v1_record"
 	projectStaffOutcomeV2ProjectNotFound = "v2_project_not_found"
@@ -545,7 +546,11 @@ func checkV1MappingsTableExists(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 // Injectable for tests.
-var reconcileFetchProjectSettingsFn = fetchProjectSettings
+var (
+	reconcileFetchProjectSettingsFn = fetchProjectSettings
+	reconcileResolveStaffByUsername = dbResolveUniqueStaffSFIDByUsername
+	reconcileResolveStaffByEmail    = dbResolveUniqueStaffSFIDByEmail
+)
 
 // projectStaffOperationTimeout bounds one project's reads and PATCH. Vars so
 // tests can shorten them.
@@ -677,15 +682,38 @@ type projectStaffRoleState struct {
 	target  string
 }
 
+// resolveProjectStaffContact preserves the bridge's username-first fallback,
+// but uses uniqueness-checking DB reads. Ambiguity is a terminal result: do
+// not fall through to another identifier that could select a different owner.
+func resolveProjectStaffContact(ctx context.Context, info *events.UserInfo) (string, error) {
+	if info == nil {
+		return v1ClearStaffValue, nil
+	}
+	if username := strings.TrimSpace(info.Username); username != "" {
+		contact, err := reconcileResolveStaffByUsername(ctx, username)
+		if err != nil || contact != "" {
+			return contact, err
+		}
+	}
+	if email := strings.TrimSpace(info.Email); email != "" {
+		return reconcileResolveStaffByEmail(ctx, email)
+	}
+	return "", nil
+}
+
 // classifyProjectStaffRole resolves the v2 assignee to a v1 contact and
 // compares it with v1. An empty v2 role is a clear; a v2 assignee that cannot
 // be resolved is unresolved_contact, never a clear.
 func classifyProjectStaffRole(ctx context.Context, log *slog.Logger, obs projectStaffObservation, spec projectStaffRoleSpec) projectStaffRoleState {
-	target, err := resolveV1StaffSFID(ctx, log, projectStaffEventUser(spec.v2User(obs.settings)), spec.role)
+	target, err := resolveProjectStaffContact(ctx, projectStaffEventUser(spec.v2User(obs.settings)))
+	if errors.Is(err, errAmbiguousProjectStaffContact) {
+		return projectStaffRoleState{outcome: projectStaffOutcomeAmbiguousContact}
+	}
 	if err != nil {
 		return projectStaffRoleState{outcome: projectStaffOutcomeError, reason: "contact_lookup_failed"}
 	}
 	if target == "" {
+		log.With("field", spec.role).WarnContext(ctx, "could not resolve v1 contact for staff user, leaving v1 field unchanged")
 		return projectStaffRoleState{outcome: projectStaffOutcomeUnresolvedContact}
 	}
 	if target == staffValueOrNone(obs.v1Staff[spec.v1Field]) {
