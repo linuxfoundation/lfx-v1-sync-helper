@@ -414,10 +414,19 @@ lfx-v1-sync-helper --reconcile-project-staff-file cohort.txt \
   --project-staff-report staff-report-after.json
 ```
 
-Each project gets a 30-second deadline for its re-reads, pacing wait and PATCH.
-The minimum rate only ensures the pacing interval can fit that budget; slow
-reads can still exhaust it. After a successful PATCH the command polls
-`v1-objects` for up to 60 seconds until the new values have replicated.
+Each project's re-reads, pacing wait and PATCH request share a 30-second
+context deadline. The minimum rate only ensures the pacing interval can fit
+that budget; slow reads can still exhaust it.
+
+OAuth token acquisition has a separate 20-second timeout. The production
+token source fetches synchronously, and the request context cannot interrupt
+it. Budget up to about 50 seconds for a project operation to return if token
+acquisition starts near the operation deadline (30 seconds plus the independent
+20-second allowance). Cancellation can likewise wait for an in-flight token
+fetch to finish.
+
+After a successful PATCH, a separate convergence poll waits on `v1-objects`
+for up to 60 seconds until the new values have replicated.
 
 Apply outcomes:
 
