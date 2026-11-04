@@ -99,14 +99,16 @@ type v1ProjectStaffSnapshot struct {
 	revision uint64
 }
 
-// v1StaffWrite is one attempted staff value. revision is the replica revision
-// already observed before dispatch (and later acknowledgements), so a stale
-// or redelivered WAL record cannot retire a newer outstanding attempt.
+// v1StaffWrite is one attempted staff value. dispatchRevision is the immutable
+// replica floor observed before dispatch. baseline, when known, records that
+// replica's value so an intervening point read can prove a field transition
+// even before its WAL delivery. Delivery deduplication never moves this floor.
 type v1StaffWrite struct {
-	id       uint64
-	value    string
-	at       time.Time
-	revision uint64
+	id               uint64
+	value            string
+	at               time.Time
+	dispatchRevision uint64
+	baseline         string
 }
 
 // Retain the newest observed replica briefly after retiring an attempt. A
@@ -118,6 +120,7 @@ type v1StaffReplica struct {
 	value       string
 	revision    uint64
 	ackRevision uint64
+	ackValue    string
 	at          time.Time
 }
 
@@ -157,6 +160,7 @@ func (l *v1StaffWriteLog) current(sfid, field, replicated string, revision uint6
 	if observed && now.Sub(replica.at) > v1StaffWriteFreshness {
 		delete(l.observed, key)
 		observed = false
+		replica = v1StaffReplica{}
 	}
 	if revision > 0 && (!observed || revision > replica.revision) && (len(writes) > 0 || observed) {
 		replica.value, replica.revision, replica.at = replicated, revision, now
@@ -172,7 +176,7 @@ func (l *v1StaffWriteLog) current(sfid, field, replicated string, revision uint6
 	}
 	l.writes[key] = writes
 	latest := writes[len(writes)-1]
-	return latest.value, true, observed && replica.revision > latest.revision && replica.value != latest.value
+	return latest.value, true, observed && replica.revision > latest.dispatchRevision && replica.value != latest.value
 }
 
 // record runs BEFORE the HTTP request: WAL may acknowledge a successful
@@ -199,11 +203,13 @@ func (l *v1StaffWriteLog) record(sfid string, fields map[string]string, revision
 	l.nextID++
 	for field, value := range fields {
 		key := v1StaffWriteKey(sfid, field)
-		floor := revision
-		if replica, ok := l.observed[key]; ok && replica.revision > floor {
-			floor = replica.revision
+		floor, baseline := revision, ""
+		if replica, ok := l.observed[key]; ok && replica.revision >= floor {
+			floor, baseline = replica.revision, replica.value
 		}
-		l.writes[key] = append(l.writes[key], v1StaffWrite{id: l.nextID, value: value, at: now, revision: floor})
+		l.writes[key] = append(l.writes[key], v1StaffWrite{
+			id: l.nextID, value: value, at: now, dispatchRevision: floor, baseline: baseline,
+		})
 	}
 	return l.nextID
 }
@@ -226,15 +232,17 @@ func (l *v1StaffWriteLog) discard(id uint64) {
 	}
 }
 
-// acknowledgeLocked consumes the oldest matching attempt, not a later
-// attempt with the same value. Advance surviving attempts' revision floors
-// so re-reading/redelivering this acknowledgement cannot consume them too.
+// acknowledgeLocked retires only the head attempt, with transition evidence.
+// A newer row carrying an unchanged role cannot skip an intervening attempt
+// or prove that another same-value PATCH reached v1. Acknowledgement progress
+// is independent of each attempt's immutable dispatch evidence.
 func (l *v1StaffWriteLog) acknowledgeLocked(key, value string, revision uint64, now time.Time) {
 	writes := l.writes[key]
 	replica, observed := l.observed[key]
 	if observed && now.Sub(replica.at) > v1StaffWriteFreshness {
 		delete(l.observed, key)
 		observed = false
+		replica = v1StaffReplica{}
 	}
 	// Track only roles this process recently wrote, not the entire v1 roster.
 	// Snapshot freshness and delivery progress are independent. An older WAL
@@ -242,25 +250,28 @@ func (l *v1StaffWriteLog) acknowledgeLocked(key, value string, revision uint64, 
 	if revision == 0 || (observed && revision <= replica.ackRevision) || (len(writes) == 0 && !observed) {
 		return
 	}
+	transition := !observed || replica.ackRevision == 0 || value != replica.ackValue
+	if len(writes) > 0 {
+		head := writes[0]
+		// The first eligible row after dispatch can acknowledge the head.
+		// A newer point-read baseline can also prove an intervening value
+		// before its WAL delivery. Neither permits repeated unchanged rows
+		// after dispatch to consume another same-value attempt.
+		if head.dispatchRevision >= replica.ackRevision && head.baseline != value {
+			transition = true
+		}
+	}
 	if !observed || revision > replica.revision {
 		replica.value, replica.revision, replica.at = value, revision, now
 	}
-	replica.ackRevision = revision
+	replica.ackRevision, replica.ackValue = revision, value
 	l.observed[key] = replica
-	for i, w := range writes {
-		if revision > w.revision && value == w.value {
-			writes = writes[i+1:]
-			break
-		}
+	if len(writes) > 0 && transition && revision > writes[0].dispatchRevision && value == writes[0].value {
+		writes = writes[1:]
 	}
 	if len(writes) == 0 {
 		delete(l.writes, key)
 		return
-	}
-	for i := range writes {
-		if revision > writes[i].revision {
-			writes[i].revision = revision
-		}
 	}
 	l.writes[key] = writes
 }

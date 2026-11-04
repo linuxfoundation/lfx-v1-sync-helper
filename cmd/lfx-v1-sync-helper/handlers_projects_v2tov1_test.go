@@ -1052,3 +1052,85 @@ func TestV1StaffWriteLogRepeatedSnapshotBeforeWAL(t *testing.T) {
 		t.Fatal("new WAL did not retire the new attempt")
 	}
 }
+
+func TestHandleProjectSettingsUpdated_ConflictingWALPreservesUncertainty(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusBadGateway)
+	const field = "executive_director__c"
+	replicatedED := "0034100001origED"
+	staleStaffReplica(t, &replicatedED)
+	assigned := &events.UserInfo{Username: "staffnew"}
+	pcc := &events.UserInfo{Username: "staffpcc"}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ExecutiveDirector: &events.UserInfo{Username: "stafforiginal"}},
+		events.ProjectSettings{ExecutiveDirector: assigned}))
+	// The failed PATCH may not have reached v1, which still holds PCC's C.
+	replicateBridgeStaff(t, 2, map[string]any{field: "0034100001pccED"})
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{field: "0034100001pccED"}, revision: 2}, nil
+	}
+	spy.patchStatus = http.StatusOK
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ExecutiveDirector: pcc}, events.ProjectSettings{ExecutiveDirector: assigned}))
+	if spy.patchCalls != 2 || spy.lastBody["ExecutiveDirectorID"] != "0034100001newED" {
+		t.Fatalf("PATCH calls = %d, body = %v; conflicting WAL must not suppress a deliberate reassignment", spy.patchCalls, spy.lastBody)
+	}
+}
+
+func TestV1StaffWriteLogAcknowledgementEvidence(t *testing.T) {
+	const field = "executive_director__c"
+	now := time.Now()
+	t.Run("unchanged sibling rows cannot consume a non-head attempt", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		for _, value := range []string{"B", "A", "B"} {
+			l.record("project", map[string]string{field: value}, 1, now)
+		}
+		l.observeReplication("project", map[string]any{field: "B"}, 2)
+		l.observeReplication("project", map[string]any{field: "B", "program_manager__c": "PM"}, 3)
+		key := v1StaffWriteKey("project", field)
+		if got := len(l.writes[key]); got != 2 {
+			t.Fatalf("unchanged ED row discarded %d pending attempts; want A and final B retained", 2-got)
+		}
+		l.observeReplication("project", map[string]any{field: "A"}, 4)
+		if got, pending, _ := l.current("project", field, "A", 4, now); got != "B" || !pending {
+			t.Fatalf("pending B lost before its replication: %q, pending=%t", got, pending)
+		}
+		l.observeReplication("project", map[string]any{field: "B"}, 5)
+		if len(l.writes[key]) != 0 {
+			t.Fatal("ordered transitions failed to retire all attempts")
+		}
+	})
+	t.Run("unchanged rows do not prove a repeated same-value write", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		l.record("project", map[string]string{field: "B"}, 1, now)
+		l.record("project", map[string]string{field: "B"}, 1, now)
+		l.observeReplication("project", map[string]any{field: "B"}, 2)
+		l.observeReplication("project", map[string]any{field: "B"}, 3)
+		if got := len(l.writes[v1StaffWriteKey("project", field)]); got != 1 {
+			t.Fatalf("unchanged row consumed a repeated write: %d pending, want 1", got)
+		}
+		l.observeReplication("project", map[string]any{field: "C"}, 4)
+		if _, pending, uncertain := l.current("project", field, "C", 4, now); !pending || !uncertain {
+			t.Fatal("conflicting WAL must keep dispatch uncertainty")
+		}
+		l.observeReplication("project", map[string]any{field: "B"}, 5)
+		if len(l.writes[v1StaffWriteKey("project", field)]) != 0 {
+			t.Fatal("a later transition did not retire the pending write")
+		}
+	})
+	t.Run("delayed pre-dispatch rows cannot acknowledge a new write", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		l.record("project", map[string]string{field: "B"}, 5, now)
+		l.observeReplication("project", map[string]any{field: "B"}, 4)
+		if got := len(l.writes[v1StaffWriteKey("project", field)]); got != 1 {
+			t.Fatalf("pre-dispatch row retired a new write: %d pending", got)
+		}
+		l.observeReplication("project", map[string]any{field: "C"}, 6)
+		if _, pending, uncertain := l.current("project", field, "C", 6, now); !pending || !uncertain {
+			t.Fatal("a conflicting delivery replaced the immutable dispatch evidence")
+		}
+		l.observeReplication("project", map[string]any{field: "B"}, 7)
+		if len(l.writes[v1StaffWriteKey("project", field)]) != 0 {
+			t.Fatal("post-dispatch transition failed to acknowledge the write")
+		}
+	})
+}
