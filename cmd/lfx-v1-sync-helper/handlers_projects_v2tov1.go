@@ -28,6 +28,13 @@ package main
 // v1 project PATCH is partial (PCC's other project dialogs send disjoint field
 // subsets), so re-sending an unchanged field would risk clobbering a newer v1
 // value with the possibly-stale v1-objects replica.
+//
+// The same lag affects the compare-before-write: right after this bridge
+// PATCHes a role, v1-objects still shows the previous value, so reverting that
+// role (or clearing it when it was empty before) would compare equal to the
+// stale replica and be omitted, leaving PCC on the intermediate value. The
+// bridge therefore remembers its own recent writes (v1StaffWriteLog) and
+// compares a role against its last write until v1-objects shows it.
 
 import (
 	"bytes"
@@ -40,6 +47,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-project-service/pkg/events"
@@ -57,6 +65,12 @@ const v1ClearStaffValue = "None"
 // gateway PATCH (v1HTTPClient itself has no client-level timeout). Token
 // acquisition is bounded separately in ClientCredentialsTokenSource.Token.
 const v1ProjectStaffSyncTimeout = 30 * time.Second
+
+// v1StaffWriteFreshness bounds how long the bridge trusts its own last staff
+// PATCH over the v1-objects replica for a role. It covers WAL replication lag
+// with margin; after it expires the replica is authoritative again, so a write
+// that never replicated cannot shadow later PCC edits forever.
+const v1StaffWriteFreshness = 5 * time.Minute
 
 // errV1ProjectNotFound marks a 404 from the v1 project-service PATCH: the
 // project is platform-native (lf... SFID) with no Salesforce-backed record, so
@@ -84,6 +98,66 @@ type v1ProjectStaffSnapshot struct {
 	staff    map[string]string
 	revision uint64
 }
+
+// v1StaffWrite is one staff value this process sent to v1 and when.
+type v1StaffWrite struct {
+	value string
+	at    time.Time
+}
+
+// v1StaffWriteLog records the bridge's recent staff PATCHes per project and v1
+// field. It is process memory: the production posture is a single enabled
+// consumer, and a restart loses at most the writes still inside the
+// replication lag window, which the rollout runbook covers with a staff-edit
+// freeze across pod transitions.
+type v1StaffWriteLog struct {
+	mu     sync.Mutex
+	writes map[string]v1StaffWrite
+}
+
+func newV1StaffWriteLog() *v1StaffWriteLog {
+	return &v1StaffWriteLog{writes: map[string]v1StaffWrite{}}
+}
+
+func v1StaffWriteKey(sfid, field string) string {
+	return sfid + "/" + field
+}
+
+// current returns the value to compare a role against: the bridge's own last
+// write while it is fresh and v1-objects does not show it yet, otherwise the
+// replicated value. A write that has replicated or expired is forgotten.
+func (l *v1StaffWriteLog) current(sfid, field, replicated string, now time.Time) (string, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := v1StaffWriteKey(sfid, field)
+	w, ok := l.writes[key]
+	if !ok {
+		return replicated, false
+	}
+	if w.value == replicated || now.Sub(w.at) > v1StaffWriteFreshness {
+		delete(l.writes, key)
+		return replicated, false
+	}
+	return w.value, true
+}
+
+// record remembers the values sent for each v1 field and drops expired
+// entries so the log stays bounded by the projects edited within the window.
+func (l *v1StaffWriteLog) record(sfid string, fields map[string]string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for key, w := range l.writes {
+		if now.Sub(w.at) > v1StaffWriteFreshness {
+			delete(l.writes, key)
+		}
+	}
+	for field, value := range fields {
+		l.writes[v1StaffWriteKey(sfid, field)] = v1StaffWrite{value: value, at: now}
+	}
+}
+
+// recentV1StaffWrites is the bridge's write log (see v1StaffWriteLog).
+var recentV1StaffWrites = newV1StaffWriteLog()
 
 // Function-variable seams for tests (pattern: fetchProjectBase in
 // client_projects.go, lookupUserByUsernameForACS in lfx_v1_client.go).
@@ -160,6 +234,9 @@ var (
 	// DB resolvers so tests can stub them.
 	resolveV1UserSFIDByUsername = ResolveV1UserSFIDByUsername
 	resolveV1UserSFIDByEmail    = ResolveV1UserSFIDByEmail
+
+	// staffWriteNow is the clock for v1StaffWriteLog freshness.
+	staffWriteNow = time.Now
 )
 
 // handleProjectSettingsUpdated processes project_settings.updated events and
@@ -243,7 +320,9 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 		{pmChanged, "program_manager__c", "ProgramManagerID", "program_manager", event.NewSettings.ProgramManager},
 	}
 
+	now := staffWriteNow()
 	payload := make(map[string]string, len(staffFields))
+	written := make(map[string]string, len(staffFields)) // v1 field -> PATCH value
 	for _, field := range staffFields {
 		if !field.changed {
 			continue
@@ -259,11 +338,16 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 			// clearing it would silently drop the PCC assignment.
 			continue
 		}
-		if target == staffValueOrNone(v1Staff[field.v1Field]) {
+		current, ownWrite := recentV1StaffWrites.current(sfid, field.v1Field, staffValueOrNone(v1Staff[field.v1Field]), now)
+		if ownWrite {
+			log.With("field", field.name).DebugContext(ctx, "v1-objects has not replicated this bridge's last write for the field, comparing against that write")
+		}
+		if target == current {
 			log.With("field", field.name).DebugContext(ctx, "staff field already matches v1 state, omitting from v1 write")
 			continue
 		}
 		payload[field.payloadKey] = target
+		written[field.v1Field] = target
 	}
 
 	if len(payload) == 0 {
@@ -276,9 +360,17 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 			log.WarnContext(ctx, "project has no Salesforce-backed v1 record (platform-native), skipping staff sync")
 			return
 		}
+		// A 5xx, timeout or transport error may still have reached v1, so
+		// remember the values: a later revert is then re-sent, which is safe
+		// either way. A 4xx was rejected and leaves v1 unchanged.
+		var statusErr *v1ProjectStaffStatusError
+		if !errors.As(err, &statusErr) || statusErr.status >= http.StatusInternalServerError {
+			recentV1StaffWrites.record(sfid, written, now)
+		}
 		log.With(errKey, err).ErrorContext(ctx, "failed to patch v1 project staff")
 		return
 	}
+	recentV1StaffWrites.record(sfid, written, now)
 
 	// Log field names only: the values are contact SFIDs.
 	log.With("fields", staffPayloadFieldNames(payload)).InfoContext(ctx, "synced v2 project staff to v1")

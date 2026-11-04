@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-project-service/pkg/events"
 	nats "github.com/nats-io/nats.go"
@@ -62,6 +63,8 @@ func setupStaffBridgeTest(t *testing.T, patchStatus int) *staffBridgeSpy {
 	origGetStaff := getV1ProjectStaffSFIDs
 	origByUsername := resolveV1UserSFIDByUsername
 	origByEmail := resolveV1UserSFIDByEmail
+	origWrites := recentV1StaffWrites
+	origNow := staffWriteNow
 
 	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	gwURL, err := url.Parse(srv.URL + "/")
@@ -80,6 +83,7 @@ func setupStaffBridgeTest(t *testing.T, patchStatus int) *staffBridgeSpy {
 	}
 	resolveV1UserSFIDByUsername = func(context.Context, string) (string, error) { return "", nil }
 	resolveV1UserSFIDByEmail = func(context.Context, string) (string, error) { return "", nil }
+	recentV1StaffWrites = newV1StaffWriteLog()
 
 	t.Cleanup(func() {
 		cfg = origCfg
@@ -89,6 +93,8 @@ func setupStaffBridgeTest(t *testing.T, patchStatus int) *staffBridgeSpy {
 		getV1ProjectStaffSFIDs = origGetStaff
 		resolveV1UserSFIDByUsername = origByUsername
 		resolveV1UserSFIDByEmail = origByEmail
+		recentV1StaffWrites = origWrites
+		staffWriteNow = origNow
 	})
 
 	return spy
@@ -446,6 +452,155 @@ func TestHandleProjectSettingsUpdated_StaleReplicaDoesNotRevertSiblingField(t *t
 	}
 	if got, present := spy.lastBody["ExecutiveDirectorID"]; present {
 		t.Errorf("ExecutiveDirectorID = %q sent from the stale replica, want omitted", got)
+	}
+}
+
+// staleStaffReplica stubs a v1-objects ED value that tests change between
+// events to model WAL replication lag, and resolves usernames from a fixed
+// table of synthetic contacts.
+func staleStaffReplica(t *testing.T, replicatedED *string) {
+	t.Helper()
+	contacts := map[string]string{"stafforiginal": "0034100001origED", "staffnew": "0034100001newED", "staffpcc": "0034100001pccED"}
+	resolveV1UserSFIDByUsername = func(_ context.Context, username string) (string, error) {
+		return contacts[username], nil
+	}
+	getV1ProjectStaffSFIDs = func(context.Context, string) (map[string]string, error) {
+		return map[string]string{"executive_director__c": *replicatedED}, nil
+	}
+}
+
+// Regression (lfx-self-serve#5034): assign a new ED, then restore the original
+// before v1-objects replicates the first PATCH. The stale replica still shows
+// the original, but v1 holds the new ED, so the restore must be sent.
+func TestHandleProjectSettingsUpdated_RevertBeforeReplicationPatches(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	replicatedED := "0034100001origED"
+	staleStaffReplica(t, &replicatedED)
+
+	original := &events.UserInfo{Username: "stafforiginal"}
+	assigned := &events.UserInfo{Username: "staffnew"}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ExecutiveDirector: original},
+		events.ProjectSettings{ExecutiveDirector: assigned}))
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ExecutiveDirector: assigned},
+		events.ProjectSettings{ExecutiveDirector: original}))
+
+	if spy.patchCalls != 2 {
+		t.Fatalf("PATCH calls = %d, want 2 (assign, then restore)", spy.patchCalls)
+	}
+	if got := spy.lastBody["ExecutiveDirectorID"]; got != "0034100001origED" {
+		t.Errorf("ExecutiveDirectorID = %q, want the restored original", got)
+	}
+}
+
+// Regression (lfx-self-serve#5034): assign an ED to a project that had none,
+// then clear it before v1-objects replicates. The stale replica is still
+// empty, but v1 holds the assignment, so the clear must be sent.
+func TestHandleProjectSettingsUpdated_ClearBeforeReplicationPatches(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	replicatedED := ""
+	staleStaffReplica(t, &replicatedED)
+
+	assigned := &events.UserInfo{Username: "staffnew"}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{},
+		events.ProjectSettings{ExecutiveDirector: assigned}))
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ExecutiveDirector: assigned},
+		events.ProjectSettings{}))
+
+	if spy.patchCalls != 2 {
+		t.Fatalf("PATCH calls = %d, want 2 (assign, then clear)", spy.patchCalls)
+	}
+	if got := spy.lastBody["ExecutiveDirectorID"]; got != v1ClearStaffValue {
+		t.Errorf("ExecutiveDirectorID = %q, want %q", got, v1ClearStaffValue)
+	}
+}
+
+// Once v1-objects shows the bridge's write, the replica is authoritative
+// again: a later PCC edit echoed through v1->v2 must still no-op.
+func TestHandleProjectSettingsUpdated_ReplicatedWriteNoLongerShadowsV1(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	replicatedED := "0034100001origED"
+	staleStaffReplica(t, &replicatedED)
+
+	assigned := &events.UserInfo{Username: "staffnew"}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ExecutiveDirector: &events.UserInfo{Username: "stafforiginal"}},
+		events.ProjectSettings{ExecutiveDirector: assigned}))
+
+	// The write replicates, then is superseded by a PCC edit whose v1->v2 echo
+	// arrives after v1-objects carries it.
+	replicatedED = "0034100001newED"
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "v1-user",
+		events.ProjectSettings{},
+		events.ProjectSettings{ExecutiveDirector: assigned}))
+	replicatedED = "0034100001pccED"
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "v1-user",
+		events.ProjectSettings{ExecutiveDirector: assigned},
+		events.ProjectSettings{ExecutiveDirector: &events.UserInfo{Username: "staffpcc"}}))
+
+	if spy.patchCalls != 1 {
+		t.Fatalf("PATCH calls = %d, want 1 (the v2 assignment only; echoes no-op)", spy.patchCalls)
+	}
+}
+
+// A write that never shows up in v1-objects stops shadowing it after
+// v1StaffWriteFreshness, so the replica decides again.
+func TestHandleProjectSettingsUpdated_ExpiredWriteFallsBackToReplica(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	replicatedED := "0034100001origED"
+	staleStaffReplica(t, &replicatedED)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	staffWriteNow = func() time.Time { return now }
+
+	original := &events.UserInfo{Username: "stafforiginal"}
+	assigned := &events.UserInfo{Username: "staffnew"}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ExecutiveDirector: original},
+		events.ProjectSettings{ExecutiveDirector: assigned}))
+	now = now.Add(v1StaffWriteFreshness + time.Second)
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{ExecutiveDirector: assigned},
+		events.ProjectSettings{ExecutiveDirector: original}))
+
+	if spy.patchCalls != 1 {
+		t.Fatalf("PATCH calls = %d, want 1 (expired write no longer overrides the replica)", spy.patchCalls)
+	}
+}
+
+// A 5xx may have reached v1, so the attempted value is remembered and a revert
+// is still sent; a 4xx was rejected, so the replica decides.
+func TestHandleProjectSettingsUpdated_FailedWriteOutcome(t *testing.T) {
+	tests := []struct {
+		name        string
+		firstStatus int
+		wantCalls   int
+	}{
+		{"5xx outcome unknown, revert sent", http.StatusBadGateway, 2},
+		{"4xx rejected, revert matches replica", http.StatusBadRequest, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := setupStaffBridgeTest(t, tc.firstStatus)
+			replicatedED := "0034100001origED"
+			staleStaffReplica(t, &replicatedED)
+
+			original := &events.UserInfo{Username: "stafforiginal"}
+			assigned := &events.UserInfo{Username: "staffnew"}
+			handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+				events.ProjectSettings{ExecutiveDirector: original},
+				events.ProjectSettings{ExecutiveDirector: assigned}))
+			spy.patchStatus = http.StatusOK
+			handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+				events.ProjectSettings{ExecutiveDirector: assigned},
+				events.ProjectSettings{ExecutiveDirector: original}))
+
+			if spy.patchCalls != tc.wantCalls {
+				t.Fatalf("PATCH calls = %d, want %d", spy.patchCalls, tc.wantCalls)
+			}
+		})
 	}
 }
 
