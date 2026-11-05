@@ -13,16 +13,12 @@ package main
 // opportunity_owner is intentionally excluded: it is SFDC-owned, resolves
 // through the B2B user store, and stays one-way v1->v2.
 //
-// Loop safety: the v1 write sets lastmodifiedbyid to this service's Auth0 M2M
-// principal, so when the change replicates back (WAL -> v1-objects KV),
-// shouldSkipSync skips re-processing. The primary guard against echoing a
-// PCC-originated edit is the compare-before-write against the current v1
-// record: our v1->v2 write is downstream of the v1-objects update that
-// triggered it, so the record we read back already carries the new values and
-// the event no-ops. The Heimdall origin skip below only catches the subset of
-// v1->v2 writes that fall back to the service account (empty/platform/unknown
-// Salesforce principals) — v1->v2 normally impersonates the real v1 user, so
-// the event actor is that user's LFID, not our machine principal.
+// Loop safety: project-service copies our signed origin claim into settings
+// events without replacing the human actor. Drop those events before consulting
+// pending writes: a delayed PCC echo is not a deliberate v2 reversal. The v1
+// write also sets lastmodifiedbyid to this service's Auth0 M2M principal so
+// shouldSkipSync suppresses its WAL echo. Legacy events without origin cannot
+// be reliably classified; they retain the service-actor guard and comparisons.
 //
 // Only the staff fields that actually changed in the event are sent to v1. The
 // v1 project PATCH is partial (PCC's other project dialogs send disjoint field
@@ -411,6 +407,13 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 
 	log := logger.With("project_uid", event.ProjectUID, "actor", event.Actor.Username)
 
+	// Trust the project-service event contract, not the impersonated username.
+	// Suppress before mapping/snapshot reads or pending-write comparisons.
+	if event.Origin == events.OriginV1SyncHelper {
+		log.DebugContext(ctx, "skipping settings event with authenticated v1 sync origin")
+		return
+	}
+
 	// Diff only the staff fields this bridge owns.
 	edChanged := !staffUserInfosEqual(event.OldSettings.ExecutiveDirector, event.NewSettings.ExecutiveDirector)
 	pmChanged := !staffUserInfosEqual(event.OldSettings.ProgramManager, event.NewSettings.ProgramManager)
@@ -422,12 +425,8 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 		return
 	}
 
-	// Defensive origin skip (AC-3): our own v1->v2 writes carry the Heimdall
-	// machine principal as the event actor only when they fall back to the
-	// service account (empty/platform/unknown-Salesforce principal) — the
-	// impersonating path puts the real v1 user's LFID here instead, which is why
-	// the compare-before-write below is the primary echo guard. Other M2M writes
-	// (e.g. a manual API correction) MUST still sync: only our client ID skips.
+	// Keep the legacy service-actor guard. Other M2M corrections still sync;
+	// the human actor alone cannot identify which product an edit came from.
 	if event.Actor.Username == cfg.HeimdallClientID+"@clients" {
 		log.DebugContext(ctx, "skipping settings event from our own v1-to-v2 sync")
 		return
@@ -446,8 +445,8 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 	}
 	log = log.With("sfid", sfid)
 
-	// Compare against current v1 state (AC-4): a PCC-originated edit already
-	// has the new values in v1, making this bridge write a no-op.
+	// Compare non-v1-origin events against replica/pending state for idempotency.
+	// Legacy originless echoes still use this path and cannot be identified safely.
 	snapshot, err := readV1ProjectStaffSnapshot(ctx, sfid)
 	if err != nil {
 		log.With(errKey, err).ErrorContext(ctx, "failed to read current v1 project record")

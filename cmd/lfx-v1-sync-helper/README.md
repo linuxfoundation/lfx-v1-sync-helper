@@ -392,6 +392,40 @@ bucket. A named operator must confirm, before running it:
 
 If any of these cannot be confirmed, run report mode only.
 
+#### Signed-origin rollout gate
+
+The [project staff bridge contract](../../README.md#project-staff-sync-gh-1802)
+uses a signed `lfx_origin` JWT claim and the project-service SDK's optional event
+`origin` field to suppress relayed v1 changes without erasing the human actor.
+This is not a new source-of-truth policy or a replacement for the apply gates.
+
+Before relying on origin-aware echo suppression:
+
+1. Release the project-service SDK containing `OriginClaim`,
+   `OriginV1SyncHelper` and `ProjectSettingsUpdatedMessage.Origin`; pin the bridge
+   to the real published version. Local cross-repo module overrides are verification
+   aids only, not a released SDK or deployable dependency update.
+2. With the staff-edit freeze and a single enabled consumer, deploy origin-aware
+   project-service code to **all** replicas, then replace **all** old bridge
+   processes with the origin-signing/consuming version. Do not resume writes during
+   a mixed rollout; old producers or validators still emit unclassifiable events.
+3. Confirm no in-flight old requests/settings events remain and WAL replication
+   has settled before lifting the freeze. Keep the existing pod-transition freeze:
+   pending-write memory is per process and is lost on restart.
+
+Absent/empty origins retain legacy comparisons, and unknown event values are not
+treated as v1. They cannot reliably distinguish a PCC echo from a genuine LFX One
+reversal by that same human. Legacy echoes can still move v1 audit attribution or
+overwrite a newer PCC assignment, not merely send a harmless same-value PATCH.
+Keep NATS publishing restricted to trusted producers; the copied event field is
+not itself a signature. A rollback to old bridge/service code restores these
+legacy risks and requires the same freeze/settle posture.
+
+No SDK release, deployment, live repair, or historical replay is implied by source
+changes or local tests. The v1 PATCH still has no CAS, so the apply freeze and
+single-writer requirements above remain mandatory even after complete rollout.
+
+
 #### Running it
 
 Synthetic paths; the selection file holds only project UIDs.

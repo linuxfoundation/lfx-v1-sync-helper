@@ -106,13 +106,16 @@ func setupStaffBridgeTest(t *testing.T, patchStatus int) *staffBridgeSpy {
 
 // settingsUpdatedMsg marshals a ProjectSettingsUpdatedMessage carrying the
 // given old/new staff snapshots into a NATS message.
-func settingsUpdatedMsg(t *testing.T, actor string, oldSettings, newSettings events.ProjectSettings) *nats.Msg {
+func settingsUpdatedMsg(t *testing.T, actor string, oldSettings, newSettings events.ProjectSettings, origins ...string) *nats.Msg {
 	t.Helper()
 	msg := events.ProjectSettingsUpdatedMessage{
 		ProjectUID:  bridgeTestProjectUID,
 		OldSettings: oldSettings,
 		NewSettings: newSettings,
 		Actor:       events.Actor{Username: actor},
+	}
+	if len(origins) > 0 {
+		msg.Origin = origins[0]
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -185,17 +188,26 @@ func TestHandleProjectSettingsUpdated_OpportunityOwnerOnlyIgnored(t *testing.T) 
 }
 
 func TestHandleProjectSettingsUpdated_OriginSkip(t *testing.T) {
-	spy := setupStaffBridgeTest(t, http.StatusOK)
-
-	// AC-3: events from our own v1->v2 sync carry the Heimdall machine
-	// principal and are skipped.
-	msg := settingsUpdatedMsg(t, "test-heimdall-client@clients",
-		events.ProjectSettings{},
-		events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "staffpm"}})
-	handleProjectSettingsUpdated(msg)
-
-	if spy.patchCalls != 0 {
-		t.Fatalf("PATCH calls = %d, want 0 (own-sync event must be skipped)", spy.patchCalls)
+	for _, tc := range []struct {
+		name, actor, origin string
+		wantCalls           int
+	}{
+		{name: "signed human relay", actor: "test-user", origin: events.OriginV1SyncHelper},
+		{name: "signed machine relay", actor: "other-client@clients", origin: events.OriginV1SyncHelper},
+		{name: "legacy service actor", actor: "test-heimdall-client@clients"},
+		{name: "same human direct edit", actor: "test-user", wantCalls: 1},
+		{name: "unknown event origin is not v1", actor: "test-user", origin: "future_source", wantCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := setupStaffBridgeTest(t, http.StatusOK)
+			resolveV1UserSFIDByUsername = func(context.Context, string) (string, error) { return bridgeTestPMSFID, nil }
+			handleProjectSettingsUpdated(settingsUpdatedMsg(t, tc.actor,
+				events.ProjectSettings{},
+				events.ProjectSettings{ProgramManager: &events.UserInfo{Username: "test-pm"}}, tc.origin))
+			if spy.patchCalls != tc.wantCalls {
+				t.Fatalf("PATCH calls = %d, want %d", spy.patchCalls, tc.wantCalls)
+			}
+		})
 	}
 }
 
@@ -1162,6 +1174,54 @@ func TestHandleProjectSettingsUpdated_UnconfirmedWriteAfterRejectedAttempt(t *te
 				events.ProjectSettings{ExecutiveDirector: rejected}, events.ProjectSettings{ExecutiveDirector: assigned}))
 			if spy.patchCalls != tc.wantPatches || spy.lastBody["ExecutiveDirectorID"] != tc.wantLastTarget {
 				t.Fatalf("PATCH calls = %d, body = %v; want %d with last target %s", spy.patchCalls, spy.lastBody, tc.wantPatches, tc.wantLastTarget)
+			}
+		})
+	}
+}
+func TestHandleProjectSettingsUpdated_DelayedSignedEchoPreservesNewerPCCEdit(t *testing.T) {
+	for _, role := range []string{"executive_director__c", "program_manager__c"} {
+		t.Run(role, func(t *testing.T) {
+			spy := setupStaffBridgeTest(t, http.StatusBadGateway)
+			const actor = "test-user"
+			settings := func(username string) events.ProjectSettings {
+				user := &events.UserInfo{Username: username}
+				if role == "executive_director__c" {
+					return events.ProjectSettings{ExecutiveDirector: user}
+				}
+				return events.ProjectSettings{ProgramManager: user}
+			}
+			replicated := "003SYNTHETIC-A"
+			readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+				return &v1ProjectStaffSnapshot{staff: map[string]string{role: replicated}, revision: 1}, nil
+			}
+			resolveV1UserSFIDByUsername = func(_ context.Context, username string) (string, error) {
+				return "003SYNTHETIC-" + username, nil
+			}
+			// A -> B has an unknown HTTP outcome and must remain pending.
+			handleProjectSettingsUpdated(settingsUpdatedMsg(t, actor, settings("A"), settings("B")))
+			key := v1StaffWriteKey(bridgeTestProjectSFID, role)
+			if spy.patchCalls != 1 || len(recentV1StaffWrites.writes[key]) != 1 {
+				t.Fatal("expected one unknown-outcome B attempt")
+			}
+			pending := recentV1StaffWrites.writes[key][0]
+			if pending.confirmed {
+				t.Fatal("5xx must not confirm B")
+			}
+			// PCC edits C, whose settings echo is delayed until PCC already holds D.
+			replicated = "003SYNTHETIC-C"
+			livePCC := "003SYNTHETIC-D"
+			spy.patchStatus = http.StatusOK
+			spy.onPatch = func() { livePCC = "003SYNTHETIC-C" }
+			getV1ProjectSFIDByUID = func(context.Context, string) (string, error) {
+				t.Fatal("signed echo must be dropped before mapping, snapshot or pending comparison")
+				return "", nil
+			}
+			handleProjectSettingsUpdated(settingsUpdatedMsg(t, actor, settings("B"), settings("C"), events.OriginV1SyncHelper))
+			if spy.patchCalls != 1 || livePCC != "003SYNTHETIC-D" {
+				t.Fatal("delayed C echo overwrote newer PCC D")
+			}
+			if len(recentV1StaffWrites.writes[key]) != 1 || recentV1StaffWrites.writes[key][0] != pending {
+				t.Fatal("ignored echo altered pending-write state")
 			}
 		})
 	}

@@ -424,16 +424,38 @@ Staff-field direction coverage:
 
 Echo/loop guards:
 
-- **Compare-before-write (primary).** Each changed role is compared against the current `v1-objects` record before writing, or against the bridge's own unreplicated write for that role (see above). A PCC-originated edit reaches v2 only *after* the `v1-objects` update that triggered the v1→v2 sync, so the record read back already carries the new value and the event no-ops.
+- **Authenticated origin (primary).** Project-service tokens signed by this bridge carry `lfx_origin: "v1_sync_helper"` using the canonical `pkg/events` SDK constants. Project-service validates it and copies it into the settings event's optional `origin` field. The bridge drops exactly that origin **before** mapping reads, user resolution or pending-write comparisons. JWT `principal`/`sub`, event `Actor.Username` and v2 audit stamps still identify the real human when resolvable; the service fallback is unchanged. The same human editing directly in LFX One still syncs.
+- **Compare-before-write (idempotency/reversal protection).** Other events compare each changed role against `v1-objects` and the bridge's recent attempts (see above). Replica equality, username and timestamps are not reliable origin classifiers.
 - **Auth0 M2M attribution.** The v1 write sets `lastmodifiedbyid = "{AUTH0_CLIENT_ID}@clients"`, which `shouldSkipSync` skips when the change replicates back through WAL → `v1-objects` KV, so our own v1 write never bounces into v2.
-- **Heimdall origin skip (partial).** Events whose actor is `{HEIMDALL_CLIENT_ID}@clients` are dropped on receipt. This only covers the v1→v2 writes that fall back to the service account (empty/`platform`/unknown-Salesforce principals): v1→v2 normally impersonates the real v1 user, so the actor is usually that user's LFID.
+- **Legacy service-actor guard.** Events whose actor is `{HEIMDALL_CLIENT_ID}@clients` are still dropped. Other M2M actors are not broadly excluded.
 
-**Conservative echo tradeoff:** while a write is pending, a PCC-originated
-settings event can cause a redundant same-value PATCH when its origin cannot
-be distinguished from a genuine v2 reversal. The value is unchanged, but v1's
-last-modified attribution may move from the user to the service account.
-This change accepts that audit-side effect rather than risk losing a real
-reassignment; reliable trusted-origin discrimination is deferred, not implemented.
+**Legacy and mixed-version limits:** absent, empty or unknown event origins retain
+the existing comparison path; they are not proof of direct v2 authorship. An old
+project-service ignores the JWT claim, and an old bridge never adds it. Such
+originless human events remain ambiguous: a redundant echo may change v1 audit
+attribution **or overwrite a newer PCC assignment** if a delayed C echo arrives
+after PCC has moved to D while B is pending. Do not rely on suppression during a
+mixed rollout. No replica-equality shortcut is added: genuine v2 reversals and
+clears still use the pending-write safety rules.
+
+The origin field trusts the existing project-service/NATS publishing boundary,
+not arbitrary HTTP headers or caller payloads; the event is not separately signed.
+Protect the service subject's publish permissions and Heimdall signing keys.
+Project-service rejects unsupported non-empty or malformed origin claims.
+Origin does not grant authorization or suppress role notifications.
+
+**Rollout/SDK gate:** first release the project-service SDK with the field/constants,
+then update this consumer's pinned SDK to that actual release (no local replace in
+committed dependencies). Deploy the origin-aware project-service on all replicas
+before the signing/consuming bridge. JWT caching is audience/principal-scoped and
+in-memory: all newly generated project-service tokens include the claim, including
+fallbacks, and cached tokens preserve it; other audiences are unchanged. Replacing
+all old bridge processes discards their old token caches. Keep the staff-edit
+freeze and single enabled consumer through pod transitions, settle in-flight
+events and WAL replication, then resume edits. See the operational runbook's
+[origin rollout gate](cmd/lfx-v1-sync-helper/README.md#signed-origin-rollout-gate).
+This removes authenticated v1 echoes, not all concurrent-write conflicts: the v1
+PATCH still has no CAS, and no existing drift is repaired automatically.
 
 Delivery: the subscription is core NATS (matching `lfx.user_profile.updated`), so there is no redelivery. A transient failure — v1 DB unavailable during contact resolution, or a 5xx from the gateway — is logged as an error and the event is dropped; recovering that project's staff state requires a fresh edit or the reviewed repair below. Enabling the subscription only handles *future* edits: it never revisits drift that already exists.
 
