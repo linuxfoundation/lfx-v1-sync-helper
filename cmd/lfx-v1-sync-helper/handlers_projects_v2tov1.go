@@ -142,9 +142,9 @@ func v1StaffWriteKey(sfid, field string) string {
 }
 
 // current compares against the latest unacknowledged write. A snapshot only
-// updates replica freshness; only WAL deliveries acknowledge attempts. An
-// unconfirmed PATCH never proves equality. A newer disagreeing replica also
-// makes the ordering uncertain, even after a successful PATCH response.
+// updates replica freshness; only WAL deliveries acknowledge attempts. Any
+// retained unconfirmed PATCH can complete late and invalidate a later success.
+// A newer disagreeing replica also makes the ordering uncertain.
 func (l *v1StaffWriteLog) current(sfid, field, replicated string, revision uint64, now time.Time) (value string, pending, uncertain bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -173,7 +173,14 @@ func (l *v1StaffWriteLog) current(sfid, field, replicated string, revision uint6
 	}
 	l.writes[key] = writes
 	latest := writes[len(writes)-1]
-	return latest.value, true, !latest.confirmed || (observed && replica.revision > latest.dispatchRevision && replica.value != latest.value)
+	uncertain = observed && replica.revision > latest.dispatchRevision && replica.value != latest.value
+	for _, write := range writes {
+		if !write.confirmed {
+			uncertain = true
+			break
+		}
+	}
+	return latest.value, true, uncertain
 }
 
 // record runs BEFORE the HTTP request: WAL may acknowledge a successful

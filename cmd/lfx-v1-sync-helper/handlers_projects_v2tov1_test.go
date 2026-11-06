@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1224,5 +1225,83 @@ func TestHandleProjectSettingsUpdated_DelayedSignedEchoPreservesNewerPCCEdit(t *
 				t.Fatal("ignored echo altered pending-write state")
 			}
 		})
+	}
+}
+
+func TestV1StaffWriteLogOlderUnconfirmedAttemptKeepsUncertainty(t *testing.T) {
+	const field = "executive_director__c"
+	now := time.Now()
+	l := newV1StaffWriteLog()
+	older := l.record("project", map[string]string{field: "B"}, 1, now)
+	later := l.record("project", map[string]string{field: "C"}, 1, now.Add(time.Second))
+	l.confirm(later)
+	if value, pending, uncertain := l.current("project", field, "A", 1, now); value != "C" || !pending || !uncertain {
+		t.Fatalf("older unknown B makes confirmed C uncertain: value=%q pending=%t uncertain=%t", value, pending, uncertain)
+	}
+	// Discarding the only unknown attempt must restore the confirmed no-op.
+	l.discard(older)
+	if value, pending, uncertain := l.current("project", field, "A", 1, now); value != "C" || !pending || uncertain {
+		t.Fatalf("discarded B still affects confirmed C: value=%q pending=%t uncertain=%t", value, pending, uncertain)
+	}
+
+	// The existing bounded freshness policy still expires an older unknown.
+	l = newV1StaffWriteLog()
+	l.record("project", map[string]string{field: "B"}, 1, now)
+	later = l.record("project", map[string]string{field: "C"}, 1, now.Add(time.Second))
+	l.confirm(later)
+	if value, pending, uncertain := l.current("project", field, "A", 1, now.Add(v1StaffWriteFreshness+500*time.Millisecond)); value != "C" || !pending || uncertain {
+		t.Fatalf("expired B still affects fresh confirmed C: value=%q pending=%t uncertain=%t", value, pending, uncertain)
+	}
+
+	// Ordered WAL acknowledgements retire both attempts normally.
+	l = newV1StaffWriteLog()
+	l.record("project", map[string]string{field: "B"}, 1, now)
+	later = l.record("project", map[string]string{field: "C"}, 1, now)
+	l.confirm(later)
+	l.observeReplication("project", map[string]any{field: "B"}, 2)
+	l.observeReplication("project", map[string]any{field: "C"}, 3)
+	if value, pending, uncertain := l.current("project", field, "C", 3, now); value != "C" || pending || uncertain {
+		t.Fatalf("acknowledged attempts still affect C: value=%q pending=%t uncertain=%t", value, pending, uncertain)
+	}
+}
+
+func TestHandleProjectSettingsUpdated_LateEarlierWriteCannotSuppressReassignment(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusBadGateway)
+	const field = "executive_director__c"
+	settings := func(value string) events.ProjectSettings {
+		return events.ProjectSettings{ExecutiveDirector: &events.UserInfo{Username: value}}
+	}
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{field: "003SYNTHETIC-A"}, revision: 1}, nil
+	}
+	resolveV1UserSFIDByUsername = func(_ context.Context, username string) (string, error) {
+		return "003SYNTHETIC-" + username, nil
+	}
+	var mu sync.Mutex
+	livePCC := "003SYNTHETIC-A"
+	spy.onPatch = func() {
+		if spy.patchStatus >= 200 && spy.patchStatus < 300 {
+			mu.Lock()
+			livePCC = spy.lastBody["ExecutiveDirectorID"]
+			mu.Unlock()
+		}
+	}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-user", settings("A"), settings("B")))
+	spy.patchStatus = http.StatusOK
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-user", settings("B"), settings("C")))
+	spy.patchStatus = http.StatusUnprocessableEntity
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-user", settings("C"), settings("D")))
+	// Unknown B completes late, after successful C and rejected D. WAL still
+	// exposes A@1; the earlier unknown attempt is the only warning of this risk.
+	mu.Lock()
+	livePCC = "003SYNTHETIC-B"
+	mu.Unlock()
+	spy.patchStatus = http.StatusOK
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-user", settings("D"), settings("C")))
+	mu.Lock()
+	got := livePCC
+	mu.Unlock()
+	if spy.patchCalls != 4 || got != "003SYNTHETIC-C" {
+		t.Fatalf("late B suppressed required C: PATCHes=%d livePCC=%q; want 4 and C", spy.patchCalls, got)
 	}
 }
