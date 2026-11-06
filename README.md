@@ -408,6 +408,8 @@ When `V2_TO_V1_PROJECT_STAFF_SYNC_ENABLED=true`, the service also subscribes to 
 
 Only the roles that actually changed in the event are sent. The v1 PATCH is partial (PCC's other project dialogs send disjoint field subsets), so an unchanged role is omitted rather than re-sent from the `v1-objects` replica — that replica lags v1 by the WAL pipeline, and echoing it back would revert a newer v1 assignment when two single-role edits land inside the lag window.
 
+The same lag affects the comparison of a changed role (lfx-self-serve#5034). Right after the bridge PATCHes a role, `v1-objects` still shows the previous value, so restoring that value, or clearing a role that was empty before, would look already in sync and be skipped, leaving PCC on the intermediate assignment. The bridge therefore compares against its latest outstanding PATCH per project and role until replication acknowledges it or five minutes pass (`v1StaffWriteFreshness`). Attempts are registered before the HTTP request, so even a WAL acknowledgement arriving before the HTTP response retires them. Project KV deliveries acknowledge writes before echo suppression, using their stream revisions; old or duplicate deliveries cannot retire later attempts. The latest observed replica value/revision is retained for the same bounded window so a settings callback holding an older snapshot cannot fall back to it after an acknowledgement; new attempts inherit that newer revision floor. Snapshot freshness and WAL acknowledgement progress are tracked separately, so a newer point read cannot block older queued deliveries from retiring attempts. If that newer replica disagrees with a pending write, the bridge sends the requested value rather than treating a match against the pending write as conclusive. Attempts retire in head order only; an unchanged row cannot skip an intervening attempt or, without new baseline evidence, retire another same-value write. Dispatch revisions remain immutable, so conflicting WAL deliveries cannot erase uncertainty. Ambiguous same-value attempts remain pending until a later transition or the freshness limit. A 5xx or timeout is retained for reversal protection but is never proof of a successful assignment. While any retained attempt for the role is unconfirmed, even a later successful PATCH cannot establish equality: the earlier request may complete late and overwrite it, so a new deliberate edit is sent rather than skipped. This uncertainty ends when the unknown attempt is acknowledged, explicitly discarded or expires under the same five-minute policy. An explicit 4xx removes only the rejected attempt. The memory is per process: it relies on the single enabled consumer and is lost on restart, which the production rollout covers with a staff-edit freeze across pod transitions.
+
 A role assigned in v2 that cannot be resolved to a v1 contact — LFX One allows a manual staff entry with name + email and no username, and such an email often has no `merged_user` row — is logged and **omitted**, leaving the existing v1 assignment intact. `"None"` is written only when the role was genuinely cleared in v2. The converse of that omission: such an entry never reaches v1, so v1's field stays empty — and v1-empty is authoritative on the next v1→v2 sync (see the GH-179 paragraph below), meaning an unresolvable v2-only entry is not durable and is cleared from the staff card by the next v1 project update.
 
 Removals propagate in the v1→v2 direction as well (GH-179): a role cleared in PCC arrives as an empty SFID field, which the settings sync treats as a deliberate clear — the settings PUT (a full-document replace) fires with the role omitted, storing it as cleared. Previously that write was gated on at least one non-nil settings field, so a removal that arrived with no other settings change was silently dropped and the stale person lingered on the LFX One staff card.
@@ -422,11 +424,50 @@ Staff-field direction coverage:
 
 Echo/loop guards:
 
-- **Compare-before-write (primary).** Each changed role is compared against the current `v1-objects` record before writing. A PCC-originated edit reaches v2 only *after* the `v1-objects` update that triggered the v1→v2 sync, so the record read back already carries the new value and the event no-ops.
+- **Authenticated origin (primary).** Project-service tokens signed by this bridge carry `lfx_origin: "v1_sync_helper"` using the canonical `pkg/events` SDK constants. Project-service validates it and copies it into the settings event's optional `origin` field. The bridge drops exactly that origin **before** mapping reads, user resolution or pending-write comparisons. JWT `principal`/`sub`, event `Actor.Username` and v2 audit stamps still identify the real human when resolvable; the service fallback is unchanged. The same human editing directly in LFX One still syncs.
+- **Compare-before-write (idempotency/reversal protection).** Other events compare each changed role against `v1-objects` and the bridge's recent attempts (see above). Replica equality, username and timestamps are not reliable origin classifiers.
 - **Auth0 M2M attribution.** The v1 write sets `lastmodifiedbyid = "{AUTH0_CLIENT_ID}@clients"`, which `shouldSkipSync` skips when the change replicates back through WAL → `v1-objects` KV, so our own v1 write never bounces into v2.
-- **Heimdall origin skip (partial).** Events whose actor is `{HEIMDALL_CLIENT_ID}@clients` are dropped on receipt. This only covers the v1→v2 writes that fall back to the service account (empty/`platform`/unknown-Salesforce principals): v1→v2 normally impersonates the real v1 user, so the actor is usually that user's LFID.
+- **Legacy service-actor guard.** Events whose actor is `{HEIMDALL_CLIENT_ID}@clients` are still dropped. Other M2M actors are not broadly excluded.
 
-Delivery: the subscription is core NATS (matching `lfx.user_profile.updated`), so there is no redelivery. A transient failure — v1 DB unavailable during contact resolution, or a 5xx from the gateway — is logged as an error and the event is dropped; recovering that project's staff state requires a fresh edit or a manual backfill.
+**Legacy and mixed-version limits:** absent, empty or unknown event origins retain
+the existing comparison path; they are not proof of direct v2 authorship. An old
+project-service ignores the JWT claim, and an old bridge never adds it. Such
+originless human events remain ambiguous: a redundant echo may change v1 audit
+attribution **or overwrite a newer PCC assignment** if a delayed C echo arrives
+after PCC has moved to D while B is pending. Do not rely on suppression during a
+mixed rollout. No replica-equality shortcut is added: genuine v2 reversals and
+clears still use the pending-write safety rules.
+
+The origin field trusts the existing project-service/NATS publishing boundary,
+not arbitrary HTTP headers or caller payloads; the event is not separately signed.
+Protect the service subject's publish permissions and Heimdall signing keys.
+Project-service rejects unsupported non-empty or malformed origin claims.
+Origin does not grant authorization or suppress role notifications.
+
+**Rollout/SDK gate:** first release the project-service SDK with the field/constants,
+then update this consumer's pinned SDK to that actual release (no local replace in
+committed dependencies). Deploy the origin-aware project-service on all replicas
+before the signing/consuming bridge. JWT caching is audience/principal-scoped and
+in-memory: all newly generated project-service tokens include the claim, including
+fallbacks, and cached tokens preserve it; other audiences are unchanged. Replacing
+all old bridge processes discards their old token caches. Keep the staff-edit
+freeze and single enabled consumer through pod transitions, settle in-flight
+events and WAL replication, then resume edits. See the operational runbook's
+[origin rollout gate](cmd/lfx-v1-sync-helper/README.md#signed-origin-rollout-gate).
+This removes authenticated v1 echoes, not all concurrent-write conflicts: the v1
+PATCH still has no CAS, and no existing drift is repaired automatically.
+
+Delivery: the subscription is core NATS (matching `lfx.user_profile.updated`), so there is no redelivery. A transient failure — v1 DB unavailable during contact resolution, or a 5xx from the gateway — is logged as an error and the event is dropped; recovering that project's staff state requires a fresh edit or the reviewed repair below. Enabling the subscription only handles *future* edits: it never revisits drift that already exists.
+
+#### Reviewed project staff repair (lfx-self-serve#5034)
+
+`--reconcile-project-staff-file` is a one-shot that compares `executive_director` and `program_manager` between LFX One and PCC for an explicit list of project UIDs (at most 1000; it never scans every project). It follows this bridge's username-then-email contact resolution and reuses its partial PATCH rather than replaying events, but reconciliation requires a unique live contact match.
+
+- **Report (default).** Reads only, and writes a JSON report with one entry per project and role: an outcome code (`in_sync`, `drift`, `unresolved_contact`, `ambiguous_contact`, `no_project_mapping`, …), an action (`assign` or `clear`) for drift, and the versions observed (v2 settings ETag, `v1-objects` revision, mapping revision), plus a per-report salted fingerprint binding each drift target. It contains no names, emails, usernames or contact SFIDs.
+- **Reviewed apply.** A reviewer checks the actual assignments in both UIs and marks individual roles `approved`; a clear also needs `clearApproved`. `--apply-project-staff` re-checks every recorded version and resolved-target fingerprint, refuses anything that moved, and PATCHes only the approved roles, LFX One wins. PCC-wins and unclear cases are left for manual disposition by not approving them.
+- **Limits.** An LFX One assignee that cannot be resolved to a v1 contact is reported as `unresolved_contact` and never becomes a clear. An identifier shared by distinct live contacts is reported as `ambiguous_contact` and never written; an ambiguous username does not fall back to email. The v1 PATCH has no compare-and-swap, so an apply needs an approved edit freeze across PCC and LFX One, settled replication and a single repair writer. A timeout or 5xx stops the run with the outcome `unconfirmed`, and the next step is a fresh report, never a retry of the old approval. Opportunity owner is never touched.
+
+Merging or deploying this tooling does not repair any live data: each environment needs its own report, review, approved apply and confirming report. The exact flags, report schema and runbook are in [`cmd/lfx-v1-sync-helper/README.md`](cmd/lfx-v1-sync-helper/README.md#project-staff-reconciliation-lfx-self-serve5034). Companion work: the LFX One staff save fix ([lfx-self-serve#5033](https://github.com/linuxfoundation/lfx-self-serve/issues/5033)) and the production rollout of this bridge ([lfx-v2-argocd#1995](https://github.com/linuxfoundation/lfx-v2-argocd/issues/1995)).
 
 ```mermaid
 sequenceDiagram
