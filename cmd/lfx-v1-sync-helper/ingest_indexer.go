@@ -670,6 +670,61 @@ func syncCommitteeDeleteToV1(ctx context.Context, committeeUID, projectSFID, com
 // resolveV1UserSFIDByEmailFn is injectable for tests.
 var resolveV1UserSFIDByEmailFn = ResolveV1UserSFIDByEmail
 
+// v1NoRole is the v1 role sent for a structured v2 role with an empty name.
+// It is the "no role" value v1 project-service accepts on write.
+const v1NoRole = "None"
+
+// v1RoleFromV2EventData extracts the v1 role fields from a v2 committee member
+// indexer event (lfx-self-serve-ops#1417). present is false when the event
+// carries no usable "role" (absent, null or malformed), in which case v1 must
+// be left untouched.
+//
+// A structured role object is a complete snapshot: committee-service always
+// emits "name" and omits empty dates, so an absent or null date key is an empty
+// date. Both date pointers are then non-nil, and a pointer to "" asks v1 to
+// clear that date. An empty name is sent as v1NoRole. A legacy string role
+// carries only a name, so its date pointers are nil and v1 keeps its dates.
+func v1RoleFromV2EventData(data map[string]any) (name string, startDate, endDate *string, present bool) {
+	switch role := data["role"].(type) {
+	case string:
+		return role, nil, nil, true
+	case map[string]any:
+		rawName, ok := role["name"].(string)
+		if !ok {
+			return "", nil, nil, false
+		}
+		start, ok := roleDateField(role, "start_date")
+		if !ok {
+			return "", nil, nil, false
+		}
+		end, ok := roleDateField(role, "end_date")
+		if !ok {
+			return "", nil, nil, false
+		}
+		name = strings.TrimSpace(rawName)
+		if name == "" {
+			name = v1NoRole
+		}
+		return name, &start, &end, true
+	default:
+		return "", nil, nil, false
+	}
+}
+
+// roleDateField returns a structured role's date. An absent or null key is the
+// empty date; ok is false for any non-string value, so a malformed role object
+// is never treated as a snapshot that clears dates.
+func roleDateField(role map[string]any, key string) (date string, ok bool) {
+	switch v := role[key].(type) {
+	case nil:
+		return "", true
+	case string:
+		return v, true
+	default:
+		return "", false
+	}
+}
+
 // syncCommitteeMemberCreateToV1 ensures a v2-created committee member exists in v1.
 // Returns a non-nil error only for transient V1 API failures; mapping write failures
 // are logged as warnings since the V1 record was already created successfully.
@@ -706,8 +761,15 @@ func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID,
 	if jobTitle, ok := data["job_title"].(string); ok {
 		payload.Title = jobTitle
 	}
-	if role, ok := data["role"].(string); ok {
+	// POST dates are date-formatted, so an empty role date is omitted.
+	if role, start, end, present := v1RoleFromV2EventData(data); present {
 		payload.Role = role
+		if start != nil {
+			payload.RoleStartDate = *start
+		}
+		if end != nil {
+			payload.RoleEndDate = *end
+		}
 	}
 	if status, ok := data["status"].(string); ok {
 		payload.Status = status
@@ -834,8 +896,13 @@ func syncCommitteeMemberUpdateToV1(ctx context.Context, memberUID, projectSFID, 
 	if jobTitle, ok := data["job_title"].(string); ok {
 		payload.Title = jobTitle
 	}
-	if role, ok := data["role"].(string); ok {
+	// A nil date pointer is omitted, which v1 preserves under the
+	// X-Preserve-Omitted-Dates contract; a pointer to "" clears the date.
+	// Only a complete structured role snapshot supplies role date pointers.
+	if role, start, end, present := v1RoleFromV2EventData(data); present {
 		payload.Role = role
+		payload.RoleStartDate = start
+		payload.RoleEndDate = end
 	}
 	if status, ok := data["status"].(string); ok {
 		payload.Status = status
@@ -850,11 +917,12 @@ func syncCommitteeMemberUpdateToV1(ctx context.Context, memberUID, projectSFID, 
 		payload.Country = country
 	}
 	// A cleared v2 voting status is sent as v1NoVotingStatus because v1 cannot
-	// clear the field; an absent "voting" key leaves v1 untouched.
+	// clear the field; an absent "voting" key leaves v1 untouched. A present
+	// voting object always sends both dates, so its empty dates still clear.
 	if vs, vsd, ved, present := v1VotingFromV2EventData(data); present {
 		payload.VotingStatus = vs
-		payload.VotingStartDate = vsd
-		payload.VotingEndDate = ved
+		payload.VotingStartDate = &vsd
+		payload.VotingEndDate = &ved
 	}
 	orgID, err := resolveOrgIDFromEventData(ctx, data)
 	if err != nil {

@@ -1055,21 +1055,29 @@ type projectServiceCommitteeMemberCreate struct {
 }
 
 // projectServiceCommitteeMemberUpdate is the request body for PATCH /v2/projects/{projectId}/committees/{committeeID}/members/{memberID}.
+//
+// The date fields are pointers so an omitted date (nil) is distinguishable
+// from an explicit clear (pointer to ""). Under preserveOmittedDatesHeader v1
+// keeps an omitted date; without it, v1 clears every omitted date.
 type projectServiceCommitteeMemberUpdate struct {
-	Email           string `json:"Email,omitempty"`
-	OrganizationID  string `json:"OrganizationID,omitempty"`
-	Title           string `json:"Title,omitempty"`
-	Role            string `json:"Role,omitempty"`
-	RoleStartDate   string `json:"RoleStartDate,omitempty"`
-	RoleEndDate     string `json:"RoleEndDate,omitempty"`
-	Status          string `json:"Status,omitempty"`
-	AppointedBy     string `json:"AppointedBy,omitempty"`
-	VotingStatus    string `json:"VotingStatus,omitempty"`
-	VotingStartDate string `json:"VotingStartDate,omitempty"`
-	VotingEndDate   string `json:"VotingEndDate,omitempty"`
-	Agency          string `json:"Agency,omitempty"`
-	Country         string `json:"Country,omitempty"`
+	Email           string  `json:"Email,omitempty"`
+	OrganizationID  string  `json:"OrganizationID,omitempty"`
+	Title           string  `json:"Title,omitempty"`
+	Role            string  `json:"Role,omitempty"`
+	RoleStartDate   *string `json:"RoleStartDate,omitempty"`
+	RoleEndDate     *string `json:"RoleEndDate,omitempty"`
+	Status          string  `json:"Status,omitempty"`
+	AppointedBy     string  `json:"AppointedBy,omitempty"`
+	VotingStatus    string  `json:"VotingStatus,omitempty"`
+	VotingStartDate *string `json:"VotingStartDate,omitempty"`
+	VotingEndDate   *string `json:"VotingEndDate,omitempty"`
+	Agency          string  `json:"Agency,omitempty"`
+	Country         string  `json:"Country,omitempty"`
 }
+
+// preserveOmittedDatesHeader opts the member PATCH into keeping omitted or
+// null date fields instead of clearing them (project-management#1540).
+const preserveOmittedDatesHeader = "X-Preserve-Omitted-Dates"
 
 // projectServiceCommitteeMemberResponse is the relevant subset of the response returned
 // by the create committee member operation.
@@ -1143,6 +1151,7 @@ func updateV1CommitteeMember(ctx context.Context, projectSFID, committeeSFID, me
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(preserveOmittedDatesHeader, "true")
 
 	resp, err := v1HTTPClient.Do(req)
 	if err != nil {
