@@ -56,6 +56,7 @@ func projectServiceErrorDetail(err error) string {
 	var (
 		badRequest  *projectservice.BadRequestError
 		conflict    *projectservice.ConflictError
+		forbidden   *projectservice.ForbiddenError
 		internal    *projectservice.InternalServerError
 		notFound    *projectservice.NotFoundError
 		unavailable *projectservice.ServiceUnavailableError
@@ -66,6 +67,8 @@ func projectServiceErrorDetail(err error) string {
 		return formatProjectServiceError(badRequest.GoaErrorName(), badRequest.Code, badRequest.Message)
 	case errors.As(err, &conflict):
 		return formatProjectServiceError(conflict.GoaErrorName(), conflict.Code, conflict.Message)
+	case errors.As(err, &forbidden):
+		return formatProjectServiceError(forbidden.GoaErrorName(), forbidden.Code, forbidden.Message)
 	case errors.As(err, &internal):
 		return formatProjectServiceError(internal.GoaErrorName(), internal.Code, internal.Message)
 	case errors.As(err, &notFound):

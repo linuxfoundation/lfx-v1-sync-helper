@@ -29,6 +29,7 @@ import (
 	// Project service imports
 	projectclient "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/http/project_service/client"
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
+	"github.com/linuxfoundation/lfx-v2-project-service/pkg/events"
 
 	// Committee service imports
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
@@ -183,6 +184,7 @@ func initGoaClients(cfg *Config) error {
 		projectHTTPClient.UpdateProjectBase(),
 		projectHTTPClient.UpdateProjectSettings(),
 		projectHTTPClient.DeleteProject(),
+		projectHTTPClient.ResolveProjectSlug(),
 		projectHTTPClient.Readyz(),
 		projectHTTPClient.Livez(),
 		projectHTTPClient.CreateProjectLink(),
@@ -384,6 +386,11 @@ func generateJWTToken(ctx context.Context, audience string, v1Principal string) 
 		"nbf":       now.Add(-30 * time.Second).Unix(), // Not before (valid from now).
 		"jti":       uuid.New().String(),               // Unique JWT ID.
 		"principal": principal,
+	}
+	// Keep human attribution in principal/sub; origin identifies the relay separately.
+	// Other services retain their existing token contract.
+	if audience == projectServiceAudience {
+		claims[events.OriginClaim] = events.OriginV1SyncHelper
 	}
 
 	// Only add email if it's not empty.

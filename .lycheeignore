@@ -10,3 +10,6 @@ https://hub\.meltano\.com/assets/logos/extractors/postgres\.png
 https://hub\.meltano\.com/assets/logos/extractors/dynamodb\.png
 https://hub\.meltano\.com/assets/logos/loaders/jsonl\.png
 https://hub\.meltano\.com/assets/logos/files/docker\.png
+
+# This production-rollout issue exists in a private repository; CI cannot access it.
+^https://github\.com/linuxfoundation/lfx-v2-argocd/issues/1995$

@@ -82,6 +82,16 @@ func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string
 	if err != nil {
 		return false, nil, err
 	}
+	// V1 collapses both technical committee categories into one value. A
+	// refreshed replica row may be our own reverse-sync PATCH, whose name is
+	// not evidence that the category changed. Keep the current V2 distinction
+	// whenever it still has the same V1 representation; other V1 categories
+	// continue to override V2 normally.
+	if typeVal, ok := v1Data["type__c"].(string); ok &&
+		typeVal == "Technical Oversight Committee/Technical Advisory Committee" &&
+		mapV2CategoryToV1(stringPtrToString(currentBase.Category)) == typeVal {
+		payload.Category = stringPtrToString(currentBase.Category)
+	}
 
 	// Snapshot the merged payload as a base struct for change detection.
 	updatedBase := committeeBaseFromUpdatePayload(currentBase.UID, payload)

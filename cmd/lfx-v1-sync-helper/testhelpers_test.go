@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -12,13 +13,16 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 )
 
 type v1TestRequest struct {
-	Method      string
-	Path        string
-	ContentType string
-	Body        map[string]any
+	Method               string
+	Path                 string
+	ContentType          string
+	PreserveOmittedDates string
+	Body                 map[string]any
 }
 
 // syncTestHarness shares the existing CAS-capable fakeMappingStore with a real
@@ -34,7 +38,12 @@ func setupSyncTest(t *testing.T, status int, response string) *syncTestHarness {
 	t.Helper()
 	h := &syncTestHarness{store: newFakeMappingStore()}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		request := v1TestRequest{Method: r.Method, Path: r.URL.Path, ContentType: r.Header.Get("Content-Type")}
+		request := v1TestRequest{
+			Method:               r.Method,
+			Path:                 r.URL.Path,
+			ContentType:          r.Header.Get("Content-Type"),
+			PreserveOmittedDates: r.Header.Get(preserveOmittedDatesHeader),
+		}
 		if r.Method != http.MethodDelete {
 			if err := json.NewDecoder(r.Body).Decode(&request.Body); err != nil {
 				t.Errorf("decode v1 request: %v", err)
@@ -57,6 +66,11 @@ func setupSyncTest(t *testing.T, status int, response string) *syncTestHarness {
 		t.Fatal(err)
 	}
 	origCfg, origClient, origStore := cfg, v1HTTPClient, mappingStore
+	origFetchSettings := fetchCommitteeSettings
+	origFetchV1 := fetchV1CommitteeData
+	fetchCommitteeSettings = func(_ context.Context, uid string) (*committeeservice.CommitteeSettingsWithReadonlyAttributes, string, error) {
+		return &committeeservice.CommitteeSettingsWithReadonlyAttributes{UID: &uid}, "1", nil
+	}
 	origGetBackoff, origPutBackoff := mappingGetInitialBackoff, mappingPutInitialBackoff
 	cfg = &Config{LFXAPIGateway: gateway}
 	v1HTTPClient = srv.Client()
@@ -65,6 +79,8 @@ func setupSyncTest(t *testing.T, status int, response string) *syncTestHarness {
 	mappingGetInitialBackoff, mappingPutInitialBackoff = time.Microsecond, time.Microsecond
 	t.Cleanup(func() {
 		cfg, v1HTTPClient, mappingStore = origCfg, origClient, origStore
+		fetchCommitteeSettings = origFetchSettings
+		fetchV1CommitteeData = origFetchV1
 		mappingGetInitialBackoff, mappingPutInitialBackoff = origGetBackoff, origPutBackoff
 	})
 	return h

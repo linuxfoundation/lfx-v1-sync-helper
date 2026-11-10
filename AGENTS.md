@@ -169,6 +169,56 @@ Boot ordering (`main.go`): NATS + KV bucket handles → a KV-backed `mappingStor
   - On update, `PublicEnabled` is sent only when the event carries `public`, so a partial or legacy event cannot flip visibility. `PublicName` is sent only when non-empty, because v1 PATCH treats an empty name as unchanged and cannot clear it. v1 clears `public_name` itself when `PublicEnabled` is `false`, and fills it with the committee name when `PublicEnabled` is `true` and no name is sent.
   - This only affects future writes. Committees already out of sync need a separate, per-record repair that decides the source of truth from the last deliberate edit, not from timestamps (the sync client rewrites `lastmodifieddate` on both sides).
 
+#### Committee update payload: empty `MailingList` and `JoinMode` — lfx-self-serve-ops#945
+
+- **An empty `MailingList` or `JoinMode` is never sent to v1** (`mapV2DataToV1CommitteeUpdatePayload`). The v1 committee PATCH validates both before the handler runs, and one invalid field rejects the whole request. `MailingList` must be an email (422 code 601), and `JoinMode` must be one of `open | invite_only | application | closed` (422 code 606). v2 omits `mailing_list` for a committee that has none, and older committees have no `join_mode`, so each hit this. v1 reports one validation error at a time, so fixing one field can reveal the next.
+  - The other empty committee text fields (`Description`, `CommitteeWebsite`, `ChatChannel`) pass v1 validation but are ignored (it only writes non-empty strings), so a v2 clear of those does not reach v1. A cleared mailing list or join mode also stays in v1.
+
+#### Committee voting enabled — lfx-self-serve-ops#946
+
+- **v2 → v1** (`syncCommitteeCreateToV1` / `mapV2DataToV1CommitteeUpdatePayload`): v2 `enable_voting` is sent as `EnableVoting`, on create and on update. Before this, v2 → v1 never sent it, so a committee created or edited in v2 kept v1's default `false`. v1 → v2 already maps `enable_voting__c` (`handlers_committees.go`).
+  - On update, `EnableVoting` is sent only when the event carries `enable_voting`, like `PublicEnabled`, so a partial or legacy event cannot flip voting. v2 serializes it without `omitempty`, so every full committee snapshot carries it.
+  - Because v2 is now authoritative on every update, a committee whose v1 value was changed in v1 and never reached v2 would be overwritten by the next v2 edit. Reconcile such committees first (`committee-cli sync committee-fields --from=v1 --field=enable_voting`) before deploying a change that sends the field.
+
+#### Committee SSO group enabled — lfx-self-serve-ops#1251
+
+- **v2 → v1** (`syncCommitteeCreateToV1` / `mapV2DataToV1CommitteeUpdatePayload`): v2 `sso_group_enabled` is sent as `SSOGroupEnabled` on create and update. Previously both paths omitted it, leaving v1 at its default `false` on create and unchanged on later updates. v1 → v2 already maps the flag (`handlers_committees.go`).
+  - Explicit `true` and `false` are preserved. Absent, null, or malformed values are omitted so partial/legacy events cannot change the v1 setting. Full committee snapshots always carry the boolean.
+  - This does not automatically repair existing drift. Confirm the last deliberate edit and intended setting before reconciliation; timestamps alone are not a source-of-truth signal because sync writes update them. Reconcile v1-authoritative mismatches before deploying, since subsequent v2 updates will now send the flag.
+
+#### Committee business email required — lfx-self-serve-ops#1253
+
+- **v1 → v2:** create maps `business_email_required__c` as before; existing committees also call
+  `updateCommitteeSettingsFromV1`, even when the base is unchanged. The setting and editor are re-read from the
+  current `v1-objects` record so an old WAL redelivery cannot reuse a superseded payload; deleted/missing records
+  and absent/null/malformed flags do nothing. KV failures retry. The v2 settings update uses a fresh read and ETag,
+  preserves other scalar settings, and omits writer/auditor lists (the service preserves absent lists).
+  All updates to existing committees refresh base fields before any base API call too, including events with an
+  absent/null flag, preventing base or settings retries from reverting a newer rename. Echo suppression uses the
+  original WAL message's editor only: a refreshed service-authored row may retain a pending human rename after a
+  settings-only PATCH. Normal base comparison determines completed work; a matching base is a no-op while pending
+  settings work still completes (e.g. after SSO-name writeback).
+  Transient base read/update failures NACK the WAL event instead of losing the pending settings change.
+  Successful base mapping and SSO-name writeback complete before the independently retryable settings update.
+  A v2 settings NotFound is logged at INFO and skipped rather than retried; creating a missing settings record is
+  separate repair work. Other settings errors still retry.
+- **v2 → v1:** create fetches current v2 settings before the v1 POST and sends explicit `BusinessEmailRequired`.
+  A settings NotFound falls back to the v1 default only after confirming the committee base still exists; deleted
+  bases are skipped and transient failures retry. Settings create/update events on `lfx.committee_settings.>` in
+  `committee_events` PATCH only that field, using current settings rather than a stale event snapshot.
+  Deleted/tombstoned committees are skipped. Missing reverse mappings retry only when the live base's parent
+  project has a live v1 mapping; proven v2-only committees are ACKed without warning/retry churn.
+  Eligible mapping races use a 30-second delayed NAK within the existing three-delivery limit, including updates
+  that arrive while a base create is still in flight.
+- **Echo suppression:** v1 settings writes use `pending.v1_to_v2.update.committee_settings.<uid>` and v1 creates
+  use the separate `create` operation, so a settings update cannot consume a create or committee-base marker.
+  Failed settings writes remove their marker. v2→v1 WAL echoes use the existing `shouldSkipSync` service-identity
+  guard. Pending-marker concurrency/freshness caveats still apply.
+- **Rollout:** update the chart-owned stream subjects to include `lfx.committee_settings.>` before the new
+  consumer starts. If stream creation is disabled or subjects are overridden, update the externally managed stream
+  as well. This does not replay old settings or repair existing drift automatically: reconcile intentional v1/v2
+  differences before rollout, since subsequent events can now propagate either side's flag.
+
 ### Python ETL (Meltano)
 
 #### Configuration Structure

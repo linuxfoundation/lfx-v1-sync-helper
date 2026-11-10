@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
+	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 	nats "github.com/nats-io/nats.go"
 )
 
@@ -375,12 +376,46 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 	if ssoGroupName, ok := data["sso_group_name"].(string); ok && ssoGroupName != "" {
 		payload.SSOGroupName = ssoGroupName
 	}
+	// v1 defaults SSOGroupEnabled to false when omitted, so send explicit v2 values.
+	if ssoEnabled, ok := data["sso_group_enabled"].(bool); ok {
+		payload.SSOGroupEnabled = &ssoEnabled
+	}
 	// v1 defaults PublicEnabled to false when omitted, so v2 visibility must be sent explicitly.
 	if public, ok := data["public"].(bool); ok {
 		payload.PublicEnabled = &public
 	}
 	if displayName, ok := data["display_name"].(string); ok {
 		payload.PublicName = displayName
+	}
+	// v1 defaults EnableVoting to false when omitted, so v2 voting must be sent explicitly.
+	if enableVoting, ok := data["enable_voting"].(bool); ok {
+		payload.EnableVoting = &enableVoting
+	}
+
+	// The committee base event excludes settings. Fetch them before creation
+	// rather than creating with v1's false default and waiting for another event.
+	settings, _, err := fetchCommitteeSettings(ctx, committeeUID)
+	if err == nil {
+		payload.BusinessEmailRequired = &settings.BusinessEmailRequired
+	} else {
+		var notFound *committeeservice.NotFoundError
+		if !errors.As(err, &notFound) {
+			return err
+		}
+		// A legacy live committee may lack settings, but a delayed create can
+		// also arrive after deletion. Confirm the base is still live before
+		// falling back to v1's default, so we never recreate a deleted committee.
+		base, _, baseErr := fetchCommitteeBase(ctx, committeeUID)
+		if errors.As(baseErr, &notFound) {
+			return nil
+		}
+		if baseErr != nil {
+			return baseErr
+		}
+		if base == nil {
+			return fmt.Errorf("empty committee base response for %s", committeeUID)
+		}
+		log.InfoContext(ctx, "committee has no settings; using v1 default for business email requirement")
 	}
 
 	log.With("payload_category", payload.Category).InfoContext(ctx, "creating committee in v1")
@@ -513,27 +548,39 @@ func mapV2DataToV1CommitteeUpdatePayload(data map[string]any) projectServiceComm
 	} else if fullSnapshot {
 		payload.Website = new(string)
 	}
-	if joinMode, ok := data["join_mode"].(string); ok {
+	// The v1 API validates JoinMode as an enum (open, invite_only, application,
+	// closed), so an empty value is rejected with a 422 and fails the whole PATCH.
+	// A committee with no join_mode (older records) cannot be cleared; omit it.
+	if joinMode, ok := data["join_mode"].(string); ok && joinMode != "" {
 		payload.JoinMode = &joinMode
-	} else if fullSnapshot {
-		payload.JoinMode = new(string)
 	}
-	if mailingListEmail, ok := data["mailing_list"].(string); ok {
+	// The v1 API validates MailingList as an email address even when it is empty,
+	// so an empty value is rejected with a 422 and fails the whole PATCH. A
+	// cleared mailing list cannot be written to v1; leave the v1 value alone.
+	if mailingListEmail, ok := data["mailing_list"].(string); ok && mailingListEmail != "" {
 		payload.MailingList = &mailingListEmail
-	} else if mailingListEmail, ok := data["mailing_list_email"].(string); ok {
+	} else if mailingListEmail, ok := data["mailing_list_email"].(string); ok && mailingListEmail != "" {
 		// Accept older events using the v1-facing key as well.
 		payload.MailingList = &mailingListEmail
-	} else if fullSnapshot {
-		payload.MailingList = new(string)
 	}
 	if chatChannel, ok := data["chat_channel"].(string); ok {
+		if chatChannel == "" {
+			// The v1 PATCH ignores empty strings; NONE explicitly clears this field.
+			chatChannel = "NONE"
+		}
 		payload.ChatChannel = &chatChannel
 	} else if fullSnapshot {
-		payload.ChatChannel = new(string)
+		// Optional fields disappear from full indexer snapshots when cleared.
+		clearChatChannel := "NONE"
+		payload.ChatChannel = &clearChatChannel
 	}
 	if ssoGroupName, ok := data["sso_group_name"].(string); ok && ssoGroupName != "" {
 		// Generated v2 identifier, not user-clearable. Never write back an empty name.
 		payload.SSOGroupName = &ssoGroupName
+	}
+	// Preserve explicit false, but leave the v1 setting alone on partial/legacy events without the flag.
+	if ssoEnabled, ok := data["sso_group_enabled"].(bool); ok {
+		payload.SSOGroupEnabled = &ssoEnabled
 	}
 	// v1 only changes PublicEnabled when it is present and clears public_name when it is false,
 	// so send it only when the event carries it; a legacy partial body must not flip visibility.
@@ -543,6 +590,11 @@ func mapV2DataToV1CommitteeUpdatePayload(data map[string]any) projectServiceComm
 	if displayName, ok := data["display_name"].(string); ok && displayName != "" {
 		// v1 cannot clear public_name through PATCH (empty means unchanged), so never send an empty name.
 		payload.PublicName = &displayName
+	}
+	// Like PublicEnabled, v1 only changes EnableVoting when it is present, so send it only when
+	// the event carries it; a legacy partial body must not flip voting.
+	if enableVoting, ok := data["enable_voting"].(bool); ok {
+		payload.EnableVoting = &enableVoting
 	}
 	return payload
 }
@@ -618,6 +670,61 @@ func syncCommitteeDeleteToV1(ctx context.Context, committeeUID, projectSFID, com
 // resolveV1UserSFIDByEmailFn is injectable for tests.
 var resolveV1UserSFIDByEmailFn = ResolveV1UserSFIDByEmail
 
+// v1NoRole is the v1 role sent for a structured v2 role with an empty name.
+// It is the "no role" value v1 project-service accepts on write.
+const v1NoRole = "None"
+
+// v1RoleFromV2EventData extracts the v1 role fields from a v2 committee member
+// indexer event (lfx-self-serve-ops#1417). present is false when the event
+// carries no usable "role" (absent, null or malformed), in which case v1 must
+// be left untouched.
+//
+// A structured role object is a complete snapshot: committee-service always
+// emits "name" and omits empty dates, so an absent or null date key is an empty
+// date. Both date pointers are then non-nil, and a pointer to "" asks v1 to
+// clear that date. An empty name is sent as v1NoRole. A legacy string role
+// carries only a name, so its date pointers are nil and v1 keeps its dates.
+func v1RoleFromV2EventData(data map[string]any) (name string, startDate, endDate *string, present bool) {
+	switch role := data["role"].(type) {
+	case string:
+		return role, nil, nil, true
+	case map[string]any:
+		rawName, ok := role["name"].(string)
+		if !ok {
+			return "", nil, nil, false
+		}
+		start, ok := roleDateField(role, "start_date")
+		if !ok {
+			return "", nil, nil, false
+		}
+		end, ok := roleDateField(role, "end_date")
+		if !ok {
+			return "", nil, nil, false
+		}
+		name = strings.TrimSpace(rawName)
+		if name == "" {
+			name = v1NoRole
+		}
+		return name, &start, &end, true
+	default:
+		return "", nil, nil, false
+	}
+}
+
+// roleDateField returns a structured role's date. An absent or null key is the
+// empty date; ok is false for any non-string value, so a malformed role object
+// is never treated as a snapshot that clears dates.
+func roleDateField(role map[string]any, key string) (date string, ok bool) {
+	switch v := role[key].(type) {
+	case nil:
+		return "", true
+	case string:
+		return v, true
+	default:
+		return "", false
+	}
+}
+
 // syncCommitteeMemberCreateToV1 ensures a v2-created committee member exists in v1.
 // Returns a non-nil error only for transient V1 API failures; mapping write failures
 // are logged as warnings since the V1 record was already created successfully.
@@ -654,8 +761,15 @@ func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID,
 	if jobTitle, ok := data["job_title"].(string); ok {
 		payload.Title = jobTitle
 	}
-	if role, ok := data["role"].(string); ok {
+	// POST dates are date-formatted, so an empty role date is omitted.
+	if role, start, end, present := v1RoleFromV2EventData(data); present {
 		payload.Role = role
+		if start != nil {
+			payload.RoleStartDate = *start
+		}
+		if end != nil {
+			payload.RoleEndDate = *end
+		}
 	}
 	if status, ok := data["status"].(string); ok {
 		payload.Status = status
@@ -782,8 +896,13 @@ func syncCommitteeMemberUpdateToV1(ctx context.Context, memberUID, projectSFID, 
 	if jobTitle, ok := data["job_title"].(string); ok {
 		payload.Title = jobTitle
 	}
-	if role, ok := data["role"].(string); ok {
+	// A nil date pointer is omitted, which v1 preserves under the
+	// X-Preserve-Omitted-Dates contract; a pointer to "" clears the date.
+	// Only a complete structured role snapshot supplies role date pointers.
+	if role, start, end, present := v1RoleFromV2EventData(data); present {
 		payload.Role = role
+		payload.RoleStartDate = start
+		payload.RoleEndDate = end
 	}
 	if status, ok := data["status"].(string); ok {
 		payload.Status = status
@@ -798,11 +917,12 @@ func syncCommitteeMemberUpdateToV1(ctx context.Context, memberUID, projectSFID, 
 		payload.Country = country
 	}
 	// A cleared v2 voting status is sent as v1NoVotingStatus because v1 cannot
-	// clear the field; an absent "voting" key leaves v1 untouched.
+	// clear the field; an absent "voting" key leaves v1 untouched. A present
+	// voting object always sends both dates, so its empty dates still clear.
 	if vs, vsd, ved, present := v1VotingFromV2EventData(data); present {
 		payload.VotingStatus = vs
-		payload.VotingStartDate = vsd
-		payload.VotingEndDate = ved
+		payload.VotingStartDate = &vsd
+		payload.VotingEndDate = &ved
 	}
 	orgID, err := resolveOrgIDFromEventData(ctx, data)
 	if err != nil {

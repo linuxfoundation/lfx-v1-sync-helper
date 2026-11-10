@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 module github.com/linuxfoundation/lfx-v1-sync-helper
 
-go 1.26.0
+go 1.27.3
 
 require (
 	github.com/akamensky/base58 v0.0.0-20210829145138-ce8bf8802e8f
@@ -17,7 +17,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/linuxfoundation/lfx-v2-committee-service v0.4.26
-	github.com/linuxfoundation/lfx-v2-project-service v0.8.8
+	github.com/linuxfoundation/lfx-v2-project-service v0.10.2
 	github.com/nats-io/nats.go v1.52.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/uptrace/bun v1.2.18
@@ -43,7 +43,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.38.4 // indirect
 	github.com/aws/smithy-go v1.27.6 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
-	github.com/go-chi/chi/v5 v5.3.1 // indirect
+	github.com/go-chi/chi/v5 v5.4.0 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect

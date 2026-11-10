@@ -112,7 +112,7 @@ natsResources:
     compression: s2
 
   # stream_committee_events is the configuration for the JetStream stream that captures
-  # lfx.committee.* and lfx.committee_member.* events published by the indexer service.
+  # lfx.committee.*, lfx.committee_member.* and lfx.committee_settings.* indexer events.
   # Owned here (v1-sync-helper chart) until the indexer service chart declares it.
   stream_committee_events:
     # creation is a boolean to determine if the JetStream stream should be created via the helm chart.
@@ -125,6 +125,7 @@ natsResources:
     subjects:
       - lfx.committee.>
       - lfx.committee_member.>
+      - lfx.committee_settings.>
     # storage is the storage type for the stream
     storage: file
     # retention is the retention policy type

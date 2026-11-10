@@ -64,11 +64,87 @@ maxAckPending: 1000
 |`lfx.committee.created`|Create committee in v1 via Project Service API|
 |`lfx.committee.updated`|Update committee in v1 via Project Service API|
 |`lfx.committee.deleted`|Delete committee in v1 via Project Service API|
+|`lfx.committee_settings.created`|Sync current business-email requirement to v1|
+|`lfx.committee_settings.updated`|Sync current business-email requirement to v1|
 |`lfx.committee_member.created`|Add member to committee in v1 via Project Service API|
 |`lfx.committee_member.updated`|Update committee member in v1 via Project Service API|
 |`lfx.committee_member.deleted`|Remove member from committee in v1 via Project Service API|
 
-Loop detection prevents infinite sync cycles: if a non-tombstoned reverse mapping already exists for the object UID, the event originated from v1 and is skipped.
+Create-loop detection skips creates with a live reverse mapping. Update echoes use
+pending-operation markers; v1 WAL echoes of v2 writes are skipped by the sync
+client's `lastmodifiedbyid` identity.
+
+#### Committee business-email requirement
+
+`business_email_required` lives in v2 committee **settings**, not the base record.
+v1 updates therefore perform a separate, ETag-protected settings read/update,
+including when no committee-base field changed. Other scalar settings are
+preserved and writer/auditor lists are omitted, so the service leaves them alone.
+Each settings sync re-reads the current v1 replica record, rather than trusting
+an old WAL delivery. Every existing-committee update also refreshes base input
+before base work, including absent/null-flag events, so a retried base or settings
+failure cannot revert a newer committee rename. Echo detection uses the original
+WAL message's editor, not the refreshed row's editor: a settings-only PATCH can
+make a pending human rename service-authored without syncing it. Normal base
+comparison skips already-completed work without discarding pending changes.
+Deleted/missing records or an absent/malformed flag do not
+change v2 settings; replica read failures are retried. Transient base failures
+also retry instead of acknowledging the settings change without processing it.
+Successful base bookkeeping and SSO-name writeback complete before settings
+sync, so a settings failure cannot bypass those steps.
+A v2 settings NotFound is INFO-logged and skipped; retries cannot create the
+missing settings record. Other settings failures continue to retry.
+
+For v2-created committees, current settings are read before creating the v1
+record. A missing settings record uses the v1 default only after confirming
+that the v2 base still exists; a deleted base is skipped. Later settings
+create/update events PATCH only `BusinessEmailRequired`
+in v1, using current v2 state rather than a stale event snapshot. Missing reverse
+mappings are retried with a 30-second delay (up to the existing three deliveries)
+only when the live committee's parent project has a live v1 mapping. This allows
+an in-flight base create to finish without retrying settings on proven v2-only
+committees. Settings deletes and tombstoned mappings
+never produce a PATCH. Settings have their own pending-marker namespace so a
+settings echo cannot consume the committee-base marker. Create markers are
+separate from update markers, so an immediate v2 settings edit is not swallowed
+by the pending echo of a v1 create.
+
+**Deployment:** the `committee_events` stream must include
+`lfx.committee_settings.>` before starting the updated consumer. The Helm chart
+adds this subject; installations managing the stream separately or overriding
+its subjects must add it themselves. Existing historical drift is not replayed
+or repaired automatically. Confirm each mismatched record's intended value
+before rollout; subsequent events can now propagate changes in both directions.
+
+#### Committee member role and term dates
+
+Member create and update events (including coordinated bulk adds, which publish
+the same per-member event) map `role` to v1 `Role`, `RoleStartDate` and
+`RoleEndDate`. Two role shapes are accepted:
+
+- **Structured** `{"name", "start_date", "end_date"}`, as committee-service emits
+  it. It is a complete snapshot: an absent or null date is an empty date, and an
+  empty name is sent as `None`. A missing or non-string name, or a date that is
+  neither a string nor null, makes the whole object ignored, so it cannot clear
+  anything.
+- **Legacy string**: only the role name is sent; role dates are left alone.
+
+On create, empty dates are omitted. On update, a structured role sends both dates,
+with `""` for an empty date to clear it in v1. A legacy string sends only `Role`
+and omits both role dates; an absent, null or malformed role omits every role
+field. A present `voting` object likewise
+sends both voting dates; an absent one omits them.
+
+Member PATCHes (including `--reconcile-committee-member-voting`) send
+`X-Preserve-Omitted-Dates: true`, so v1 keeps omitted dates instead of clearing
+them (project-management#1540). Without that support, v1 clears every omitted
+date on PATCH.
+
+**Deployment:** deploy only after project-management#1540 is merged and its
+header behavior is verified in the target environment; an HTTP 200 from an older
+project-service does not prove support. Existing role/date drift is not repaired
+automatically. Confirm each mismatched member's intended values before rollout,
+since later structured snapshots overwrite v1 role dates.
 
 ## Configuration
 
@@ -195,6 +271,256 @@ The binary supports one-shot commands that exit after completing their task.
 **`--backfill-projects`** — re-emits v1 `salesforce-project__c` rows with no live `project.sfid.*` v1-mappings entry (LFXV2-3220 removed the project allowlist; projects created before 17 Aug 2026 and never modified since were never synced) by re-PUTting the existing `v1-objects` value and letting the running deployment's KV consumer create them. Because that consumer unconditionally ACKs project messages and hard-errors on a missing parent mapping, candidates are re-emitted parent-before-child, level by level (`orderCandidatesByDepth`), rate-limited (`--emit-rate`, default 2.0/s) with a settle-poll between levels. Refuses to start a live run that mixes Formation-staged and non-Formation candidates unless `--exclude-stage-prefix`, `--include-stage-prefix`, or `--allow-formation` is passed. Aborts unless `--force` if live+tombstoned project mappings fall below the safety floor (~1000). Requires only NATS (`NATS_URL`, `AUTH0_CLIENT_ID`) — no v2 API calls. Supports `--dry-run` (candidate/ordering report only — cannot observe the downstream create) and `--limit` (0 = unlimited). End-of-run summary includes: `scanned`, `mappings_live`, `mappings_tombstoned`, `candidates`, `emitted`, `levels`, `formation_candidates`, `remaining_unmapped`, `errors`.
 
 The flags are independent and mutually exclusive — run each as a separate Job invocation.
+
+### Project staff reconciliation (lfx-self-serve#5034)
+
+`--reconcile-project-staff-file` compares the executive director and program
+manager of selected projects between LFX One (v2) and PCC (v1). It reports by
+default and repairs v1 only for roles a reviewer approved. LFX One wins for an
+approved role. There is no Job manifest: an operator runs it by hand, under the
+gates below.
+
+Creating or deploying this tooling authorizes nothing. A live run needs fresh
+approval of the environment, the project cohort, the maintenance window and the
+exact approved report.
+
+#### Flags
+
+| Flag | Meaning |
+| --- | --- |
+| `--reconcile-project-staff-file <path>` | Required. UTF-8 file of v2 project UIDs, one per line, in canonical UUID form. Blank lines and `#` lines are ignored, duplicates are dropped, more than 1000 projects is an error. |
+| `--project-staff-report <path>` | New report file, created with mode `0600`. The run fails up front if the file exists. Required for a report run; optional with `--apply-project-staff`, where it records the apply results. |
+| `--apply-project-staff` | Default `false`. PATCHes v1 for approved roles. Requires `--project-staff-approved-plan`. Rejected together with `--dry-run`. |
+| `--project-staff-approved-plan <path>` | The reviewed report. Only accepted with `--apply-project-staff`. |
+| `--emit-rate <n>` | Shared flag, default 2. At most `n` project PATCHes per second, one project at a time. The next PATCH waits at least `1/n` seconds after the preceding PATCH returns, so OAuth delays cannot refill a reserved slot. Apply requires at least `1/30` per second (use `0.03334` or faster), so the pacing interval fits the 30-second operation budget. |
+
+The shared `--dry-run` flag (default `false`) never makes this command write:
+without `--apply-project-staff` the run is report-only either way. Flag and file
+errors exit `2` before configuration, NATS, Postgres or any API client is
+touched. An approved plan whose `gatewayOrigin` differs from the configured
+`LFX_API_GW` is rejected right after the configuration loads, before any client
+starts.
+
+The command needs the normal service configuration plus the v1 platform
+database (`V1_DB_*`) for contact resolution, the JWT and Goa clients for v2
+settings, and the v1 API client for the PATCH. It skips the Auth0 Management
+client.
+
+#### Mapping reads (no DDL)
+
+The `project.uid.*` reverse mapping is read according to
+`V1_MAPPINGS_STORE_MODE`, read-only:
+
+- `kv` and `dual`: the existing `v1-mappings` KV bucket, which is authoritative
+  in both modes. No Postgres pool is opened and no dual-write mirror worker
+  starts.
+- `postgres`: a pool without schema bootstrap, plus a catalog check that the
+  `v1_mappings` table exists. A missing table fails the run; it is never created.
+
+The command never writes a mapping and never calls `initMappingStore`.
+
+#### Report schema (version 2)
+
+Every entry is one project and role. The report holds no names, emails,
+usernames, LFIDs, contact SFIDs, avatars, raw HTTP bodies or tokens. Approved
+plans are decoded with unknown fields rejected. Synthetic example:
+
+```json
+{
+  "schemaVersion": 2,
+  "mode": "report",
+  "gatewayOrigin": "https://api-gw.dev.platform.linuxfoundation.org",
+  "fingerprintSalt": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "summary": { "drift": 2, "in_sync": 1, "unresolved_contact": 1 },
+  "entries": [
+    {
+      "projectUid": "11111111-1111-4111-8111-111111111111",
+      "projectSfid": "a0941000002wSYNAAA",
+      "role": "executive_director",
+      "action": "assign",
+      "outcome": "drift",
+      "v2Etag": "7",
+      "v1Revision": 40,
+      "mappingRevision": 1,
+      "targetFingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "approved": false,
+      "clearApproved": false
+    },
+    {
+      "projectUid": "11111111-1111-4111-8111-111111111111",
+      "projectSfid": "a0941000002wSYNAAA",
+      "role": "program_manager",
+      "action": "clear",
+      "outcome": "drift",
+      "v2Etag": "7",
+      "v1Revision": 40,
+      "mappingRevision": 1,
+      "targetFingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "approved": false,
+      "clearApproved": false
+    }
+  ]
+}
+```
+
+- `action`: `assign` (LFX One has a person that resolves to a different v1
+  contact) or `clear` (LFX One has nobody, PCC has someone).
+- `v2Etag`, `v1Revision`, `mappingRevision`: the versions the comparison was
+  made against. An apply refuses a role if any of them has changed.
+- `fingerprintSalt`, `targetFingerprint`: a fresh random salt per report and a
+  SHA-256 binding of the salt, project UID, role and resolved target. Apply
+  refuses a drifted role as `stale_target` if contact resolution now selects
+  a different target, even when every project version is unchanged. Salt and
+  fingerprints are pseudonymous data, not anonymized identities; keep them
+  private. The example fingerprints above are placeholders.
+- Version 1 reports lack target bindings and are rejected. Generate and review
+  a fresh version 2 report; do not upgrade an old approval by editing fields.
+- `mode`: `report` or `apply`. Only a `report` file is accepted as an approved
+  plan, so apply results cannot be replayed.
+
+Report outcomes:
+
+| Outcome | Meaning |
+| --- | --- |
+| `in_sync` | v1 already holds the resolved LFX One value. |
+| `drift` | The values differ; `action` says what an approval would do. |
+| `unresolved_contact` | LFX One has a person with no v1 contact (often a manual entry). Not repairable here, and never treated as a clear. |
+| `ambiguous_contact` | The username or email matches more than one distinct live v1 contact. Nothing is written; an ambiguous username never falls back to email. Duplicate email rows for one contact are not ambiguous. |
+| `no_project_mapping` | No live `project.uid.*` mapping. |
+| `no_v1_record` | No live `salesforce-project__c` record in `v1-objects`. |
+| `v2_project_not_found` | The project settings do not exist in v2. |
+| `error` | A read failed (`reason`: `mapping_read_failed`, `v2_settings_read_failed`, `v1_record_read_failed`, `contact_lookup_failed`). The run exits `1`. |
+
+#### Review and approval
+
+1. Generate the report and review each `drift` entry in **both** PCC and LFX
+   One. Decide per role. Leave PCC-wins and unclear roles unapproved; they need
+   manual handling.
+2. Set `"approved": true` only on roles LFX One should win. For a `clear`, also
+   set `"clearApproved": true`, otherwise the role is skipped as
+   `clear_not_approved`.
+3. Do not edit any other field. The plan is rejected for an unsupported schema
+   or role, an unknown field, `clearApproved` on anything but an approved clear,
+   an approved project missing from the selection file, an approved entry
+   without its versions or target fingerprint, a missing/invalid salt, or
+   conflicting duplicates.
+
+#### Gates before an apply
+
+The apply re-checks versions immediately before each PATCH, but the v1 PATCH has
+no compare-and-swap and the v1 comparison source is the replicated `v1-objects`
+bucket. A named operator must confirm, before running it:
+
+- [ ] An edit freeze on the selected projects in both PCC and LFX One, approved
+      by the project owner, for the whole window.
+- [ ] Replication has settled: no in-flight PCC edits are still on their way
+      through WAL to `v1-objects`, and no staff bridge events are in flight.
+- [ ] This is the only repair writer. One event-consumer replica does not rule
+      out a second repair run or a PCC edit.
+- [ ] The approved report was generated against this environment and is the
+      one that was reviewed.
+
+If any of these cannot be confirmed, run report mode only.
+
+#### Signed-origin rollout gate
+
+The [project staff bridge contract](../../README.md#project-staff-sync-gh-1802)
+uses a signed `lfx_origin` JWT claim and the project-service SDK's optional event
+`origin` field to suppress relayed v1 changes without erasing the human actor.
+This is not a new source-of-truth policy or a replacement for the apply gates.
+
+Before relying on origin-aware echo suppression:
+
+1. Release the project-service SDK containing `OriginClaim`,
+   `OriginV1SyncHelper` and `ProjectSettingsUpdatedMessage.Origin`; pin the bridge
+   to the real published version. Local cross-repo module overrides are verification
+   aids only, not a released SDK or deployable dependency update.
+2. With the staff-edit freeze and a single enabled consumer, deploy origin-aware
+   project-service code to **all** replicas, then replace **all** old bridge
+   processes with the origin-signing/consuming version. Do not resume writes during
+   a mixed rollout; old producers or validators still emit unclassifiable events.
+3. Confirm no in-flight old requests/settings events remain and WAL replication
+   has settled before lifting the freeze. Keep the existing pod-transition freeze:
+   pending-write memory is per process and is lost on restart.
+
+Absent/empty origins retain legacy comparisons, and unknown event values are not
+treated as v1. They cannot reliably distinguish a PCC echo from a genuine LFX One
+reversal by that same human. Legacy echoes can still move v1 audit attribution or
+overwrite a newer PCC assignment, not merely send a harmless same-value PATCH.
+Keep NATS publishing restricted to trusted producers; the copied event field is
+not itself a signature. A rollback to old bridge/service code restores these
+legacy risks and requires the same freeze/settle posture.
+
+No SDK release, deployment, live repair, or historical replay is implied by source
+changes or local tests. The v1 PATCH still has no CAS, so the apply freeze and
+single-writer requirements above remain mandatory even after complete rollout.
+
+
+#### Running it
+
+Synthetic paths; the selection file holds only project UIDs.
+
+```sh
+# 1. Report (reads only).
+lfx-v1-sync-helper --reconcile-project-staff-file cohort.txt \
+  --project-staff-report staff-report.json
+
+# 2. Review in PCC and LFX One, copy the report, set approvals.
+cp staff-report.json staff-approved.json   # edit approved / clearApproved only
+
+# 3. Apply, during the freeze.
+lfx-v1-sync-helper --reconcile-project-staff-file cohort.txt \
+  --apply-project-staff --project-staff-approved-plan staff-approved.json \
+  --project-staff-report staff-apply-results.json
+
+# 4. Confirm with a fresh report.
+lfx-v1-sync-helper --reconcile-project-staff-file cohort.txt \
+  --project-staff-report staff-report-after.json
+```
+
+Each project's re-reads, pacing wait and PATCH request share a 30-second
+context deadline. The minimum rate only ensures the pacing interval can fit
+that budget; slow reads can still exhaust it.
+
+OAuth token acquisition has a separate 20-second timeout. The production
+token source fetches synchronously, and the request context cannot interrupt
+it. Budget up to about 50 seconds for a project operation to return if token
+acquisition starts near the operation deadline (30 seconds plus the independent
+20-second allowance). Cancellation can likewise wait for an in-flight token
+fetch to finish.
+
+After a successful PATCH, a separate convergence poll waits on `v1-objects`
+for up to 60 seconds until the new values have replicated.
+
+Apply outcomes:
+
+| Outcome | Meaning | Next step |
+| --- | --- | --- |
+| `patched` | v1 PATCHed and the change replicated. | None. |
+| `now_in_sync` | Already equal at re-check time. | None. |
+| `clear_not_approved` | Approved clear without `clearApproved`. | Approve explicitly if intended. |
+| `stale_mapping`, `stale_v2`, `stale_v1`, `stale_action`, `stale_target` | A project version, action or resolved contact changed since the review. Nothing written. | Fresh report and review. |
+| `unresolved_contact`, `no_v1_record`, `v2_project_not_found` | The project cannot be compared any more. Nothing written. | Investigate, then a fresh report. |
+| `ambiguous_contact` | A reviewed identifier now has multiple live contact owners. Nothing written, even if the recorded project versions are unchanged. | Resolve the ambiguity manually, then generate and review a fresh report. |
+| `v1_project_not_found` | v1 returned 404 (platform-native project). | None in v1. |
+| `rejected` | v1 returned another 4xx (`reason`: `http_<status>`). Nothing written. The run continues. | Investigate. |
+| `patched_unconverged` | The PATCH succeeded but `v1-objects` did not show it within the window. | Fresh report after replication settles. |
+| `unconfirmed` | Timeout, transport error or 5xx: v1 may or may not have written. **The run stops.** | Check the project in PCC and LFX One, then a fresh report and review. Never re-run the old approval. |
+| `not_attempted` | No PATCH sent because the operation/pacing budget was exhausted, an earlier project stopped the run, or the run was cancelled. | Fresh report and review; check the rate and read latency if pacing exhausted the budget. |
+| `error` | A re-read failed. Nothing written. | Fresh report. |
+
+The run exits `0` only when every approved role ended `patched`, `now_in_sync`
+or `clear_not_approved`; otherwise it exits `1`. Logs carry only project UIDs,
+roles, outcome and reason codes, and counts. Keep reports out of tickets, docs
+and chat.
+
+#### Verification
+
+After the freeze, check the repaired roles independently in PCC and in LFX One,
+then run a fresh report. Every approved role should be `in_sync`; any
+unapproved or unresolvable drift is expected to remain. The staff bridge itself
+is core NATS with no redelivery, so this command is also the recovery path for
+an event dropped during an outage.
 
 ### Detecting committee parent drift (read-only)
 

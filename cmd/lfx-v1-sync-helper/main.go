@@ -88,14 +88,18 @@ func main() {
 	var doBackfillCommittees = flag.Bool("backfill-committees", false, "re-emit v1 committees that have no v2 mapping so the running deployment creates them, then exit")
 	var excludeStagePrefix = flag.String("exclude-stage-prefix", "", "comma-separated, case-insensitive project_status__c prefixes to exclude (applicable with --backfill-projects)")
 	var includeStagePrefix = flag.String("include-stage-prefix", "", "comma-separated, case-insensitive project_status__c prefixes to include exclusively (applicable with --backfill-projects)")
-	var emitRate = flag.Float64("emit-rate", 2.0, "maximum record re-emits (or v1 PATCHes) per second (applicable with --backfill-projects, --backfill-committees, and --reconcile-committee-member-voting)")
+	var reconcileProjectStaffFile = flag.String("reconcile-project-staff-file", "", "compare executive director / program manager between v2 and v1 for the project UIDs listed in a file (one per line, at most 1000), then exit; report-only unless --apply-project-staff")
+	var projectStaffReportPath = flag.String("project-staff-report", "", "new file (must not exist, created 0600) for the identity-redacted project staff report; required for a report-only run (applicable with --reconcile-project-staff-file)")
+	var applyProjectStaff = flag.Bool("apply-project-staff", false, "PATCH v1 for the roles approved in --project-staff-approved-plan (applicable with --reconcile-project-staff-file)")
+	var projectStaffApprovedPlan = flag.String("project-staff-approved-plan", "", "reviewed project staff report with per-role approvals; required with --apply-project-staff")
+	var emitRate = flag.Float64("emit-rate", 2.0, "maximum record re-emits (or v1 PATCHes) per second (applicable with --backfill-projects, --backfill-committees, --reconcile-committee-member-voting, and --apply-project-staff)")
 	var allowFormation = flag.Bool("allow-formation", false, "allow formation-staged projects in the same run as non-formation projects (applicable with --backfill-projects)")
 	var checkSlugs = flag.Bool("check-slugs", false, "skip candidates whose slug already resolves to a v2 project (applicable with --backfill-projects)")
 	var checkCommitteeNames = flag.Bool("check-committee-names", false, "skip candidates whose project UID + name already resolves to a v2 committee via lfx.committee-api.name_to_uid (applicable with --backfill-committees)")
 	var forceBackfill = flag.Bool("force", false, "bypass the minimum-mappings safety floor (applicable with --backfill-projects and --backfill-committees)")
 	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
 	var syncUsersFile = flag.String("sync-users-file", "", "sync profile and alternate emails for each username listed in a file (one per line), then exit")
-	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-*, --reconcile-committee-member-voting, --sync-user, and --sync-users-file)")
+	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-*, --reconcile-committee-member-voting, --sync-user, and --sync-users-file; rejected with --apply-project-staff)")
 	var backfillLimit = flag.Int("limit", 1000, "maximum number of records (projects or committees) to process per backfill run (applicable with --backfill-projects and --backfill-committees; 0 = unlimited)")
 	var auth0Rate = flag.Float64("auth0-rate", defaultAuth0RateLimit, "users per second to pace the --sync-users-file loop")
 
@@ -125,14 +129,35 @@ func main() {
 
 	// Enforce mutual exclusion across all one-shot flags.
 	oneShotCount := 0
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *syncUser != "", *syncUsersFile != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doReconcileCommitteeMemberVoting, *doBackfillV1MappingsToPG, *doBackfillProjects, *doBackfillCommittees} {
+	staffOpts := projectStaffReconcileOptions{
+		selectionPath:    *reconcileProjectStaffFile,
+		reportPath:       *projectStaffReportPath,
+		apply:            *applyProjectStaff,
+		approvedPlanPath: *projectStaffApprovedPlan,
+		dryRun:           *dryRun,
+		emitRate:         *emitRate,
+	}
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *syncUser != "", *syncUsersFile != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doReconcileCommitteeMemberVoting, *doBackfillV1MappingsToPG, *doBackfillProjects, *doBackfillCommittees, staffOpts.requested()} {
 		if b {
 			oneShotCount++
 		}
 	}
 	if oneShotCount > 1 {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-committee-member-mappings, --backfill-committee-member-names, --reconcile-committee-member-voting, --backfill-v1-mappings-to-postgres, --backfill-projects, --backfill-committees, --sync-user, and --sync-users-file are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-committee-member-mappings, --backfill-committee-member-names, --reconcile-committee-member-voting, --reconcile-project-staff-file, --backfill-v1-mappings-to-postgres, --backfill-projects, --backfill-committees, --sync-user, and --sync-users-file are mutually exclusive")
 		os.Exit(2)
+	}
+
+	// --reconcile-project-staff-file validates its flags, selection file and
+	// approved plan before any configuration or client is loaded, so a bad
+	// input never reaches NATS, Postgres or an API.
+	var staffInput *projectStaffReconcileInput
+	if staffOpts.requested() {
+		var err error
+		staffInput, err = prepareProjectStaffReconcile(staffOpts)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(2)
+		}
 	}
 
 	// Initialize a default logger early so init functions can log errors.
@@ -148,6 +173,9 @@ func main() {
 	// --reconcile-committee-member-voting never reads the v1 platform database
 	// or calls the Auth0 Management API, so it skips those two clients and the
 	// Job pod does not need their credentials.
+	// --reconcile-project-staff-file resolves staff contacts in the v1
+	// platform database but never calls the Auth0 Management API, so it skips
+	// only that client.
 	var err error
 	if *doBackfillCommitteeMemberMappings || *doBackfillV1MappingsToPG || *doBackfillProjects || *doBackfillCommittees {
 		cfg = LoadMinimalConfig()
@@ -156,6 +184,14 @@ func main() {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
 			os.Exit(1)
+		}
+		// Reject an approved plan made against another gateway before any
+		// client is initialized.
+		if staffInput != nil {
+			if err := staffInput.checkGateway(cfg.LFXAPIGateway); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				os.Exit(2)
+			}
 		}
 		if !*doReconcileCommitteeMemberVoting {
 			if err := initV1DB(context.Background(), cfg); err != nil {
@@ -175,7 +211,7 @@ func main() {
 			logger.With(errKey, err).Error("error initializing v1 client")
 			os.Exit(1)
 		}
-		if !*doReconcileCommitteeMemberVoting {
+		if !*doReconcileCommitteeMemberVoting && staffInput == nil {
 			if err := initAuth0MgmtClient(cfg); err != nil {
 				logger.With(errKey, err).Error("error initializing Auth0 Management API client")
 				os.Exit(1)
@@ -531,6 +567,15 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Handle --reconcile-project-staff-file: report executive director /
+	// program manager drift for the selected projects, or PATCH v1 for the
+	// reviewed approvals (lfx-self-serve#5034), then exit. It opens its own
+	// read-only mapping reader for V1_MAPPINGS_STORE_MODE and never runs
+	// initMappingStore, so no schema is applied and no mirror worker starts.
+	if staffInput != nil {
+		os.Exit(runProjectStaffReconcile(ctx, staffInput))
+	}
+
 	// Handle --backfill-v1-mappings-to-postgres flag: copy the v1-mappings NATS
 	// KV bucket into the Postgres v1_mappings table, then exit (LFXV2-2985).
 	if *doBackfillV1MappingsToPG {
@@ -742,7 +787,7 @@ func main() {
 
 	// Subscribe to indexer domain events for bidirectional committee sync via a durable
 	// JetStream consumer on the committee-events stream. The stream captures
-	// lfx.committee.> and lfx.committee_member.> subjects published by the indexer service
+	// lfx.committee.>, lfx.committee_member.> and lfx.committee_settings.> subjects published by the indexer service
 	// after every successful OpenSearch write. Using JetStream gives at-least-once delivery,
 	// replacing the at-most-once core NATS QueueSubscribe that could silently drop events.
 	committeeEventsStreamName := "committee_events"
@@ -761,11 +806,12 @@ func main() {
 		FilterSubjects: []string{
 			"lfx.committee.>",
 			"lfx.committee_member.>",
+			"lfx.committee_settings.>",
 		},
 		MaxDeliver:    3,
 		AckWait:       30 * time.Second,
 		MaxAckPending: 100,
-		Description:   "Indexer committee/committee-member event consumer for v1-sync-helper",
+		Description:   "Indexer committee/committee-member/settings event consumer for v1-sync-helper",
 	})
 	if err != nil {
 		logger.With(errKey, err, "consumer", committeeEventsConsumerName, "stream", committeeEventsStreamName).Error("error creating committee-events consumer")
