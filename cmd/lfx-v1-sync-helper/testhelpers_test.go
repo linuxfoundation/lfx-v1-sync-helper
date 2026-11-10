@@ -18,10 +18,11 @@ import (
 )
 
 type v1TestRequest struct {
-	Method      string
-	Path        string
-	ContentType string
-	Body        map[string]any
+	Method               string
+	Path                 string
+	ContentType          string
+	PreserveOmittedDates string
+	Body                 map[string]any
 }
 
 // syncTestHarness shares the existing CAS-capable fakeMappingStore with a real
@@ -37,7 +38,12 @@ func setupSyncTest(t *testing.T, status int, response string) *syncTestHarness {
 	t.Helper()
 	h := &syncTestHarness{store: newFakeMappingStore()}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		request := v1TestRequest{Method: r.Method, Path: r.URL.Path, ContentType: r.Header.Get("Content-Type")}
+		request := v1TestRequest{
+			Method:               r.Method,
+			Path:                 r.URL.Path,
+			ContentType:          r.Header.Get("Content-Type"),
+			PreserveOmittedDates: r.Header.Get(preserveOmittedDatesHeader),
+		}
 		if r.Method != http.MethodDelete {
 			if err := json.NewDecoder(r.Body).Decode(&request.Body); err != nil {
 				t.Errorf("decode v1 request: %v", err)

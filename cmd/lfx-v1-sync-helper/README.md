@@ -116,6 +116,36 @@ its subjects must add it themselves. Existing historical drift is not replayed
 or repaired automatically. Confirm each mismatched record's intended value
 before rollout; subsequent events can now propagate changes in both directions.
 
+#### Committee member role and term dates
+
+Member create and update events (including coordinated bulk adds, which publish
+the same per-member event) map `role` to v1 `Role`, `RoleStartDate` and
+`RoleEndDate`. Two role shapes are accepted:
+
+- **Structured** `{"name", "start_date", "end_date"}`, as committee-service emits
+  it. It is a complete snapshot: an absent or null date is an empty date, and an
+  empty name is sent as `None`. A missing or non-string name, or a date that is
+  neither a string nor null, makes the whole object ignored, so it cannot clear
+  anything.
+- **Legacy string**: only the role name is sent; role dates are left alone.
+
+On create, empty dates are omitted. On update, a structured role sends both dates,
+with `""` for an empty date to clear it in v1. A legacy string sends only `Role`
+and omits both role dates; an absent, null or malformed role omits every role
+field. A present `voting` object likewise
+sends both voting dates; an absent one omits them.
+
+Member PATCHes (including `--reconcile-committee-member-voting`) send
+`X-Preserve-Omitted-Dates: true`, so v1 keeps omitted dates instead of clearing
+them (project-management#1540). Without that support, v1 clears every omitted
+date on PATCH.
+
+**Deployment:** deploy only after project-management#1540 is merged and its
+header behavior is verified in the target environment; an HTTP 200 from an older
+project-service does not prove support. Existing role/date drift is not repaired
+automatically. Confirm each mismatched member's intended values before rollout,
+since later structured snapshots overwrite v1 role dates.
+
 ## Configuration
 
 ### Environment Variables
