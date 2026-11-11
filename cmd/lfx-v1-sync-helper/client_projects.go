@@ -190,9 +190,11 @@ func projectSettingsWriteMayBeNeeded(settingsPayload *projectservice.UpdateProje
 		settingsPayload.ExecutiveDirector != nil ||
 		settingsPayload.ProgramManager != nil ||
 		settingsPayload.OpportunityOwner != nil ||
+		settingsPayload.FormationLead != nil ||
 		clears.ExecutiveDirector ||
 		clears.ProgramManager ||
-		clears.OpportunityOwner
+		clears.OpportunityOwner ||
+		clears.FormationLead
 }
 
 // hydrateSettingsPayload round-trips every field the update is not changing
@@ -217,6 +219,31 @@ func hydrateSettingsPayload(settingsPayload *projectservice.UpdateProjectSetting
 	}
 	if settingsPayload.OpportunityOwner == nil && !clears.OpportunityOwner {
 		settingsPayload.OpportunityOwner = currentSettings.OpportunityOwner
+	}
+	if settingsPayload.FormationLead == nil && !clears.FormationLead {
+		settingsPayload.FormationLead = currentSettings.FormationLead
+	}
+	if clears.FormationLeadPartial && settingsPayload.FormationLead != nil {
+		// Only the changed subfields may be copied from a v1 WAL row while
+		// another reverse PATCH is in flight. Fill the rest from v2 so a
+		// stale email cannot erase a genuine PCC name change (or vice versa).
+		merged := &projectservice.FormationLead{}
+		if currentSettings.FormationLead != nil {
+			*merged = *currentSettings.FormationLead
+		}
+		if settingsPayload.FormationLead.Name != nil {
+			merged.Name = settingsPayload.FormationLead.Name
+		}
+		if settingsPayload.FormationLead.Email != nil {
+			merged.Email = settingsPayload.FormationLead.Email
+		}
+		if settingsPayload.FormationLead.Avatar != nil {
+			merged.Avatar = settingsPayload.FormationLead.Avatar
+		}
+		settingsPayload.FormationLead = merged
+	}
+	if clears.FormationLead {
+		settingsPayload.FormationLead = &projectservice.FormationLead{}
 	}
 	if settingsPayload.Writers == nil {
 		settingsPayload.Writers = currentSettings.Writers
@@ -265,7 +292,25 @@ func projectSettingsUpdateNeeded(settingsPayload *projectservice.UpdateProjectSe
 	if clears.OpportunityOwner && !userInfoPtrsEqual(nil, currentSettings.OpportunityOwner) {
 		return true
 	}
+	if settingsPayload.FormationLead != nil && !formationLeadsEqual(settingsPayload.FormationLead, currentSettings.FormationLead) {
+		return true
+	}
+	if clears.FormationLead && !formationLeadsEqual(nil, currentSettings.FormationLead) {
+		return true
+	}
 	return false
+}
+
+func formationLeadsEqual(a, b *projectservice.FormationLead) bool {
+	if a == nil {
+		a = &projectservice.FormationLead{}
+	}
+	if b == nil {
+		b = &projectservice.FormationLead{}
+	}
+	return stringPtrToString(a.Name) == stringPtrToString(b.Name) &&
+		stringPtrToString(a.Email) == stringPtrToString(b.Email) &&
+		stringPtrToString(a.Avatar) == stringPtrToString(b.Avatar)
 }
 
 // deleteProject deletes a project by UID.

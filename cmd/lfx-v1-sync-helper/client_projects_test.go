@@ -49,6 +49,12 @@ func TestProjectSettingsWriteMayBeNeeded(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "formation lead clear flag alone passes",
+			payload: &projectservice.UpdateProjectSettingsPayload{},
+			clears:  staffClearFlags{FormationLead: true},
+			want:    true,
+		},
+		{
 			name:    "no flags and all-nil payload skips the write",
 			payload: &projectservice.UpdateProjectSettingsPayload{},
 			want:    false,
@@ -76,6 +82,11 @@ func TestProjectSettingsWriteMayBeNeeded(t *testing.T) {
 		{
 			name:    "opportunity owner passes",
 			payload: &projectservice.UpdateProjectSettingsPayload{OpportunityOwner: jdoe},
+			want:    true,
+		},
+		{
+			name:    "formation lead passes",
+			payload: &projectservice.UpdateProjectSettingsPayload{FormationLead: &projectservice.FormationLead{Name: stringToStringPtr("Alice Example")}},
 			want:    true,
 		},
 	}
@@ -142,6 +153,26 @@ func TestProjectSettingsUpdateNeeded(t *testing.T) {
 			current: &projectservice.ProjectSettings{},
 			clears:  staffClearFlags{OpportunityOwner: true},
 			want:    false,
+		},
+		{
+			name:    "formation lead clear removes populated contact",
+			payload: &projectservice.UpdateProjectSettingsPayload{FormationLead: &projectservice.FormationLead{}},
+			current: &projectservice.ProjectSettings{FormationLead: &projectservice.FormationLead{Email: stringToStringPtr("alice@example.com")}},
+			clears:  staffClearFlags{FormationLead: true},
+			want:    true,
+		},
+		{
+			name:    "formation lead clear already empty is no-op",
+			payload: &projectservice.UpdateProjectSettingsPayload{FormationLead: &projectservice.FormationLead{}},
+			current: &projectservice.ProjectSettings{},
+			clears:  staffClearFlags{FormationLead: true},
+			want:    false,
+		},
+		{
+			name:    "formation lead changed",
+			payload: &projectservice.UpdateProjectSettingsPayload{FormationLead: &projectservice.FormationLead{Email: stringToStringPtr("bob@example.com")}},
+			current: &projectservice.ProjectSettings{FormationLead: &projectservice.FormationLead{Email: stringToStringPtr("alice@example.com")}},
+			want:    true,
 		},
 		{
 			name:    "staff reassignment differs from current",
@@ -218,6 +249,7 @@ func TestHydrateSettingsPayload(t *testing.T) {
 			ExecutiveDirector:   jdoe,
 			ProgramManager:      asmith,
 			OpportunityOwner:    jdoe,
+			FormationLead:       &projectservice.FormationLead{Name: stringToStringPtr("Alice Example"), Email: stringToStringPtr("alice@example.com")},
 			Writers:             writers,
 			MeetingCoordinators: writers,
 			Auditors:            writers,
@@ -230,9 +262,10 @@ func TestHydrateSettingsPayload(t *testing.T) {
 		current *projectservice.ProjectSettings
 		clears  staffClearFlags
 		// want nil = field must stay nil after hydration (deliberate clear).
-		wantEDNil bool
-		wantPMNil bool
-		wantOONil bool
+		wantEDNil          bool
+		wantPMNil          bool
+		wantOONil          bool
+		wantFormationClear bool
 	}{
 		{
 			name:    "all-nil payload round-trips every current field",
@@ -268,6 +301,13 @@ func TestHydrateSettingsPayload(t *testing.T) {
 			current:   fullCurrent(),
 			clears:    staffClearFlags{OpportunityOwner: true},
 			wantOONil: true,
+		},
+		{
+			name:               "formation lead clear sends empty object while other fields hydrate",
+			payload:            &projectservice.UpdateProjectSettingsPayload{},
+			current:            fullCurrent(),
+			clears:             staffClearFlags{FormationLead: true},
+			wantFormationClear: true,
 		},
 		{
 			name:    "empty current leaves payload fields nil",
@@ -318,6 +358,13 @@ func TestHydrateSettingsPayload(t *testing.T) {
 			} else if !userInfoPtrsEqual(tt.payload.OpportunityOwner, tt.current.OpportunityOwner) {
 				t.Errorf("OpportunityOwner not hydrated from current")
 			}
+			if tt.wantFormationClear {
+				if tt.payload.FormationLead == nil || !formationLeadsEqual(tt.payload.FormationLead, nil) {
+					t.Errorf("FormationLead = %+v, want explicit empty object", tt.payload.FormationLead)
+				}
+			} else if !formationLeadsEqual(tt.payload.FormationLead, tt.current.FormationLead) {
+				t.Errorf("FormationLead not hydrated from current")
+			}
 			if !userInfoSlicesEqual(tt.payload.Writers, tt.current.Writers) {
 				t.Errorf("Writers not hydrated from current")
 			}
@@ -329,6 +376,18 @@ func TestHydrateSettingsPayload(t *testing.T) {
 			}
 		})
 	}
+	t.Run("partial Formation Lead preserves pending email and applies PCC name", func(t *testing.T) {
+		name := "Carol Fixture"
+		payload := &projectservice.UpdateProjectSettingsPayload{FormationLead: &projectservice.FormationLead{Name: &name}}
+		current := &projectservice.ProjectSettings{FormationLead: &projectservice.FormationLead{
+			Name: stringToStringPtr("Alice Example"), Email: stringToStringPtr("new@example.com"),
+		}}
+		hydrateSettingsPayload(payload, current, staffClearFlags{FormationLeadPartial: true})
+		if payload.FormationLead == nil || stringPtrToString(payload.FormationLead.Name) != name ||
+			stringPtrToString(payload.FormationLead.Email) != "new@example.com" {
+			t.Errorf("merged Formation Lead = %+v, want PCC name and pending v2 email", payload.FormationLead)
+		}
+	})
 }
 
 // TestProjectResponsesAcceptDigitLeadingSlug is the regression test for

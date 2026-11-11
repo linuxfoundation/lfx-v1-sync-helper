@@ -9,9 +9,27 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
+	"github.com/nats-io/nats.go/jetstream"
 )
+
+var readLatestV1ProjectRow = func(ctx context.Context, key string) (map[string]any, uint64, error) {
+	entry, err := v1KV.Get(ctx, key)
+	if errors.Is(err, jetstream.ErrKeyNotFound) || errors.Is(err, jetstream.ErrKeyDeleted) {
+		return nil, 0, nil
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	row, err := decodeV1ProjectRow(entry.Value())
+	return row, entry.Revision(), err
+}
+
+var updateProjectFromV1 = updateProject
+var createProjectFromV1 = createProject
+var deleteProjectFromV1 = deleteProject
 
 // isValidURL checks if a URL value is non-empty and not "nil".
 func isValidURL(url string) bool {
@@ -78,13 +96,14 @@ func mapAdminCategoryToCategory(adminCategory string) *string {
 // permanent classification failures (bad payload, invalid data), and
 // tombstoned mappings (already deleted, must not resurrect).
 func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any) bool {
+	return handleProjectUpdateAtRevision(ctx, key, v1Data, 0)
+}
+
+func handleProjectUpdateAtRevision(ctx context.Context, key string, v1Data map[string]any, deliveredRev uint64) bool {
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return false
 	}
-
-	// Extract v1Principal from v1 data for JWT generation.
-	v1Principal := extractV1Principal(ctx, v1Data)
 
 	// Extract project SFID (primary key).
 	sfid, ok := v1Data["sfid"].(string)
@@ -117,9 +136,245 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 			ErrorContext(ctx, "transient mapping-store failure resolving project SFID; redelivering to avoid duplicate v2 create")
 		return true
 	}
+	if existingUID != "" {
+		// Serialize the forward refresh, v2 settings write and durable
+		// obligation update with the repair worker and reverse settings
+		// handler. Start the budget only after acquiring the lock.
+		unlock := lockFormationLeadProject(existingUID)
+		defer unlock()
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+	}
+	// KV events can be delivered late or redelivered. Refresh before mapping so
+	// an older Formation Lead (or project-base snapshot) cannot overwrite a
+	// newer edit. Missing/deleted rows and our own v2→v1 WAL echoes are stale.
+	latest, revision, err := readLatestV1ProjectRow(ctx, key)
+	if err != nil {
+		logger.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to refresh v1 project; redelivering")
+		return true
+	}
+	if latest == nil {
+		return false
+	}
+	if deletedAt, _ := latest["_sdc_deleted_at"].(string); deletedAt != "" {
+		return false
+	}
+	if deleted, _ := latest["isdeleted"].(bool); deleted {
+		return false
+	}
+	if latestSFID, ok := latest["sfid"].(string); !ok || latestSFID != sfid {
+		logger.With("sfid", sfid).ErrorContext(ctx, "refreshed v1 project has a mismatched or missing SFID")
+		return false
+	}
+	latestIsOwnWrite := shouldSkipSync(ctx, latest)
+	if latestIsOwnWrite && existingUID == "" {
+		// No mapping yet: an own-write row may belong to a v2-created
+		// project. Do not treat it as a new v1-originated create.
+		return false
+	}
+	formationPending := false
+	forcePreserveFormationLead := false
+	deferredHumanLead := false
+	appliedFormationFields := map[string]bool{}
+	confirmedIntent := map[string]string{}
+	suppressedFields := map[string]bool{}
+	deliveredChanges, hasDeliveredChanges := formationLeadChanges(v1Data)
+	deliveredVersions, _ := formationLeadFieldVersions(v1Data)
+	// Retain the human delivery's lead if a timed-out reverse PATCH already
+	// overwrote it in the latest replica. The original delivery revision
+	// establishes that the human edit followed the PATCH dispatch floor.
+	sourceRev := deliveredRev
+	if sourceRev == 0 {
+		sourceRev = revision // direct callers/tests without a KV entry
+	}
+	for _, field := range []string{"formation_lead_name", "formation_lead_email", "formation_lead_avatar"} {
+		fieldName := strings.TrimPrefix(field, "formation_lead_")
+		value, _ := latest[field].(string)
+		candidate := value
+		if latestIsOwnWrite && deliveredRev > 0 {
+			candidate, _ = v1Data[field].(string)
+		}
+		if latestIsOwnWrite && deliveredRev > 0 && deliveredRev < revision {
+			// A point read can already see our matching echo before the
+			// consumer has delivered it to the write log. Keep the
+			// intervening human intent instead of ACKing it away.
+			if intended, ok := recentV1StaffWrites.confirmedIntentBefore(sfid, field, deliveredRev); ok && intended == value &&
+				(!hasDeliveredChanges || deliveredChanges[fieldName]) {
+				deferredHumanLead = true
+			}
+		}
+		if !latestIsOwnWrite && sourceRev > 0 {
+			if intended, ok := recentV1StaffWrites.confirmedIntentBefore(sfid, field, sourceRev); ok {
+				confirmedIntent[field] = intended
+			}
+		}
+		if latestIsOwnWrite && deliveredRev > 0 && (!hasDeliveredChanges || deliveredChanges[fieldName]) &&
+			recentV1StaffWrites.humanDeliveryOverwrittenByEcho(sfid, field, deliveredRev, candidate) {
+			deferredHumanLead = true
+		}
+		_, pending, _ := recentV1StaffWrites.current(sfid, field, value, revision, staffWriteNow())
+		if deliveredRev > 0 && recentV1StaffWrites.staleFormationField(sfid, field, candidate, deliveredRev) {
+			// The matching echo may have retired the in-memory attempt
+			// between a failed human delivery and its retry. Keep its
+			// dispatch baseline until that delivery is resolved.
+			formationPending = true
+			suppressedFields[field] = true
+		}
+		if pending && (latestIsOwnWrite || recentV1StaffWrites.hasUnconfirmed(sfid, field) ||
+			recentV1StaffWrites.hasConfirmedWithoutNewerReplica(sfid, field, revision)) {
+			// Confirmed writes cannot still complete late. A newer human
+			// v1 edit is authoritative only if its KV revision is beyond
+			// the confirmed write's dispatch floor. The old human row at
+			// that floor can precede a completed reverse PATCH.
+			if (!hasDeliveredChanges || deliveredChanges[fieldName]) &&
+				recentV1StaffWrites.hasUnconfirmedAfter(sfid, field, sourceRev, candidate) {
+				deferredHumanLead = true
+			} else {
+				formationPending = true
+			}
+		}
+	}
+	if len(confirmedIntent) > 0 && !deferredHumanLead {
+		// A queued human row at dispatch+1 may predate a completed reverse
+		// PATCH. Revision alone cannot decide the order: compare the
+		// uncached v1 contact with that PATCH's confirmed intent. If v1
+		// still holds our write, do not restore the older replica contact.
+		readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		live, liveErr := fetchLiveFormationLead(readCtx, sfid)
+		cancel()
+		if liveErr != nil {
+			logger.With(errKey, liveErr, "sfid", sfid).WarnContext(ctx, "cannot classify delayed human Formation Lead; preserving v2 contact")
+			formationPending = true
+			forcePreserveFormationLead = true
+		} else {
+			liveFields := map[string]string{
+				"formation_lead_name": live.Name, "formation_lead_email": live.Email, "formation_lead_avatar": live.Avatar,
+			}
+			for field, intended := range confirmedIntent {
+				candidate, _ := latest[field].(string)
+				if liveFields[field] == intended && candidate != intended {
+					fieldName := strings.TrimPrefix(field, "formation_lead_")
+					if hasDeliveredChanges && deliveredChanges[fieldName] {
+						deferredHumanLead = true // WAL proves this was a PCC contact edit.
+					} else {
+						formationPending = true
+						suppressedFields[field] = true
+					}
+				}
+			}
+		}
+	}
+	if existingUID != "" && deliveredRev > 0 {
+		obligation, found, checkErr := formationLeadObligation(ctx, existingUID)
+		if checkErr != nil {
+			logger.With(errKey, checkErr, "sfid", sfid).ErrorContext(ctx, "failed to compare Formation Lead human revisions; redelivering")
+			return true
+		}
+		if found && obligation.ProcessedHumanRev >= deliveredRev && obligation.ProcessedHumanRev != 0 {
+			deferredHumanLead = false
+			formationPending = true
+			forcePreserveFormationLead = true
+		} else if found && !obligation.Completed {
+			// An unfinished reverse repair survives process restart even
+			// when its in-memory write log does not. A base-only save cannot
+			// replace the pending v2 contact. Include cumulative changes
+			// from the refreshed row: a later email edit can overtake an
+			// earlier name delivery, and the latest one-row mask alone
+			// would otherwise drop that name.
+			if versions, ok := formationLeadFieldVersions(latest); ok && !latestIsOwnWrite {
+				// The delivered row's mask can describe an edit that predates
+				// this reverse dispatch. Only differences from the durable
+				// successfully processed human-field watermark are eligible;
+				// dispatch may have observed a PCC edit still queued for v2.
+				deliveredChanges = map[string]bool{}
+				currentHuman, hasProvenance := formationLeadCurrentHumanFields(latest)
+				for field := range formationLeadColumns {
+					processed, known := obligation.ProcessedFields[field]
+					if !known && versions[field] != 0 {
+						forcePreserveFormationLead = true
+					} else if versions[field] > processed {
+						if !hasProvenance || !currentHuman[field] {
+							// A later bridge echo replaced this human value;
+							// neither the latest row nor its counters recover it.
+							forcePreserveFormationLead = true
+						} else {
+							deliveredChanges[field] = true
+						}
+					} else if versions[field] < processed {
+						forcePreserveFormationLead = true
+					}
+				}
+				hasDeliveredChanges = true
+			} else if !latestIsOwnWrite {
+				forcePreserveFormationLead = true
+			}
+			formationPending = true
+			if forcePreserveFormationLead || !hasDeliveredChanges || len(deliveredChanges) == 0 {
+				forcePreserveFormationLead = true
+				deferredHumanLead = false
+			} else {
+				deferredHumanLead = true
+			}
+		} else if !found && !latestIsOwnWrite && hasDeliveredChanges && len(deliveredChanges) > 0 && deliveredVersions != nil {
+			// An older name delivery may refresh a row that already contains
+			// a newer queued email edit. Apply both proven human fields in
+			// this settings write before creating the first watermark.
+			if versions, ok := formationLeadFieldVersions(latest); ok {
+				currentHuman, hasProvenance := formationLeadCurrentHumanFields(latest)
+				for field := range formationLeadColumns {
+					if versions[field] > deliveredVersions[field] {
+						if !hasProvenance || !currentHuman[field] {
+							forcePreserveFormationLead = true
+						} else {
+							deliveredChanges[field] = true
+						}
+					} else if versions[field] < deliveredVersions[field] {
+						forcePreserveFormationLead = true
+					}
+				}
+			}
+		}
+	}
+	if deferredHumanLead && latestIsOwnWrite && deliveredRev > 0 {
+		// Only the Formation Lead is taken from the human delivery; base
+		// fields still use the freshest row. The persisted obligation later
+		// restores this value in v1 once the uncertain PATCH has settled.
+		fresh := make(map[string]any, len(latest))
+		for field, value := range latest {
+			fresh[field] = value
+		}
+		for _, field := range []string{"formation_lead_name", "formation_lead_email", "formation_lead_avatar"} {
+			if value, ok := v1Data[field]; ok {
+				fresh[field] = value
+			} else {
+				delete(fresh, field)
+			}
+		}
+		// These values came from the delivered human row, not the newer
+		// bridge-authored row. Keep their generations/provenance together;
+		// otherwise a newer PCC edit can be marked processed with the
+		// older delivery's contact value.
+		for _, field := range []string{formationLeadChangesKey, formationLeadVersionsKey, formationLeadCurrentHumanKey} {
+			if value, ok := v1Data[field]; ok {
+				fresh[field] = value
+			} else {
+				delete(fresh, field)
+			}
+		}
+		latest = fresh
+	}
+	// An intervening staff PATCH may change the latest row's editor to this
+	// service while the delivered human event still has an unsynced base
+	// rename. Use its refreshed fields, but keep the human provenance for the
+	// update; only the original delivery identifies a round-trip echo.
+	v1Principal := extractV1Principal(ctx, v1Data)
+	if !latestIsOwnWrite {
+		v1Principal = extractV1Principal(ctx, latest)
+	}
+	v1Data = latest
 
 	var uid string
-	var err error
 
 	if existingUID != "" {
 		// Update existing project - always allow updates for mapped projects.
@@ -144,6 +399,45 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 			logger.With(errKey, err, "sfid", sfid, "slug", slug).ErrorContext(ctx, "failed to map v1 data to settings payload")
 			return isTransientStoreErr(err)
 		}
+		if forcePreserveFormationLead {
+			preservePendingFormationLead(settingsPayload, &clears)
+		} else if formationPending || deferredHumanLead || hasDeliveredChanges {
+			// Preserve stale subfields from v2, but apply genuine PCC edits
+			// to other subfields. A full-contact suppression can lose a name
+			// that the reverse PATCH merged from v1 while its email was stale.
+			partial := &projectservice.FormationLead{}
+			accepted := false
+			for _, field := range []string{"formation_lead_name", "formation_lead_email", "formation_lead_avatar"} {
+				fieldName := strings.TrimPrefix(field, "formation_lead_")
+				if hasDeliveredChanges && !deliveredChanges[fieldName] {
+					continue
+				}
+				candidate, _ := v1Data[field].(string)
+				if suppressedFields[field] || recentV1StaffWrites.staleFormationField(sfid, field, candidate, sourceRev) {
+					continue
+				}
+				if field == "formation_lead_email" {
+					candidate = strings.TrimSpace(candidate)
+				}
+				switch field {
+				case "formation_lead_name":
+					partial.Name = &candidate
+				case "formation_lead_email":
+					partial.Email = &candidate
+				case "formation_lead_avatar":
+					partial.Avatar = &candidate
+				}
+				accepted = true
+				appliedFormationFields[fieldName] = true
+			}
+			if accepted {
+				settingsPayload.FormationLead = partial
+				clears.FormationLead = false
+				clears.FormationLeadPartial = true
+			} else {
+				preservePendingFormationLead(settingsPayload, &clears)
+			}
+		}
 
 		// Record that we're about to write the v2 project so the
 		// resulting indexer event (which will fan out to
@@ -165,9 +459,59 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 		writePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceProject, existingUID)
 
 		var baseMutated bool
-		baseMutated, err = updateProject(ctx, payload, settingsPayload, clears, v1Principal)
+		baseMutated, err = updateProjectFromV1(ctx, payload, settingsPayload, clears, v1Principal)
 		if !baseMutated {
 			deletePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceProject, existingUID)
+		}
+		if err != nil && clears.FormationLeadPartial && hasDeliveredChanges && len(deliveredChanges) > 0 && !deferredHumanLead {
+			// A failed v2 write must not disappear when a later PCC rename
+			// carries an empty latest-save mask. The replica keeps the human
+			// values; the marker keeps only an earlier generation baseline.
+			// JetStream has MaxDeliver=3, so NAK alone is not durable.
+			baseline := map[string]uint64(nil)
+			if deliveredVersions != nil && hasDeliveredChanges {
+				baseline = make(map[string]uint64, len(deliveredVersions))
+				for field, version := range deliveredVersions {
+					baseline[field] = version
+				}
+				for field := range deliveredChanges {
+					if baseline[field] == 0 {
+						baseline = nil // Cannot prove a pre-edit generation.
+						break
+					}
+					baseline[field]--
+				}
+			}
+			if markErr := retainUncertainFormationLeadWrite(ctx, existingUID, sfid, sourceRev, baseline); markErr != nil {
+				logger.With(errKey, markErr, "sfid", sfid).ErrorContext(ctx, "failed to retain forward Formation Lead repair obligation; redelivering")
+				return true
+			}
+			logger.With(errKey, err, "sfid", sfid).WarnContext(ctx, "forward Formation Lead write failed; retaining repair obligation and redelivering")
+			return true
+		}
+		if err != nil && deferredHumanLead {
+			// The human contact exists only in this delivery until the v2
+			// settings write succeeds; never ACK an ETag conflict or a
+			// transient read/write failure before the obligation exists.
+			logger.With(errKey, err, "sfid", sfid).WarnContext(ctx, "deferred human Formation Lead write failed; redelivering")
+			return true
+		}
+		if err == nil && len(appliedFormationFields) > 0 {
+			// The human value now lives in v2 project settings. Persist only
+			// identifiers/retry timing for a later v1 repair; no contact PII
+			// is stored outside the project resource contract.
+			processedVersions, _ := formationLeadFieldVersions(v1Data)
+			if processedVersions != nil {
+				if markErr := markFormationLeadReconcileFields(ctx, existingUID, sfid, sourceRev, processedVersions, appliedFormationFields); markErr != nil {
+					logger.With(errKey, markErr, "sfid", sfid).ErrorContext(ctx, "failed to retain Formation Lead reconciliation obligation; redelivering")
+					return true
+				}
+			} else {
+				// An ordinary legacy/Meltano row has no trustworthy
+				// generation history. Do not create a new active marker that
+				// can never complete. Any prior reverse obligation remains.
+				logger.With("sfid", sfid).WarnContext(ctx, "Formation Lead contact synced without durable field generations; preserving existing obligations only")
+			}
 		}
 		uid = existingUID
 	} else {
@@ -185,7 +529,7 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 		}
 
 		var response *projectservice.ProjectFull
-		response, err = createProject(ctx, payload, v1Principal)
+		response, err = createProjectFromV1(ctx, payload, v1Principal)
 		if response != nil && response.UID != nil {
 			uid = *response.UID
 		}
@@ -210,10 +554,26 @@ func handleProjectUpdate(ctx context.Context, key string, v1Data map[string]any)
 		if _, err := mappingStore.Put(ctx, reverseMappingKey, []byte(sfid)); err != nil {
 			logger.With(errKey, err, "project_uid", uid, "sfid", sfid).WarnContext(ctx, "failed to store project reverse mapping")
 		}
+		if existingUID == "" {
+			// The create payload included the full v1 contact (or its
+			// absence). Every valid WAL generation in that snapshot has
+			// reached v2; seed the processed watermark before partial edits.
+			if versions, ok := formationLeadFieldVersions(v1Data); ok {
+				if markErr := markFormationLeadReconcile(ctx, uid, sfid, sourceRev, versions); markErr != nil {
+					logger.With(errKey, markErr, "sfid", sfid).ErrorContext(ctx, "failed to retain initial Formation Lead processing history; redelivering")
+					return true
+				}
+			}
+		}
 	}
 
 	logger.With("project_uid", uid, "sfid", sfid, "slug", slug).InfoContext(ctx, "successfully synced project")
 	return false
+}
+
+func preservePendingFormationLead(settings *projectservice.UpdateProjectSettingsPayload, clears *staffClearFlags) {
+	settings.FormationLead = nil
+	clears.FormationLead = false
 }
 
 // handleProjectDelete processes a project deletion.
@@ -269,7 +629,7 @@ func handleProjectDelete(ctx context.Context, key string, sfid string, v1Princip
 	// consumer has the UID directly from the indexer event's ObjectID.
 	writePendingMarker(ctx, markerV1ToV2, markerOpDelete, markerResourceProject, existingUID)
 
-	err = deleteProject(ctx, existingUID, v1Principal)
+	err = deleteProjectFromV1(ctx, existingUID, v1Principal)
 	if err != nil {
 		// v2 DELETE failed. Roll back the marker so it does not
 		// suppress an unrelated genuine v2-native project.deleted
@@ -290,6 +650,9 @@ func handleProjectDelete(ctx context.Context, key string, sfid string, v1Princip
 	reverseMappingKey := fmt.Sprintf("project.uid.%s", existingUID)
 	if err := tombstoneMapping(ctx, reverseMappingKey); err != nil {
 		logger.With(errKey, err, "project_uid", existingUID, "sfid", sfid).WarnContext(ctx, "failed to tombstone project UID mapping")
+	}
+	if err := tombstoneFormationLeadReconcile(ctx, existingUID); err != nil {
+		logger.With(errKey, err, "project_uid", existingUID).WarnContext(ctx, "failed to tombstone Formation Lead repair marker after project deletion")
 	}
 
 	logger.With("project_uid", existingUID, "sfid", sfid, "key", key).InfoContext(ctx, "successfully deleted project")
@@ -427,6 +790,7 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any)
 	// Map program manager and opportunity owner from v1 Salesforce contact SFIDs.
 	payload.ProgramManager = lookupProgramManager(ctx, v1Data)
 	payload.OpportunityOwner = lookupOpportunityOwner(ctx, v1Data)
+	payload.FormationLead = formationLeadFromV1(v1Data)
 
 	// Handle parent project logic.
 	parentProjectID := ""
@@ -648,9 +1012,11 @@ func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string,
 // v2"; an unset flag with a nil payload field means "leave whatever v2 has
 // alone" (e.g. a lookup failure on a still-populated v1 field).
 type staffClearFlags struct {
-	ExecutiveDirector bool
-	ProgramManager    bool
-	OpportunityOwner  bool
+	ExecutiveDirector    bool
+	ProgramManager       bool
+	OpportunityOwner     bool
+	FormationLead        bool
+	FormationLeadPartial bool
 }
 
 // v1StaffFieldCleared reports whether a v1 staff SFID field is absent or
@@ -700,8 +1066,25 @@ func mapV1DataToProjectUpdateSettingsPayload(ctx context.Context, projectUID str
 	if payload.OpportunityOwner == nil && v1StaffFieldCleared(v1Data, "opportunity_owner__c") {
 		clears.OpportunityOwner = true
 	}
+	payload.FormationLead = formationLeadFromV1(v1Data)
+	if payload.FormationLead == nil {
+		clears.FormationLead = true
+	}
 
 	return payload, clears, nil
+}
+
+// formationLeadFromV1 reads the v1 project columns, which are contact details
+// rather than Salesforce contact IDs. No LFID lookup should be performed.
+func formationLeadFromV1(v1Data map[string]any) *projectservice.FormationLead {
+	name, _ := v1Data["formation_lead_name"].(string)
+	email, _ := v1Data["formation_lead_email"].(string)
+	email = strings.TrimSpace(email) // V2 validates email; v1 may store padded contact text.
+	avatar, _ := v1Data["formation_lead_avatar"].(string)
+	if name == "" && email == "" && avatar == "" {
+		return nil
+	}
+	return &projectservice.FormationLead{Name: &name, Email: &email, Avatar: &avatar}
 }
 
 // lookupStaffUser resolves a Salesforce contact SFID stored under v1Field in v1Data to a

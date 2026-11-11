@@ -17,7 +17,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/linuxfoundation/lfx-v2-committee-service v0.4.26
-	github.com/linuxfoundation/lfx-v2-project-service v0.10.2
+	github.com/linuxfoundation/lfx-v2-project-service v0.10.3
 	github.com/nats-io/nats.go v1.52.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/uptrace/bun v1.2.18

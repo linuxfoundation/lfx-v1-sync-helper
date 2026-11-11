@@ -85,6 +85,7 @@ func main() {
 	var doReconcileCommitteeMemberVoting = flag.Bool("reconcile-committee-member-voting", false, "reconcile V2 committee member voting status into v1 (v2 wins) and backfill missing record-sfid member mappings, then exit")
 	var doBackfillV1MappingsToPG = flag.Bool("backfill-v1-mappings-to-postgres", false, "copy the v1-mappings NATS KV bucket into the Postgres v1_mappings table, then exit (LFXV2-2985)")
 	var doBackfillProjects = flag.Bool("backfill-projects", false, "re-emit v1 projects that have no v2 mapping so the running deployment creates them, then exit")
+	var doBackfillFormationLeads = flag.Bool("backfill-formation-leads", false, "reconcile Formation Lead in v2 settings for mapped v1 projects, then exit")
 	var doBackfillCommittees = flag.Bool("backfill-committees", false, "re-emit v1 committees that have no v2 mapping so the running deployment creates them, then exit")
 	var excludeStagePrefix = flag.String("exclude-stage-prefix", "", "comma-separated, case-insensitive project_status__c prefixes to exclude (applicable with --backfill-projects)")
 	var includeStagePrefix = flag.String("include-stage-prefix", "", "comma-separated, case-insensitive project_status__c prefixes to include exclusively (applicable with --backfill-projects)")
@@ -137,13 +138,13 @@ func main() {
 		dryRun:           *dryRun,
 		emitRate:         *emitRate,
 	}
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *syncUser != "", *syncUsersFile != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doReconcileCommitteeMemberVoting, *doBackfillV1MappingsToPG, *doBackfillProjects, *doBackfillCommittees, staffOpts.requested()} {
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *syncUser != "", *syncUsersFile != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doReconcileCommitteeMemberVoting, *doBackfillV1MappingsToPG, *doBackfillProjects, *doBackfillFormationLeads, *doBackfillCommittees, staffOpts.requested()} {
 		if b {
 			oneShotCount++
 		}
 	}
 	if oneShotCount > 1 {
-		fmt.Fprintln(os.Stderr, "error: --backfill-acs-project, --backfill-acs-org, --backfill-workspaces, --backfill-committee-member-mappings, --backfill-committee-member-names, --reconcile-committee-member-voting, --reconcile-project-staff-file, --backfill-v1-mappings-to-postgres, --backfill-projects, --backfill-committees, --sync-user, and --sync-users-file are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: one-shot --backfill-*, --reconcile-*, --sync-user, and --sync-users-file modes are mutually exclusive")
 		os.Exit(2)
 	}
 
@@ -193,7 +194,7 @@ func main() {
 				os.Exit(2)
 			}
 		}
-		if !*doReconcileCommitteeMemberVoting {
+		if !*doReconcileCommitteeMemberVoting && !*doBackfillFormationLeads {
 			if err := initV1DB(context.Background(), cfg); err != nil {
 				logger.With(errKey, err).Error("error initializing v1 platform database connection")
 				os.Exit(1)
@@ -207,11 +208,13 @@ func main() {
 			logger.With(errKey, err).Error("error initializing Goa clients")
 			os.Exit(1)
 		}
-		if err := initV1Client(cfg); err != nil {
-			logger.With(errKey, err).Error("error initializing v1 client")
-			os.Exit(1)
+		if !*doBackfillFormationLeads {
+			if err := initV1Client(cfg); err != nil {
+				logger.With(errKey, err).Error("error initializing v1 client")
+				os.Exit(1)
+			}
 		}
-		if !*doReconcileCommitteeMemberVoting && staffInput == nil {
+		if !*doReconcileCommitteeMemberVoting && staffInput == nil && !*doBackfillFormationLeads {
 			if err := initAuth0MgmtClient(cfg); err != nil {
 				logger.With(errKey, err).Error("error initializing Auth0 Management API client")
 				os.Exit(1)
@@ -394,6 +397,18 @@ func main() {
 			os.Exit(1)
 		}
 		logger.Info("ACS project grants backfill completed successfully")
+		os.Exit(0)
+	}
+	if *doBackfillFormationLeads {
+		result, err := backfillFormationLeads(ctx, *dryRun, *backfillLimit, *emitRate)
+		logger.With("scanned", result.scanned, "mapped", result.mapped, "changed", result.changed,
+			"updated", result.updated, "skipped", result.skipped, "v2_only_conflicts", result.v2Only,
+			"errors", result.errors, "dry_run", *dryRun).
+			Info("formation lead backfill summary")
+		if err != nil {
+			logger.With(errKey, err).Error("formation lead backfill failed")
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 
@@ -634,6 +649,9 @@ func main() {
 		os.Exit(1)
 	}
 	logger.With("mode", string(cfg.V1MappingsStoreMode)).Info("v1-mappings store initialized")
+	if cfg.V2ToV1ProjectStaffSyncEnabled {
+		go runFormationLeadReconciles(ctx)
+	}
 
 	// Create or get the JetStream pull consumer for v1 objects KV bucket
 	// This replaces the KV Watch() method to enable horizontal scaling

@@ -1263,8 +1263,67 @@ func syncProjectCreateToV1(ctx context.Context, projectUID string, data map[stri
 				ErrorContext(ctx, "failed to store project reverse mapping after v1 create — v1 record is orphaned; future update/delete events will be dropped and a replay will duplicate; manual reconciliation required (write mapping or delete v1 record)")
 		}
 	}
+	// The project-service publishes its settings event concurrently with the
+	// base create event. That settings event may arrive before the reverse
+	// mapping or the v1 project exists and get dropped by the core-NATS
+	// subscriber. Fetch current settings here, after the v1 create/mappings,
+	// so an initial Formation Lead is not lost to this ordering race.
+	if cfg.V2ToV1ProjectStaffSyncEnabled {
+		if err := syncInitialFormationLeadToV1(ctx, projectUID, projectSFID); err != nil {
+			log.With(errKey, err, "project_sfid", projectSFID).
+				ErrorContext(ctx, "initial Formation Lead sync failed after project create; manual reconciliation required")
+		}
+	}
 
 	log.With("project_sfid", projectSFID).InfoContext(ctx, "successfully created project in v1 from indexer event")
+}
+
+var (
+	fetchInitialFormationSettings = fetchProjectSettings
+	patchInitialFormationLead     = patchV1ProjectFields
+)
+
+func syncInitialFormationLeadToV1(ctx context.Context, projectUID, sfid string) error {
+	ctx, cancel := context.WithTimeout(ctx, v1ProjectStaffSyncTimeout)
+	defer cancel()
+	unlock := lockFormationLeadProject(projectUID)
+	defer unlock()
+	settings, _, err := fetchInitialFormationSettings(ctx, projectUID)
+	if err != nil {
+		if markErr := retainUncertainFormationLeadWrite(ctx, projectUID, sfid, 0); markErr != nil {
+			return fmt.Errorf("reading initial v2 Formation Lead failed (%v), and retaining repair obligation: %w", err, markErr)
+		}
+		return fmt.Errorf("reading v2 settings after v1 project create: %w", err)
+	}
+	if settings == nil || formationLeadsEqual(settings.FormationLead, nil) {
+		return nil
+	}
+	lead := settings.FormationLead
+	fields := map[string]string{
+		"formation_lead_name":   stringPtrToString(lead.Name),
+		"formation_lead_email":  stringPtrToString(lead.Email),
+		"formation_lead_avatar": stringPtrToString(lead.Avatar),
+	}
+	if markErr := retainUncertainFormationLeadWrite(ctx, projectUID, sfid, 0); markErr != nil {
+		return fmt.Errorf("retaining initial Formation Lead obligation before PATCH: %w", markErr)
+	}
+	writeID := recentV1StaffWrites.record(sfid, fields, 0, staffWriteNow())
+	payload := map[string]any{"FormationLead": struct {
+		Name   string `json:"Name"`
+		Email  string `json:"Email"`
+		Avatar string `json:"Avatar"`
+	}{fields["formation_lead_name"], fields["formation_lead_email"], fields["formation_lead_avatar"]}}
+	if err := patchInitialFormationLead(ctx, sfid, payload); err != nil {
+		var statusErr *v1ProjectStaffStatusError
+		if errors.Is(err, errV1ProjectNotFound) || errors.As(err, &statusErr) && statusErr.status < 500 {
+			recentV1StaffWrites.discard(writeID)
+		} else if markErr := retainUncertainFormationLeadWrite(ctx, projectUID, sfid, 0); markErr != nil {
+			return fmt.Errorf("initial Formation Lead PATCH failed (%v), and retaining repair obligation: %w", err, markErr)
+		}
+		return fmt.Errorf("patching initial Formation Lead in v1: %w", err)
+	}
+	recentV1StaffWrites.confirm(writeID)
+	return nil
 }
 
 // syncProjectUpdateToV1 patches a v1 project to match the v2 state.
@@ -1349,6 +1408,9 @@ func syncProjectDeleteToV1(ctx context.Context, projectUID, projectSFID string) 
 	}
 	if err := tombstoneMapping(ctx, "project.uid."+projectUID); err != nil {
 		log.With(errKey, err).ErrorContext(ctx, "failed to tombstone project reverse mapping after v1 delete — create-path loop guard will skip legitimate re-sync until reconciled")
+	}
+	if err := tombstoneFormationLeadReconcile(ctx, projectUID); err != nil {
+		log.With(errKey, err).ErrorContext(ctx, "failed to tombstone Formation Lead repair marker after project deletion")
 	}
 
 	log.InfoContext(ctx, "successfully deleted project in v1 from indexer event")
