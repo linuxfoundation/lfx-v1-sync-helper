@@ -1,0 +1,66 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+#
+# Manually applied one-shot job, dry-run by default. Before applying, pin the
+# image to a release digest and set HEIMDALL_CLIENT_ID from the target cluster.
+# Deploy the project-service classification fields before running this job.
+# Review the dry-run summary and v2-only conflicts before removing --dry-run.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: backfill-project-classifications
+  namespace: v1-sync-helper
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: v1-sync-helper-sa
+      containers:
+        - name: backfill
+          # Replace with the release image digest before use.
+          image: ghcr.io/linuxfoundation/lfx-v1-sync-helper/lfx-v1-sync-helper:latest
+          imagePullPolicy: IfNotPresent
+          args: ["--backfill-project-classifications", "--dry-run", "--limit", "1000", "--emit-rate", "2"]
+          env:
+            - name: NATS_URL
+              value: "nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
+            - name: V1_MAPPINGS_STORE_MODE
+              value: "kv"
+            - name: AUTH0_TENANT
+              value: "linuxfoundation"
+            - name: AUTH0_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  key: client_id
+                  name: v1-sync-helper-secrets
+            - name: AUTH0_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: client_private_key
+                  name: v1-sync-helper-secrets
+            - name: HEIMDALL_CLIENT_ID
+              value: ""
+            - name: HEIMDALL_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: signer.pem
+                  name: heimdall-signer-cert
+            - name: HEIMDALL_KEY_ID
+              value: "prod-rsa-2025-12-12-001"
+            - name: PROJECT_SERVICE_URL
+              value: "http://lfx-v2-project-service.project-service.svc.cluster.local:8080"
+            - name: COMMITTEE_SERVICE_URL
+              value: "http://lfx-v2-committee-service.committee-service.svc.cluster.local:8080"
+            - name: LFX_API_GW
+              value: "https://api-gw.platform.linuxfoundation.org/"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "10m"
+            limits:
+              memory: "2Gi"
+              cpu: "500m"
+          securityContext:
+            allowPrivilegeEscalation: false

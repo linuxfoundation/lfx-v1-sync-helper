@@ -95,3 +95,19 @@ func TestMergeUserInfoWithACS(t *testing.T) {
 		}
 	})
 }
+
+func TestACSProjectSettingsPayloadPreservesFormationLead(t *testing.T) {
+	lead := &projectservice.FormationLead{Name: stringToStringPtr("Test User"), Email: stringToStringPtr("user@example.com")}
+	admins := []*projectservice.UserInfo{{Username: stringToStringPtr("testuser01")}}
+	mentors := []*projectservice.UserInfo{{Username: stringToStringPtr("testmentor01")}}
+	current := &projectservice.ProjectSettings{
+		FormationLead: lead, MentorshipProgramAdmins: mentors,
+		MissionStatement: stringToStringPtr("Test mission"),
+	}
+	payload := acsProjectSettingsPayload("00000000-0000-4000-8000-000000000001", "12", "test-token", current, admins, nil, nil)
+	if payload.FormationLead != lead || payload.MentorshipProgramAdmins == nil || len(payload.MentorshipProgramAdmins) != 1 ||
+		payload.MissionStatement != current.MissionStatement || payload.Writers == nil || len(payload.Writers) != 1 ||
+		payload.IfMatch == nil || *payload.IfMatch != "12" {
+		t.Errorf("ACS settings PUT must retain formation lead and unrelated settings: %+v", payload)
+	}
+}

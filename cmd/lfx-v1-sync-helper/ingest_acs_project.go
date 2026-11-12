@@ -224,22 +224,7 @@ func backfillProjectACSGrants(ctx context.Context, sfid, projectUID string, dryR
 		return fmt.Errorf("failed to generate JWT token: %w", err)
 	}
 
-	_, err = projectClient.UpdateProjectSettings(ctx, &projectservice.UpdateProjectSettingsPayload{
-		BearerToken: &token,
-		UID:         &projectUID,
-		IfMatch:     &etag,
-		// Preserve all non-list fields from the current settings (PUT replaces
-		// the full resource, so every field must be round-tripped).
-		MissionStatement:  currentSettings.MissionStatement,
-		AnnouncementDate:  currentSettings.AnnouncementDate,
-		ExecutiveDirector: currentSettings.ExecutiveDirector,
-		ProgramManager:    currentSettings.ProgramManager,
-		OpportunityOwner:  currentSettings.OpportunityOwner,
-		// Merged lists from ACS backfill.
-		Writers:             mergedWriters,
-		Auditors:            mergedAuditors,
-		MeetingCoordinators: mergedCoordinators,
-	})
+	_, err = projectClient.UpdateProjectSettings(ctx, acsProjectSettingsPayload(projectUID, etag, token, currentSettings, mergedWriters, mergedAuditors, mergedCoordinators))
 	if err != nil {
 		return wrapProjectServiceError("failed to update project settings", err)
 	}
@@ -253,6 +238,27 @@ func backfillProjectACSGrants(ctx context.Context, sfid, projectUID string, dryR
 	).InfoContext(ctx, "updated project settings with merged ACS grants")
 
 	return nil
+}
+
+func acsProjectSettingsPayload(projectUID, etag, token string, currentSettings *projectservice.ProjectSettings, mergedWriters, mergedAuditors, mergedCoordinators []*projectservice.UserInfo) *projectservice.UpdateProjectSettingsPayload {
+	return &projectservice.UpdateProjectSettingsPayload{
+		BearerToken: &token,
+		UID:         &projectUID,
+		IfMatch:     &etag,
+		// Preserve all non-list fields from the current settings (PUT replaces
+		// the full resource, so every field must be round-tripped).
+		MissionStatement:        currentSettings.MissionStatement,
+		AnnouncementDate:        currentSettings.AnnouncementDate,
+		ExecutiveDirector:       currentSettings.ExecutiveDirector,
+		ProgramManager:          currentSettings.ProgramManager,
+		OpportunityOwner:        currentSettings.OpportunityOwner,
+		FormationLead:           currentSettings.FormationLead,
+		MentorshipProgramAdmins: currentSettings.MentorshipProgramAdmins,
+		// Merged lists from ACS backfill.
+		Writers:             mergedWriters,
+		Auditors:            mergedAuditors,
+		MeetingCoordinators: mergedCoordinators,
+	}
 }
 
 // fetchACSGrantsByRole calls the ACS /grantusers endpoint for a project (all pages)

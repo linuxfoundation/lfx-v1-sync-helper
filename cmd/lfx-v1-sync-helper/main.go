@@ -86,6 +86,7 @@ func main() {
 	var doBackfillV1MappingsToPG = flag.Bool("backfill-v1-mappings-to-postgres", false, "copy the v1-mappings NATS KV bucket into the Postgres v1_mappings table, then exit (LFXV2-2985)")
 	var doBackfillProjects = flag.Bool("backfill-projects", false, "re-emit v1 projects that have no v2 mapping so the running deployment creates them, then exit")
 	var doBackfillFormationLeads = flag.Bool("backfill-formation-leads", false, "reconcile Formation Lead in v2 settings for mapped v1 projects, then exit")
+	var doBackfillProjectClassifications = flag.Bool("backfill-project-classifications", false, "reconcile v1 industry, technology and technical activity type on mapped v2 projects, then exit")
 	var doBackfillCommittees = flag.Bool("backfill-committees", false, "re-emit v1 committees that have no v2 mapping so the running deployment creates them, then exit")
 	var excludeStagePrefix = flag.String("exclude-stage-prefix", "", "comma-separated, case-insensitive project_status__c prefixes to exclude (applicable with --backfill-projects)")
 	var includeStagePrefix = flag.String("include-stage-prefix", "", "comma-separated, case-insensitive project_status__c prefixes to include exclusively (applicable with --backfill-projects)")
@@ -138,7 +139,7 @@ func main() {
 		dryRun:           *dryRun,
 		emitRate:         *emitRate,
 	}
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *syncUser != "", *syncUsersFile != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doReconcileCommitteeMemberVoting, *doBackfillV1MappingsToPG, *doBackfillProjects, *doBackfillFormationLeads, *doBackfillCommittees, staffOpts.requested()} {
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *syncUser != "", *syncUsersFile != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doReconcileCommitteeMemberVoting, *doBackfillV1MappingsToPG, *doBackfillProjects, *doBackfillFormationLeads, *doBackfillProjectClassifications, *doBackfillCommittees, staffOpts.requested()} {
 		if b {
 			oneShotCount++
 		}
@@ -194,7 +195,7 @@ func main() {
 				os.Exit(2)
 			}
 		}
-		if !*doReconcileCommitteeMemberVoting && !*doBackfillFormationLeads {
+		if !*doReconcileCommitteeMemberVoting && !*doBackfillFormationLeads && !*doBackfillProjectClassifications {
 			if err := initV1DB(context.Background(), cfg); err != nil {
 				logger.With(errKey, err).Error("error initializing v1 platform database connection")
 				os.Exit(1)
@@ -208,13 +209,13 @@ func main() {
 			logger.With(errKey, err).Error("error initializing Goa clients")
 			os.Exit(1)
 		}
-		if !*doBackfillFormationLeads {
+		if !*doBackfillFormationLeads && !*doBackfillProjectClassifications {
 			if err := initV1Client(cfg); err != nil {
 				logger.With(errKey, err).Error("error initializing v1 client")
 				os.Exit(1)
 			}
 		}
-		if !*doReconcileCommitteeMemberVoting && staffInput == nil && !*doBackfillFormationLeads {
+		if !*doReconcileCommitteeMemberVoting && staffInput == nil && !*doBackfillFormationLeads && !*doBackfillProjectClassifications {
 			if err := initAuth0MgmtClient(cfg); err != nil {
 				logger.With(errKey, err).Error("error initializing Auth0 Management API client")
 				os.Exit(1)
@@ -436,6 +437,18 @@ func main() {
 			os.Exit(1)
 		}
 		logger.With(res.logFields()...).Info("project backfill completed successfully")
+		os.Exit(0)
+	}
+	if *doBackfillProjectClassifications {
+		result, err := backfillProjectClassifications(ctx, *dryRun, *backfillLimit, *emitRate)
+		logger.With("scanned", result.scanned, "mapped", result.mapped, "changed", result.changed,
+			"updated", result.updated, "skipped", result.skipped, "v2_only_conflicts", result.v2Only,
+			"errors", result.errors, "dry_run", *dryRun).
+			Info("project classification backfill summary")
+		if err != nil {
+			logger.With(errKey, err).Error("project classification backfill failed")
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 

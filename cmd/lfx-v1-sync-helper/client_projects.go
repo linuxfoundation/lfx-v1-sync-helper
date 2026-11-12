@@ -106,6 +106,9 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 		Category:                   basePayload.Category,
 		Funding:                    basePayload.Funding,
 		FundingModel:               basePayload.FundingModel,
+		Industry:                   basePayload.Industry,
+		Technology:                 basePayload.Technology,
+		TechnicalActivityType:      basePayload.TechnicalActivityType,
 		CharterURL:                 basePayload.CharterURL,
 		LegalEntityType:            basePayload.LegalEntityType,
 		LegalEntityName:            basePayload.LegalEntityName,
@@ -351,6 +354,9 @@ func projectBasesEqual(a, b *projectservice.ProjectBase) bool {
 		stringPtrToString(a.Category) == stringPtrToString(b.Category) &&
 		stringPtrToString(a.Funding) == stringPtrToString(b.Funding) &&
 		stringSliceEqual(a.FundingModel, b.FundingModel) &&
+		stringSliceEqual(a.Industry, b.Industry) &&
+		stringSliceEqual(a.Technology, b.Technology) &&
+		stringSliceEqual(a.TechnicalActivityType, b.TechnicalActivityType) &&
 		stringPtrToString(a.CharterURL) == stringPtrToString(b.CharterURL) &&
 		stringPtrToString(a.LegalEntityType) == stringPtrToString(b.LegalEntityType) &&
 		stringPtrToString(a.LegalEntityName) == stringPtrToString(b.LegalEntityName) &&
@@ -370,6 +376,16 @@ func projectBasesEqual(a, b *projectservice.ProjectBase) bool {
 // whole base document, so a field left nil here would be cleared by any
 // unrelated v1 edit.
 func preserveV2OnlyBaseFields(basePayload *projectservice.UpdateProjectBasePayload, currentBase *projectservice.ProjectBase) {
+	// An absent or malformed v1 column must not clear a v2 classification.
+	if basePayload.Industry == nil {
+		basePayload.Industry = currentBase.Industry
+	}
+	if basePayload.Technology == nil {
+		basePayload.Technology = currentBase.Technology
+	}
+	if basePayload.TechnicalActivityType == nil {
+		basePayload.TechnicalActivityType = currentBase.TechnicalActivityType
+	}
 	if basePayload.ContactEmail == nil {
 		basePayload.ContactEmail = currentBase.ContactEmail
 	}

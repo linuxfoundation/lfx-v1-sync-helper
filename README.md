@@ -182,6 +182,21 @@ The include-Formation pass bulk-creates checklists in `lfx-v2-formation-service`
 lfx-v1-sync-helper --backfill-projects --include-stage-prefix Formation --check-slugs [--dry-run]
 ```
 
+**Mapped-project classifications backfill (`--backfill-project-classifications`):**
+
+Reconciles v1 `industry__c`, `technology__c` and `technical_activity_type__c` into the three v2 project-base arrays for already-mapped projects. Unlike `--backfill-projects`, it does not re-emit project creates: it fetches base+ETag and writes only changed classifications while round-tripping other base fields. Live writes use the v1→v2 pending marker to suppress the indexer reverse-sync echo. Missing/malformed v1 columns are preserved; an empty v1 classification never bulk-clears a populated v2-only value (`v2_only_conflicts` requires separate review). Live v1 edits and deliberate clears are handled by the normal sync path.
+
+For v2→v1 clears, the helper sends v1's `"None"` selection: the v1 PATCH repository ignores `[]` but stores an empty column for `"None"`. A v2 `null` classification means unbackfilled/unknown and is never sent as a clear. Conversely an empty or `"None"` v1 column becomes an empty v2 array. Backfill conflicts are logged by project UID and field without logging classification values.
+
+Run only **after** the project-service classification fields are merged, released and deployed, and after the sync-helper version with this job is deployed. Requires KV-authoritative `v1-mappings` (the job refuses postgres-only mapping mode), the `v1-objects` bucket, and the project's Goa/JWT client. Avoid concurrent PCC/Self Serve classification edits while running, since the v1 replica can lag; the job re-reads each v1 record before a write and skips changed values. Dry-run first; `--limit` caps successful writes, and reruns skip equal values. Review `scanned`, `mapped`, `changed`, `updated`, `v2_only_conflicts` and `errors`; verify via both APIs afterward. Do not treat the unmapped-project creation backfill as a substitute for this job.
+
+For an in-cluster one-shot, `manifests/backfill-project-classifications-job.yaml` starts in dry-run mode. Before applying it, pin the released image digest and set the target environment's Heimdall client ID and endpoints. Do not apply a manifest with its placeholder values or enable live mode until dry-run counters are reviewed.
+
+```sh
+lfx-v1-sync-helper --backfill-project-classifications --dry-run
+lfx-v1-sync-helper --backfill-project-classifications --limit 1000 --emit-rate 2
+```
+
 **Unmapped-committee backfill (`--backfill-committees`):**
 
 Re-emits v1 committees that have no v2 mapping, by re-PUTting the existing `v1-objects` value and letting the running deployment's KV consumer create them. `handleCommitteeUpdate` permanently drops (ACKs, no redelivery) a committee create whose parent project has no live mapping — the same bug pattern as the project backfill above, but with a single dependency (parent project) rather than two. Run this after `--backfill-projects` has completed and settled; a candidate whose parent project is still unmapped is reported as `skipped_parent_unmapped` rather than resolved. Requires only NATS (`NATS_URL`, `AUTH0_CLIENT_ID`) — it makes no v2 API calls itself.

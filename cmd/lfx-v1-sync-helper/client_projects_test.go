@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"testing"
 	"time"
 
@@ -548,6 +549,8 @@ func TestUpdateProjectSendsPreservedContactEmail(t *testing.T) {
 			Slug:         stringToStringPtr("test-project"),
 			Description:  stringToStringPtr("before"),
 			ContactEmail: stringToStringPtr(email),
+			Industry:     []string{"Energy & Climate"},
+			Technology:   []string{"Blockchain"},
 		}, "1", nil
 	}
 
@@ -584,5 +587,11 @@ func TestUpdateProjectSendsPreservedContactEmail(t *testing.T) {
 	}
 	if got := sent["contact_email"]; got != email {
 		t.Errorf("PUT body contact_email = %v, want %q", got, email)
+	}
+	if got := sent["industry"]; !reflect.DeepEqual(got, []any{"Energy & Climate"}) {
+		t.Errorf("PUT body industry = %v, want the existing classification", got)
+	}
+	if got := sent["technology"]; !reflect.DeepEqual(got, []any{"Blockchain"}) {
+		t.Errorf("PUT body technology = %v, want the existing classification", got)
 	}
 }
