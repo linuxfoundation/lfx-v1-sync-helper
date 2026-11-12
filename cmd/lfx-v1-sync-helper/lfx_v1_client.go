@@ -730,6 +730,14 @@ type projectServiceCommitteeResponse struct {
 	SSOGroupName    string `json:"SSOGroupName"`
 }
 
+// v1CommitteeCreateStatusError supports classification without parsing response
+// text or retaining/logging a response body that may contain user-supplied data.
+type v1CommitteeCreateStatusError struct{ StatusCode int }
+
+func (e *v1CommitteeCreateStatusError) Error() string {
+	return fmt.Sprintf("v1 committee create returned HTTP %d", e.StatusCode)
+}
+
 // createCommittee creates a committee in Postgres via the Project Service v2 API.
 // projectSFID is the v1 Salesforce ID of the parent project.
 func createV1Committee(ctx context.Context, projectSFID string, payload projectServiceCommitteeCreate) (*projectServiceCommitteeResponse, error) {
@@ -762,7 +770,7 @@ func createV1Committee(ctx context.Context, projectSFID string, payload projectS
 	logger.DebugContext(ctx, "createV1Committee response", "status", resp.StatusCode, "url", resp.Request.URL.String(), "body", string(respBody))
 
 	if resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("project service returned status %d creating committee for project %s: %s", resp.StatusCode, projectSFID, string(respBody))
+		return nil, &v1CommitteeCreateStatusError{StatusCode: resp.StatusCode}
 	}
 
 	var result projectServiceCommitteeResponse

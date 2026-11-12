@@ -120,6 +120,13 @@ func TestIndexerSyncCreate(t *testing.T) {
 						h.assertMapping(t, reverseKey, c.reverse)
 						return
 					}
+					if initial == "tombstoned" && c.resource == markerResourceCommittee {
+						if len(h.recordedRequests()) != 0 {
+							t.Fatal("committee create must not resurrect a tombstoned identity")
+						}
+						h.assertMapping(t, reverseKey, tombstoneMarker)
+						return
+					}
 					assertSyncRequest(t, h, http.MethodPost, c.path, c.wantPost)
 					h.assertMapping(t, string(c.resource)+".sfid."+c.sfid, c.uid)
 					h.assertMapping(t, reverseKey, c.reverse)
@@ -415,6 +422,9 @@ func TestSyncCommitteeMemberCreateToV1(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := setupSyncTest(t, http.StatusOK, tt.response)
+			// These payload-mapping cases include legacy/malformed event shapes;
+			// lifecycle tests separately exercise the typed current-state reader.
+			readMemberCreateData = func(context.Context, string, string) (map[string]any, error) { return tt.data, nil }
 			if err := syncCommitteeMemberCreateToV1(t.Context(), memberUID, committeeUID, projectSFID, committeeSFID, tt.data); err != nil {
 				t.Fatalf("syncCommitteeMemberCreateToV1: %v", err)
 			}
