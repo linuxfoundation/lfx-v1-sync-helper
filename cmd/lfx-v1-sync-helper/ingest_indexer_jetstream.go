@@ -13,6 +13,45 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+const (
+	committeeEventsStreamName   = "committee_events"
+	committeeEventsConsumerName = "v1-sync-helper-committee-events-consumer"
+	// Allow the v1 API's 60-second timeout plus five seconds of processing overhead.
+	committeeEventsProcessingTimeout = 65 * time.Second
+	// Leave headroom for ACK/NAK delivery after processing times out.
+	committeeEventsAckWait = 90 * time.Second
+	// A settings retry must allow an in-flight base create to finish first.
+	committeeEventsMappingRetryDelay = committeeEventsProcessingTimeout + 5*time.Second
+)
+
+func committeeEventsConsumerConfig() jetstream.ConsumerConfig {
+	return jetstream.ConsumerConfig{
+		Name:    committeeEventsConsumerName,
+		Durable: committeeEventsConsumerName,
+		// Only deliver new messages on first creation; the durable resumes its
+		// existing checkpoint on restarts, including AckWait reconciliation.
+		DeliverPolicy: jetstream.DeliverNewPolicy,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		FilterSubjects: []string{
+			"lfx.committee.>",
+			"lfx.committee_member.>",
+			"lfx.committee_settings.>",
+		},
+		MaxDeliver:    3,
+		AckWait:       committeeEventsAckWait,
+		MaxAckPending: 100,
+		Description:   "Indexer committee/committee-member/settings event consumer for v1-sync-helper",
+	}
+}
+
+func consumeCommitteeEvents(consumer jetstream.Consumer, handler jetstream.MessageHandler) (jetstream.ConsumeContext, error) {
+	// AckWait starts at server delivery, not when the serial callback begins.
+	// Leave queued work on the server until this replica can process it.
+	return consumer.Consume(handler, jetstream.PullMaxMessages(1), jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
+		logger.With(errKey, err).Error("committee-events consumer error encountered")
+	}))
+}
+
 // committeeEventProcessor is a function that processes a single committee-stream event.
 // It returns nil for both success and permanent failures (bad JSON, missing fields,
 // unknown action) that should not be retried. It returns a non-nil error only for
@@ -30,9 +69,9 @@ func newCommitteeEventsIngestHandler(committeeProc, memberProc, settingsProc com
 		subject := msg.Subject()
 		data := msg.Data()
 
-		// Bound processing to 25 seconds — below the 30-second AckWait — so JetStream
-		// does not redeliver the message while a slow V1 API call is still in flight.
-		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		// Keep the processing deadline below AckWait so JetStream does not
+		// redeliver while a slow v1 API call is still in flight.
+		ctx, cancel := context.WithTimeout(context.Background(), committeeEventsProcessingTimeout)
 		defer cancel()
 
 		var procErr error
@@ -55,8 +94,8 @@ func newCommitteeEventsIngestHandler(committeeProc, memberProc, settingsProc com
 			if strings.HasPrefix(subject, "lfx.committee_settings.") && errors.Is(procErr, ErrKeyNotFound) {
 				// Settings can be indexed before a v2-originated committee has been
 				// created in v1. Don't burn all three deliveries while that HTTP
-				// request is in flight (its processing deadline is 25 seconds).
-				nakErr = msg.NakWithDelay(30 * time.Second)
+				// request is in flight (it may use the full processing deadline).
+				nakErr = msg.NakWithDelay(committeeEventsMappingRetryDelay)
 			} else {
 				nakErr = msg.Nak()
 			}

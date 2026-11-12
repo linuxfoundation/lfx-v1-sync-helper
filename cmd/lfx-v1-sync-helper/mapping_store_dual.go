@@ -29,11 +29,11 @@ const (
 	// defaultDualMirrorDrainTimeout caps how long Close waits for the
 	// worker to drain the queue on graceful shutdown before giving up.
 	// Fits inside the shared shutdown budget: main.go allows NATS
-	// draining up to gracefulShutdownSeconds (25s), and the chart's
+	// draining up to gracefulShutdownSeconds (75s), and the chart's
 	// deployment sets terminationGracePeriodSeconds to comfortably
 	// exceed the sum of NATS drain + mirror drain (see
-	// charts/lfx-v1-sync-helper/values.yaml). 5s leaves >5s of
-	// safety margin under a 60s grace period after the NATS drain.
+	// charts/lfx-v1-sync-helper/values.yaml). 5s leaves 40s of
+	// safety margin under the default 120s grace period after the NATS drain.
 	defaultDualMirrorDrainTimeout = 5 * time.Second
 )
 

@@ -248,7 +248,7 @@ func TestCommitteeSettingsMappingRaceRecovers(t *testing.T) {
 	h.seed(t, "project.uid.project-uid", "project-sfid")
 	data := map[string]any{"business_email_required": true}
 	msg := dispatchSettings(t, "created", data)
-	if !msg.nacked || msg.nakDelay != 30*time.Second {
+	if !msg.nacked || msg.nakDelay != 70*time.Second {
 		t.Fatal("unmapped settings create must retry after allowing the base create to finish")
 	}
 	h.seed(t, "committee.uid.committee-uid", "project-sfid:committee-sfid")

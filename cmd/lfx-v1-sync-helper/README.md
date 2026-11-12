@@ -59,6 +59,28 @@ maxAckPending: 1000
 
 #### v2 → v1 (indexer domain events)
 
+The app reconciles the durable `v1-sync-helper-committee-events-consumer` on
+`committee_events` at startup, including existing consumers. Committee, member
+and settings events have a **65-second total processing deadline**, allowing the
+v1 API's 60-second timeout plus five seconds of overhead. The consumer's
+**90-second AckWait** leaves room to ACK/NAK after processing finishes without
+redelivering an operation still in flight. The three-delivery limit, subjects and
+durable checkpoint are unchanged; restarting does not replay historical events.
+Each replica pulls only **one message at a time**: the next event stays on the
+server rather than consuming its AckWait in a client buffer behind a slow call.
+Multiple replicas can still process different events concurrently; the shared
+consumer's `MaxAckPending` remains 100. All replicas must run the updated image
+for this per-replica delivery bound to apply throughout the deployment.
+Other consumers retain their own acknowledgement windows.
+
+Graceful shutdown allows **75 seconds** for the NATS connection to drain, followed
+by up to **5 seconds** for pending dual-store mapping writes. The Helm app's pod
+grace period defaults to **120 seconds**; update any shorter environment override
+along with the application image. The processing budget covers the whole event,
+including authentication and lookups, not a fresh 65 seconds for each HTTP call.
+These longer budgets do not resolve ambiguous create success followed by 409;
+safe reconciliation/idempotency is tracked separately.
+
 |NATS Subject|Action|
 |---|---|
 |`lfx.committee.created`|Create committee in v1 via Project Service API|
@@ -100,7 +122,7 @@ record. A missing settings record uses the v1 default only after confirming
 that the v2 base still exists; a deleted base is skipped. Later settings
 create/update events PATCH only `BusinessEmailRequired`
 in v1, using current v2 state rather than a stale event snapshot. Missing reverse
-mappings are retried with a 30-second delay (up to the existing three deliveries)
+mappings are retried with a 70-second delay (up to the existing three deliveries)
 only when the live committee's parent project has a live v1 mapping. This allows
 an in-flight base create to finish without retrying settings on proven v2-only
 committees. Settings deletes and tombstoned mappings

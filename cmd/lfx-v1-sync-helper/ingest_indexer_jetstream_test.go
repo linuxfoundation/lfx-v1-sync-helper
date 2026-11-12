@@ -9,7 +9,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	nats "github.com/nats-io/nats.go"
@@ -62,6 +64,81 @@ func errProc(_ context.Context, _ string, _ []byte) error {
 // okProc is a committeeEventProcessor that always returns nil (success or permanent skip).
 func okProc(_ context.Context, _ string, _ []byte) error {
 	return nil
+}
+
+func TestCommitteeEventsConsumerConfig(t *testing.T) {
+	config := committeeEventsConsumerConfig()
+	if config.Name != "v1-sync-helper-committee-events-consumer" || config.Durable != config.Name {
+		t.Fatal("existing durable consumer identity must not change")
+	}
+	if config.AckWait != 90*time.Second || config.AckWait <= committeeEventsProcessingTimeout {
+		t.Fatalf("AckWait = %v, want 90s and greater than the processing deadline", config.AckWait)
+	}
+	if config.DeliverPolicy != jetstream.DeliverNewPolicy || config.AckPolicy != jetstream.AckExplicitPolicy || config.MaxDeliver != 3 || config.MaxAckPending != 100 {
+		t.Fatal("delivery, acknowledgement and retry policies must remain unchanged")
+	}
+	wantSubjects := []string{"lfx.committee.>", "lfx.committee_member.>", "lfx.committee_settings.>"}
+	if !reflect.DeepEqual(config.FilterSubjects, wantSubjects) {
+		t.Fatalf("FilterSubjects = %v, want %v", config.FilterSubjects, wantSubjects)
+	}
+	if committeeEventsMappingRetryDelay != 70*time.Second || committeeEventsMappingRetryDelay <= committeeEventsProcessingTimeout {
+		t.Fatal("settings mapping retry must allow the full base-create deadline to finish")
+	}
+	if time.Duration(gracefulShutdownSeconds)*time.Second <= committeeEventsProcessingTimeout {
+		t.Fatal("NATS drain budget must exceed the processing deadline")
+	}
+}
+
+func TestCommitteeEventsIngestHandler_ProcessingBudget(t *testing.T) {
+	for _, subject := range []string{"lfx.committee.created", "lfx.committee_member.created", "lfx.committee_settings.updated"} {
+		for _, timeout := range []bool{false, true} {
+			name := subject + "/slow-success"
+			if timeout {
+				name = subject + "/deadline-exceeded"
+			}
+			t.Run(name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					started := time.Now()
+					var processingCtx context.Context
+					processor := func(ctx context.Context, _ string, _ []byte) error {
+						processingCtx = ctx
+						deadline, ok := ctx.Deadline()
+						if !ok || deadline.Sub(started) != 65*time.Second {
+							t.Fatalf("processing deadline = %v, want 65s", deadline.Sub(started))
+						}
+						if timeout {
+							<-ctx.Done()
+							return ctx.Err()
+						}
+						// Simulate a v1 call taking its full 60-second budget plus
+						// overhead, without making the test sleep in real time.
+						time.Sleep(61 * time.Second)
+						return ctx.Err()
+					}
+					msg := &fakeMsg{subject: subject, data: []byte(`{}`)}
+					newCommitteeEventsIngestHandler(processor, processor, processor)(msg)
+					if processingCtx == nil {
+						t.Fatal("processor was not called")
+					}
+					if timeout {
+						if time.Since(started) != 65*time.Second || !errors.Is(processingCtx.Err(), context.DeadlineExceeded) {
+							t.Fatal("processing must stop at the 65-second deadline")
+						}
+						if msg.ackCalls != 0 || msg.nakCalls != 1 || msg.nakDelay != 0 {
+							t.Fatal("deadline failures must NAK once without ACK or mapping-race delay")
+						}
+					} else {
+						if time.Since(started) != 61*time.Second || msg.ackCalls != 1 || msg.nakCalls != 0 {
+							t.Fatal("slow successful processing must ACK once without NAK")
+						}
+						if !errors.Is(processingCtx.Err(), context.Canceled) {
+							t.Fatal("handler must release the processing context after success")
+						}
+					}
+				})
+			})
+		}
+	}
 }
 
 // TestCommitteeEventsIngestHandler_UnknownSubject verifies that an unrecognised

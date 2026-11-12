@@ -71,7 +71,7 @@ func TestCommitteeSettingsPermanentAndEligibleMappingMisses(t *testing.T) {
 				if msg.nacked != tt.wantRetry {
 					t.Errorf("NAK = %v, want %v", msg.nacked, tt.wantRetry)
 				}
-				if tt.projectMapping == "project-sfid" && msg.nakDelay != 30*time.Second {
+				if tt.projectMapping == "project-sfid" && msg.nakDelay != 70*time.Second {
 					t.Error("eligible mapping race must retain delayed retry")
 				}
 				if len(h.recordedRequests()) != 0 {

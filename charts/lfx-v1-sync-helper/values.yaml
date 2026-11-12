@@ -173,6 +173,8 @@ natsResources:
 app:
   # replicas is the number of service instances to run for horizontal scaling
   replicas: 1
+  # Cover the 75-second NATS drain and 5-second mapping mirror drain, plus teardown.
+  terminationGracePeriodSeconds: 120
   # image is the configuration for the container images
   image:
     # repository is the container image repository

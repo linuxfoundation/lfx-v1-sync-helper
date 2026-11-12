@@ -208,7 +208,7 @@ Boot ordering (`main.go`): NATS + KV bucket handles → a KV-backed `mappingStor
   `committee_events` PATCH only that field, using current settings rather than a stale event snapshot.
   Deleted/tombstoned committees are skipped. Missing reverse mappings retry only when the live base's parent
   project has a live v1 mapping; proven v2-only committees are ACKed without warning/retry churn.
-  Eligible mapping races use a 30-second delayed NAK within the existing three-delivery limit, including updates
+  Eligible mapping races use a 70-second delayed NAK within the existing three-delivery limit, including updates
   that arrive while a base create is still in flight.
 - **Echo suppression:** v1 settings writes use `pending.v1_to_v2.update.committee_settings.<uid>` and v1 creates
   use the separate `create` operation, so a settings update cannot consume a create or committee-base marker.
