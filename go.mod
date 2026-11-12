@@ -18,6 +18,7 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/linuxfoundation/lfx-v2-committee-service v0.4.26
 	github.com/linuxfoundation/lfx-v2-project-service v0.10.4
+	github.com/nats-io/nats-server/v2 v2.12.6
 	github.com/nats-io/nats.go v1.52.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/uptrace/bun v1.2.18
@@ -31,6 +32,7 @@ require (
 
 require (
 	github.com/PuerkitoBio/rehttp v1.4.0 // indirect
+	github.com/antithesishq/antithesis-sdk-go v0.7.0-default-no-op // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.35 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.35 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.35 // indirect
@@ -45,6 +47,7 @@ require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
 	github.com/go-chi/chi/v5 v5.4.0 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
+	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
@@ -57,6 +60,8 @@ require (
 	github.com/lestrrat-go/iter v1.0.2 // indirect
 	github.com/lestrrat-go/jwx/v2 v2.1.7 // indirect
 	github.com/lestrrat-go/option v1.0.1 // indirect
+	github.com/minio/highwayhash v1.0.4 // indirect
+	github.com/nats-io/jwt/v2 v2.8.2 // indirect
 	github.com/nats-io/nkeys v0.4.16 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect

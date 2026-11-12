@@ -33,10 +33,9 @@ const (
 	// User SFID lookup subjects for resolving v1 platform user SFIDs by username or email.
 	lookupUserSFIDByUsernameSubject = "lfx.lookup_v1_user_sfid.by_username"
 	lookupUserSFIDByEmailSubject    = "lfx.lookup_v1_user_sfid.by_email"
-	// gracefulShutdownSeconds should be higher than NATS client
-	// request timeout, and lower than the pod or liveness probe's
-	// terminationGracePeriodSeconds.
-	gracefulShutdownSeconds = 25
+	// Allow a full 65-second committee-event handler to finish before the
+	// NATS connection closes. The pod grace period also covers mirror draining.
+	gracefulShutdownSeconds = 75
 )
 
 var (
@@ -821,37 +820,13 @@ func main() {
 	// lfx.committee.>, lfx.committee_member.> and lfx.committee_settings.> subjects published by the indexer service
 	// after every successful OpenSearch write. Using JetStream gives at-least-once delivery,
 	// replacing the at-most-once core NATS QueueSubscribe that could silently drop events.
-	committeeEventsStreamName := "committee_events"
-	committeeEventsConsumerName := "v1-sync-helper-committee-events-consumer"
-
-	committeeEventsConsumer, err := jsContext.CreateOrUpdateConsumer(ctx, committeeEventsStreamName, jetstream.ConsumerConfig{
-		Name:    committeeEventsConsumerName,
-		Durable: committeeEventsConsumerName,
-		// DeliverNewPolicy: only deliver messages published after this consumer is first created.
-		// The old QueueSubscribe only processed events after subscription; replaying stream history
-		// on first start would flood V1 with redundant updates. The durable name ensures the
-		// consumer resumes from its last ACKed position on restarts, so no events are dropped
-		// after the initial connection.
-		DeliverPolicy: jetstream.DeliverNewPolicy,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		FilterSubjects: []string{
-			"lfx.committee.>",
-			"lfx.committee_member.>",
-			"lfx.committee_settings.>",
-		},
-		MaxDeliver:    3,
-		AckWait:       30 * time.Second,
-		MaxAckPending: 100,
-		Description:   "Indexer committee/committee-member/settings event consumer for v1-sync-helper",
-	})
+	committeeEventsConsumer, err := jsContext.CreateOrUpdateConsumer(ctx, committeeEventsStreamName, committeeEventsConsumerConfig())
 	if err != nil {
 		logger.With(errKey, err, "consumer", committeeEventsConsumerName, "stream", committeeEventsStreamName).Error("error creating committee-events consumer")
 		os.Exit(1)
 	}
 
-	committeeEventsConsumerCtx, err := committeeEventsConsumer.Consume(committeeEventsIngestHandler, jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
-		logger.With(errKey, err).Error("committee-events consumer error encountered")
-	}))
+	committeeEventsConsumerCtx, err := consumeCommitteeEvents(committeeEventsConsumer, committeeEventsIngestHandler)
 	if err != nil {
 		logger.With(errKey, err, "consumer", committeeEventsConsumerName).Error("error starting committee-events consumer")
 		os.Exit(1)

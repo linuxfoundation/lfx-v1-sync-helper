@@ -31,15 +31,15 @@ spec:
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name | default .Chart.Name }}
       # terminationGracePeriodSeconds must cover the sum of the NATS
-      # drain budget (main.go's gracefulShutdownSeconds, 25s) plus the
+      # drain budget (main.go's gracefulShutdownSeconds, 75s) plus the
       # dual-store mirror drain (mapping_store_dual.go's
       # defaultDualMirrorDrainTimeout, 5s) plus a safety margin for
-      # HTTP/pgxpool teardown. 60s leaves comfortable headroom without
+      # HTTP/pgxpool teardown. 120s leaves comfortable headroom without
       # unnecessarily delaying pod deletion under normal operation.
       # Kubernetes default (30s) is too short — a SIGKILL mid-drain
       # would abandon in-flight PG shadow writes and leave the mirror
       # worker's queue partially applied.
-      terminationGracePeriodSeconds: {{ .Values.app.terminationGracePeriodSeconds | default 60 }}
+      terminationGracePeriodSeconds: {{ .Values.app.terminationGracePeriodSeconds | default 120 }}
       containers:
         - name: app
           image: "{{ .Values.app.image.repository }}:{{ .Values.app.image.tag | default .Chart.AppVersion }}"
