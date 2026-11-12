@@ -15,6 +15,7 @@ import (
 
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
+	"github.com/linuxfoundation/lfx-v2-project-service/pkg/events"
 	nats "github.com/nats-io/nats.go"
 )
 
@@ -31,10 +32,15 @@ func setupHandlerMarkerTest(t *testing.T) *fakeMappingStore {
 	origFetchProject := fetchProjectBase
 	origFetchCommittee := fetchCommitteeBase
 	origFetchV1Committee := fetchV1CommitteeData
+	origReadLatestV1 := readLatestV1ProjectRow
+	origFetchLiveLead := fetchLiveFormationLead
 
 	cfg = &Config{Auth0ClientID: "test-client-id"}
 	mappingStore = fake
 	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	readLatestV1ProjectRow = func(_ context.Context, _ string) (map[string]any, uint64, error) {
+		return map[string]any{"sfid": "a000000000AAA", "slug__c": "test-slug", "name": "Test Project"}, 1, nil
+	}
 
 	t.Cleanup(func() {
 		cfg = origCfg
@@ -43,6 +49,8 @@ func setupHandlerMarkerTest(t *testing.T) *fakeMappingStore {
 		fetchProjectBase = origFetchProject
 		fetchCommitteeBase = origFetchCommittee
 		fetchV1CommitteeData = origFetchV1Committee
+		readLatestV1ProjectRow = origReadLatestV1
+		fetchLiveFormationLead = origFetchLiveLead
 	})
 	return fake
 }
@@ -107,6 +115,470 @@ func TestHandleProjectUpdate_MarkerCleanedOnFetchBaseError(t *testing.T) {
 	}
 }
 
+func TestHandleProjectUpdate_RefreshBeforeMapping(t *testing.T) {
+	setupHandlerMarkerTest(t)
+	const sfid = "a000000000AAA"
+	oldWrites := recentV1StaffWrites
+	recentV1StaffWrites = newV1StaffWriteLog()
+	t.Cleanup(func() { recentV1StaffWrites = oldWrites })
+	for _, tt := range []struct {
+		name           string
+		latest         map[string]any
+		readErr        error
+		pending        bool
+		wantRetry      bool
+		wantUpdate     bool
+		confirmedFloor bool
+		olderDelivery  bool
+		deferredHuman  bool
+		activeMarker   bool
+		observedHuman  bool
+		historicalMask bool
+	}{
+		{name: "latest record deleted"},
+		{name: "human rename survives later v2-authored staff PATCH", latest: map[string]any{"sfid": sfid, "name": "Renamed Project", "slug__c": "test-project", "parent_project__c": "parent", "lastmodifiedbyid": "test-client-id@clients"}, wantUpdate: true},
+		{name: "latest soft deleted", latest: map[string]any{"sfid": sfid, "isdeleted": true}},
+		{name: "read failure redelivers", readErr: errors.New("test KV failure"), wantRetry: true},
+		{name: "reverse write pending does not redeliver", latest: map[string]any{"sfid": sfid, "name": "Test Project", "slug__c": "test-project", "parent_project__c": "parent", "formation_lead_email": "old@example.com"}, pending: true, wantUpdate: true},
+		{name: "delayed floor plus one human row preserves confirmed live contact", latest: map[string]any{"sfid": sfid, "name": "Test Project", "slug__c": "test-project", "parent_project__c": "parent", "formation_lead_email": "old@example.com"}, confirmedFloor: true, wantUpdate: true},
+		{name: "active marker survives restart and base-only save", latest: map[string]any{"sfid": sfid, "name": "Renamed Project", "slug__c": "test-project", "parent_project__c": "parent", "formation_lead_email": "old@example.com", formationLeadChangesKey: []any{}}, activeMarker: true, wantUpdate: true},
+		{name: "observed revision cannot suppress unprocessed human contact", latest: map[string]any{"sfid": sfid, "name": "Test Project", "slug__c": "test-project", "parent_project__c": "parent", "lastmodifiedbyid": "human-editor", "formation_lead_email": "human@example.com", formationLeadChangesKey: []any{"email"}, formationLeadVersionsKey: map[string]any{"name": float64(0), "email": float64(1), "avatar": float64(0)}, formationLeadCurrentHumanKey: map[string]any{"name": false, "email": true, "avatar": false}}, observedHuman: true, wantUpdate: true, wantRetry: true},
+		{name: "historical delivery mask cannot override marker baseline", latest: map[string]any{"sfid": sfid, "name": "Test Project", "slug__c": "test-project", "parent_project__c": "parent", "lastmodifiedbyid": "human-editor", "formation_lead_email": "stale@example.com", formationLeadChangesKey: []any{}, formationLeadVersionsKey: map[string]any{"name": float64(0), "email": float64(1), "avatar": float64(0)}, formationLeadCurrentHumanKey: map[string]any{"name": false, "email": true, "avatar": false}}, historicalMask: true, wantUpdate: true},
+		{name: "older redelivery cannot supersede newer human revision", latest: map[string]any{"sfid": sfid, "name": "Test Project", "slug__c": "test-project", "parent_project__c": "parent", "formation_lead_email": "stale@example.com"}, olderDelivery: true, wantUpdate: true},
+		{name: "deferred human v2 failure redelivers", latest: map[string]any{"sfid": sfid, "name": "Test Project", "slug__c": "test-project", "parent_project__c": "parent", "formation_lead_email": "human@example.com"}, deferredHuman: true, wantUpdate: true, wantRetry: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// Each ordering case needs an independent marker baseline.
+			mappingStore = newFakeMappingStore()
+			if _, err := mappingStore.Put(t.Context(), "project.sfid."+sfid, []byte("test-uid")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := mappingStore.Put(t.Context(), "project.sfid.parent", []byte("parent-uid")); err != nil {
+				t.Fatal(err)
+			}
+			recentV1StaffWrites = newV1StaffWriteLog()
+			if tt.pending {
+				recentV1StaffWrites.record(sfid, map[string]string{"formation_lead_email": "new@example.com"}, 1, staffWriteNow(),
+					map[string]string{"formation_lead_email": "old@example.com"})
+			}
+			if tt.deferredHuman {
+				recentV1StaffWrites.record(sfid, map[string]string{"formation_lead_email": "new@example.com"}, 1, staffWriteNow(),
+					map[string]string{"formation_lead_email": "old@example.com"})
+			}
+			if tt.confirmedFloor {
+				id := recentV1StaffWrites.record(sfid, map[string]string{"formation_lead_email": "new@example.com"}, 1, staffWriteNow())
+				recentV1StaffWrites.confirm(id)
+				fetchLiveFormationLead = func(context.Context, string) (*events.FormationLead, error) {
+					return &events.FormationLead{Email: "new@example.com"}, nil
+				}
+			}
+			if tt.olderDelivery {
+				if err := markFormationLeadReconcile(t.Context(), "test-uid", sfid, 13); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.activeMarker {
+				if err := markFormationLeadReconcile(t.Context(), "test-uid", sfid, 1); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.observedHuman {
+				if err := markFormationLeadReconcile(t.Context(), "test-uid", sfid, 9, map[string]uint64{"name": 0, "email": 0, "avatar": 0}); err != nil {
+					t.Fatal(err)
+				}
+				if err := rearmFormationLeadReconcile(t.Context(), "test-uid", sfid, 13, map[string]uint64{"name": 0, "email": 0, "avatar": 0}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.historicalMask {
+				if err := markFormationLeadReconcile(t.Context(), "test-uid", sfid, 9, map[string]uint64{"name": 0, "email": 1, "avatar": 0}); err != nil {
+					t.Fatal(err)
+				}
+				if err := rearmFormationLeadReconcile(t.Context(), "test-uid", sfid, 12, map[string]uint64{"name": 0, "email": 1, "avatar": 0}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			readLatestV1ProjectRow = func(context.Context, string) (map[string]any, uint64, error) {
+				if tt.observedHuman || tt.historicalMask {
+					return tt.latest, 12, tt.readErr
+				}
+				return tt.latest, 2, tt.readErr
+			}
+			updateReached := false
+			fetchProjectBase = func(context.Context, string) (*projectservice.ProjectBase, string, error) {
+				updateReached = true
+				return nil, "", errors.New("test stopped after reaching unrelated project update")
+			}
+			var got bool
+			if tt.activeMarker {
+				got = handleProjectUpdateAtRevision(t.Context(), "salesforce-project__c."+sfid,
+					map[string]any{"sfid": sfid, "lastmodifiedbyid": "0050M000009AbcDEQ", formationLeadChangesKey: []any{}}, 2)
+			} else if tt.observedHuman || tt.historicalMask {
+				email := "human@example.com"
+				if tt.historicalMask {
+					email = "stale@example.com"
+				}
+				got = handleProjectUpdateAtRevision(t.Context(), "salesforce-project__c."+sfid,
+					map[string]any{"sfid": sfid, "lastmodifiedbyid": "human-editor", "formation_lead_email": email, formationLeadChangesKey: []any{"email"}}, 11)
+			} else if tt.olderDelivery {
+				got = handleProjectUpdateAtRevision(t.Context(), "salesforce-project__c."+sfid, map[string]any{"sfid": sfid, "lastmodifiedbyid": "0050M000009AbcDEQ", "formation_lead_email": "older@example.com"}, 11)
+			} else {
+				got = handleProjectUpdate(t.Context(), "salesforce-project__c."+sfid, map[string]any{"sfid": sfid, "lastmodifiedbyid": "0050M000009AbcDEQ"})
+			}
+			if got != tt.wantRetry {
+				t.Errorf("retry = %t, want %t", got, tt.wantRetry)
+			}
+			if updateReached != tt.wantUpdate {
+				t.Errorf("project update reached = %t, want %t", updateReached, tt.wantUpdate)
+			}
+		})
+	}
+}
+
+func TestHandleProjectUpdate_ContactMaskWithoutPendingWrite(t *testing.T) {
+	store := setupHandlerMarkerTest(t)
+	origUpdate := updateProjectFromV1
+	t.Cleanup(func() { updateProjectFromV1 = origUpdate })
+	const sfid = "a000000000AAA"
+	if _, err := store.Put(t.Context(), "project.sfid."+sfid, []byte("test-uid")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(t.Context(), "project.sfid.parent", []byte("parent-uid")); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name      string
+		mask      []any
+		wantName  bool
+		ambiguous bool
+	}{
+		{name: "project-only rename preserves queued v2 email", mask: []any{}},
+		{name: "PCC name edit preserves queued v2 email", mask: []any{"name"}, wantName: true},
+		{name: "late bridge echo and rename cannot process overwritten PCC email", mask: []any{}, ambiguous: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			latest := map[string]any{"sfid": sfid, "slug__c": "test-project", "parent_project__c": "parent", "name": "Renamed Project", "lastmodifiedbyid": "human-editor", "formation_lead_name": "Alice Example", "formation_lead_email": "old@example.com", formationLeadChangesKey: tt.mask}
+			if tt.ambiguous {
+				latest[formationLeadVersionsKey] = map[string]any{"name": float64(0), "email": float64(1), "avatar": float64(0)}
+				latest[formationLeadCurrentHumanKey] = map[string]any{"name": false, "email": false, "avatar": false}
+				if err := markFormationLeadReconcile(t.Context(), "test-uid", sfid, 9, map[string]uint64{"name": 0, "email": 0, "avatar": 0}); err != nil {
+					t.Fatal(err)
+				}
+				if err := rearmFormationLeadReconcile(t.Context(), "test-uid", sfid, 12, map[string]uint64{"name": 0, "email": 0, "avatar": 0}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			readLatestV1ProjectRow = func(context.Context, string) (map[string]any, uint64, error) {
+				if tt.ambiguous {
+					return latest, 13, nil
+				}
+				return latest, 2, nil
+			}
+			called := false
+			updateProjectFromV1 = func(_ context.Context, _ *projectservice.UpdateProjectBasePayload, payload *projectservice.UpdateProjectSettingsPayload, clears staffClearFlags, _ string) (bool, error) {
+				called = true
+				if tt.wantName {
+					if payload.FormationLead == nil || payload.FormationLead.Name == nil || *payload.FormationLead.Name != "Alice Example" || payload.FormationLead.Email != nil || !clears.FormationLeadPartial {
+						t.Errorf("name-only PCC edit must retain v2 email on hydration: lead=%+v clears=%+v", payload.FormationLead, clears)
+					}
+				} else if payload.FormationLead != nil || clears.FormationLead {
+					t.Errorf("base-only edit must preserve entire queued v2 lead: lead=%+v clears=%+v", payload.FormationLead, clears)
+				}
+				return false, nil
+			}
+			delivered, deliveredRev := latest, uint64(2)
+			if tt.ambiguous {
+				delivered = map[string]any{"sfid": sfid, "lastmodifiedbyid": "human-editor", "formation_lead_email": "human@example.com", formationLeadChangesKey: []any{"email"}}
+				deliveredRev = 11
+			}
+			if retry := handleProjectUpdateAtRevision(t.Context(), "salesforce-project__c."+sfid, delivered, deliveredRev); retry || !called {
+				t.Errorf("forward masked project update: retry=%t called=%t", retry, called)
+			}
+			if tt.ambiguous {
+				marker, found, err := formationLeadObligation(t.Context(), "test-uid")
+				if err != nil || !found || marker.ProcessedHumanRev != 9 {
+					t.Errorf("overwritten human email was marked processed: marker=%+v found=%t err=%v", marker, found, err)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleProjectUpdate_FailedContactSurvivesBaseOnlySave(t *testing.T) {
+	store := setupHandlerMarkerTest(t)
+	origUpdate, origWrites := updateProjectFromV1, recentV1StaffWrites
+	t.Cleanup(func() { updateProjectFromV1, recentV1StaffWrites = origUpdate, origWrites })
+	recentV1StaffWrites = newV1StaffWriteLog()
+	const sfid = "a000000000AAA"
+	if _, err := store.Put(t.Context(), "project.sfid."+sfid, []byte("test-uid")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(t.Context(), "project.sfid.parent", []byte("parent-uid")); err != nil {
+		t.Fatal(err)
+	}
+	row := map[string]any{"sfid": sfid, "slug__c": "test-project", "parent_project__c": "parent", "name": "Test Project", "lastmodifiedbyid": "human-editor", "formation_lead_email": "human@example.com", formationLeadChangesKey: []any{"email"}, formationLeadVersionsKey: map[string]any{"name": float64(0), "email": float64(1), "avatar": float64(0)}, formationLeadCurrentHumanKey: map[string]any{"name": false, "email": true, "avatar": false}}
+	revision := uint64(2)
+	readLatestV1ProjectRow = func(context.Context, string) (map[string]any, uint64, error) {
+		return row, revision, nil
+	}
+	writeCount := 0
+	updateProjectFromV1 = func(_ context.Context, _ *projectservice.UpdateProjectBasePayload, payload *projectservice.UpdateProjectSettingsPayload, clears staffClearFlags, _ string) (bool, error) {
+		writeCount++
+		if !clears.FormationLeadPartial || payload.FormationLead == nil || payload.FormationLead.Email == nil || *payload.FormationLead.Email != "human@example.com" {
+			t.Errorf("lost failed PCC email before v2 write: lead=%+v clears=%+v", payload.FormationLead, clears)
+		}
+		if writeCount == 1 {
+			return false, errors.New("test v2 write unavailable")
+		}
+		return false, nil
+	}
+	if retry := handleProjectUpdateAtRevision(t.Context(), "salesforce-project__c."+sfid, row, revision); !retry {
+		t.Fatal("failed PCC contact write was acknowledged without retry")
+	}
+	marker, found, err := formationLeadObligation(t.Context(), "test-uid")
+	if err != nil || !found || marker.Completed || marker.ProcessedHumanRev != 0 || marker.FieldVersions["email"] != 0 {
+		t.Fatalf("failed contact write lacks durable pre-edit baseline: %+v found=%t err=%v", marker, found, err)
+	}
+	// Simulate a restart and an unrelated PCC rename after JetStream gives
+	// up retrying the original contact delivery.
+	recentV1StaffWrites = newV1StaffWriteLog()
+	row = map[string]any{"sfid": sfid, "slug__c": "test-project", "parent_project__c": "parent", "name": "Renamed Project", "lastmodifiedbyid": "human-editor", "formation_lead_email": "human@example.com", formationLeadChangesKey: []any{}, formationLeadVersionsKey: map[string]any{"name": float64(0), "email": float64(1), "avatar": float64(0)}, formationLeadCurrentHumanKey: map[string]any{"name": false, "email": true, "avatar": false}}
+	revision = 3
+	if retry := handleProjectUpdateAtRevision(t.Context(), "salesforce-project__c."+sfid, row, revision); retry || writeCount != 2 {
+		t.Errorf("base-only save did not recover missed PCC contact: retry=%t writes=%d", retry, writeCount)
+	}
+}
+
+func TestHandleProjectUpdate_QueuedContactInReverseSnapshot(t *testing.T) {
+	store := setupHandlerMarkerTest(t)
+	origUpdate, origWrites := updateProjectFromV1, recentV1StaffWrites
+	t.Cleanup(func() { updateProjectFromV1, recentV1StaffWrites = origUpdate, origWrites })
+	recentV1StaffWrites = newV1StaffWriteLog()
+	const sfid = "a000000000AAA"
+	if _, err := store.Put(t.Context(), "project.sfid."+sfid, []byte("test-uid")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(t.Context(), "project.sfid.parent", []byte("parent-uid")); err != nil {
+		t.Fatal(err)
+	}
+	if err := markFormationLeadReconcile(t.Context(), "test-uid", sfid, 9,
+		map[string]uint64{"name": 0, "email": 0, "avatar": 0}); err != nil {
+		t.Fatal(err)
+	}
+	markerKey := formationReconcilePrefix + "test-uid"
+	entry, err := store.Get(t.Context(), markerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var marker formationReconcileObligation
+	if err := json.Unmarshal(entry.Value, &marker); err != nil {
+		t.Fatal(err)
+	}
+	marker.Completed = true
+	encoded, err := json.Marshal(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(t.Context(), markerKey, encoded, entry.Revision); err != nil {
+		t.Fatal(err)
+	}
+	if err := rearmFormationLeadReconcile(t.Context(), "test-uid", sfid, 13,
+		map[string]uint64{"name": 0, "email": 1, "avatar": 0}); err != nil {
+		t.Fatal(err)
+	}
+	latest := map[string]any{"sfid": sfid, "slug__c": "test-project", "parent_project__c": "parent", "name": "Test Project", "lastmodifiedbyid": "human-editor", "formation_lead_email": "human@example.com", formationLeadChangesKey: []any{"email"}, formationLeadVersionsKey: map[string]any{"name": float64(0), "email": float64(1), "avatar": float64(0)}, formationLeadCurrentHumanKey: map[string]any{"name": false, "email": true, "avatar": false}}
+	readLatestV1ProjectRow = func(context.Context, string) (map[string]any, uint64, error) {
+		return latest, 12, nil
+	}
+	called := false
+	updateProjectFromV1 = func(_ context.Context, _ *projectservice.UpdateProjectBasePayload, payload *projectservice.UpdateProjectSettingsPayload, clears staffClearFlags, _ string) (bool, error) {
+		called = true
+		if !clears.FormationLeadPartial || payload.FormationLead == nil || payload.FormationLead.Email == nil || *payload.FormationLead.Email != "human@example.com" {
+			t.Errorf("queued email was lost because reverse snapshot already observed it: lead=%+v clears=%+v", payload.FormationLead, clears)
+		}
+		return false, nil
+	}
+	if retry := handleProjectUpdateAtRevision(t.Context(), "salesforce-project__c."+sfid, latest, 11); retry || !called {
+		t.Errorf("queued PCC contact did not reach v2: retry=%t called=%t", retry, called)
+	}
+}
+
+func TestHandleProjectUpdate_InitialContactProcessingHistory(t *testing.T) {
+	store := setupHandlerMarkerTest(t)
+	origCreate, origUpdate := createProjectFromV1, updateProjectFromV1
+	t.Cleanup(func() { createProjectFromV1, updateProjectFromV1 = origCreate, origUpdate })
+	const sfid = "a000000000AAA"
+	if _, err := store.Put(t.Context(), "project.sfid.parent", []byte("parent-uid")); err != nil {
+		t.Fatal(err)
+	}
+	row := map[string]any{"sfid": sfid, "slug__c": "test-project", "parent_project__c": "parent", "name": "Test Project", "lastmodifiedbyid": "human-editor", "formation_lead_name": "Alice Example", "formation_lead_email": "alice@example.com", formationLeadChangesKey: []any{"name", "email"}, formationLeadVersionsKey: map[string]any{"name": float64(1), "email": float64(1), "avatar": float64(0)}, formationLeadCurrentHumanKey: map[string]any{"name": true, "email": true, "avatar": false}}
+	revision := uint64(1)
+	readLatestV1ProjectRow = func(context.Context, string) (map[string]any, uint64, error) {
+		return row, revision, nil
+	}
+	createProjectFromV1 = func(_ context.Context, payload *projectservice.CreateProjectPayload, _ string) (*projectservice.ProjectFull, error) {
+		if payload.FormationLead == nil || payload.FormationLead.Email == nil || *payload.FormationLead.Email != "alice@example.com" {
+			t.Errorf("create did not sync initial v1 email: %+v", payload.FormationLead)
+		}
+		uid := "test-uid"
+		return &projectservice.ProjectFull{UID: &uid}, nil
+	}
+	if retry := handleProjectUpdateAtRevision(t.Context(), "salesforce-project__c."+sfid, row, revision); retry {
+		t.Fatal("initial contact create requested retry")
+	}
+	marker, found, err := formationLeadObligation(t.Context(), "test-uid")
+	if err != nil || !found || marker.ProcessedFields["name"] != 1 || marker.ProcessedFields["email"] != 1 {
+		t.Fatalf("initial v1 contact missing processed generations: marker=%+v found=%t err=%v", marker, found, err)
+	}
+	updateProjectFromV1 = func(_ context.Context, _ *projectservice.UpdateProjectBasePayload, payload *projectservice.UpdateProjectSettingsPayload, clears staffClearFlags, _ string) (bool, error) {
+		if !clears.FormationLeadPartial || payload.FormationLead == nil || payload.FormationLead.Name == nil || payload.FormationLead.Email != nil {
+			t.Errorf("later name-only edit must preserve initial email: lead=%+v clears=%+v", payload.FormationLead, clears)
+		}
+		return false, nil
+	}
+	row = map[string]any{"sfid": sfid, "slug__c": "test-project", "parent_project__c": "parent", "name": "Test Project", "lastmodifiedbyid": "human-editor", "formation_lead_name": "Bob Fixture", "formation_lead_email": "alice@example.com", formationLeadChangesKey: []any{"name"}, formationLeadVersionsKey: map[string]any{"name": float64(2), "email": float64(1), "avatar": float64(0)}, formationLeadCurrentHumanKey: map[string]any{"name": true, "email": true, "avatar": false}}
+	revision = 2
+	if retry := handleProjectUpdateAtRevision(t.Context(), "salesforce-project__c."+sfid, row, revision); retry {
+		t.Fatal("later name-only contact edit requested retry")
+	}
+	marker, found, err = formationLeadObligation(t.Context(), "test-uid")
+	if err != nil || !found || marker.ProcessedFields["name"] != 2 || marker.ProcessedFields["email"] != 1 {
+		t.Errorf("partial update lost already-synced email watermark: marker=%+v found=%t err=%v", marker, found, err)
+	}
+}
+
+func TestHandleProjectUpdate_TwoQueuedFieldsBeforeFirstMarker(t *testing.T) {
+	store := setupHandlerMarkerTest(t)
+	origUpdate := updateProjectFromV1
+	t.Cleanup(func() { updateProjectFromV1 = origUpdate })
+	const sfid = "a000000000AAA"
+	if _, err := store.Put(t.Context(), "project.sfid."+sfid, []byte("test-uid")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(t.Context(), "project.sfid.parent", []byte("parent-uid")); err != nil {
+		t.Fatal(err)
+	}
+	delivered := map[string]any{"sfid": sfid, "slug__c": "test-project", "parent_project__c": "parent", "name": "Test Project", "lastmodifiedbyid": "human-editor", "formation_lead_name": "Bob Fixture", "formation_lead_email": "alice@example.com", formationLeadChangesKey: []any{"name"}, formationLeadVersionsKey: map[string]any{"name": float64(2), "email": float64(1), "avatar": float64(0)}}
+	latest := map[string]any{"sfid": sfid, "slug__c": "test-project", "parent_project__c": "parent", "name": "Test Project", "lastmodifiedbyid": "human-editor", "formation_lead_name": "Bob Fixture", "formation_lead_email": "bob@example.com", formationLeadChangesKey: []any{"email"}, formationLeadVersionsKey: map[string]any{"name": float64(2), "email": float64(2), "avatar": float64(0)}, formationLeadCurrentHumanKey: map[string]any{"name": true, "email": true, "avatar": false}}
+	readLatestV1ProjectRow = func(context.Context, string) (map[string]any, uint64, error) {
+		return latest, 3, nil
+	}
+	called := false
+	updateProjectFromV1 = func(_ context.Context, _ *projectservice.UpdateProjectBasePayload, payload *projectservice.UpdateProjectSettingsPayload, clears staffClearFlags, _ string) (bool, error) {
+		called = true
+		if !clears.FormationLeadPartial || payload.FormationLead == nil || payload.FormationLead.Name == nil || *payload.FormationLead.Name != "Bob Fixture" || payload.FormationLead.Email == nil || *payload.FormationLead.Email != "bob@example.com" {
+			t.Errorf("refreshed contact failed to include both queued edits: lead=%+v clears=%+v", payload.FormationLead, clears)
+		}
+		return false, nil
+	}
+	if retry := handleProjectUpdateAtRevision(t.Context(), "salesforce-project__c."+sfid, delivered, 2); retry || !called {
+		t.Errorf("queued contact merge: retry=%t called=%t", retry, called)
+	}
+	marker, found, err := formationLeadObligation(t.Context(), "test-uid")
+	if err != nil || !found || marker.ProcessedFields["name"] != 2 || marker.ProcessedFields["email"] != 2 {
+		t.Errorf("queued email was not recorded after v2 accepted it: marker=%+v found=%t err=%v", marker, found, err)
+	}
+}
+
+func TestHandleProjectUpdate_LegacyContactDoesNotCreateUnrepairableMarker(t *testing.T) {
+	store := setupHandlerMarkerTest(t)
+	origUpdate := updateProjectFromV1
+	t.Cleanup(func() { updateProjectFromV1 = origUpdate })
+	const sfid = "a000000000AAA"
+	if _, err := store.Put(t.Context(), "project.sfid."+sfid, []byte("test-uid")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(t.Context(), "project.sfid.parent", []byte("parent-uid")); err != nil {
+		t.Fatal(err)
+	}
+	updates := 0
+	updateProjectFromV1 = func(_ context.Context, _ *projectservice.UpdateProjectBasePayload, payload *projectservice.UpdateProjectSettingsPayload, clears staffClearFlags, _ string) (bool, error) {
+		updates++
+		if !clears.FormationLeadPartial || payload.FormationLead == nil {
+			t.Errorf("legacy contact edit was not forwarded: lead=%+v clears=%+v", payload.FormationLead, clears)
+		}
+		return false, nil
+	}
+	for i, mask := range []any{[]any{"name"}, []any{"email"}} {
+		row := map[string]any{"sfid": sfid, "slug__c": "test-project", "parent_project__c": "parent", "name": "Test Project", "lastmodifiedbyid": "human-editor", "formation_lead_name": "Alice Example", "formation_lead_email": "alice@example.com", formationLeadChangesKey: mask}
+		if i == 1 {
+			row["formation_lead_email"] = "bob@example.com"
+		}
+		revision := uint64(i + 2)
+		readLatestV1ProjectRow = func(context.Context, string) (map[string]any, uint64, error) {
+			return row, revision, nil
+		}
+		if retry := handleProjectUpdateAtRevision(t.Context(), "salesforce-project__c."+sfid, row, revision); retry {
+			t.Errorf("legacy contact edit %d unexpectedly requested retry", i)
+		}
+		if _, found, err := formationLeadObligation(t.Context(), "test-uid"); err != nil || found {
+			t.Errorf("successful legacy edit %d created an unrepairable marker: found=%t err=%v", i, found, err)
+		}
+	}
+	if updates != 2 {
+		t.Errorf("legacy contact updates=%d, want both edits forwarded", updates)
+	}
+}
+
+func TestHandleProjectUpdate_RecoveredDeliveryKeepsItsGenerations(t *testing.T) {
+	store := setupHandlerMarkerTest(t)
+	origUpdate, origWrites := updateProjectFromV1, recentV1StaffWrites
+	t.Cleanup(func() { updateProjectFromV1, recentV1StaffWrites = origUpdate, origWrites })
+	recentV1StaffWrites = newV1StaffWriteLog()
+	const sfid = "a000000000AAA"
+	if _, err := store.Put(t.Context(), "project.sfid."+sfid, []byte("test-uid")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(t.Context(), "project.sfid.parent", []byte("parent-uid")); err != nil {
+		t.Fatal(err)
+	}
+	baseline := map[string]uint64{"name": 0, "email": 0, "avatar": 0}
+	if err := rearmFormationLeadReconcile(t.Context(), "test-uid", sfid, 10, baseline); err != nil {
+		t.Fatal(err)
+	}
+	writeID := recentV1StaffWrites.record(sfid, map[string]string{"formation_lead_email": "bridge@example.com"}, 10, staffWriteNow(), map[string]string{"formation_lead_email": "old@example.com"})
+	recentV1StaffWrites.confirm(writeID)
+	recentV1StaffWrites.observeReplication(sfid, map[string]any{"formation_lead_email": "bridge@example.com"}, 13)
+	latest := map[string]any{"sfid": sfid, "slug__c": "test-project", "parent_project__c": "parent", "name": "Test Project", "lastmodifiedbyid": "test-client-id@clients", "formation_lead_email": "bridge@example.com", formationLeadChangesKey: []any{"email"}, formationLeadVersionsKey: map[string]any{"name": float64(0), "email": float64(2), "avatar": float64(0)}, formationLeadCurrentHumanKey: map[string]any{"name": false, "email": false, "avatar": false}}
+	readLatestV1ProjectRow = func(context.Context, string) (map[string]any, uint64, error) {
+		return latest, 13, nil
+	}
+	delivered := map[string]any{"sfid": sfid, "slug__c": "test-project", "parent_project__c": "parent", "name": "Test Project", "lastmodifiedbyid": "human-editor", "formation_lead_email": "human1@example.com", formationLeadChangesKey: []any{"email"}, formationLeadVersionsKey: map[string]any{"name": float64(0), "email": float64(1), "avatar": float64(0)}, formationLeadCurrentHumanKey: map[string]any{"name": false, "email": true, "avatar": false}}
+	called := false
+	updateProjectFromV1 = func(_ context.Context, _ *projectservice.UpdateProjectBasePayload, payload *projectservice.UpdateProjectSettingsPayload, clears staffClearFlags, _ string) (bool, error) {
+		called = true
+		if !clears.FormationLeadPartial || payload.FormationLead == nil || payload.FormationLead.Email == nil || *payload.FormationLead.Email != "human1@example.com" {
+			t.Errorf("older human delivery not recovered: lead=%+v clears=%+v", payload.FormationLead, clears)
+		}
+		return false, nil
+	}
+	if retry := handleProjectUpdateAtRevision(t.Context(), "salesforce-project__c."+sfid, delivered, 11); retry || !called {
+		t.Errorf("recovered delivery: retry=%t called=%t", retry, called)
+	}
+	marker, found, err := formationLeadObligation(t.Context(), "test-uid")
+	if err != nil || !found || marker.ProcessedFields["email"] != 1 {
+		t.Errorf("newer generation falsely marked processed with older value: marker=%+v found=%t err=%v", marker, found, err)
+	}
+}
+
+func TestReadLatestV1ProjectRow(t *testing.T) {
+	origKV := v1KV
+	kv := newFakeKV()
+	v1KV = kv
+	t.Cleanup(func() { v1KV = origKV })
+	key := "salesforce-project__c.a000000000AAA"
+	kv.data[key] = []byte(`{"sfid":"a000000000AAA","formation_lead_email":"new@example.com"}`)
+	kv.rev[key] = 8
+	row, revision, err := readLatestV1ProjectRow(t.Context(), key)
+	if err != nil || revision != 8 || row["formation_lead_email"] != "new@example.com" {
+		t.Errorf("latest row = %v (revision %d), error %v; want latest email at revision 8", row, revision, err)
+	}
+	row, revision, err = readLatestV1ProjectRow(t.Context(), key+"-missing")
+	if err != nil || row != nil || revision != 0 {
+		t.Errorf("missing row = %v (revision %d), error %v; want nil, 0, nil", row, revision, err)
+	}
+}
+
 // TestHandleProjectDelete_MarkerCleanedOnDeleteError pins the PR
 // #170 T5 fix: when deleteProject errors, handleProjectDelete must
 // roll back the pending indexer-echo marker so an unrelated genuine
@@ -147,6 +619,31 @@ func TestHandleProjectDelete_MarkerCleanedOnDeleteError(t *testing.T) {
 	markerKey := pendingMarkerKey(markerV1ToV2, markerOpDelete, markerResourceProject, uid)
 	if _, err := fake.Get(context.Background(), markerKey); !errors.Is(err, ErrKeyNotFound) {
 		t.Errorf("marker still present after deleteProject error: err=%v — the T5 rollback is missing", err)
+	}
+}
+
+func TestHandleProjectDelete_TombstonesFormationLeadRepair(t *testing.T) {
+	store := setupHandlerMarkerTest(t)
+	origDelete := deleteProjectFromV1
+	t.Cleanup(func() { deleteProjectFromV1 = origDelete })
+	const sfid, uid = "a000000000AAB", "test-uid"
+	if _, err := store.Put(t.Context(), "project.sfid."+sfid, []byte(uid)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(t.Context(), "project.uid."+uid, []byte(sfid)); err != nil {
+		t.Fatal(err)
+	}
+	if err := rearmFormationLeadReconcile(t.Context(), uid, sfid, 1,
+		map[string]uint64{"name": 0, "email": 0, "avatar": 0}); err != nil {
+		t.Fatal(err)
+	}
+	deleteProjectFromV1 = func(context.Context, string, string) error { return nil }
+	if retry := handleProjectDelete(t.Context(), "salesforce-project__c."+sfid, sfid, "test-principal"); retry {
+		t.Fatal("confirmed delete unexpectedly requested retry")
+	}
+	entry, err := store.Get(t.Context(), formationReconcilePrefix+uid)
+	if err != nil || !isTombstonedMapping(entry.Value) {
+		t.Errorf("deleted project retained active Formation Lead repair: entry=%+v err=%v", entry, err)
 	}
 }
 

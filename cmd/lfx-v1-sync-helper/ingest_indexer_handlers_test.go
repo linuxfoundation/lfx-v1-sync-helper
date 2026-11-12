@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"testing"
 
+	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
 	nats "github.com/nats-io/nats.go"
 )
 
@@ -93,6 +94,13 @@ func TestIndexerSyncCreate(t *testing.T) {
 		t.Run(string(c.resource), func(t *testing.T) {
 			for _, initial := range []string{"missing", "live", "tombstoned"} {
 				t.Run(initial, func(t *testing.T) {
+					if c.resource == markerResourceProject {
+						original := fetchInitialFormationSettings
+						fetchInitialFormationSettings = func(context.Context, string) (*projectservice.ProjectSettings, string, error) {
+							return &projectservice.ProjectSettings{}, "1", nil
+						}
+						t.Cleanup(func() { fetchInitialFormationSettings = original })
+					}
 					h := setupSyncTest(t, http.StatusCreated, `{"ID":"`+c.sfid+`"}`)
 					c.seedParent(t, h)
 					reverseKey := string(c.resource) + ".uid." + c.uid
@@ -123,6 +131,38 @@ func TestIndexerSyncCreate(t *testing.T) {
 						t.Fatal("replayed create bypassed loop guard")
 					}
 				})
+			}
+		})
+	}
+}
+
+func TestIndexerSyncCreate_FormationLeadFlag(t *testing.T) {
+	project := indexerSyncCases()[0]
+	for _, enabled := range []bool{false, true} {
+		name := "disabled"
+		if enabled {
+			name = "enabled"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := setupSyncTest(t, http.StatusCreated, `{"ID":"project-sfid"}`)
+			cfg.V2ToV1ProjectStaffSyncEnabled = enabled
+			origFetch, origPatch, origWrites := fetchInitialFormationSettings, patchInitialFormationLead, recentV1StaffWrites
+			recentV1StaffWrites = newV1StaffWriteLog()
+			t.Cleanup(func() {
+				fetchInitialFormationSettings, patchInitialFormationLead, recentV1StaffWrites = origFetch, origPatch, origWrites
+			})
+			fetches, patches := 0, 0
+			fetchInitialFormationSettings = func(context.Context, string) (*projectservice.ProjectSettings, string, error) {
+				fetches++
+				return &projectservice.ProjectSettings{FormationLead: &projectservice.FormationLead{Name: stringToStringPtr("Alice Example")}}, "1", nil
+			}
+			patchInitialFormationLead = func(context.Context, string, any) error {
+				patches++
+				return nil
+			}
+			project.dispatch(t, "created", project.create)
+			if len(h.recordedRequests()) != 1 || fetches != patches || (enabled && patches != 1) || (!enabled && patches != 0) {
+				t.Errorf("create requests=%d fetches=%d patches=%d, enabled=%t", len(h.recordedRequests()), fetches, patches, enabled)
 			}
 		})
 	}

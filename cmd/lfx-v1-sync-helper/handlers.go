@@ -120,7 +120,7 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 	// Determine the object type based on the key prefix.
 	switch prefix {
 	case "salesforce-project__c":
-		return handleProjectUpdate(ctx, key, v1Data)
+		return handleProjectUpdateAtRevision(ctx, key, v1Data, entry.Revision())
 	case "platform-collaboration__c":
 		return handleCommitteeUpdate(ctx, key, v1Data)
 	case "platform-community__c":
