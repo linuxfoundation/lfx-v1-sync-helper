@@ -701,6 +701,9 @@ func mapV1DataToProjectCreatePayload(ctx context.Context, v1Data map[string]any)
 		}
 		payload.FundingModel = models
 	}
+	payload.Industry = v1ProjectClassifications(v1Data, "industry__c")
+	payload.Technology = v1ProjectClassifications(v1Data, "technology__c")
+	payload.TechnicalActivityType = v1ProjectClassifications(v1Data, "technical_activity_type__c")
 
 	// Map charter URL.
 	if charterURL, ok := v1Data["charterurl__c"].(string); ok && isValidURL(charterURL) {
@@ -884,6 +887,9 @@ func mapV1DataToProjectUpdateBasePayload(ctx context.Context, projectUID string,
 		}
 		payload.FundingModel = models
 	}
+	payload.Industry = v1ProjectClassifications(v1Data, "industry__c")
+	payload.Technology = v1ProjectClassifications(v1Data, "technology__c")
+	payload.TechnicalActivityType = v1ProjectClassifications(v1Data, "technical_activity_type__c")
 
 	// Map charter URL.
 	if charterURL, ok := v1Data["charterurl__c"].(string); ok && isValidURL(charterURL) {

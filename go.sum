@@ -86,8 +86,8 @@ github.com/lestrrat-go/option v1.0.1 h1:oAzP2fvZGQKWkvHa1/SAcFolBEca1oN+mQ7eooNB
 github.com/lestrrat-go/option v1.0.1/go.mod h1:5ZHFbivi4xwXxhxY9XHDe2FHo6/Z7WWmtT7T5nBBp3I=
 github.com/linuxfoundation/lfx-v2-committee-service v0.4.26 h1:8WBuQZFVgA0jmvVvSKhkVbOs7OAQtMeE0KruevNfxmY=
 github.com/linuxfoundation/lfx-v2-committee-service v0.4.26/go.mod h1:aF2WeU5qpiVsjaAVoPXJgzJUOyczgVukiA3zw6GampU=
-github.com/linuxfoundation/lfx-v2-project-service v0.10.3 h1:rqd8AQUOC3xJuJDiWgcjA9rGXJubF2jLJf6Lve+CsX4=
-github.com/linuxfoundation/lfx-v2-project-service v0.10.3/go.mod h1:KBt4Qh8K9uA6cwkj97uAenVGhDWAvWJhyu8xSaQ05gY=
+github.com/linuxfoundation/lfx-v2-project-service v0.10.4 h1:EjHDApuLyI7hBn99dIceZtZ9ueBB6kiD4lX5OaRtUb4=
+github.com/linuxfoundation/lfx-v2-project-service v0.10.4/go.mod h1:KBt4Qh8K9uA6cwkj97uAenVGhDWAvWJhyu8xSaQ05gY=
 github.com/nats-io/nats.go v1.52.0 h1:n3avV4VBsCgsdwh71TppsTwtv+QdPs7ntSKM8qJLGsc=
 github.com/nats-io/nats.go v1.52.0/go.mod h1:26HypzazeOkyO3/mqd1zZd53STJN0EjCYF9Uy2ZOBno=
 github.com/nats-io/nkeys v0.4.16 h1:rd5oAuLOb8mnAycB0xleuEBNS1pVVnN0fv/FF34Eypg=

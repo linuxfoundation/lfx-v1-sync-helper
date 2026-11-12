@@ -42,6 +42,16 @@ func TestProjectUpdateClearVsOmit(t *testing.T) {
 			"AutoJoinEnabled": false,
 		}},
 		{"typed empty slice", map[string]any{"funding_model": []string{}}, map[string]any{"Model": []any{}}},
+		{"classification arrays and clears", map[string]any{
+			"industry":   []any{"Energy & Climate", "Manufacturing"},
+			"technology": []any{}, "technical_activity_type": []any{},
+		}, map[string]any{"Industry": []any{"Energy & Climate", "Manufacturing"}, "Technology": []any{"None"}, "TechActivityType": []any{"None"}}},
+		{"null unbackfilled classifications do not clear populated v1 fields", map[string]any{
+			"industry": nil, "technology": nil, "technical_activity_type": nil,
+		}, map[string]any{}},
+		{"classification malformed omitted", map[string]any{
+			"industry": []any{"Energy", 42}, "technology": "malformed",
+		}, map[string]any{}},
 		{"whitespace parent clears", map[string]any{
 			"parent_uid": "  \t", "legal_parent_uid": "\n  ",
 		}, map[string]any{"Parent": "", "LegalParentID": ""}},
@@ -358,6 +368,9 @@ func TestMapV2DataToV1ProjectCreatePayload_HappyPath(t *testing.T) {
 		"legal_entity_name":             "Prospect Foundation, LLC",
 		"funding":                       "Membership",
 		"funding_model":                 []any{"Membership", "Grants"},
+		"industry":                      []any{"Energy & Climate", "Manufacturing"},
+		"technology":                    []any{"Blockchain"},
+		"technical_activity_type":       []any{"Open Data"},
 		"charter_url":                   "https://example.org/charter.pdf",
 		"autojoin_enabled":              true,
 		"formation_date":                "2026-01-15T00:00:00Z",
@@ -403,6 +416,11 @@ func TestMapV2DataToV1ProjectCreatePayload_HappyPath(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Model, []string{"Membership", "Grants"}) {
 		t.Errorf("Model = %#v (v2 funding_model → v1 Model)", got.Model)
+	}
+	if !reflect.DeepEqual(got.Industry, []string{"Energy & Climate", "Manufacturing"}) ||
+		!reflect.DeepEqual(got.Technology, []string{"Blockchain"}) ||
+		!reflect.DeepEqual(got.TechActivityType, []string{"Open Data"}) {
+		t.Errorf("classification arrays = %#v / %#v / %#v", got.Industry, got.Technology, got.TechActivityType)
 	}
 	if got.CharterURL != "https://example.org/charter.pdf" {
 		t.Errorf("CharterURL = %q", got.CharterURL)

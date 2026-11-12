@@ -869,6 +869,9 @@ type projectServiceProjectCreate struct {
 	EntityType                     string   `json:"EntityType,omitempty"` // v2 legal_entity_type
 	Funding                        string   `json:"Funding,omitempty"`
 	Model                          []string `json:"Model,omitempty"` // v2 funding_model
+	Industry                       []string `json:"Industry,omitempty"`
+	Technology                     []string `json:"Technology,omitempty"`
+	TechActivityType               []string `json:"TechActivityType,omitempty"`
 	CharterURL                     string   `json:"CharterURL,omitempty"`
 	AutoJoinEnabled                *bool    `json:"AutoJoinEnabled,omitempty"`
 	StartDate                      string   `json:"StartDate,omitempty"` // v2 formation_date, date-only
@@ -895,6 +898,9 @@ type projectServiceProjectUpdate struct {
 	EntityType                     *string   `json:"EntityType,omitempty"`
 	Funding                        *string   `json:"Funding,omitempty"`
 	Model                          *[]string `json:"Model,omitempty"`
+	Industry                       *[]string `json:"Industry,omitempty"`
+	Technology                     *[]string `json:"Technology,omitempty"`
+	TechActivityType               *[]string `json:"TechActivityType,omitempty"`
 	CharterURL                     *string   `json:"CharterURL,omitempty"`
 	AutoJoinEnabled                *bool     `json:"AutoJoinEnabled,omitempty"`
 	StartDate                      *string   `json:"StartDate,omitempty"`

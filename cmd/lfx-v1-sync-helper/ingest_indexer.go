@@ -1469,6 +1469,15 @@ func mapV2DataToV1ProjectCreatePayload(ctx context.Context, data map[string]any)
 	if fundingModels, ok := extractStringSlice(data["funding_model"]); ok {
 		payload.Model = fundingModels
 	}
+	if industry := v2ProjectClassifications(data, "industry"); industry != nil {
+		payload.Industry = *industry
+	}
+	if technology := v2ProjectClassifications(data, "technology"); technology != nil {
+		payload.Technology = *technology
+	}
+	if activity := v2ProjectClassifications(data, "technical_activity_type"); activity != nil {
+		payload.TechActivityType = *activity
+	}
 	if charterURL, ok := data["charter_url"].(string); ok && charterURL != "" {
 		payload.CharterURL = charterURL
 	}
@@ -1581,6 +1590,9 @@ func mapV2DataToV1ProjectUpdatePayload(ctx context.Context, data map[string]any)
 			}
 		}
 	}
+	payload.Industry = v1ProjectPatchClassifications(data, "industry")
+	payload.Technology = v1ProjectPatchClassifications(data, "technology")
+	payload.TechActivityType = v1ProjectPatchClassifications(data, "technical_activity_type")
 	if charterURL, ok := data["charter_url"].(string); ok {
 		payload.CharterURL = &charterURL
 	}
