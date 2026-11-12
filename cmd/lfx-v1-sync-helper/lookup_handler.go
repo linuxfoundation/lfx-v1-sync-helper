@@ -11,11 +11,16 @@ import (
 	nats "github.com/nats-io/nats.go"
 )
 
+// Keep the existing error envelope so older clients reject the response instead
+// of interpreting it as an ID. Updated clients recognize this exact error code.
+const lookupTombstonedResponse = "error: mapping_tombstoned"
+
 // lookupHandler handles NATS function calls for bidirectional v1-v2 mapping lookups.
 // It receives a mapping key as the request payload and returns the corresponding
-// value from the mapping store, an empty string if the key is not found or tombstoned,
-// or an error message prefixed with "error: " for other errors. Supports both v1->v2
-// and v2->v1 lookups depending on the key format used.
+// value from the mapping store, an empty string if the key is not found,
+// "error: mapping_tombstoned" if the mapping is tombstoned, or an error message
+// prefixed with "error: " for other errors. Supports both v1->v2 and v2->v1
+// lookups depending on the key format used.
 //
 // The store is chosen at boot via V1_MAPPINGS_STORE_MODE (see mapping_store.go);
 // this handler is unaware of the backend and treats ErrKeyNotFound identically
@@ -53,8 +58,9 @@ func lookupHandler(msg *nats.Msg) {
 	if isTombstonedMapping(value) {
 		logger.With("mapping_key", mappingKey).DebugContext(ctx, "mapping key is tombstoned")
 
-		// Respond with empty string for tombstoned mappings.
-		if err := msg.Respond([]byte("")); err != nil {
+		// A retained deletion marker is distinct from an absent mapping. It does
+		// not prove that the source resource has not since been recreated.
+		if err := msg.Respond([]byte(lookupTombstonedResponse)); err != nil {
 			logger.With(errKey, err, "mapping_key", mappingKey).ErrorContext(ctx, "failed to respond to lookup request")
 		}
 		return
