@@ -26,20 +26,26 @@ func init() {
 
 // fakeMsg is a test double for jetstream.Msg that records whether Ack or Nak was called.
 type fakeMsg struct {
-	subject  string
-	data     []byte
-	acked    bool
-	nacked   bool
-	ackCalls int
-	nakCalls int
-	nakDelay time.Duration
+	subject    string
+	data       []byte
+	acked      bool
+	nacked     bool
+	ackCalls   int
+	nakCalls   int
+	nakDelay   time.Duration
+	deliveries uint64
 }
 
-func (m *fakeMsg) Subject() string                           { return m.subject }
-func (m *fakeMsg) Data() []byte                              { return m.data }
-func (m *fakeMsg) Headers() nats.Header                      { return nil }
-func (m *fakeMsg) Reply() string                             { return "" }
-func (m *fakeMsg) Metadata() (*jetstream.MsgMetadata, error) { return nil, nil }
+func (m *fakeMsg) Subject() string      { return m.subject }
+func (m *fakeMsg) Data() []byte         { return m.data }
+func (m *fakeMsg) Headers() nats.Header { return nil }
+func (m *fakeMsg) Reply() string        { return "" }
+func (m *fakeMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	if m.deliveries == 0 {
+		return nil, nil
+	}
+	return &jetstream.MsgMetadata{NumDelivered: m.deliveries}, nil
+}
 func (m *fakeMsg) Ack() error {
 	m.acked = true
 	m.ackCalls++

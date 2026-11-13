@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -53,9 +54,9 @@ func consumeCommitteeEvents(consumer jetstream.Consumer, handler jetstream.Messa
 }
 
 // committeeEventProcessor is a function that processes a single committee-stream event.
-// It returns nil for both success and permanent failures (bad JSON, missing fields,
-// unknown action) that should not be retried. It returns a non-nil error only for
-// transient failures (V1 API errors, KV unavailability) where a redeliver is useful.
+// Nil means success/permanent skip. errCommitteeCreateManual surfaces a permanent
+// rejection before ACK; other errors request redelivery, with a delayed retry for
+// tracked creates and eligible settings mapping races.
 type committeeEventProcessor func(ctx context.Context, subject string, data []byte) error
 
 // newCommitteeEventsIngestHandler returns a JetStream message handler for the
@@ -87,11 +88,29 @@ func newCommitteeEventsIngestHandler(committeeProc, memberProc, settingsProc com
 		}
 
 		if procErr != nil {
+			eventLog := logger.With("subject", subject)
+			var identity struct {
+				ObjectID string `json:"object_id"`
+			}
+			if json.Unmarshal(data, &identity) == nil && identity.ObjectID != "" {
+				eventLog = eventLog.With("object_id", identity.ObjectID)
+			}
+			if errors.Is(procErr, errCommitteeCreateManual) {
+				eventLog.With(errKey, procErr).ErrorContext(ctx, "committee create rejected for manual reconciliation")
+				if err := msg.Ack(); err != nil {
+					logger.With(errKey, err, "subject", subject).ErrorContext(ctx, "failed to ACK manual-reconciliation event")
+				}
+				return
+			}
+			if metadata, err := msg.Metadata(); err == nil && metadata != nil && metadata.NumDelivered >= uint64(committeeEventsConsumerConfig().MaxDeliver) {
+				eventLog.With("stream_sequence", metadata.Sequence.Stream, "deliveries", metadata.NumDelivered).
+					ErrorContext(ctx, "committee-events retries exhausted; manual reconciliation required")
+			}
 			// Log before NAKing so the failure is visible even after MaxDeliver exhausts.
-			logger.With(errKey, procErr, "subject", subject).WarnContext(ctx, "transient processing error, NAKing committee-events message for retry")
+			eventLog.With(errKey, procErr).WarnContext(ctx, "transient processing error, NAKing committee-events message for retry")
 			// Transient failure: NAK so JetStream redelivers up to MaxDeliver times.
 			var nakErr error
-			if strings.HasPrefix(subject, "lfx.committee_settings.") && errors.Is(procErr, ErrKeyNotFound) {
+			if errors.Is(procErr, errCommitteeCreatePending) || (strings.HasPrefix(subject, "lfx.committee_settings.") && errors.Is(procErr, ErrKeyNotFound)) {
 				// Settings can be indexed before a v2-originated committee has been
 				// created in v1. Don't burn all three deliveries while that HTTP
 				// request is in flight (it may use the full processing deadline).

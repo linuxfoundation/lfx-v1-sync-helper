@@ -36,9 +36,8 @@ type indexingEventBody struct {
 
 // processCommitteeIndexingEvent handles lfx.committee.{created,updated,deleted} events
 // published by the indexer service after successful OpenSearch writes.
-// Returns nil for success and permanent failures (bad payload, missing fields, unknown
-// action) that should not be retried. Returns a non-nil error only for transient
-// failures (V1 API errors, KV unavailability) where a redeliver is appropriate.
+// Returns nil for success/permanent skips, errCommitteeCreateManual for surfaced
+// permanent recovery rejections, and other errors when redelivery is appropriate.
 func processCommitteeIndexingEvent(ctx context.Context, subject string, data []byte) error {
 	var event indexingEvent
 	if err := json.Unmarshal(data, &event); err != nil {
@@ -130,6 +129,14 @@ func processCommitteeIndexingEvent(ctx context.Context, subject string, data []b
 				InfoContext(ctx, "skipping indexer echo of v1-originated committee delete (fresh v1_to_v2 pending marker); mappings already tombstoned by v1→v2 handler")
 			return nil
 		}
+		if err := recordCreateDeletion(ctx, "committee", event.ObjectID); err != nil {
+			return err
+		}
+		if _, _, err := readCommitteeCreateAttempt(ctx, event.ObjectID); err == nil {
+			return cleanupRecordedCommitteeCreate(ctx, event.ObjectID)
+		} else if !errors.Is(err, ErrKeyNotFound) {
+			return err
+		}
 
 		entry, err := getMappingEntryWithRetry(ctx, "committee.uid."+event.ObjectID)
 		if err != nil {
@@ -159,9 +166,8 @@ func processCommitteeIndexingEvent(ctx context.Context, subject string, data []b
 
 // processCommitteeMemberIndexingEvent handles lfx.committee_member.{created,updated,deleted} events
 // published by the indexer service after successful OpenSearch writes.
-// Returns nil for success and permanent failures (bad payload, missing fields, unknown
-// action) that should not be retried. Returns a non-nil error only for transient
-// failures (V1 API errors, KV unavailability) where a redeliver is appropriate.
+// Uses the same skip/manual-reconciliation/retry result contract as committee
+// events. A member can wait for its parent's recorded create to recover.
 func processCommitteeMemberIndexingEvent(ctx context.Context, subject string, data []byte) error {
 	var event indexingEvent
 	if err := json.Unmarshal(data, &event); err != nil {
@@ -194,6 +200,13 @@ func processCommitteeMemberIndexingEvent(ctx context.Context, subject string, da
 		committeeEntry, err := getMappingEntryWithRetry(ctx, "committee.uid."+committeeUID)
 		if err != nil {
 			if errors.Is(err, ErrKeyNotFound) {
+				_, _, attemptErr := readCommitteeCreateAttempt(ctx, committeeUID)
+				if attemptErr == nil {
+					return errCommitteeCreatePending
+				}
+				if !errors.Is(attemptErr, ErrKeyNotFound) {
+					return attemptErr
+				}
 				logger.With("committee_uid", committeeUID, "member_uid", event.ObjectID).
 					WarnContext(ctx, "no committee mapping for committee UID after bounded retry, skipping")
 				return nil // permanent: committee has no v1 counterpart
@@ -262,6 +275,14 @@ func processCommitteeMemberIndexingEvent(ctx context.Context, subject string, da
 				InfoContext(ctx, "skipping indexer echo of v1-originated committee member delete (fresh v1_to_v2 pending marker); mappings already tombstoned by v1→v2 handler")
 			return nil
 		}
+		if err := recordCreateDeletion(ctx, "committee_member", event.ObjectID); err != nil {
+			return err
+		}
+		if result, _, err := readMemberCreateResult(ctx, event.ObjectID); err == nil {
+			return cleanupRecordedMemberCreate(ctx, event.ObjectID, result)
+		} else if !errors.Is(err, ErrKeyNotFound) {
+			return err
+		}
 
 		reverseMappingKey := "committee_member.uid." + event.ObjectID
 		entry, err := getMappingEntryWithRetry(ctx, reverseMappingKey)
@@ -320,11 +341,17 @@ func processCommitteeMemberIndexingEvent(ctx context.Context, subject string, da
 }
 
 // syncCommitteeCreateToV1 ensures a v2-created committee exists in v1.
-// If a reverse mapping already exists the record originated in v1 — skip to avoid loops.
-// Returns a non-nil error only for transient V1 API failures; mapping write failures
-// are logged as warnings since the V1 record was already created successfully.
+// A live reverse mapping skips ordinary echoes, but recorded creates also finish
+// their forward mapping. Tombstones always prevent resurrection.
+// Ambiguous creates are fenced by a durable attempt and recovered on a fresh
+// delivery. Mapping failures remain retryable rather than being silently ACKed.
 func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID string, data map[string]any) error {
 	log := logger.With("committee_uid", committeeUID, "project_sfid", projectSFID)
+	if deleted, err := hasCreateDeletion(ctx, "committee", committeeUID); err != nil {
+		return err
+	} else if deleted {
+		return cleanupRecordedCommitteeCreate(ctx, committeeUID)
+	}
 
 	// A non-tombstoned reverse mapping means this was created from v1; skip.
 	// A transient KV error is returned so JetStream redelivers rather than
@@ -335,9 +362,13 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 	if reverseErr != nil && !errors.Is(reverseErr, ErrKeyNotFound) {
 		return reverseErr // transient: KV unavailable, redeliver
 	}
-	if reverseErr == nil && !isTombstonedMapping(reverseEntry.Value) {
-		log.DebugContext(ctx, "committee originated from v1 — skipping reverse sync")
+	if reverseErr == nil && isTombstonedMapping(reverseEntry.Value) {
+		log.InfoContext(ctx, "committee create skipped: reverse mapping is tombstoned")
 		return nil
+	}
+	if reverseErr == nil && !isTombstonedMapping(reverseEntry.Value) {
+		name, _ := data["name"].(string)
+		return finishRecordedCommitteeCreate(ctx, committeeUID, projectSFID, string(reverseEntry.Value), name)
 	}
 
 	name, _ := data["name"].(string)
@@ -349,10 +380,29 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 	payload := projectServiceCommitteeCreate{Name: name}
 	parentSFID, err := resolveV2CommitteeParentSFID(ctx, projectSFID, data, false)
 	if err != nil {
+		if errors.Is(err, ErrKeyNotFound) {
+			parentUID, _ := data["parent_uid"].(string)
+			if deleted, readErr := hasCreateDeletion(ctx, "committee", parentUID); readErr != nil {
+				return readErr
+			} else if deleted {
+				return fmt.Errorf("%w: parent committee was deleted", errCommitteeCreateManual)
+			}
+			if attempt, _, attemptErr := readCommitteeCreateAttempt(ctx, parentUID); attemptErr == nil {
+				if attempt.ProjectSFID != projectSFID {
+					return fmt.Errorf("%w: parent create belongs to another project", errCommitteeCreateManual)
+				}
+				return errCommitteeCreatePending
+			} else if !errors.Is(attemptErr, ErrKeyNotFound) {
+				return attemptErr
+			}
+		}
 		return err // Parent must exist in v1 before its child can be created.
 	}
 	if parentSFID != nil {
-		payload.CommitteeID = *parentSFID
+		// NONE clears a parent on PATCH, but is not a parent ID on POST.
+		if *parentSFID != "NONE" {
+			payload.CommitteeID = *parentSFID
+		}
 	}
 	category, _ := data["category"].(string)
 	mapped := mapV2CategoryToV1(category)
@@ -367,7 +417,9 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 	if joinMode, ok := data["join_mode"].(string); ok {
 		payload.JoinMode = joinMode
 	}
-	if mailingListEmail, ok := data["mailing_list_email"].(string); ok {
+	if mailingListEmail, ok := data["mailing_list"].(string); ok {
+		payload.MailingList = mailingListEmail
+	} else if mailingListEmail, ok := data["mailing_list_email"].(string); ok {
 		payload.MailingList = mailingListEmail
 	}
 	if chatChannel, ok := data["chat_channel"].(string); ok {
@@ -420,48 +472,7 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 
 	log.With("payload_category", payload.Category).InfoContext(ctx, "creating committee in v1")
 
-	result, err := createV1Committee(ctx, projectSFID, payload)
-	if err != nil {
-		log.With(errKey, err).ErrorContext(ctx, "failed to create committee in v1")
-		return err // transient: trigger redeliver
-	}
-
-	// Store forward mapping (v1 SFID -> v2 UID) and reverse mapping (v2 UID -> projectSFID:committeeSFID).
-	//
-	// Both writes use putMappingWithRetry (handlers.go): the v1 record already
-	// exists, and losing either mapping is a durable inconsistency because core
-	// NATS will not redeliver this create event. Same treatment applied to
-	// syncProjectCreateToV1 in linuxfoundation/lfx-v1-sync-helper#160.
-	//
-	// The reverse mapping is the more critical of the two: it doubles as the
-	// create-path loop guard and drives the SFID lookup for subsequent
-	// update/delete events. Losing it means a replay would create a duplicate v1
-	// committee and any future v2 update / delete would be silently dropped. Its
-	// failure is escalated to ERROR with the SFID + UID so ops can reconcile
-	// manually (write the mapping directly or delete the stray v1 committee).
-	committeeSFID := result.ID
-	if err := putMappingWithRetry(ctx, "committee.sfid."+committeeSFID, []byte(committeeUID)); err != nil {
-		if errors.Is(err, errPutRaceAbortedByTombstone) {
-			log.With(errKey, err, "committee_sfid", committeeSFID).
-				InfoContext(ctx, "committee forward mapping write aborted — delete raced with create; v1 record already deleted, mapping tombstoned, final state consistent")
-		} else {
-			log.With(errKey, err, "committee_sfid", committeeSFID).
-				ErrorContext(ctx, "failed to store committee forward mapping after v1 create — lookup_v1_mapping may return stale results until reconciled")
-		}
-	}
-	reverseMappingValue := projectSFID + ":" + committeeSFID
-	if err := putMappingWithRetry(ctx, "committee.uid."+committeeUID, []byte(reverseMappingValue)); err != nil {
-		if errors.Is(err, errPutRaceAbortedByTombstone) {
-			log.With(errKey, err, "committee_sfid", committeeSFID).
-				InfoContext(ctx, "committee reverse mapping write aborted — delete raced with create; v1 record already deleted, mapping tombstoned, final state consistent")
-		} else {
-			log.With(errKey, err, "committee_sfid", committeeSFID).
-				ErrorContext(ctx, "failed to store committee reverse mapping after v1 create — v1 record is orphaned; future update/delete events will be dropped and a replay will duplicate; manual reconciliation required (write mapping or delete v1 record)")
-		}
-	}
-
-	log.With("committee_sfid", committeeSFID).InfoContext(ctx, "successfully created committee in v1 from indexer event")
-	return nil
+	return createOrRecoverCommittee(ctx, committeeUID, projectSFID, payload)
 }
 
 // syncCommitteeUpdateToV1 patches a v1 committee to match the v2 state.
@@ -726,23 +737,43 @@ func roleDateField(role map[string]any, key string) (date string, ok bool) {
 }
 
 // syncCommitteeMemberCreateToV1 ensures a v2-created committee member exists in v1.
-// Returns a non-nil error only for transient V1 API failures; mapping write failures
-// are logged as warnings since the V1 record was already created successfully.
-func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID, projectSFID, committeeSFID string, data map[string]any) error {
+// Current V2 fields replace stale events. Durable attempts and deletion fences
+// prevent concurrent/replayed POSTs and retain known IDs for retryable cleanup.
+func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID, projectSFID, committeeSFID string, _ map[string]any) error {
 	log := logger.With("member_uid", memberUID, "committee_uid", committeeUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID)
+	if result, _, err := readMemberCreateResult(ctx, memberUID); err == nil {
+		if result.ProjectSFID != projectSFID || result.CommitteeSFID != committeeSFID || result.CommitteeUID != committeeUID {
+			return fmt.Errorf("%w: member create scope changed", errCommitteeCreateManual)
+		}
+		if result.MemberID == "" {
+			return errCommitteeCreatePending
+		}
+		return completeMemberCreate(ctx, memberUID, result, true)
+	} else if !errors.Is(err, ErrKeyNotFound) {
+		return err
+	}
+	if deleted, err := hasCreateDeletion(ctx, "committee_member", memberUID); err != nil {
+		return err
+	} else if deleted {
+		return nil
+	}
 
 	// A non-tombstoned reverse mapping means this was created from v1; skip.
 	// A transient KV error is returned so JetStream redelivers rather than
 	// proceeding to a create that may duplicate a record whose mapping just
 	// couldn't be fetched.
 	reverseKey := "committee_member.uid." + memberUID
-	reverseEntry, reverseErr := getMappingEntryWithRetry(ctx, reverseKey)
+	_, reverseErr := getMappingEntryWithRetry(ctx, reverseKey)
 	if reverseErr != nil && !errors.Is(reverseErr, ErrKeyNotFound) {
 		return reverseErr // transient: KV unavailable, redeliver
 	}
-	if reverseErr == nil && !isTombstonedMapping(reverseEntry.Value) {
-		log.DebugContext(ctx, "committee member originated from v1 — skipping reverse sync")
+	if reverseErr == nil {
+		log.DebugContext(ctx, "committee member already mapped or tombstoned — skipping reverse sync")
 		return nil
+	}
+	data, err := readMemberCreateData(ctx, committeeUID, memberUID)
+	if err != nil || data == nil {
+		return err
 	}
 
 	email, _ := data["email"].(string)
@@ -809,72 +840,115 @@ func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID,
 		log.With("member_id", userSFID, "email", email).DebugContext(ctx, "resolved user SFID for committee member")
 	}
 
+	for kind, uid := range map[string]string{"committee": committeeUID, "committee_member": memberUID} {
+		if deleted, err := hasCreateDeletion(ctx, kind, uid); err != nil {
+			return err
+		} else if deleted {
+			return nil
+		}
+	}
+	patchPayload, err := mapV2MemberUpdatePayload(ctx, data)
+	if err != nil {
+		return err
+	}
+	recorded := &memberCreateResult{Version: 1, ProjectSFID: projectSFID, CommitteeSFID: committeeSFID, CommitteeUID: committeeUID,
+		Fingerprint: memberUpdateFingerprint(patchPayload)}
+	encoded, err := json.Marshal(recorded)
+	if err != nil {
+		return err
+	}
+	revision, err := mappingStore.Create(ctx, memberCreateResultKey(memberUID), encoded)
+	if errors.Is(err, ErrKeyExists) {
+		return errCommitteeCreatePending
+	}
+	if err != nil {
+		return err
+	}
 	result, err := createV1CommitteeMember(ctx, projectSFID, committeeSFID, payload)
 	if err != nil {
-		log.With(errKey, err).ErrorContext(ctx, "failed to create committee member in v1")
-		return err // transient: trigger redeliver
+		log.With(errKey, err).ErrorContext(ctx, "committee member create outcome unresolved; retained attempt prevents another POST; manual reconciliation may be required")
+		return errCommitteeCreatePending
 	}
+	if result == nil || result.MemberID == "" {
+		return errCommitteeCreatePending
+	}
+	recorded.MemberID, recorded.RecordID = result.MemberID, result.ID
+	encoded, err = json.Marshal(recorded)
+	if err != nil {
+		return err
+	}
+	if _, err := mappingStore.Update(ctx, memberCreateResultKey(memberUID), encoded, revision); err != nil {
+		log.With(errKey, err, "member_sfid", result.MemberID, "record_sfid", result.ID).
+			ErrorContext(ctx, "failed to record member create result; manual reconciliation required; attempt prevents another POST")
+		return err
+	}
+	return completeMemberCreate(ctx, memberUID, recorded, false)
+}
 
-	// Store forward mapping (v1 record SFID -> committeeUID:memberUID) and reverse mapping (v2 UID -> projectSFID:committeeSFID:memberSFID).
-	//
-	// All writes use putMappingWithRetry (handlers.go): the v1 record already
-	// exists, and losing any mapping is a durable inconsistency because core
-	// NATS will not redeliver this create event.
-	//
-	// The forward mapping is keyed on the platform-community__c record SFID
-	// (result.ID), the sfid the WAL emits for later v1 edits and deletes, so
-	// those resolve through handleCommitteeMemberUpdate's update branch instead
-	// of missing the mapping (lfx-self-serve#4079). The record-sfid companion is
-	// written first, mirroring the companion-first ordering in
-	// handleCommitteeMemberUpdate: if it fails, the forward mapping falls back
-	// to the contact-SFID key that syncCommitteeMemberDeleteToV1 can still
-	// resolve without a companion. When result.ID is empty, the contact SFID is
-	// used and no companion is written.
-	//
-	// The reverse mapping is the most critical: it doubles as the create-path
-	// loop guard and drives the SFID triple lookup for subsequent update/delete
-	// events. Losing it means a replay would create a duplicate v1 committee
-	// member and any future v2 update / delete would be silently dropped. Its
-	// failure is escalated to ERROR with the SFID + UID so ops can reconcile
-	// manually. It is always written, whatever happened to the companion.
-	memberSFID := result.MemberID
-	forwardSFID := memberSFID
-	if recordSFID := result.ID; recordSFID != "" {
-		if err := putMappingWithRetry(ctx, committeeMemberRecordSFIDKey(memberUID), []byte(recordSFID)); err != nil {
-			if errors.Is(err, errPutRaceAbortedByTombstone) {
-				log.With(errKey, err, "record_sfid", recordSFID).
-					InfoContext(ctx, "committee member record sfid mapping write aborted — delete raced with create; v1 record already deleted, mapping tombstoned, final state consistent")
-			} else {
-				log.With(errKey, err, "record_sfid", recordSFID).
-					ErrorContext(ctx, "failed to store committee member record sfid mapping after v1 create — falling back to the contact-SFID forward mapping key; v1 edits of this member will not reach v2 until reconciled")
+func completeMemberCreate(ctx context.Context, memberUID string, recorded *memberCreateResult, replay bool) error {
+	committeeUID, projectSFID, committeeSFID := recorded.CommitteeUID, recorded.ProjectSFID, recorded.CommitteeSFID
+	for kind, uid := range map[string]string{"committee": committeeUID, "committee_member": memberUID} {
+		if deleted, err := hasCreateDeletion(ctx, kind, uid); err != nil {
+			return err
+		} else if deleted {
+			return cleanupRecordedMemberCreate(ctx, memberUID, recorded)
+		}
+	}
+	current, err := readMemberCreateData(ctx, committeeUID, memberUID)
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return cleanupRecordedMemberCreate(ctx, memberUID, recorded)
+	}
+	currentPayload, err := mapV2MemberUpdatePayload(ctx, current)
+	if err != nil {
+		return err
+	}
+	if replay || recorded.Fingerprint != memberUpdateFingerprint(currentPayload) {
+		if err := verifyMemberRecoveryTarget(ctx, recorded); err != nil {
+			return err
+		}
+	}
+	// Retain the record-keyed forward mapping contract (#4079), but use
+	// create-only claims. Partial failures retry from the durable result, never
+	// another POST or a fallback key that could disagree with the companion.
+	forwardID := recorded.RecordID
+	if forwardID == "" {
+		forwardID = recorded.MemberID
+	}
+	pairs := []createMappingPair{
+		{"committee_member.sfid." + forwardID, committeeUID + ":" + memberUID},
+		{"committee_member.uid." + memberUID, projectSFID + ":" + committeeSFID + ":" + recorded.MemberID},
+	}
+	if recorded.RecordID != "" {
+		pairs = append(pairs, createMappingPair{committeeMemberRecordSFIDKey(memberUID), recorded.RecordID})
+	}
+	var mappingErr error
+	for _, pair := range pairs {
+		_, mappingErr = mappingStore.Create(ctx, pair.key, []byte(pair.value))
+		if errors.Is(mappingErr, ErrKeyExists) {
+			var entry MappingEntry
+			entry, mappingErr = mappingStore.Get(ctx, pair.key)
+			if mappingErr == nil && string(entry.Value) != pair.value {
+				mappingErr = fmt.Errorf("%w: member mapping conflicts or is tombstoned", errCommitteeCreateManual)
 			}
-		} else {
-			forwardSFID = recordSFID
+		}
+		if mappingErr != nil {
+			break
 		}
 	}
-	forwardMappingValue := committeeUID + ":" + memberUID
-	if err := putMappingWithRetry(ctx, "committee_member.sfid."+forwardSFID, []byte(forwardMappingValue)); err != nil {
-		if errors.Is(err, errPutRaceAbortedByTombstone) {
-			log.With(errKey, err, "member_sfid", memberSFID, "forward_sfid", forwardSFID).
-				InfoContext(ctx, "committee member forward mapping write aborted — delete raced with create; v1 record already deleted, mapping tombstoned, final state consistent")
-		} else {
-			log.With(errKey, err, "member_sfid", memberSFID, "forward_sfid", forwardSFID).
-				ErrorContext(ctx, "failed to store committee member forward mapping after v1 create — lookup_v1_mapping may return stale results until reconciled")
+	for kind, uid := range map[string]string{"committee": committeeUID, "committee_member": memberUID} {
+		if deleted, err := hasCreateDeletion(ctx, kind, uid); err != nil {
+			return err
+		} else if deleted {
+			return cleanupRecordedMemberCreate(ctx, memberUID, recorded)
 		}
 	}
-	reverseMappingValue := projectSFID + ":" + committeeSFID + ":" + memberSFID
-	if err := putMappingWithRetry(ctx, "committee_member.uid."+memberUID, []byte(reverseMappingValue)); err != nil {
-		if errors.Is(err, errPutRaceAbortedByTombstone) {
-			log.With(errKey, err, "member_sfid", memberSFID).
-				InfoContext(ctx, "committee member reverse mapping write aborted — delete raced with create; v1 record already deleted, mapping tombstoned, final state consistent")
-		} else {
-			log.With(errKey, err, "member_sfid", memberSFID).
-				ErrorContext(ctx, "failed to store committee member reverse mapping after v1 create — v1 record is orphaned; future update/delete events will be dropped and a replay will duplicate; manual reconciliation required (write mapping or delete v1 record)")
-		}
+	if mappingErr != nil {
+		return mappingErr
 	}
-
-	log.With("member_sfid", memberSFID, "forward_sfid", forwardSFID).InfoContext(ctx, "successfully created committee member in v1 from indexer event")
-	return nil
+	return reconcileRecordedMemberCreate(ctx, memberUID, recorded, pairs, replay)
 }
 
 // syncCommitteeMemberUpdateToV1 patches a v1 committee member to match the v2 state.
@@ -889,6 +963,19 @@ func syncCommitteeMemberUpdateToV1(ctx context.Context, memberUID, projectSFID, 
 		return nil
 	}
 
+	payload, err := mapV2MemberUpdatePayload(ctx, data)
+	if err != nil {
+		return err
+	}
+	if err := updateV1CommitteeMember(ctx, projectSFID, committeeSFID, memberSFID, payload); err != nil {
+		log.With(errKey, err).ErrorContext(ctx, "failed to update committee member in v1")
+		return err
+	}
+	log.InfoContext(ctx, "successfully updated committee member in v1 from indexer event")
+	return nil
+}
+
+func mapV2MemberUpdatePayload(ctx context.Context, data map[string]any) (projectServiceCommitteeMemberUpdate, error) {
 	payload := projectServiceCommitteeMemberUpdate{}
 	if email, ok := data["email"].(string); ok {
 		payload.Email = email
@@ -926,19 +1013,13 @@ func syncCommitteeMemberUpdateToV1(ctx context.Context, memberUID, projectSFID, 
 	}
 	orgID, err := resolveOrgIDFromEventData(ctx, data)
 	if err != nil {
-		return err // transient: org-service unavailable, redeliver
+		return payload, err
 	}
 	if orgID != "" {
 		payload.OrganizationID = orgID
 	}
 
-	if err := updateV1CommitteeMember(ctx, projectSFID, committeeSFID, memberSFID, payload); err != nil {
-		log.With(errKey, err).ErrorContext(ctx, "failed to update committee member in v1")
-		return err // transient: trigger redeliver
-	}
-
-	log.InfoContext(ctx, "successfully updated committee member in v1 from indexer event")
-	return nil
+	return payload, nil
 }
 
 // syncCommitteeMemberDeleteToV1 deletes a v1 committee member that was deleted in v2.
