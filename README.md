@@ -67,7 +67,28 @@ Payload: <mapping_key>
 
 - **Success**: The mapped value as a string
 - **Not Found**: Empty string (`""`)
+- **Tombstoned mapping**: Exactly `"error: mapping_tombstoned"`
 - **Error**: String prefixed with `"error: "` (e.g., `"error: connection timeout"`)
+
+An absent entry and a retained deletion marker are different: `not found` does
+not establish that a mapping never existed, and a tombstone does not establish
+that the source resource is still deleted (it may have been recreated). Both KV
+(`!del`) and Postgres (`tombstoned=true`) expose the same tombstone response
+through the configured MappingStore. Native KV deletes/purges without a retained
+application-level tombstone remain indistinguishable from an absent entry.
+
+Consumers should recognize the exact `error: mapping_tombstoned` reply before
+handling other `error: ` replies, and preserve it as a distinct domain error for
+Self Serve. Store errors, timeouts, canceled requests, and no responders are not
+missing or tombstoned mappings. Never interpret any error response as a mapped ID
+or use it to grant access, recreate a resource, or restore a mapping.
+
+The subject, request payload, successful replies (including compound committee
+IDs), and missing-key replies are unchanged. Existing clients that recognize the
+`error: ` prefix continue to fail closed, but may classify tombstones as service
+failures until upgraded. Deploy the distinct-error consumers before the helper
+change when avoiding that temporary classification change is required. No
+versioned subject or JSON envelope is introduced.
 
 ### Available Lookup Patterns
 
