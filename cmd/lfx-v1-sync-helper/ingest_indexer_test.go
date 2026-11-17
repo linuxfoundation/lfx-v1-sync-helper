@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"testing"
 )
@@ -280,6 +281,26 @@ func TestResolveOrgIDFromEventData_memoReusesCreatedOrg(t *testing.T) {
 	}
 	if searches != 2 || len(h.recordedRequests()) != 2 {
 		t.Fatalf("without memo: searches = %d, org creates = %d; want 2 and 2", searches, len(h.recordedRequests()))
+	}
+}
+
+func TestResolveOrgIDFromEventData_rejectedCreateGetsDelayedRetry(t *testing.T) {
+	setupSyncTest(t, 409, `{"message":"website already exists"}`)
+	orig := searchV1B2CAccountByDomainFn
+	t.Cleanup(func() { searchV1B2CAccountByDomainFn = orig })
+	searchV1B2CAccountByDomainFn = func(context.Context, string) (string, error) { return "", nil }
+	data := map[string]any{"organization": map[string]any{"name": "Acme", "website": "acme.example"}}
+
+	_, err := resolveOrgIDFromEventData(t.Context(), data)
+	if !errors.Is(err, errV1OrgCreateFailed) {
+		t.Fatalf("resolveOrgIDFromEventData() error = %v; want errV1OrgCreateFailed", err)
+	}
+
+	proc := func(context.Context, string, []byte) error { return err }
+	msg := &fakeMsg{subject: "lfx.committee_member.created"}
+	newCommitteeEventsIngestHandler(proc, proc, proc)(msg)
+	if msg.ackCalls != 0 || msg.nakCalls != 1 || msg.nakDelay != committeeEventsMappingRetryDelay {
+		t.Fatalf("ack=%d nak=%d delay=%v; want delayed NAK so a lagging replica can catch up", msg.ackCalls, msg.nakCalls, msg.nakDelay)
 	}
 }
 

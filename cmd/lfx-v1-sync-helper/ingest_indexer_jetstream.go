@@ -56,7 +56,7 @@ func consumeCommitteeEvents(consumer jetstream.Consumer, handler jetstream.Messa
 // committeeEventProcessor is a function that processes a single committee-stream event.
 // Nil means success/permanent skip. errCommitteeCreateManual surfaces a permanent
 // rejection before ACK; other errors request redelivery, with a delayed retry for
-// tracked creates and eligible settings mapping races.
+// tracked creates, failed org creates, and eligible settings mapping races.
 type committeeEventProcessor func(ctx context.Context, subject string, data []byte) error
 
 // newCommitteeEventsIngestHandler returns a JetStream message handler for the
@@ -110,10 +110,12 @@ func newCommitteeEventsIngestHandler(committeeProc, memberProc, settingsProc com
 			eventLog.With(errKey, procErr).WarnContext(ctx, "transient processing error, NAKing committee-events message for retry")
 			// Transient failure: NAK so JetStream redelivers up to MaxDeliver times.
 			var nakErr error
-			if errors.Is(procErr, errCommitteeCreatePending) || (strings.HasPrefix(subject, "lfx.committee_settings.") && errors.Is(procErr, ErrKeyNotFound)) {
+			if errors.Is(procErr, errCommitteeCreatePending) || errors.Is(procErr, errV1OrgCreateFailed) || (strings.HasPrefix(subject, "lfx.committee_settings.") && errors.Is(procErr, ErrKeyNotFound)) {
 				// Settings can be indexed before a v2-originated committee has been
 				// created in v1. Don't burn all three deliveries while that HTTP
 				// request is in flight (it may use the full processing deadline).
+				// Likewise, an org created by an earlier delivery may not have
+				// reached the v1 read replica yet.
 				nakErr = msg.NakWithDelay(committeeEventsMappingRetryDelay)
 			} else {
 				nakErr = msg.Nak()

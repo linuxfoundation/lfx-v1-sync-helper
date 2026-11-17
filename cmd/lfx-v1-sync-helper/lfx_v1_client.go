@@ -41,6 +41,11 @@ import (
 
 var (
 	v1HTTPClient *http.Client
+
+	// errV1OrgCreateFailed marks a failed org create after a replica search
+	// miss. The Organization Service rejects a website or name it already
+	// holds, so the retry must wait long enough for the replica to catch up.
+	errV1OrgCreateFailed = errors.New("org create failed")
 )
 
 // V1User represents a user from the v1-objects KV bucket. Used for both salesforce-merged_user (b2c)
@@ -382,7 +387,7 @@ func resolveV1OrgID(ctx context.Context, name, website string) (string, error) {
 
 	created, err := createV1OrgInOrgSvc(ctx, name, website)
 	if err != nil {
-		return "", fmt.Errorf("org create failed: %w", err)
+		return "", fmt.Errorf("%w: %w", errV1OrgCreateFailed, err)
 	}
 	return created.ID, nil
 }
