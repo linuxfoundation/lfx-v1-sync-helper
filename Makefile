@@ -35,6 +35,11 @@ build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p bin
 	$(GOBUILD) $(BUILD_FLAGS) -o $(BINARY_PATH) ./$(CMD_PATH)
+	$(GOBUILD) $(BUILD_FLAGS) -o bin/v1-mapping-api ./cmd/v1-mapping-api
+
+.PHONY: apigen
+apigen:
+	$(GOCMD) tool goa gen github.com/linuxfoundation/lfx-v1-sync-helper/design
 
 # Build with debug symbols and race detection
 debug:
@@ -150,6 +155,7 @@ help:
 	@echo "Available targets:"
 	@echo "  all                        - Run clean, deps, fmt, lint, test, build"
 	@echo "  build                      - Build the binary"
+	@echo "  apigen                     - Regenerate the mapping API transports and OpenAPI contracts"
 	@echo "  debug                      - Build with debug symbols and race detection"
 	@echo "  clean                      - Clean build artifacts"
 	@echo "  test                       - Run tests"

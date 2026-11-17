@@ -9,6 +9,7 @@ ignore: |
   venv
   .venv
   charts/lfx-v1-sync-helper/templates
+  gen/
 rules:
   line-length:
     max: 120
