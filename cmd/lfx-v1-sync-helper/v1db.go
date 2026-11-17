@@ -207,6 +207,56 @@ func dbResolveUserSFIDByEmail(ctx context.Context, email string) (string, error)
 	return row.LeadOrContactID.String, nil
 }
 
+// errAmbiguousProjectStaffContact means an identifier belongs to more than
+// one live contact. Reconciliation must leave that role for manual review.
+var errAmbiguousProjectStaffContact = errors.New("ambiguous project staff contact")
+
+// These lookups are deliberately stricter than the general v1 resolvers: a
+// reviewed repair must not choose one owner of a shared identifier. DISTINCT
+// avoids treating duplicate email rows for the same contact as ambiguous; two
+// distinct results are enough to reject the match without enumerating users.
+func dbResolveUniqueStaffSFIDByUsername(ctx context.Context, username string) (string, error) {
+	normalized := normalizeUserIdentifier(username)
+	if normalized == "" {
+		return "", nil
+	}
+	q := v1DB.NewSelect().Model((*mergedUserRow)(nil)).
+		ColumnExpr("DISTINCT mu.sfid").
+		Where("LOWER(mu.username__c) = ?", normalized).
+		Where("mu.isdeleted IS NOT TRUE").
+		Where("mu.sfid IS NOT NULL")
+	return resolveUniqueStaffContact(ctx, q)
+}
+
+func dbResolveUniqueStaffSFIDByEmail(ctx context.Context, email string) (string, error) {
+	normalized := normalizeUserIdentifier(email)
+	if normalized == "" {
+		return "", nil
+	}
+	q := activeEmailFilter(v1DB.NewSelect().Model((*alternateEmailRow)(nil))).
+		ColumnExpr("DISTINCT ae.leadorcontactid").
+		Where("LOWER(ae.alternate_email_address__c) = ?", normalized).
+		Where("ae.leadorcontactid IS NOT NULL")
+	return resolveUniqueStaffContact(ctx, q)
+}
+
+func resolveUniqueStaffContact(ctx context.Context, q *bun.SelectQuery) (string, error) {
+	qCtx, cancel := withQueryTimeout(ctx)
+	defer cancel()
+	var contacts []string
+	if err := q.Limit(2).Scan(qCtx, &contacts); err != nil {
+		return "", fmt.Errorf("query unique project staff contact: %w", err)
+	}
+	switch len(contacts) {
+	case 0:
+		return "", nil
+	case 1:
+		return contacts[0], nil
+	default:
+		return "", errAmbiguousProjectStaffContact
+	}
+}
+
 // dbGetAlternateEmailsForUser returns all live (not soft-deleted) alternate
 // email rows for a user, primary-flagged rows first. Inactive rows are
 // included so callers can apply their own active/verified policies.
@@ -273,14 +323,19 @@ type accountRow struct {
 
 // accountDomainCandidateLimit caps domain candidate queries. The SQL
 // prefilter matches domain aliases by substring, so callers confirm each
-// candidate in Go.
+// candidate in Go. Website and primary-domain matches are ordered first so
+// the cap can only drop alias-only candidates.
 const accountDomainCandidateLimit = 100
 
 // normalizedWebsiteSQL returns a SQL expression that normalizes a website
-// column the same way normalizeDomain does in Go: trim, lowercase, strip an
-// http(s):// scheme and a www. prefix, and drop any path component.
+// column the same way normalizeDomain does in Go: trim whitespace, lowercase,
+// strip an http(s):// scheme and a www. prefix, and drop any path component.
+// It must match at least every value normalizeDomain matches: a row the SQL
+// prefilter misses is never confirmed in Go, and the caller then creates a
+// duplicate org. The expression must not contain "?": bun binds every "?"
+// in a query fragment as a placeholder, so the regex uses {0,1} instead.
 func normalizedWebsiteSQL(column string) string {
-	return fmt.Sprintf(`split_part(regexp_replace(lower(btrim(%s)), '^(https?://)?(www\.)?', ''), '/', 1)`, column)
+	return fmt.Sprintf(`split_part(regexp_replace(lower(btrim(%s, E' \t\n\r\f\v')), '^(https{0,1}://){0,1}(www\.){0,1}', ''), '/', 1)`, column)
 }
 
 // b2bAccountSelect returns a select over live salesforce_b2b."Account" rows.
@@ -377,6 +432,8 @@ func dbFindB2CAccountCandidatesByDomain(ctx context.Context, domain string, excl
 		q = q.Where("a.sfid NOT IN (?)", bun.List(excludeSFIDs))
 	}
 	err := q.
+		OrderExpr("("+normalizedWebsiteSQL("a.website")+" = ? OR "+normalizedWebsiteSQL("a.account_domain__c")+" = ?) DESC NULLS LAST", domain, domain).
+		OrderExpr("a.createddate ASC NULLS LAST").
 		OrderExpr("a.sfid ASC").
 		Limit(accountDomainCandidateLimit).
 		Scan(qCtx)

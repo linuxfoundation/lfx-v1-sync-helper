@@ -115,6 +115,12 @@ The chart requires the following secrets to be created before installation (if t
 
 ### App Component
 
+`app.terminationGracePeriodSeconds` defaults to **120 seconds**. This covers
+the app's **75-second NATS drain** and **5-second mapping mirror drain**, with
+headroom for teardown. The NATS drain allows a **65-second committee-event
+handler** to finish before its connection closes. Review any environment override
+when upgrading; the old 60-second pod grace period is too short for that handler.
+
 The following environment variables for the custom app component have defaults configured in the chart's `app.environment` section:
 
 | Variable                | Default                                                                    | Description               |

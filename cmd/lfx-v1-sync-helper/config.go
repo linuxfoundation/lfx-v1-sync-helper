@@ -86,6 +86,11 @@ type Config struct {
 	// (e.g. when enabling notifications more broadly at GA).
 	CommitteeSkipMemberNotifications bool
 
+	// Enables ambiguous scoped adoption only after all older writers and
+	// unscoped outstanding attempts have been reconciled. Fresh dispatch is
+	// always name-fenced; this default-false rollout gate is not proof by itself.
+	CommitteeScopedAdoptionEnabled bool
+
 	// Postgres connection settings — used by the v1-mappings Postgres store
 	// introduced in LFXV2-2985 and its backfill/migration job. These are
 	// intentionally NAMED SEPARATELY from the top-level DatabaseURL /
@@ -271,6 +276,7 @@ func LoadConfig() (*Config, error) {
 		DynamoDBIngestEnabled:            parseBooleanEnv("DYNAMODB_INGEST_ENABLED"),
 		V2ToV1ProjectStaffSyncEnabled:    parseBooleanEnv("V2_TO_V1_PROJECT_STAFF_SYNC_ENABLED"),
 		CommitteeSkipMemberNotifications: parseBooleanEnvWithDefault("COMMITTEE_SKIP_MEMBER_NOTIFICATIONS", true),
+		CommitteeScopedAdoptionEnabled:   parseBooleanEnv("COMMITTEE_SCOPED_ADOPTION_ENABLED"),
 		DynamoDBStreamName:               os.Getenv("DYNAMODB_STREAM_NAME"),
 		NATSFetchMaxWait:                 parseDurationEnv("NATS_FETCH_MAX_WAIT", defaultNATSFetchMaxWait),
 		V1MappingsDatabaseURL:            os.Getenv("V1_MAPPINGS_DATABASE_URL"),

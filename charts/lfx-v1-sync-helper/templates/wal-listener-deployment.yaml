@@ -12,6 +12,16 @@ metadata:
     component: wal-listener
 spec:
   replicas: {{ .Values.walListener.replicas }}
+  # Recreate: the replication slot allows a single consumer, so a rolling update
+  # leaves the new pod unable to attach while the old one holds the slot, and the
+  # rollout deadlocks. During the brief gap with no consumer, the slot retains the
+  # WAL and the new pod resumes from the last confirmed LSN. The periodic Meltano
+  # Postgres ETL (meltano-postgres-cronjob.yaml) is only a fallback for inserts and
+  # updates on tables with a replication key; it cannot recover hard deletes or
+  # user_skills, which depend on the WAL.
+  strategy:
+    type: Recreate
+    rollingUpdate: null
   selector:
     matchLabels:
       app: {{ .Chart.Name }}

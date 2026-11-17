@@ -184,6 +184,32 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 		return true
 	}
 
+	// Both base and settings failures can NACK the entire WAL message. Refresh
+	// every existing committee, including absent/null-flag events, so an older
+	// delivery cannot undo a newer rename with a fresh v2 ETag.
+	if existingUID != "" {
+		latest, exists, readErr := fetchV1CommitteeData(ctx, sfid)
+		if readErr != nil {
+			logger.With(errKey, readErr, "sfid", sfid).ErrorContext(ctx, "failed to refresh committee WAL input; redelivering")
+			return true
+		}
+		if !exists {
+			return false // A superseded upsert must not resurrect a deleted record or mapping.
+		}
+		v1Data = latest
+		// A settings-only or SSO-name PATCH can change the replica editor to
+		// our client without completing the human edit in this WAL message.
+		// Refresh the fields, but do not attribute that pending edit to us.
+		if !shouldSkipSync(ctx, latest) {
+			v1Principal = extractV1Principal(ctx, latest)
+		}
+		projectSFID, _ = latest["project_name__c"].(string)
+		// A settings-only PATCH can make the latest row service-authored without
+		// syncing its pending human rename. Only the original message's editor
+		// (checked above) identifies an echo; normal base comparison below
+		// determines whether this original v1 delivery's base work is complete.
+	}
+
 	var uid string
 	var err error
 	var v2SSOGroupName string
@@ -268,11 +294,19 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 
 	if err != nil {
 		logger.With(errKey, err, "sfid", sfid).ErrorContext(ctx, "failed to sync committee")
-		// A transient mapping-store failure inside updateCommittee ->
-		// mapV1DataToCommitteeUpdateBasePayload propagates via the
-		// isTransientStoreErr sentinel; NACK so the message is
-		// redelivered rather than silently dropped.
+		// Existing committees must retry transient base API failures as well as
+		// store failures, otherwise their settings change would never run.
+		// Preserve the existing create-path error classification.
+		if existingUID != "" {
+			return isRetryableCommitteeSyncError(err)
+		}
 		return isTransientStoreErr(err)
+	}
+
+	if existingUID == "" && uid != "" {
+		// CreateCommittee already copied the setting. Its separate settings-created
+		// event is an echo; mark it before exposing the new reverse mapping.
+		writePendingMarker(ctx, markerV1ToV2, markerOpCreate, markerResourceCommitteeSettings, uid)
 	}
 
 	// Store the SFID mapping and reverse mapping before the writeback PATCH.
@@ -295,11 +329,21 @@ func handleCommitteeUpdate(ctx context.Context, key string, v1Data map[string]an
 	// Write the v2-generated SSOGroupName back to the v1 project-service so PCC can display it.
 	if v2SSOGroupName != "" && projectSFID != "" {
 		if writeErr := updateV1Committee(ctx, projectSFID, sfid, projectServiceCommitteeUpdate{
-			SSOGroupName: v2SSOGroupName,
+			SSOGroupName: &v2SSOGroupName,
 		}); writeErr != nil {
 			logger.With(errKey, writeErr, "sfid", sfid, "sso_group_name", v2SSOGroupName).WarnContext(ctx, "failed to write SSOGroupName back to v1")
 		} else {
 			logger.With("sfid", sfid, "sso_group_name", v2SSOGroupName).InfoContext(ctx, "wrote SSOGroupName back to v1")
+		}
+	}
+
+	// Complete successful base bookkeeping and SSO-name writeback first. A
+	// settings failure is independently retryable; on redelivery the base may
+	// already be unchanged and return no generated name to write back.
+	if existingUID != "" {
+		if settingsErr := updateCommitteeSettingsFromV1(ctx, existingUID, v1Data, v1Principal); settingsErr != nil {
+			logger.With(errKey, settingsErr, "committee_uid", existingUID).ErrorContext(ctx, "failed to sync committee settings; redelivering")
+			return true
 		}
 	}
 
@@ -520,6 +564,11 @@ func mapV1DataToCommitteeCreatePayload(ctx context.Context, v1Data map[string]an
 		Name:       name,
 		ProjectUID: projectUID,
 	}
+	parentUID, err := resolveV1CommitteeParentUID(ctx, v1Data)
+	if err != nil {
+		return nil, err
+	}
+	payload.ParentUID = parentUID
 
 	// Map optional fields.
 	if desc, ok := v1Data["description__c"].(string); ok && desc != "" {
@@ -623,9 +672,76 @@ func mapV1DataToCommitteeUpdateBasePayload(ctx context.Context, committeeUID str
 		ProjectUID: projectUID,
 	}
 	seedCommitteeUpdateFromCurrentBase(payload, currentBase)
+	if _, present := v1Data["committee_id"]; present {
+		parentUID, err := resolveV1CommitteeParentUID(ctx, v1Data)
+		if err != nil {
+			// An existing child may arrive before its new parent. Unlike an
+			// unmapped create, ACKing this update would lose both the move
+			// and any unrelated edits until the next v1 write.
+			if errors.Is(err, ErrKeyNotFound) {
+				// wrapTransientStoreErr deliberately leaves ErrKeyNotFound
+				// unwrapped elsewhere; this dependency miss is retryable.
+				return nil, &errTransientStore{err: err}
+			}
+			return nil, err
+		}
+		payload.ParentUID = parentUID
+	}
 	overlayV1CommitteeUpdatePayload(ctx, payload, v1Data, name)
 
 	return payload, nil
+}
+
+// resolveV1CommitteeParentUID translates platform.collaboration__c.committee_id
+// (the parent committee SFID) to a v2 UID. A present but empty/null value clears
+// the parent; a missing field leaves an existing parent's value untouched on update.
+func resolveV1CommitteeParentUID(ctx context.Context, v1Data map[string]any) (*string, error) {
+	var parentSFID string
+	switch value := v1Data["committee_id"].(type) {
+	case string:
+		parentSFID = value
+	case nil:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("invalid parent committee SFID type %T", value)
+	}
+	parentSFID = strings.TrimSpace(parentSFID)
+	if parentSFID == "" {
+		return nil, nil
+	}
+	childSFID, _ := v1Data["sfid"].(string)
+	if parentSFID == childSFID {
+		return nil, fmt.Errorf("committee %s cannot be its own parent", childSFID)
+	}
+	entry, err := mappingStore.Get(ctx, "committee.sfid."+parentSFID)
+	switch {
+	case err == nil:
+		if isTombstonedMapping(entry.Value) || len(entry.Value) == 0 {
+			return nil, fmt.Errorf("parent committee mapping is tombstoned or empty for SFID %s", parentSFID)
+		}
+		uid := string(entry.Value)
+		reverse, reverseErr := mappingStore.Get(ctx, "committee.uid."+uid)
+		switch {
+		case reverseErr == nil:
+			if isTombstonedMapping(reverse.Value) {
+				return nil, fmt.Errorf("reverse parent committee mapping is tombstoned for UID %s", uid)
+			}
+			parentProjectSFID, mappedParentSFID, valid := splitTwoParts(string(reverse.Value))
+			childProjectSFID, _ := v1Data["project_name__c"].(string)
+			if !valid || parentProjectSFID != childProjectSFID || mappedParentSFID != parentSFID {
+				return nil, fmt.Errorf("parent committee %s has an inconsistent mapping or belongs to another project", parentSFID)
+			}
+		case errors.Is(reverseErr, ErrKeyNotFound):
+			return nil, fmt.Errorf("reverse parent committee mapping not yet available for UID %s: %w", uid, reverseErr)
+		default:
+			return nil, wrapTransientStoreErr(fmt.Errorf("resolving reverse parent committee mapping for UID %s: %w", uid, reverseErr))
+		}
+		return &uid, nil
+	case errors.Is(err, ErrKeyNotFound):
+		return nil, fmt.Errorf("parent committee not yet mapped for SFID %s: %w", parentSFID, err)
+	default:
+		return nil, wrapTransientStoreErr(fmt.Errorf("resolving parent committee UID for SFID %s: %w", parentSFID, err))
+	}
 }
 
 // seedCommitteeUpdateFromCurrentBase seeds sync-managed fields on payload from
@@ -647,6 +763,7 @@ func seedCommitteeUpdateFromCurrentBase(payload *committeeservice.UpdateCommitte
 	payload.EnableVoting = currentBase.EnableVoting
 	payload.SsoGroupEnabled = currentBase.SsoGroupEnabled
 	payload.Public = currentBase.Public
+	payload.ParentUID = currentBase.ParentUID
 }
 
 // overlayV1CommitteeUpdatePayload overlays V1 values on top of payload for every
@@ -687,8 +804,8 @@ func overlayV1CommitteeUpdatePayload(ctx context.Context, payload *committeeserv
 		logger.With("display_name", displayName).DebugContext(ctx, "mapped committee display name field for update")
 	}
 
-	// Map business email required field - only available in create payload.
-	// UpdateCommitteeBasePayload does not support BusinessEmailRequired field.
+	// BusinessEmailRequired belongs to settings, not the base payload. The
+	// handler syncs it separately even when the base update is a no-op.
 
 	// Map governance fields (requires lfx-v2-committee-service >= v0.3.0 with PR #61 merged).
 	// Note: JoinMode is not available on UpdateCommitteeBasePayload.
@@ -1024,14 +1141,16 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 		payload.Status = "Active" // Default status.
 	}
 
-	// Map voting information - only if voting_status__c is set.
-	if votingStatus, ok := v1Data["voting_status__c"].(string); ok && votingStatus != "" {
+	// Map voting information - only if voting_status__c is set. v1 "None" means
+	// no voting status, the same as empty (v2 rejects "None" on voting-enabled
+	// committees).
+	if votingStatus, ok := v1Data["voting_status__c"].(string); ok && normalizeVotingStatus(votingStatus) != "" {
 		votingStruct := &struct {
 			Status    string  `json:"status"`
 			StartDate *string `json:"start_date,omitempty"`
 			EndDate   *string `json:"end_date,omitempty"`
 		}{
-			Status: votingStatus,
+			Status: normalizeVotingStatus(votingStatus),
 		}
 
 		if votingStartDate, ok := v1Data["voting_start_date__c"].(string); ok && votingStartDate != "" {
@@ -1216,14 +1335,16 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID s
 		payload.Status = "Active" // Default status.
 	}
 
-	// Map voting information - only if voting_status__c is set.
-	if votingStatus, ok := v1Data["voting_status__c"].(string); ok && votingStatus != "" {
+	// Map voting information - only if voting_status__c is set. v1 "None" means
+	// no voting status, the same as empty (v2 rejects "None" on voting-enabled
+	// committees).
+	if votingStatus, ok := v1Data["voting_status__c"].(string); ok && normalizeVotingStatus(votingStatus) != "" {
 		votingStruct := &struct {
 			Status    string  `json:"status"`
 			StartDate *string `json:"start_date,omitempty"`
 			EndDate   *string `json:"end_date,omitempty"`
 		}{
-			Status: votingStatus,
+			Status: normalizeVotingStatus(votingStatus),
 		}
 
 		if votingStartDate, ok := v1Data["voting_start_date__c"].(string); ok && votingStartDate != "" {

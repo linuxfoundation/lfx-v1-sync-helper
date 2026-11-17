@@ -5,8 +5,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"testing"
 
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
@@ -53,6 +55,10 @@ func TestCommitteeBasesEqual_BooleanOnlyDifferenceTriggersUpdate(t *testing.T) {
 			name: "DisplayName differs",
 			mut:  func(b *committeeservice.CommitteeBaseWithReadonlyAttributes) { b.DisplayName = sptr("New Display") },
 		},
+		{
+			name: "ParentUID differs",
+			mut:  func(b *committeeservice.CommitteeBaseWithReadonlyAttributes) { b.ParentUID = sptr("parent-uid") },
+		},
 	}
 
 	baseTemplate := func() *committeeservice.CommitteeBaseWithReadonlyAttributes {
@@ -87,7 +93,7 @@ func TestCommitteeBasesEqual_BooleanOnlyDifferenceTriggersUpdate(t *testing.T) {
 
 // TestCommitteeBasesEqual_IgnoresNonSyncedFields verifies that
 // committeeBasesEqual does not report a difference for fields the sync does not
-// manage (RequiresReview, ParentUID, JoinMode, Repository, Scope, Deliverables,
+// manage (RequiresReview, JoinMode, Repository, Scope, Deliverables,
 // KeyDates, Calendar). Admin edits made directly in V2 to these fields must not
 // force redundant sync updates.
 func TestCommitteeBasesEqual_IgnoresNonSyncedFields(t *testing.T) {
@@ -104,7 +110,6 @@ func TestCommitteeBasesEqual_IgnoresNonSyncedFields(t *testing.T) {
 		ProjectUID:     sptr("proj-uid"),
 		Category:       sptr("Governance"),
 		RequiresReview: true,                        // differs
-		ParentUID:      sptr("parent-uid"),          // differs
 		JoinMode:       "closed",                    // differs
 		Repository:     sptr("https://git.example"), // differs
 	}
@@ -129,6 +134,7 @@ func TestSeedCommitteeUpdateFromCurrentBase_PreservesCurrentValues(t *testing.T)
 		EnableVoting:    true,
 		SsoGroupEnabled: true,
 		Public:          true,
+		ParentUID:       sptr("parent-uid"),
 	}
 	payload := &committeeservice.UpdateCommitteeBasePayload{
 		UID:        sptr("cmt-uid"),
@@ -163,6 +169,9 @@ func TestSeedCommitteeUpdateFromCurrentBase_PreservesCurrentValues(t *testing.T)
 	}
 	if !payload.Public {
 		t.Error("Public not seeded from currentBase; absent V1 key would clobber current true with zero-value false")
+	}
+	if payload.ParentUID == nil || *payload.ParentUID != "parent-uid" {
+		t.Errorf("ParentUID not preserved from current base: %v", payload.ParentUID)
 	}
 }
 
@@ -529,6 +538,230 @@ func TestNewsletterCategoryRoundTrip(t *testing.T) {
 			got := mapV2CategoryToV1(*category)
 			if got != tt.want {
 				t.Fatalf("mapV2CategoryToV1(mapTypeToCategory(%q)) = %q, want %q", tt.typeVal, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMapV1DataToCommitteeMemberVotingNone verifies that a v1 voting_status__c of
+// "None" (any casing) or "" maps to a nil v2 Voting in both member mappers, since
+// v2 rejects "None" on voting-enabled committees (lfx-self-serve#4079).
+func TestMapV1DataToCommitteeMemberVotingNone(t *testing.T) {
+	origLogger := logger
+	defer func() { logger = origLogger }()
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	tests := []struct {
+		votingStatus string
+		wantStatus   string // "" means a nil Voting is expected
+	}{
+		{"None", ""},
+		{"none", ""},
+		{"", ""},
+		{"Voting Rep", "Voting Rep"},
+		{"Observer", "Observer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.votingStatus, func(t *testing.T) {
+			v1Data := map[string]any{
+				"contactemail__c":  "member@example.com",
+				"voting_status__c": tt.votingStatus,
+			}
+
+			create, err := mapV1DataToCommitteeMemberCreatePayload(ctx, "committee-uid", v1Data)
+			if err != nil {
+				t.Fatalf("create mapper: %v", err)
+			}
+			update, err := mapV1DataToCommitteeMemberUpdatePayload(ctx, "committee-uid", "member-uid", v1Data)
+			if err != nil {
+				t.Fatalf("update mapper: %v", err)
+			}
+
+			if tt.wantStatus == "" {
+				if create.Voting != nil {
+					t.Errorf("create: expected nil Voting, got %+v", create.Voting)
+				}
+				if update.Voting != nil {
+					t.Errorf("update: expected nil Voting, got %+v", update.Voting)
+				}
+				return
+			}
+			if create.Voting == nil || create.Voting.Status != tt.wantStatus {
+				t.Errorf("create: expected Voting.Status %q, got %+v", tt.wantStatus, create.Voting)
+			}
+			if update.Voting == nil || update.Voting.Status != tt.wantStatus {
+				t.Errorf("update: expected Voting.Status %q, got %+v", tt.wantStatus, update.Voting)
+			}
+		})
+	}
+}
+
+// TestMapV1DataToCommitteeMemberOrganization verifies how a resolved v1
+// organization maps onto both member payloads: only a B2B match carries the
+// organization ID, a B2C match carries name and website only, and an
+// unresolved or failed lookup leaves Organization nil.
+func TestMapV1DataToCommitteeMemberOrganization(t *testing.T) {
+	origLogger, origResolve := logger, resolveV1OrgBySFIDFn
+	defer func() { logger, resolveV1OrgBySFIDFn = origLogger, origResolve }()
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	deref := func(s *string) string {
+		if s == nil {
+			return ""
+		}
+		return *s
+	}
+
+	const accountSFID = "001000000000001AAA"
+	tests := []struct {
+		name        string
+		org         *v1OrgMatch
+		err         error
+		wantOrg     bool
+		wantID      string
+		wantWebsite string
+	}{
+		{"b2b match", &v1OrgMatch{B2BOrgID: accountSFID, Name: "Acme", Domain: "acme.example"}, nil, true, accountSFID, "http://acme.example"},
+		{"b2c match", &v1OrgMatch{Name: "Acme", Domain: "acme.example"}, nil, true, "", "http://acme.example"},
+		{"b2c match without domain", &v1OrgMatch{Name: "Acme"}, nil, true, "", ""},
+		{"no org", nil, nil, false, "", ""},
+		{"lookup error", nil, errors.New("db down"), false, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotSFIDs []string
+			resolveV1OrgBySFIDFn = func(_ context.Context, sfid string) (*v1OrgMatch, error) {
+				gotSFIDs = append(gotSFIDs, sfid)
+				return tt.org, tt.err
+			}
+			v1Data := map[string]any{
+				"contactemail__c": "member@example.com",
+				"account__c":      accountSFID,
+			}
+
+			create, err := mapV1DataToCommitteeMemberCreatePayload(ctx, "committee-uid", v1Data)
+			if err != nil {
+				t.Fatalf("create mapper: %v", err)
+			}
+			update, err := mapV1DataToCommitteeMemberUpdatePayload(ctx, "committee-uid", "member-uid", v1Data)
+			if err != nil {
+				t.Fatalf("update mapper: %v", err)
+			}
+			if !reflect.DeepEqual(gotSFIDs, []string{accountSFID, accountSFID}) {
+				t.Errorf("resolver called with %v, want account__c once per mapper", gotSFIDs)
+			}
+
+			for label, org := range map[string]*struct {
+				ID      *string
+				Name    *string
+				Website *string
+			}{"create": create.Organization, "update": update.Organization} {
+				if !tt.wantOrg {
+					if org != nil {
+						t.Errorf("%s: expected nil Organization, got %+v", label, org)
+					}
+					continue
+				}
+				if org == nil {
+					t.Fatalf("%s: expected Organization, got nil", label)
+				}
+				if org.Name == nil || *org.Name != tt.org.Name {
+					t.Errorf("%s: Name = %v, want %q", label, org.Name, tt.org.Name)
+				}
+				if got := deref(org.ID); got != tt.wantID {
+					t.Errorf("%s: ID = %q, want %q", label, got, tt.wantID)
+				}
+				if got := deref(org.Website); got != tt.wantWebsite {
+					t.Errorf("%s: Website = %q, want %q", label, got, tt.wantWebsite)
+				}
+			}
+		})
+	}
+}
+
+// TestCommitteeMembersEqualVotingNone verifies that committeeMembersEqual treats
+// a nil Voting, an empty status and "None" as the same "no voting status" value,
+// while a real status against nil is still a change.
+func TestCommitteeMembersEqualVotingNone(t *testing.T) {
+	type voting = struct {
+		Status    string
+		StartDate *string
+		EndDate   *string
+	}
+	email := "member@example.com"
+	current := func(v *voting) *committeeservice.CommitteeMemberFullWithReadonlyAttributes {
+		return &committeeservice.CommitteeMemberFullWithReadonlyAttributes{Email: &email, Voting: v}
+	}
+	update := func(v *voting) *committeeservice.UpdateCommitteeMemberPayload {
+		return &committeeservice.UpdateCommitteeMemberPayload{Email: email, Voting: v}
+	}
+
+	tests := []struct {
+		name      string
+		current   *voting
+		update    *voting
+		wantEqual bool
+	}{
+		{"nil vs nil", nil, nil, true},
+		{"legacy None vs nil", &voting{Status: "None"}, nil, true},
+		{"nil vs empty status", nil, &voting{Status: ""}, true},
+		{"none casing vs None", &voting{Status: "none"}, &voting{Status: "None"}, true},
+		{"Voting Rep vs nil", &voting{Status: "Voting Rep"}, nil, false},
+		{"nil vs Voting Rep", nil, &voting{Status: "Voting Rep"}, false},
+		{"Voting Rep vs Observer", &voting{Status: "Voting Rep"}, &voting{Status: "Observer"}, false},
+		{"same status, different start date", &voting{Status: "Voting Rep", StartDate: sptr("2026-01-01")}, &voting{Status: "Voting Rep", StartDate: sptr("2026-02-01")}, false},
+		{"same status and dates", &voting{Status: "Voting Rep", StartDate: sptr("2026-01-01")}, &voting{Status: "Voting Rep", StartDate: sptr("2026-01-01")}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := committeeMembersEqual(current(tt.current), update(tt.update)); got != tt.wantEqual {
+				t.Errorf("committeeMembersEqual = %v, want %v", got, tt.wantEqual)
+			}
+		})
+	}
+}
+
+// TestPreserveUnsetVotingStatus verifies that the v1NoVotingStatus written to
+// v1 for a v2 member with no voting status is not synced back into v2 as a
+// real status when an unrelated v1 field changes (lfx-self-serve#4079).
+func TestPreserveUnsetVotingStatus(t *testing.T) {
+	type voting = struct {
+		Status    string
+		StartDate *string
+		EndDate   *string
+	}
+	email := "member@example.com"
+
+	tests := []struct {
+		name       string
+		current    *voting
+		update     *voting
+		wantStatus string // "" means update.Voting is nil afterwards
+		wantEqual  bool
+	}{
+		{"nil vs Observer", nil, &voting{Status: "Observer"}, "", true},
+		{"empty vs observer casing", &voting{Status: ""}, &voting{Status: " observer "}, "", true},
+		{"legacy None vs Observer", &voting{Status: "None"}, &voting{Status: "Observer"}, "", true},
+		{"Voting Rep vs Observer is a change", &voting{Status: "Voting Rep"}, &voting{Status: "Observer"}, "Observer", false},
+		{"nil vs Voting Rep is a change", nil, &voting{Status: "Voting Rep"}, "Voting Rep", false},
+		{"Observer vs Observer is untouched", &voting{Status: "Observer"}, &voting{Status: "Observer"}, "Observer", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			current := &committeeservice.CommitteeMemberFullWithReadonlyAttributes{Email: &email, Voting: tt.current}
+			update := &committeeservice.UpdateCommitteeMemberPayload{Email: email, Voting: tt.update}
+			preserveUnsetVotingStatus(current, update)
+
+			gotStatus := ""
+			if update.Voting != nil {
+				gotStatus = update.Voting.Status
+			}
+			if gotStatus != tt.wantStatus {
+				t.Errorf("update voting status = %q, want %q", gotStatus, tt.wantStatus)
+			}
+			if got := committeeMembersEqual(current, update); got != tt.wantEqual {
+				t.Errorf("committeeMembersEqual = %v, want %v", got, tt.wantEqual)
 			}
 		})
 	}

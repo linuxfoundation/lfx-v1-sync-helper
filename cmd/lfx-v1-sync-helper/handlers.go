@@ -100,6 +100,12 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 		return handleResourceDelete(ctx, key, v1Data)
 	}
 
+	// Retire replicated staff writes even when this service authored the WAL
+	// record and the echo guard below skips its v1-to-v2 side effects.
+	if sfid, project := strings.CutPrefix(key, "salesforce-project__c."); project {
+		recentV1StaffWrites.observeReplication(sfid, v1Data, entry.Revision())
+	}
+
 	// Check if we should skip this sync operation.
 	if shouldSkipSync(ctx, v1Data) {
 		return false
@@ -114,7 +120,7 @@ func handleKVPut(ctx context.Context, entry jetstream.KeyValueEntry) bool {
 	// Determine the object type based on the key prefix.
 	switch prefix {
 	case "salesforce-project__c":
-		return handleProjectUpdate(ctx, key, v1Data)
+		return handleProjectUpdateAtRevision(ctx, key, v1Data, entry.Revision())
 	case "platform-collaboration__c":
 		return handleCommitteeUpdate(ctx, key, v1Data)
 	case "platform-community__c":

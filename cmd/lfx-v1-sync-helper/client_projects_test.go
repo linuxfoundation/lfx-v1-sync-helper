@@ -4,9 +4,19 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"reflect"
 	"testing"
+	"time"
 
+	projectclient "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/http/project_service/client"
 	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
+	"github.com/patrickmn/go-cache"
+	goahttp "goa.design/goa/v3/http"
 )
 
 func TestProjectSettingsWriteMayBeNeeded(t *testing.T) {
@@ -40,6 +50,12 @@ func TestProjectSettingsWriteMayBeNeeded(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "formation lead clear flag alone passes",
+			payload: &projectservice.UpdateProjectSettingsPayload{},
+			clears:  staffClearFlags{FormationLead: true},
+			want:    true,
+		},
+		{
 			name:    "no flags and all-nil payload skips the write",
 			payload: &projectservice.UpdateProjectSettingsPayload{},
 			want:    false,
@@ -67,6 +83,11 @@ func TestProjectSettingsWriteMayBeNeeded(t *testing.T) {
 		{
 			name:    "opportunity owner passes",
 			payload: &projectservice.UpdateProjectSettingsPayload{OpportunityOwner: jdoe},
+			want:    true,
+		},
+		{
+			name:    "formation lead passes",
+			payload: &projectservice.UpdateProjectSettingsPayload{FormationLead: &projectservice.FormationLead{Name: stringToStringPtr("Alice Example")}},
 			want:    true,
 		},
 	}
@@ -133,6 +154,26 @@ func TestProjectSettingsUpdateNeeded(t *testing.T) {
 			current: &projectservice.ProjectSettings{},
 			clears:  staffClearFlags{OpportunityOwner: true},
 			want:    false,
+		},
+		{
+			name:    "formation lead clear removes populated contact",
+			payload: &projectservice.UpdateProjectSettingsPayload{FormationLead: &projectservice.FormationLead{}},
+			current: &projectservice.ProjectSettings{FormationLead: &projectservice.FormationLead{Email: stringToStringPtr("alice@example.com")}},
+			clears:  staffClearFlags{FormationLead: true},
+			want:    true,
+		},
+		{
+			name:    "formation lead clear already empty is no-op",
+			payload: &projectservice.UpdateProjectSettingsPayload{FormationLead: &projectservice.FormationLead{}},
+			current: &projectservice.ProjectSettings{},
+			clears:  staffClearFlags{FormationLead: true},
+			want:    false,
+		},
+		{
+			name:    "formation lead changed",
+			payload: &projectservice.UpdateProjectSettingsPayload{FormationLead: &projectservice.FormationLead{Email: stringToStringPtr("bob@example.com")}},
+			current: &projectservice.ProjectSettings{FormationLead: &projectservice.FormationLead{Email: stringToStringPtr("alice@example.com")}},
+			want:    true,
 		},
 		{
 			name:    "staff reassignment differs from current",
@@ -209,6 +250,7 @@ func TestHydrateSettingsPayload(t *testing.T) {
 			ExecutiveDirector:   jdoe,
 			ProgramManager:      asmith,
 			OpportunityOwner:    jdoe,
+			FormationLead:       &projectservice.FormationLead{Name: stringToStringPtr("Alice Example"), Email: stringToStringPtr("alice@example.com")},
 			Writers:             writers,
 			MeetingCoordinators: writers,
 			Auditors:            writers,
@@ -221,9 +263,10 @@ func TestHydrateSettingsPayload(t *testing.T) {
 		current *projectservice.ProjectSettings
 		clears  staffClearFlags
 		// want nil = field must stay nil after hydration (deliberate clear).
-		wantEDNil bool
-		wantPMNil bool
-		wantOONil bool
+		wantEDNil          bool
+		wantPMNil          bool
+		wantOONil          bool
+		wantFormationClear bool
 	}{
 		{
 			name:    "all-nil payload round-trips every current field",
@@ -259,6 +302,13 @@ func TestHydrateSettingsPayload(t *testing.T) {
 			current:   fullCurrent(),
 			clears:    staffClearFlags{OpportunityOwner: true},
 			wantOONil: true,
+		},
+		{
+			name:               "formation lead clear sends empty object while other fields hydrate",
+			payload:            &projectservice.UpdateProjectSettingsPayload{},
+			current:            fullCurrent(),
+			clears:             staffClearFlags{FormationLead: true},
+			wantFormationClear: true,
 		},
 		{
 			name:    "empty current leaves payload fields nil",
@@ -309,6 +359,13 @@ func TestHydrateSettingsPayload(t *testing.T) {
 			} else if !userInfoPtrsEqual(tt.payload.OpportunityOwner, tt.current.OpportunityOwner) {
 				t.Errorf("OpportunityOwner not hydrated from current")
 			}
+			if tt.wantFormationClear {
+				if tt.payload.FormationLead == nil || !formationLeadsEqual(tt.payload.FormationLead, nil) {
+					t.Errorf("FormationLead = %+v, want explicit empty object", tt.payload.FormationLead)
+				}
+			} else if !formationLeadsEqual(tt.payload.FormationLead, tt.current.FormationLead) {
+				t.Errorf("FormationLead not hydrated from current")
+			}
 			if !userInfoSlicesEqual(tt.payload.Writers, tt.current.Writers) {
 				t.Errorf("Writers not hydrated from current")
 			}
@@ -319,5 +376,222 @@ func TestHydrateSettingsPayload(t *testing.T) {
 				t.Errorf("Auditors not hydrated from current")
 			}
 		})
+	}
+	t.Run("partial Formation Lead preserves pending email and applies PCC name", func(t *testing.T) {
+		name := "Carol Fixture"
+		payload := &projectservice.UpdateProjectSettingsPayload{FormationLead: &projectservice.FormationLead{Name: &name}}
+		current := &projectservice.ProjectSettings{FormationLead: &projectservice.FormationLead{
+			Name: stringToStringPtr("Alice Example"), Email: stringToStringPtr("new@example.com"),
+		}}
+		hydrateSettingsPayload(payload, current, staffClearFlags{FormationLeadPartial: true})
+		if payload.FormationLead == nil || stringPtrToString(payload.FormationLead.Name) != name ||
+			stringPtrToString(payload.FormationLead.Email) != "new@example.com" {
+			t.Errorf("merged Formation Lead = %+v, want PCC name and pending v2 email", payload.FormationLead)
+		}
+	})
+}
+
+// TestProjectResponsesAcceptDigitLeadingSlug is the regression test for
+// lfx-self-serve-ops#1212: project-service accepts slugs that start with a
+// digit (e.g. "3mf-working-group") and returns them in its responses. A
+// generated client older than project-service v0.10.0 validated those
+// responses against the old letter-first slug pattern, so a create that
+// succeeded server-side was reported as failed and no v1->v2 mapping was
+// written. The update path (updateProject: GetOneProjectBase, then
+// UpdateProjectBase) decodes the same field, so it is covered too.
+func TestProjectResponsesAcceptDigitLeadingSlug(t *testing.T) {
+	const (
+		uid  = "9b610a05-dfb5-4c46-95d2-8e184981d524"
+		slug = "3mf-working-group"
+		name = "3MF Working Group"
+	)
+	token := "test-token"
+	projectUID := uid
+
+	tests := []struct {
+		name   string
+		status int
+		call   func(c *projectclient.Client) (any, error)
+	}{
+		{
+			name:   "create-project",
+			status: http.StatusCreated,
+			call: func(c *projectclient.Client) (any, error) {
+				return c.CreateProject()(context.Background(), &projectservice.CreateProjectPayload{
+					BearerToken: &token, Name: name, Slug: slug,
+				})
+			},
+		},
+		{
+			name:   "get-one-project-base",
+			status: http.StatusOK,
+			call: func(c *projectclient.Client) (any, error) {
+				return c.GetOneProjectBase()(context.Background(), &projectservice.GetOneProjectBasePayload{
+					BearerToken: &token, UID: &projectUID,
+				})
+			},
+		},
+		{
+			name:   "update-project-base",
+			status: http.StatusOK,
+			call: func(c *projectclient.Client) (any, error) {
+				return c.UpdateProjectBase()(context.Background(), &projectservice.UpdateProjectBasePayload{
+					BearerToken: &token, UID: &projectUID, Name: name, Slug: slug,
+				})
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := projectServiceStub(t, tc.status, map[string]string{"uid": uid, "slug": slug, "name": name})
+
+			res, err := tc.call(projectClientAgainst(t, srv))
+			if err != nil {
+				t.Fatalf("%s error = %v, want the %d response to decode", tc.name, err, tc.status)
+			}
+
+			var got *string
+			switch r := res.(type) {
+			case *projectservice.ProjectFull:
+				got = r.Slug
+			case *projectservice.GetOneProjectBaseResult:
+				if r.Project != nil {
+					got = r.Project.Slug
+				}
+			case *projectservice.ProjectBase:
+				got = r.Slug
+			default:
+				t.Fatalf("%s result is %T, want a decoded project", tc.name, res)
+			}
+			if got == nil || *got != slug {
+				t.Errorf("Slug = %v, want %q", got, slug)
+			}
+		})
+	}
+}
+
+// projectClientAgainst builds the real generated project-service HTTP client
+// against srv, the same way initGoaClients does.
+func projectClientAgainst(t *testing.T, srv *httptest.Server) *projectclient.Client {
+	t.Helper()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+
+	return projectclient.NewClient(u.Scheme, u.Host, srv.Client(), goahttp.RequestEncoder, goahttp.ResponseDecoder, false)
+}
+
+// TestPreserveV2OnlyBaseFields guards against an unrelated v1 edit erasing a
+// contact email set in v2: UpdateProjectBase replaces the whole base document,
+// so an omitted contact_email is stored as empty.
+func TestPreserveV2OnlyBaseFields(t *testing.T) {
+	current := &projectservice.ProjectBase{ContactEmail: stringToStringPtr("contact@example.org")}
+
+	t.Run("unset in v1 keeps the v2 email", func(t *testing.T) {
+		payload := &projectservice.UpdateProjectBasePayload{Description: "changed in v1"}
+		preserveV2OnlyBaseFields(payload, current)
+		if got := stringPtrToString(payload.ContactEmail); got != "contact@example.org" {
+			t.Errorf("ContactEmail = %q, want the current v2 email", got)
+		}
+	})
+
+	t.Run("set in the payload wins", func(t *testing.T) {
+		payload := &projectservice.UpdateProjectBasePayload{ContactEmail: stringToStringPtr("new@example.org")}
+		preserveV2OnlyBaseFields(payload, current)
+		if got := stringPtrToString(payload.ContactEmail); got != "new@example.org" {
+			t.Errorf("ContactEmail = %q, want the payload's email", got)
+		}
+	})
+
+	t.Run("preserved email is not a base change", func(t *testing.T) {
+		payload := &projectservice.UpdateProjectBasePayload{}
+		preserveV2OnlyBaseFields(payload, current)
+		updated := &projectservice.ProjectBase{ContactEmail: payload.ContactEmail}
+		if !projectBasesEqual(current, updated) {
+			t.Error("projectBasesEqual = false, want true when only the preserved email is carried over")
+		}
+	})
+
+	t.Run("changed email is a base change", func(t *testing.T) {
+		updated := &projectservice.ProjectBase{ContactEmail: stringToStringPtr("new@example.org")}
+		if projectBasesEqual(current, updated) {
+			t.Error("projectBasesEqual = true, want false when the contact email differs")
+		}
+	})
+}
+
+// TestUpdateProjectSendsPreservedContactEmail drives updateProject itself, so
+// removing or reordering its preserveV2OnlyBaseFields call fails here: an
+// unrelated v1 edit must still send the existing v2 contact_email on the
+// full-replace UpdateProjectBase PUT.
+func TestUpdateProjectSendsPreservedContactEmail(t *testing.T) {
+	const (
+		uid   = "9b610a05-dfb5-4c46-95d2-8e184981d524"
+		email = "contact@example.org"
+	)
+
+	origFetch := fetchProjectBase
+	origClient := projectClient
+	origCache := jwtTokenCache
+	t.Cleanup(func() {
+		fetchProjectBase = origFetch
+		projectClient = origClient
+		jwtTokenCache = origCache
+	})
+
+	fetchProjectBase = func(_ context.Context, _ string) (*projectservice.ProjectBase, string, error) {
+		return &projectservice.ProjectBase{
+			UID:          stringToStringPtr(uid),
+			Name:         stringToStringPtr("Test Project"),
+			Slug:         stringToStringPtr("test-project"),
+			Description:  stringToStringPtr("before"),
+			ContactEmail: stringToStringPtr(email),
+			Industry:     []string{"Energy & Climate"},
+			Technology:   []string{"Blockchain"},
+		}, "1", nil
+	}
+
+	// Pre-seed the token cache so generateCachedJWTToken never calls the real
+	// JWT signer. Cache key format: "jwt-<audience>-<v1Principal>".
+	jwtTokenCache = cache.New(5*time.Minute, 10*time.Minute)
+	jwtTokenCache.Set("jwt-"+projectServiceAudience+"-", "test-token", cache.DefaultExpiration)
+
+	var sent map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+			t.Errorf("decode PUT body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{"uid": uid, "slug": "test-project", "name": "Test Project"}); err != nil {
+			t.Errorf("encode stub body: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	projectClient = &projectservice.Client{UpdateProjectBaseEndpoint: projectClientAgainst(t, srv).UpdateProjectBase()}
+
+	projectUID := uid
+	mutated, err := updateProject(context.Background(), &projectservice.UpdateProjectBasePayload{
+		UID:         &projectUID,
+		Name:        "Test Project",
+		Slug:        "test-project",
+		Description: "changed in v1",
+	}, nil, staffClearFlags{}, "")
+	if err != nil {
+		t.Fatalf("updateProject() error = %v", err)
+	}
+	if !mutated {
+		t.Fatal("updateProject() mutated = false, want the description change to issue UpdateProjectBase")
+	}
+	if got := sent["contact_email"]; got != email {
+		t.Errorf("PUT body contact_email = %v, want %q", got, email)
+	}
+	if got := sent["industry"]; !reflect.DeepEqual(got, []any{"Energy & Climate"}) {
+		t.Errorf("PUT body industry = %v, want the existing classification", got)
+	}
+	if got := sent["technology"]; !reflect.DeepEqual(got, []any{"Blockchain"}) {
+		t.Errorf("PUT body technology = %v, want the existing classification", got)
 	}
 }

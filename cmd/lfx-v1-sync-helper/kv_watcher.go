@@ -15,6 +15,7 @@ type kvEntry struct {
 	key       string
 	value     []byte
 	operation jetstream.KeyValueOp
+	revision  uint64
 }
 
 func (e *kvEntry) Key() string {
@@ -42,7 +43,7 @@ func (e *kvEntry) Delta() uint64 {
 }
 
 func (e *kvEntry) Revision() uint64 {
-	return 0
+	return e.revision
 }
 
 // kvConsumerHeartbeatInterval bounds how often startInProgressHeartbeat pings
@@ -128,6 +129,14 @@ func kvMessageHandler(msg jetstream.Msg) {
 		key:       key,
 		value:     msg.Data(),
 		operation: operation,
+	}
+	// KV revisions are stream sequence numbers, not consumer delivery
+	// sequence numbers. Preserve them for replication acknowledgements.
+	if metadata, err := msg.Metadata(); err == nil {
+		entry.revision = metadata.Sequence.Stream
+	} else {
+		// Unknown revision must never acknowledge an outstanding write.
+		logger.With(errKey, err, "key", key).Warn("KV delivery has no stream revision")
 	}
 
 	// Process the KV entry and check if retry is needed. A heartbeat keeps

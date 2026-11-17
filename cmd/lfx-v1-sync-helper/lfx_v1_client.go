@@ -550,6 +550,10 @@ func searchV1B2CAccountByDomain(ctx context.Context, domain string) (string, err
 	if err != nil {
 		return "", err
 	}
+	if len(candidates) == accountDomainCandidateLimit {
+		logger.With("domain", domain, "limit", accountDomainCandidateLimit).
+			WarnContext(ctx, "v1 account domain candidates hit the query limit; alias-only matches may have been dropped")
+	}
 	var matches []accountRow
 	for i := range candidates {
 		if accountMatchesDomain(&candidates[i], domain) {
@@ -607,34 +611,38 @@ func compareAccountsForDomainMatch(a, b accountRow, domain string) int {
 
 // projectServiceCommitteeCreate is the request body for POST /v2/projects/{projectId}/committees.
 type projectServiceCommitteeCreate struct {
-	Name            string `json:"Name"`
-	Category        string `json:"Category"`
-	Description     string `json:"Description,omitempty"`
-	Website         string `json:"CommitteeWebsite,omitempty"`
-	CommitteeID     string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
-	SSOGroupEnabled *bool  `json:"SSOGroupEnabled,omitempty"`
-	PublicEnabled   *bool  `json:"PublicEnabled,omitempty"`
-	PublicName      string `json:"PublicName,omitempty"`
-	SSOGroupName    string `json:"SSOGroupName,omitempty"`
-	JoinMode        string `json:"JoinMode,omitempty"`
-	MailingList     string `json:"MailingList,omitempty"`
-	ChatChannel     string `json:"ChatChannel,omitempty"`
+	Name                  string `json:"Name"`
+	Category              string `json:"Category"`
+	Description           string `json:"Description,omitempty"`
+	Website               string `json:"CommitteeWebsite,omitempty"`
+	CommitteeID           string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
+	SSOGroupEnabled       *bool  `json:"SSOGroupEnabled,omitempty"`
+	BusinessEmailRequired *bool  `json:"BusinessEmailRequired,omitempty"`
+	EnableVoting          *bool  `json:"EnableVoting,omitempty"`
+	PublicEnabled         *bool  `json:"PublicEnabled,omitempty"`
+	PublicName            string `json:"PublicName,omitempty"`
+	SSOGroupName          string `json:"SSOGroupName,omitempty"`
+	JoinMode              string `json:"JoinMode,omitempty"`
+	MailingList           string `json:"MailingList,omitempty"`
+	ChatChannel           string `json:"ChatChannel,omitempty"`
 }
 
 // projectServiceCommitteeUpdate is the request body for PATCH /v2/projects/{projectId}/committees/{committeeID}.
 type projectServiceCommitteeUpdate struct {
-	Name            string `json:"Name,omitempty"`
-	Category        string `json:"Category,omitempty"`
-	Description     string `json:"Description,omitempty"`
-	Website         string `json:"CommitteeWebsite,omitempty"`
-	CommitteeID     string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
-	SSOGroupEnabled *bool  `json:"SSOGroupEnabled,omitempty"`
-	PublicEnabled   *bool  `json:"PublicEnabled,omitempty"`
-	PublicName      string `json:"PublicName,omitempty"`
-	SSOGroupName    string `json:"SSOGroupName,omitempty"`
-	JoinMode        string `json:"JoinMode,omitempty"`
-	MailingList     string `json:"MailingList,omitempty"`
-	ChatChannel     string `json:"ChatChannel,omitempty"`
+	Name                  *string `json:"Name,omitempty"`
+	Category              *string `json:"Category,omitempty"`
+	Description           *string `json:"Description,omitempty"`
+	Website               *string `json:"CommitteeWebsite,omitempty"`
+	CommitteeID           *string `json:"CommitteeID,omitempty"` // parent committee ID if creating a subcommittee
+	SSOGroupEnabled       *bool   `json:"SSOGroupEnabled,omitempty"`
+	BusinessEmailRequired *bool   `json:"BusinessEmailRequired,omitempty"`
+	EnableVoting          *bool   `json:"EnableVoting,omitempty"`
+	PublicEnabled         *bool   `json:"PublicEnabled,omitempty"`
+	PublicName            *string `json:"PublicName,omitempty"`
+	SSOGroupName          *string `json:"SSOGroupName,omitempty"`
+	JoinMode              *string `json:"JoinMode,omitempty"`
+	MailingList           *string `json:"MailingList,omitempty"`
+	ChatChannel           *string `json:"ChatChannel,omitempty"`
 }
 
 // projectServiceCommitteeResponse is the response from the project service for creating and updating committees.
@@ -649,6 +657,14 @@ type projectServiceCommitteeResponse struct {
 	PublicEnabled   bool   `json:"PublicEnabled"`
 	PublicName      string `json:"PublicName"`
 	SSOGroupName    string `json:"SSOGroupName"`
+}
+
+// v1CommitteeCreateStatusError supports classification without parsing response
+// text or retaining/logging a response body that may contain user-supplied data.
+type v1CommitteeCreateStatusError struct{ StatusCode int }
+
+func (e *v1CommitteeCreateStatusError) Error() string {
+	return fmt.Sprintf("v1 committee create returned HTTP %d", e.StatusCode)
 }
 
 // createCommittee creates a committee in Postgres via the Project Service v2 API.
@@ -683,7 +699,7 @@ func createV1Committee(ctx context.Context, projectSFID string, payload projectS
 	logger.DebugContext(ctx, "createV1Committee response", "status", resp.StatusCode, "url", resp.Request.URL.String(), "body", string(respBody))
 
 	if resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("project service returned status %d creating committee for project %s: %s", resp.StatusCode, projectSFID, string(respBody))
+		return nil, &v1CommitteeCreateStatusError{StatusCode: resp.StatusCode}
 	}
 
 	var result projectServiceCommitteeResponse
@@ -790,6 +806,9 @@ type projectServiceProjectCreate struct {
 	EntityType                     string   `json:"EntityType,omitempty"` // v2 legal_entity_type
 	Funding                        string   `json:"Funding,omitempty"`
 	Model                          []string `json:"Model,omitempty"` // v2 funding_model
+	Industry                       []string `json:"Industry,omitempty"`
+	Technology                     []string `json:"Technology,omitempty"`
+	TechActivityType               []string `json:"TechActivityType,omitempty"`
 	CharterURL                     string   `json:"CharterURL,omitempty"`
 	AutoJoinEnabled                *bool    `json:"AutoJoinEnabled,omitempty"`
 	StartDate                      string   `json:"StartDate,omitempty"` // v2 formation_date, date-only
@@ -802,28 +821,32 @@ type projectServiceProjectCreate struct {
 }
 
 // projectServiceProjectUpdate is the request body for PATCH /project-service/v1/projects/{sfid}.
-// All fields are optional; unset fields are left untouched on the v1 record.
+// Nil fields are omitted (leave v1 untouched); non-nil empty values are sent
+// explicitly so the v1 PATCH can clear a field.
 type projectServiceProjectUpdate struct {
-	Name                           string   `json:"Name,omitempty"`
-	Slug                           string   `json:"Slug,omitempty"`
-	Description                    string   `json:"Description,omitempty"`
-	Parent                         string   `json:"Parent,omitempty"`
-	ProjectType                    string   `json:"ProjectType,omitempty"` // v2 is_foundation: true→"Project Group", false→"Project"
-	Status                         string   `json:"Status,omitempty"`
-	Category                       string   `json:"Category,omitempty"`
-	EntityName                     string   `json:"EntityName,omitempty"`
-	EntityType                     string   `json:"EntityType,omitempty"`
-	Funding                        string   `json:"Funding,omitempty"`
-	Model                          []string `json:"Model,omitempty"`
-	CharterURL                     string   `json:"CharterURL,omitempty"`
-	AutoJoinEnabled                *bool    `json:"AutoJoinEnabled,omitempty"`
-	StartDate                      string   `json:"StartDate,omitempty"`
-	ProjectLogo                    string   `json:"ProjectLogo,omitempty"`
-	RepositoryURL                  string   `json:"RepositoryURL,omitempty"`
-	Website                        string   `json:"Website,omitempty"`
-	ProjectEntityDissolutionDate   string   `json:"ProjectEntityDissolutionDate,omitempty"`
-	ProjectEntityFormationDocument string   `json:"ProjectEntityFormationDocument,omitempty"`
-	LegalParentID                  string   `json:"LegalParentID,omitempty"`
+	Name                           *string   `json:"Name,omitempty"`
+	Slug                           *string   `json:"Slug,omitempty"`
+	Description                    *string   `json:"Description,omitempty"`
+	Parent                         *string   `json:"Parent,omitempty"`
+	ProjectType                    *string   `json:"ProjectType,omitempty"` // v2 is_foundation: true→"Project Group", false→"Project"
+	Status                         *string   `json:"Status,omitempty"`
+	Category                       *string   `json:"Category,omitempty"`
+	EntityName                     *string   `json:"EntityName,omitempty"`
+	EntityType                     *string   `json:"EntityType,omitempty"`
+	Funding                        *string   `json:"Funding,omitempty"`
+	Model                          *[]string `json:"Model,omitempty"`
+	Industry                       *[]string `json:"Industry,omitempty"`
+	Technology                     *[]string `json:"Technology,omitempty"`
+	TechActivityType               *[]string `json:"TechActivityType,omitempty"`
+	CharterURL                     *string   `json:"CharterURL,omitempty"`
+	AutoJoinEnabled                *bool     `json:"AutoJoinEnabled,omitempty"`
+	StartDate                      *string   `json:"StartDate,omitempty"`
+	ProjectLogo                    *string   `json:"ProjectLogo,omitempty"`
+	RepositoryURL                  *string   `json:"RepositoryURL,omitempty"`
+	Website                        *string   `json:"Website,omitempty"`
+	ProjectEntityDissolutionDate   *string   `json:"ProjectEntityDissolutionDate,omitempty"`
+	ProjectEntityFormationDocument *string   `json:"ProjectEntityFormationDocument,omitempty"`
+	LegalParentID                  *string   `json:"LegalParentID,omitempty"`
 }
 
 // projectServiceProjectResponse is the relevant subset of the response returned by
@@ -975,21 +998,29 @@ type projectServiceCommitteeMemberCreate struct {
 }
 
 // projectServiceCommitteeMemberUpdate is the request body for PATCH /v2/projects/{projectId}/committees/{committeeID}/members/{memberID}.
+//
+// The date fields are pointers so an omitted date (nil) is distinguishable
+// from an explicit clear (pointer to ""). Under preserveOmittedDatesHeader v1
+// keeps an omitted date; without it, v1 clears every omitted date.
 type projectServiceCommitteeMemberUpdate struct {
-	Email           string `json:"Email,omitempty"`
-	OrganizationID  string `json:"OrganizationID,omitempty"`
-	Title           string `json:"Title,omitempty"`
-	Role            string `json:"Role,omitempty"`
-	RoleStartDate   string `json:"RoleStartDate,omitempty"`
-	RoleEndDate     string `json:"RoleEndDate,omitempty"`
-	Status          string `json:"Status,omitempty"`
-	AppointedBy     string `json:"AppointedBy,omitempty"`
-	VotingStatus    string `json:"VotingStatus,omitempty"`
-	VotingStartDate string `json:"VotingStartDate,omitempty"`
-	VotingEndDate   string `json:"VotingEndDate,omitempty"`
-	Agency          string `json:"Agency,omitempty"`
-	Country         string `json:"Country,omitempty"`
+	Email           string  `json:"Email,omitempty"`
+	OrganizationID  string  `json:"OrganizationID,omitempty"`
+	Title           string  `json:"Title,omitempty"`
+	Role            string  `json:"Role,omitempty"`
+	RoleStartDate   *string `json:"RoleStartDate,omitempty"`
+	RoleEndDate     *string `json:"RoleEndDate,omitempty"`
+	Status          string  `json:"Status,omitempty"`
+	AppointedBy     string  `json:"AppointedBy,omitempty"`
+	VotingStatus    string  `json:"VotingStatus,omitempty"`
+	VotingStartDate *string `json:"VotingStartDate,omitempty"`
+	VotingEndDate   *string `json:"VotingEndDate,omitempty"`
+	Agency          string  `json:"Agency,omitempty"`
+	Country         string  `json:"Country,omitempty"`
 }
+
+// preserveOmittedDatesHeader opts the member PATCH into keeping omitted or
+// null date fields instead of clearing them (project-management#1540).
+const preserveOmittedDatesHeader = "X-Preserve-Omitted-Dates"
 
 // projectServiceCommitteeMemberResponse is the relevant subset of the response returned
 // by the create committee member operation.
@@ -1063,6 +1094,7 @@ func updateV1CommitteeMember(ctx context.Context, projectSFID, committeeSFID, me
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(preserveOmittedDatesHeader, "true")
 
 	resp, err := v1HTTPClient.Do(req)
 	if err != nil {
