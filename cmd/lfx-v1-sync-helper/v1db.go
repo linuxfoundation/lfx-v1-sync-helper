@@ -8,8 +8,9 @@ package main
 // Salesforce schema). This replaces the NATS KV secondary indexes
 // (v1-user.username.*, v1-user.email.*, v1-merged-user.alternate-emails.*,
 // v1-user.primary-email.*) that previously required event-driven maintenance
-// and periodic full rebuilds. Queries here are read-only; the tables are
-// owned by the v1 platform replication pipeline, not this service.
+// and periodic full rebuilds, and the cached v1 Organization Service lookup by
+// account SFID. Queries here are read-only; the tables are owned by the v1
+// platform replication pipeline, not this service.
 
 import (
 	"context"
@@ -305,6 +306,58 @@ func dbGetSkillsForUser(ctx context.Context, lfid string) ([]string, error) {
 		names = append(names, row.Name)
 	}
 	return names, nil
+}
+
+// accountRow maps the organization columns we need from either
+// salesforce_b2b."Account" (B2B, Stitch-replicated from Salesforce) or
+// salesforce.account (B2C). Queries alias the source columns onto these
+// names, since the two tables use different identifier casing.
+type accountRow struct {
+	ID           string         `bun:"id"`
+	Name         sql.NullString `bun:"name"`
+	Website      sql.NullString `bun:"website"`
+	Domain       sql.NullString `bun:"account_domain"`
+	DomainAlias  sql.NullString `bun:"domain_alias"`
+	CreatedDate  sql.NullTime   `bun:"createddate"`
+	IsDeleted    sql.NullBool   `bun:"isdeleted"`
+	RecordTypeID sql.NullString `bun:"recordtypeid"`
+}
+
+// b2cAccountSelect returns a select over salesforce.account rows, including
+// soft-deleted rows (callers filter on isdeleted as needed).
+func b2cAccountSelect(rows any) *bun.SelectQuery {
+	return v1DB.NewSelect().Model(rows).
+		ModelTableExpr(`salesforce.account AS a`).
+		ColumnExpr(`a.sfid AS id`).
+		ColumnExpr(`a.name AS name`).
+		ColumnExpr(`a.website AS website`).
+		ColumnExpr(`a.account_domain__c AS account_domain`).
+		ColumnExpr(`a.domain_alias__c AS domain_alias`).
+		ColumnExpr(`a.createddate AS createddate`).
+		ColumnExpr(`a.isdeleted AS isdeleted`).
+		ColumnExpr(`a.recordtypeid AS recordtypeid`)
+}
+
+// dbLookupB2CAccountBySFID fetches a salesforce.account row by sfid,
+// including soft-deleted rows. Returns (nil, nil) on miss.
+func dbLookupB2CAccountBySFID(ctx context.Context, sfid string) (*accountRow, error) {
+	if sfid == "" {
+		return nil, nil
+	}
+	row := &accountRow{}
+	qCtx, cancel := withQueryTimeout(ctx)
+	defer cancel()
+	err := b2cAccountSelect(row).
+		Where("a.sfid = ?", sfid).
+		Limit(1).
+		Scan(qCtx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to query b2c account by sfid: %w", err)
+	}
+	return row, nil
 }
 
 // emailRowIsActive reports whether an alternate email row is usable: active
