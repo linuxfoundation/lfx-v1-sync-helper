@@ -229,7 +229,7 @@ func TestNormalizedWebsiteSQLBindsOnlyItsPlaceholder(t *testing.T) {
 	db := bun.NewDB(sqlDB, pgdialect.New())
 
 	got := db.NewSelect().ColumnExpr(normalizedWebsiteSQL("a.website")+" = ?", "acme.io").String()
-	want := `SELECT split_part(regexp_replace(lower(btrim(a.website, E' \t\n\r\f\v')), '^(https{0,1}://){0,1}(www\.){0,1}', ''), '/', 1) = 'acme.io'`
+	want := `SELECT split_part(regexp_replace(lower(btrim(a.website, E' \t\n\r\f\x0b')), '^(https://){0,1}(http://){0,1}(www\.){0,1}', ''), '/', 1) = 'acme.io'`
 	if got != want {
 		t.Errorf("query =\n%s\nwant\n%s", got, want)
 	}

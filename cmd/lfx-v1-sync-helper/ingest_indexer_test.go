@@ -250,6 +250,39 @@ func TestResolveOrgIDFromEventData_keepsSFID(t *testing.T) {
 	}
 }
 
+// TestResolveOrgIDFromEventData_memoReusesCreatedOrg verifies that within one
+// sync operation an org created on a replica miss is reused, instead of a
+// second miss (replica not caught up) creating another org.
+func TestResolveOrgIDFromEventData_memoReusesCreatedOrg(t *testing.T) {
+	h := setupSyncTest(t, 201, `{"ID":"001000000000009AAA","Name":"Acme"}`)
+	orig := searchV1B2CAccountByDomainFn
+	t.Cleanup(func() { searchV1B2CAccountByDomainFn = orig })
+	searches := 0
+	searchV1B2CAccountByDomainFn = func(context.Context, string) (string, error) {
+		searches++
+		return "", nil
+	}
+	data := map[string]any{"organization": map[string]any{"name": "Acme", "website": "acme.example"}}
+
+	ctx := withOrgResolutionMemo(t.Context())
+	for range 3 {
+		orgID, err := resolveOrgIDFromEventData(ctx, data)
+		if err != nil || orgID != "001000000000009AAA" {
+			t.Fatalf("resolveOrgIDFromEventData() = %q, %v", orgID, err)
+		}
+	}
+	if searches != 1 || len(h.recordedRequests()) != 1 {
+		t.Fatalf("searches = %d, org creates = %d; want 1 and 1", searches, len(h.recordedRequests()))
+	}
+
+	if _, err := resolveOrgIDFromEventData(t.Context(), data); err != nil {
+		t.Fatal(err)
+	}
+	if searches != 2 || len(h.recordedRequests()) != 2 {
+		t.Fatalf("without memo: searches = %d, org creates = %d; want 2 and 2", searches, len(h.recordedRequests()))
+	}
+}
+
 func TestResolveOrgIDFromEventData_ignoresNonSFID(t *testing.T) {
 	// CDP UUIDs and other non-SFID values must be dropped so they are never
 	// forwarded to v1 as OrganizationID. With no name or website, resolveV1OrgID

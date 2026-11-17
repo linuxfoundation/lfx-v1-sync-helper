@@ -722,6 +722,43 @@ func TestCommitteeMembersEqualVotingNone(t *testing.T) {
 	}
 }
 
+// TestCommitteeMembersEqualOrganizationID verifies that an organization ID
+// change alone (added, removed or replaced) is detected, so a resync can
+// apply it even when name and website are unchanged.
+func TestCommitteeMembersEqualOrganizationID(t *testing.T) {
+	type org = struct {
+		ID      *string
+		Name    *string
+		Website *string
+	}
+	email := "member@example.com"
+	withID := func(id *string) *org {
+		return &org{ID: id, Name: sptr("Acme"), Website: sptr("http://acme.example")}
+	}
+
+	tests := []struct {
+		name      string
+		current   *org
+		update    *org
+		wantEqual bool
+	}{
+		{"same ID", withID(sptr("001000000000001AAA")), withID(sptr("001000000000001AAA")), true},
+		{"both without ID", withID(nil), withID(nil), true},
+		{"ID added", withID(nil), withID(sptr("001000000000001AAA")), false},
+		{"ID removed", withID(sptr("001000000000001AAA")), withID(nil), false},
+		{"ID changed", withID(sptr("001000000000001AAA")), withID(sptr("001000000000002AAA")), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			current := &committeeservice.CommitteeMemberFullWithReadonlyAttributes{Email: &email, Organization: tt.current}
+			update := &committeeservice.UpdateCommitteeMemberPayload{Email: email, Organization: tt.update}
+			if got := committeeMembersEqual(current, update); got != tt.wantEqual {
+				t.Errorf("committeeMembersEqual = %v, want %v", got, tt.wantEqual)
+			}
+		})
+	}
+}
+
 // TestPreserveUnsetVotingStatus verifies that the v1NoVotingStatus written to
 // v1 for a v2 member with no voting status is not synced back into v2 as a
 // real status when an unrelated v1 field changes (lfx-self-serve#4079).

@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"reflect"
+	"regexp"
 	"slices"
 	"testing"
 	"time"
@@ -154,6 +155,39 @@ func TestNewV1OrgMatch(t *testing.T) {
 	}
 	if got := newV1OrgMatch(&accountRow{ID: row.ID}, true); got != nil {
 		t.Fatalf("nameless row = %+v, want nil", got)
+	}
+}
+
+// TestDomainAliasTokenPatternMatchesParseDomainAliases verifies that the SQL
+// alias filter pattern selects exactly the alias values that
+// parseDomainAliases confirms, so a substring look-alike cannot crowd a real
+// alias match out of the capped candidate query. The pattern only uses
+// syntax that Go RE2 and Postgres ARE interpret the same way.
+func TestDomainAliasTokenPatternMatchesParseDomainAliases(t *testing.T) {
+	const domain = "acme.example"
+	re := regexp.MustCompile("(?i)" + domainAliasTokenPattern(domain))
+	aliases := []string{
+		"acme.example",
+		"ACME.Example",
+		"other.example, acme.example",
+		"other.example,acme.example\nthird.example",
+		"https://www.acme.example/about",
+		"https://http://acme.example",
+		"--- Merged Data: acme.example",
+		"notacme.example",
+		"acme.example.org",
+		"acme.examples",
+		"sub.acme.example",
+		"acme.example?ref=1",
+		"https://acme.example.evil.example",
+		"acme-example",
+		"",
+	}
+	for _, alias := range aliases {
+		want := slices.Contains(parseDomainAliases(alias), domain)
+		if got := re.MatchString(alias); got != want {
+			t.Errorf("alias %q: pattern match = %v, parseDomainAliases match = %v", alias, got, want)
+		}
 	}
 }
 

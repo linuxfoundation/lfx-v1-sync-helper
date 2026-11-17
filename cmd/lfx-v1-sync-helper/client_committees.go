@@ -361,7 +361,8 @@ func committeeMembersEqual(current *committeeservice.CommitteeMemberFullWithRead
 
 	// Compare organization information.
 	if current.Organization != nil && update.Organization != nil {
-		if stringPtrToString(current.Organization.Name) != stringPtrToString(update.Organization.Name) ||
+		if stringPtrToString(current.Organization.ID) != stringPtrToString(update.Organization.ID) ||
+			stringPtrToString(current.Organization.Name) != stringPtrToString(update.Organization.Name) ||
 			stringPtrToString(current.Organization.Website) != stringPtrToString(update.Organization.Website) {
 			return false
 		}

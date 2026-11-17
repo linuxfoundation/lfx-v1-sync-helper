@@ -16,6 +16,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -321,21 +322,31 @@ type accountRow struct {
 	IsDeleted   sql.NullBool   `bun:"isdeleted"`
 }
 
-// accountDomainCandidateLimit caps domain candidate queries. The SQL
-// prefilter matches domain aliases by substring, so callers confirm each
-// candidate in Go. Website and primary-domain matches are ordered first so
-// the cap can only drop alias-only candidates.
+// accountDomainCandidateLimit caps domain candidate queries. Website and
+// primary-domain matches are ordered first so the cap can only drop
+// alias-only candidates.
 const accountDomainCandidateLimit = 100
 
 // normalizedWebsiteSQL returns a SQL expression that normalizes a website
 // column the same way normalizeDomain does in Go: trim whitespace, lowercase,
-// strip an http(s):// scheme and a www. prefix, and drop any path component.
-// It must match at least every value normalizeDomain matches: a row the SQL
-// prefilter misses is never confirmed in Go, and the caller then creates a
-// duplicate org. The expression must not contain "?": bun binds every "?"
-// in a query fragment as a placeholder, so the regex uses {0,1} instead.
+// strip an https:// then an http:// prefix and a www. prefix, and drop any
+// path component. It must match at least every value normalizeDomain
+// matches: a row the SQL filter misses is never confirmed in Go, and the
+// caller then creates a duplicate org. The expression must not contain "?":
+// bun binds every "?" in a query fragment as a placeholder, so the regex uses
+// {0,1} instead. Postgres escape strings (E'...') have no \v escape (it is a
+// literal "v"), so the vertical tab is written \x0b.
 func normalizedWebsiteSQL(column string) string {
-	return fmt.Sprintf(`split_part(regexp_replace(lower(btrim(%s, E' \t\n\r\f\v')), '^(https{0,1}://){0,1}(www\.){0,1}', ''), '/', 1)`, column)
+	return fmt.Sprintf(`split_part(regexp_replace(lower(btrim(%s, E' \t\n\r\f\x0b')), '^(https://){0,1}(http://){0,1}(www\.){0,1}', ''), '/', 1)`, column)
+}
+
+// domainAliasTokenPattern returns a case-insensitive Postgres regex that
+// matches a domain_alias__c value containing a token that parseDomainAliases
+// normalizes to domain: separated by whitespace or commas, with optional
+// https://, http:// and www. prefixes and an optional path. It is bound as a
+// query argument because it contains "?".
+func domainAliasTokenPattern(domain string) string {
+	return `(^|[[:space:],])(https://)?(http://)?(www\.)?` + regexp.QuoteMeta(domain) + `(/[^[:space:],]*)?($|[[:space:],])`
 }
 
 // b2bAccountSelect returns a select over live salesforce_b2b."Account" rows.
@@ -411,8 +422,9 @@ func dbLookupB2CAccountBySFID(ctx context.Context, sfid string) (*accountRow, er
 // dbFindB2CAccountCandidatesByDomain returns live salesforce.account rows,
 // excluding excludeSFIDs, whose normalized website or primary domain
 // matches domain (which must already be normalized with normalizeDomain)
-// case-insensitively, or whose domain aliases contain domain as a
-// substring. Alias candidates must be confirmed by the caller.
+// case-insensitively, or whose domain aliases contain domain as a whole
+// alias token (see domainAliasTokenPattern). Callers still confirm each
+// candidate in Go.
 func dbFindB2CAccountCandidatesByDomain(ctx context.Context, domain string, excludeSFIDs []string) ([]accountRow, error) {
 	if domain == "" {
 		return nil, nil
@@ -426,7 +438,7 @@ func dbFindB2CAccountCandidatesByDomain(ctx context.Context, domain string, excl
 			return q.
 				Where(normalizedWebsiteSQL("a.website")+" = ?", domain).
 				WhereOr(normalizedWebsiteSQL("a.account_domain__c")+" = ?", domain).
-				WhereOr("strpos(lower(a.domain_alias__c), ?) > 0", domain)
+				WhereOr("(strpos(lower(a.domain_alias__c), ?) > 0 AND a.domain_alias__c ~* ?)", domain, domainAliasTokenPattern(domain))
 		})
 	if len(excludeSFIDs) > 0 {
 		q = q.Where("a.sfid NOT IN (?)", bun.List(excludeSFIDs))
