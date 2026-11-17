@@ -16,6 +16,7 @@ jobs:
     uses: linuxfoundation/lfx-public-workflows/.github/workflows/license-header-check.yml@main
     with:
       copyright_line: "Copyright The Linux Foundation and each contributor to LFX."
+      exclude_pattern: "gen"
       include_files: |
         [
           "*.tpl",

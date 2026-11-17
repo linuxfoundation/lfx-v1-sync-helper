@@ -1,6 +1,9 @@
 # Ignore local Kubernetes paths.
 ^(https?|nats)://[a-zA-Z0-9.-]+\.svc\.cluster\.local
 
+# Goa-generated OpenAPI server placeholders do not represent a running CI server.
+^https?://localhost(:[0-9]+)?(/|$)
+
 # Meltano Hub links referenced by this repo; external and intermittently unreachable from CI.
 https://hub\.meltano\.com/extractors/tap-postgres--meltanolabs
 https://hub\.meltano\.com/extractors/tap-dynamodb--meltanolabs

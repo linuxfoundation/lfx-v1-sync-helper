@@ -1,0 +1,15 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+{{- if .Values.mappingApi.enabled }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ .Chart.Name }}-mapping-api-heimdall
+  namespace: {{ .Release.Namespace }}
+spec:
+  forwardAuth:
+    address: {{ required "mappingApi.heimdallUrl is required" .Values.mappingApi.heimdallUrl | quote }}
+    authResponseHeaders:
+      - Authorization
+{{- end }}

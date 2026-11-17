@@ -1,0 +1,19 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+{{- if .Values.mappingApi.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}-mapping-api
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Chart.Name }}
+    component: mapping-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+{{- end }}
