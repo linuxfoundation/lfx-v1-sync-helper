@@ -25,7 +25,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,17 +34,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/vmihailenco/msgpack/v5"
 	"golang.org/x/oauth2"
-)
-
-const (
-	// Cache settings for organization lookups
-	orgCacheKeyPrefix         = "v1_org."
-	orgLockKeyPrefix          = "v1_org_lock."
-	orgCacheExpiry            = 30 * time.Minute // Treat org data as fresh for 30 minutes
-	orgCacheStaleWhileRefresh = 6 * time.Hour    // Use stale data up to 6 hours with background refresh
-	orgLockTimeout            = 10 * time.Second // Lock timeout for concurrent requests
-	orgLockRetryInterval      = 1 * time.Second  // Retry interval when lock exists
-	orgLockRetryAttempts      = 3                // Number of lock acquisition retry attempts
 )
 
 var (
@@ -66,10 +55,9 @@ type V1User struct {
 
 // V1Organization represents an organization from the LFX v1 Organization Service
 type V1Organization struct {
-	ID          string    `json:"ID"`
-	Name        string    `json:"Name"`
-	Domain      string    `json:"Domains"`
-	LastFetched time.Time `json:"_last_fetched"` // Internal field for cache management
+	ID     string `json:"ID"`
+	Name   string `json:"Name"`
+	Domain string `json:"Domains"`
 }
 
 // V1OrganizationResponse represents the API response from v1 Organization Service
@@ -315,46 +303,6 @@ func ResolveV1UserSFIDByEmail(ctx context.Context, email string) (string, error)
 	return dbResolveUserSFIDByEmail(ctx, email)
 }
 
-// getOrganizationFromV1API fetches organization information from the LFX v1 Organization Service
-func getV1OrganizationFromOrgSvc(ctx context.Context, sfid string) (*V1Organization, error) {
-	url := fmt.Sprintf("%sorganization-service/v1/orgs/%s", cfg.LFXAPIGateway.String(), sfid)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	resp, err := v1HTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("v1 Organization Service returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var orgResponse V1OrganizationResponse
-	if err := json.Unmarshal(body, &orgResponse); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal organization response: %w", err)
-	}
-
-	// Convert to internal organization format with cache timestamp
-	org := &V1Organization{
-		ID:          orgResponse.ID,
-		Name:        orgResponse.Name,
-		Domain:      orgResponse.Domain,
-		LastFetched: time.Now().UTC(),
-	}
-
-	return org, nil
-}
-
 // normalizeDomain strips protocol, www prefix, and any path component from a website
 // string and lowercases it, producing a bare hostname suitable for exact domain comparison.
 func normalizeDomain(website string) string {
@@ -408,10 +356,9 @@ func searchV1OrgsByWebsite(ctx context.Context, website string) (*V1Organization
 	for _, org := range listResp.Data {
 		if normalizeDomain(org.Domain) == searchDomain {
 			return &V1Organization{
-				ID:          org.ID,
-				Name:        org.Name,
-				Domain:      org.Domain,
-				LastFetched: time.Now().UTC(),
+				ID:     org.ID,
+				Name:   org.Name,
+				Domain: org.Domain,
 			}, nil
 		}
 	}
@@ -457,10 +404,9 @@ func createV1OrgInOrgSvc(ctx context.Context, name, website string) (*V1Organiza
 	}
 
 	return &V1Organization{
-		ID:          orgResp.ID,
-		Name:        orgResp.Name,
-		Domain:      orgResp.Domain,
-		LastFetched: time.Now().UTC(),
+		ID:     orgResp.ID,
+		Name:   orgResp.Name,
+		Domain: orgResp.Domain,
 	}, nil
 }
 
@@ -491,193 +437,51 @@ func resolveV1OrgID(ctx context.Context, name, website string) (string, error) {
 	return created.ID, nil
 }
 
-// getCachedV1Org retrieves an organization from the mappings cache
-func getCachedV1Org(ctx context.Context, sfid string) (*V1Organization, error) {
-	cacheKey := orgCacheKeyPrefix + sfid
+// lookupB2CAccountBySFIDFn is the salesforce.account lookup by sfid. Tests
+// may replace it to stub database lookups.
+var lookupB2CAccountBySFIDFn = dbLookupB2CAccountBySFID
 
-	entry, err := mappingStore.Get(ctx, cacheKey)
-	if err != nil {
-		return nil, err // No cached entry
-	}
+// v1OrgServiceRecordTypeIDs are the salesforce.account record types the v1
+// Organization Service returns (Company Account, Project Account). They are
+// its ORG_SERVICE_RECORD_TYPE_ID setting, the same in dev, staging, and prod.
+var v1OrgServiceRecordTypeIDs = []string{"01241000000bkf1AAA", "01241000001E1xlAAC"}
 
-	var org V1Organization
-	if err := json.Unmarshal(entry.Value, &org); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal cached organization: %w", err)
-	}
+// errV1OrgUnresolved marks an account the v1 Organization Service would not
+// return (missing, soft-deleted, or another record type) or that has an empty
+// name, as opposed to a database failure.
+var errV1OrgUnresolved = errors.New("v1 organization unresolved")
 
-	return &org, nil
-}
-
-// setCachedOrg stores an organization in the mappings cache
-func setCachedV1Org(ctx context.Context, sfid string, org *V1Organization) error {
-	cacheKey := orgCacheKeyPrefix + sfid
-
-	data, err := json.Marshal(org)
-	if err != nil {
-		return fmt.Errorf("failed to marshal organization for cache: %w", err)
-	}
-
-	_, err = mappingStore.Put(ctx, cacheKey, data)
-	return err
-}
-
-// acquireOrgLock attempts to acquire a lock for organization refresh operations with retries
-// Returns (acquired, waited) where waited indicates if any retry attempts were made
-func acquireV1OrgLock(ctx context.Context, sfid string, maxRetries int) (bool, bool) {
-	lockKey := orgLockKeyPrefix + sfid
-	var waited bool
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		lockValue := strconv.FormatInt(time.Now().Unix(), 10)
-
-		// Try to create the lock (will fail if it already exists)
-		_, err := mappingStore.Create(ctx, lockKey, []byte(lockValue))
-		if err == nil {
-			return true, waited // Successfully acquired lock
-		}
-
-		// Check if lock already exists and if it's stale
-		if entry, getErr := mappingStore.Get(ctx, lockKey); getErr == nil {
-			if lockTimestamp, parseErr := strconv.ParseInt(string(entry.Value), 10, 64); parseErr == nil {
-				lockTime := time.Unix(lockTimestamp, 0)
-				if time.Since(lockTime) > orgLockTimeout {
-					// Lock is stale, try to update it
-					if _, updateErr := mappingStore.Put(ctx, lockKey, []byte(lockValue)); updateErr == nil {
-						return true, waited
-					}
-				}
-			}
-		}
-
-		// If this isn't the last attempt, wait before retrying
-		if attempt < maxRetries {
-			waited = true
-			time.Sleep(orgLockRetryInterval)
-		}
-	}
-
-	return false, waited // Failed to acquire lock after all attempts
-}
-
-// releaseOrgLock releases an organization refresh lock
-func releaseV1OrgLock(ctx context.Context, sfid string) error {
-	lockKey := orgLockKeyPrefix + sfid
-	return mappingStore.Delete(ctx, lockKey)
-}
-
-// refreshOrgInBackground refreshes organization data in the background
-func refreshV1OrgInBackground(ctx context.Context, sfid string) {
-	go func() {
-		// Acquire lock for this refresh operation
-		acquired, _ := acquireV1OrgLock(ctx, sfid, 1)
-		if !acquired {
-			return // Another process is already refreshing
-		}
-
-		defer func() {
-			if releaseErr := releaseV1OrgLock(ctx, sfid); releaseErr != nil {
-				logger.With(errKey, releaseErr, "org_sfid", sfid).WarnContext(ctx, "failed to release organization cache lock")
-			}
-		}()
-
-		// Fetch fresh organization data
-		org, err := getV1OrganizationFromOrgSvc(ctx, sfid)
-		if err != nil {
-			logger.With(errKey, err, "org_sfid", sfid).WarnContext(ctx, "background organization refresh failed")
-			return
-		}
-
-		// Update cache
-		if err := setCachedV1Org(ctx, sfid, org); err != nil {
-			logger.With(errKey, err, "org_sfid", sfid).WarnContext(ctx, "failed to update organization cache after refresh")
-		} else {
-			logger.With("org_sfid", sfid, "name", org.Name).DebugContext(ctx, "organization cache refreshed in background")
-		}
-	}()
-}
-
-// lookupOrg retrieves organization information with caching and refresh logic
+// lookupV1Org resolves an account SFID to the organization the v1
+// Organization Service returned from GET /v1/orgs/{sfid}, reading the same
+// salesforce.account row from the v1 platform database. That endpoint
+// matched the sfid exactly, only rows whose isdeleted is false and whose
+// record type is in v1OrgServiceRecordTypeIDs, and returned
+// account_domain__c as Domains. A missing account and an account with an
+// empty name are errors wrapping errV1OrgUnresolved.
 func lookupV1Org(ctx context.Context, sfid string) (*V1Organization, error) {
 	if sfid == "" {
 		return nil, fmt.Errorf("organization SFID cannot be empty")
 	}
 
-	// Try to get from cache first
-	cachedOrg, err := getCachedV1Org(ctx, sfid)
-	if err == nil {
-		age := time.Since(cachedOrg.LastFetched)
-		// See if cache is still within the "stale" window.
-		if age <= orgCacheStaleWhileRefresh {
-			if age > orgCacheExpiry {
-				// Cache is stale: refresh in background.
-				refreshV1OrgInBackground(ctx, sfid)
-			}
-			return cachedOrg, nil
-		}
-		// Fall through if cache is *too* old (past "stale" window).
-	}
-
-	// Try to acquire lock.
-	acquired, waited := acquireV1OrgLock(ctx, sfid, orgLockRetryAttempts)
-
-	if acquired {
-		// We got the lock, set up defer to release it
-		defer func() {
-			if releaseErr := releaseV1OrgLock(ctx, sfid); releaseErr != nil {
-				logger.With(errKey, releaseErr, "org_sfid", sfid).WarnContext(ctx, "failed to release organization lookup lock")
-			}
-		}()
-	}
-
-	// If we waited, check cache again - another process might have populated it
-	if waited {
-		if freshOrg, cacheErr := getCachedV1Org(ctx, sfid); cacheErr == nil {
-			if time.Since(freshOrg.LastFetched) <= orgCacheExpiry {
-				// Cache is now fresh, return it
-				return freshOrg, nil
-			}
-		}
-		// Fall through to fetch fresh data.
-	}
-
-	// Fetch from API
-	org, err := getV1OrganizationFromOrgSvc(ctx, sfid)
+	row, err := lookupB2CAccountBySFIDFn(ctx, sfid)
 	if err != nil {
-		// Cache the error state to avoid repeated failed lookups
-		errorOrg := &V1Organization{
-			ID:          sfid,
-			Name:        "", // Empty name indicates error state
-			Domain:      "",
-			LastFetched: time.Now().UTC(),
-		}
-		if cacheErr := setCachedV1Org(ctx, sfid, errorOrg); cacheErr != nil {
-			logger.With(errKey, cacheErr, "org_sfid", sfid).WarnContext(ctx, "failed to cache error state for organization")
-		}
 		return nil, err
 	}
+	if row == nil || !row.IsDeleted.Valid || row.IsDeleted.Bool ||
+		!slices.Contains(v1OrgServiceRecordTypeIDs, row.RecordTypeID.String) {
+		return nil, fmt.Errorf("%w: %s not found", errV1OrgUnresolved, sfid)
+	}
 
-	// Validate required fields
-	if org.Name == "" {
+	if row.Name.String == "" {
 		logger.With("org_sfid", sfid).WarnContext(ctx, "v1 organization has empty name")
-		// Cache the invalid state
-		invalidOrg := &V1Organization{
-			ID:          sfid,
-			Name:        "", // Empty name indicates invalid state
-			Domain:      "",
-			LastFetched: time.Now().UTC(),
-		}
-		if cacheErr := setCachedV1Org(ctx, sfid, invalidOrg); cacheErr != nil {
-			logger.With(errKey, cacheErr, "org_sfid", sfid).WarnContext(ctx, "failed to cache invalid state for organization")
-		}
-		return nil, fmt.Errorf("organization %s has invalid data (empty name)", sfid)
+		return nil, fmt.Errorf("%w: %s has invalid data (empty name)", errV1OrgUnresolved, sfid)
 	}
 
-	// Cache the valid organization data
-	if err := setCachedV1Org(ctx, sfid, org); err != nil {
-		logger.With(errKey, err, "org_sfid", sfid).WarnContext(ctx, "failed to cache organization data")
-	}
-
-	return org, nil
+	return &V1Organization{
+		ID:     row.ID,
+		Name:   row.Name.String,
+		Domain: row.Domain.String,
+	}, nil
 }
 
 // projectServiceCommitteeCreate is the request body for POST /v2/projects/{projectId}/committees.

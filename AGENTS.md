@@ -152,6 +152,15 @@ Boot ordering (`main.go`): NATS + KV bucket handles → a KV-backed `mappingStor
 
 **Chart wiring.** The Postgres cluster is provisioned by `charts/lfx-v1-sync-helper/templates/database.yaml`, selected via `.Values.database.mode` (`external` | `database` | `cluster+database`). The app deployment forwards CNPG operator-managed `<clusterName>-app` Secret keys (or external Secret keys, or a single-key `V1_MAPPINGS_DATABASE_URL`) as `V1_MAPPINGS_*` env vars (distinct from `V1_DB_*`, which addresses the read-only Salesforce replica) and the service composes the libpq DSN in-process via `Config.ResolveV1MappingsDatabaseURL` — never as a literal env-var value, to avoid leaking the password through `kubectl describe pod`. When `database.mode=external` with no `secretName`, the deployment injects `V1_MAPPINGS_STORE_MODE=kv` automatically so a chart install without Postgres wiring still boots. Setting `.Values.app.environment.V1_MAPPINGS_STORE_MODE.value` overrides that safety fallback.
 
+#### v1 Organization Lookup by Account SFID (`lfx_v1_client.go`, `v1db.go`) — lfx-self-serve-ops#1513
+
+- `lookupV1Org` (committee member create/update mapping and Auth0 profile sync) reads `salesforce.account` from the v1 platform Postgres replica (`V1_DB_*`) via `dbLookupB2CAccountBySFID`; there is no org cache. It keeps the results of the Organization Service `GET /v1/orgs/{sfid}` it replaced: an exact `sfid` match, found only when `isdeleted` is false and the record type is in `v1OrgServiceRecordTypeIDs`, returning `name` and `account_domain__c` as `Domain`.
+- `v1OrgServiceRecordTypeIDs` (Company Account, Project Account) is the Organization Service's `ORG_SERVICE_RECORD_TYPE_ID` Lambda setting, identical in dev, staging, and prod. If that setting changes, change the constant with it.
+- A missing, soft-deleted, or other-record-type account and an empty name return an error wrapping `errV1OrgUnresolved`. The committee member mappers leave `organization` unset on any error. Auth0 profile sync treats `errV1OrgUnresolved` as no organization (the existing Auth0 `organization` is left untouched and the other fields sync) and fails only on a database error.
+- Committee member `organization` is the raw `account__c` as `id`, the account name, and a website from `account_domain__c` only. The individual placeholder accounts resolve like any other account; committee-service clears an `id` that does not resolve to a `b2b_org` (on create, and on update when the `id` changes) and keeps the name and website.
+- v2→v1 org resolution (`resolveV1OrgID`) still uses the Organization Service: `GET /v1/orgs/search`, then `POST /v1/orgs` when nothing matches.
+- `v1_org.*` and `v1_org_lock.*` rows left in the mapping store are no longer read or written.
+
 #### Committee create recovery — lfx-self-serve-ops#1482
 
 - `committee_create_recovery.go` fences each new v1 POST with a versioned `create_attempt.committee.<uid>` record in the online `MappingStore`. Retain payload/creator hashes, not raw payloads or principals. Never expire/reset an unresolved attempt automatically or repeat POST after an ambiguous response.

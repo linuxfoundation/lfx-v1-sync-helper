@@ -336,7 +336,7 @@ since later structured snapshots overwrite v1 role dates.
 | `AUTH0_CLIENT_ID`           | Yes      | Auth0 client ID for v1 API authentication                                         |
 | `AUTH0_PRIVATE_KEY`         | Yes      | Auth0 private key (PEM format) for v1 API                                         |
 | `LFX_API_GW`                | No       | LFX API Gateway URL (default: `https://api-gw.dev.platform.linuxfoundation.org/`) |
-| `DATABASE_URL`              | Yes*     | PostgreSQL DSN for the v1 platform database (live user lookups). *Alternatively set the discrete `V1_DB_*` variables below. |
+| `DATABASE_URL`              | Yes*     | PostgreSQL DSN for the v1 platform database (live user and organization lookups). *Alternatively set the discrete `V1_DB_*` variables below. |
 | `V1_DB_HOST`                | Yes*     | v1 platform database host (used when `DATABASE_URL` is unset)                     |
 | `V1_DB_PORT`                | No       | v1 platform database port (default: `5432`)                                       |
 | `V1_DB_NAME`                | No       | v1 platform database name (default: `sfdc`)                                       |

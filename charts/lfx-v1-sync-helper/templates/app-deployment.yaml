@@ -75,7 +75,7 @@ spec:
               secretKeyRef:
                 name: {{ .Values.app.auth0.secret.name }}
                 key: {{ .Values.app.auth0.secret.privateKeyKey }}
-          # v1 platform database connection for live user lookups
+          # v1 platform database connection for live user and organization lookups
           - name: V1_DB_HOST
             valueFrom:
               secretKeyRef:
