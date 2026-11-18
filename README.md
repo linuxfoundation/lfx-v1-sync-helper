@@ -146,6 +146,16 @@ Payload: <email>
 - If a username/email does not resolve to a live (non-deleted) record, the lookup returns an empty string (miss)
 - Callers send raw UTF-8 usernames and emails; the service normalizes (trim, lowercase, NFC) internally
 
+## Legacy mapping-store audit
+
+[`scripts/audit_v1_mappings.py`](scripts/audit_v1_mappings.py) compares the
+retained NATS `v1-mappings` baseline against Postgres without writing either
+system. It distinguishes missing mappings from expected Postgres-only
+tombstones and other post-cutover divergence. See the
+[audit runbook](scripts/audit-v1-mappings.md) for credentials, protected output,
+classification policies, tests, and limitations. Do not rerun the migration
+backfill to reconcile a stale NATS bucket with the active Postgres store.
+
 ## Backfill / Reindex
 
 **ACS grant backfill (`--backfill-acs-project` / `--backfill-acs-org`):**
