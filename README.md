@@ -42,6 +42,13 @@ Kubernetes deployment manifests for the custom app service and WAL listener comp
 - [Adding a new DynamoDB table](./research/adding-dynamodb-table.md) — step-by-step checklist for onboarding a new DynamoDB table into the Meltano pipeline and stream consumer, with a worked example.
 - [Updating the Meltano catalog ConfigMap](./research/updating-meltano-catalog.md) — how to regenerate and apply the schema cache when tables or columns change.
 
+## Mapping HTTP API
+
+The optional Goa-based `v1-mapping-api` app provides team-authorized project and
+committee V2 → V1 lookups over HTTP. See the [API contract and deployment
+handoff](docs/mapping-api-contract.md) for request/response fields, error statuses,
+authorization, and per-environment configuration.
+
 ## NATS API
 
 The v1-sync-helper service provides a NATS request/reply function for querying v1-v2 ID mappings.
