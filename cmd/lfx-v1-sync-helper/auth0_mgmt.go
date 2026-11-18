@@ -291,16 +291,17 @@ func syncProfileToAuth0(ctx context.Context, auth0UserID string, primaryUser *ma
 		}
 	}
 
-	// Resolve organization name from v1 accountid. A lookup failure is surfaced
-	// to the caller so backfill runs can log it explicitly; the caller treats
-	// it as non-retryable and ACKs the message so the backfill keeps moving.
+	// Resolve organization name from v1 accountid. An unresolvable account
+	// (placeholder, missing, or ambiguous soft-deleted) leaves orgName empty,
+	// so the existing Auth0 organization is left untouched while the other
+	// profile fields still sync. A database failure is surfaced to the caller.
 	var orgName string
 	if accountID, ok := v1Data["accountid"].(string); ok && accountID != "" {
-		org, orgErr := lookupV1Org(ctx, accountID)
+		org, orgErr := resolveV1OrgBySFIDFn(ctx, accountID)
 		if orgErr != nil {
 			return false, fmt.Errorf("failed to resolve v1 org %s: %w", accountID, orgErr)
 		}
-		if org != nil && org.Name != "" {
+		if org != nil {
 			orgName = org.Name
 		}
 	}

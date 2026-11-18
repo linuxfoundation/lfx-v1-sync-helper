@@ -73,6 +73,8 @@ func setupSyncTest(t *testing.T, status int, response string) *syncTestHarness {
 	origCreatePayload := checkCommitteeCreatePayload
 	origFetchMember, origMemberData := fetchMemberForCreate, readMemberCreateData
 	origMemberCleanup := readMemberCleanupState
+	origLookupAccount := lookupLiveV1B2CAccountSFIDFn
+	lookupLiveV1B2CAccountSFIDFn = func(_ context.Context, accountSFID string) (string, error) { return accountSFID, nil }
 	readCommitteeCreateState = func(_ context.Context, _, name string) (committeeCreateState, error) {
 		return committeeCreateState{Now: time.Now(), Primary: true, NormalizedName: strings.ToLower(name)}, nil
 	}
@@ -95,6 +97,7 @@ func setupSyncTest(t *testing.T, status int, response string) *syncTestHarness {
 		checkCommitteeCreatePayload = origCreatePayload
 		fetchMemberForCreate, readMemberCreateData = origFetchMember, origMemberData
 		readMemberCleanupState = origMemberCleanup
+		lookupLiveV1B2CAccountSFIDFn = origLookupAccount
 		mappingGetInitialBackoff, mappingPutInitialBackoff = origGetBackoff, origPutBackoff
 	})
 	return h

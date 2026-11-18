@@ -6,6 +6,9 @@ package main
 import (
 	"database/sql"
 	"testing"
+
+	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/pgdialect"
 )
 
 // boolPtr and stringPtr help build sql.NullBool/sql.NullString literals
@@ -211,5 +214,23 @@ func TestCountQualifyingAlternateEmails(t *testing.T) {
 				t.Errorf("sawPrimary = %v, want %v", sawPrimary, tt.wantSawPrimary)
 			}
 		})
+	}
+}
+
+// TestNormalizedWebsiteSQLBindsOnlyItsPlaceholder guards against "?" in the
+// normalization expression: bun binds every "?" in a fragment, so a regex
+// quantifier there would swallow the domain argument and break the query.
+func TestNormalizedWebsiteSQLBindsOnlyItsPlaceholder(t *testing.T) {
+	sqlDB, err := sql.Open("pgx", "postgres://localhost/unused")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sqlDB.Close() }()
+	db := bun.NewDB(sqlDB, pgdialect.New())
+
+	got := db.NewSelect().ColumnExpr(normalizedWebsiteSQL("a.website")+" = ?", "acme.io").String()
+	want := `SELECT split_part(regexp_replace(lower(btrim(a.website, E' \t\n\r\f\x0b')), '^(https://){0,1}(http://){0,1}(www\.){0,1}', ''), '/', 1) = 'acme.io'`
+	if got != want {
+		t.Errorf("query =\n%s\nwant\n%s", got, want)
 	}
 }

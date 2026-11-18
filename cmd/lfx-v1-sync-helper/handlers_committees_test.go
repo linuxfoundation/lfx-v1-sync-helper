@@ -5,8 +5,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"testing"
 
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
@@ -595,6 +597,89 @@ func TestMapV1DataToCommitteeMemberVotingNone(t *testing.T) {
 	}
 }
 
+// TestMapV1DataToCommitteeMemberOrganization verifies how a resolved v1
+// organization maps onto both member payloads: only a B2B match carries the
+// organization ID, a B2C match carries name and website only, and an
+// unresolved or failed lookup leaves Organization nil.
+func TestMapV1DataToCommitteeMemberOrganization(t *testing.T) {
+	origLogger, origResolve := logger, resolveV1OrgBySFIDFn
+	defer func() { logger, resolveV1OrgBySFIDFn = origLogger, origResolve }()
+	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	deref := func(s *string) string {
+		if s == nil {
+			return ""
+		}
+		return *s
+	}
+
+	const accountSFID = "001000000000001AAA"
+	tests := []struct {
+		name        string
+		org         *v1OrgMatch
+		err         error
+		wantOrg     bool
+		wantID      string
+		wantWebsite string
+	}{
+		{"b2b match", &v1OrgMatch{B2BOrgID: accountSFID, Name: "Acme", Domain: "acme.example"}, nil, true, accountSFID, "http://acme.example"},
+		{"b2c match", &v1OrgMatch{Name: "Acme", Domain: "acme.example"}, nil, true, "", "http://acme.example"},
+		{"b2c match without domain", &v1OrgMatch{Name: "Acme"}, nil, true, "", ""},
+		{"no org", nil, nil, false, "", ""},
+		{"lookup error", nil, errors.New("db down"), false, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotSFIDs []string
+			resolveV1OrgBySFIDFn = func(_ context.Context, sfid string) (*v1OrgMatch, error) {
+				gotSFIDs = append(gotSFIDs, sfid)
+				return tt.org, tt.err
+			}
+			v1Data := map[string]any{
+				"contactemail__c": "member@example.com",
+				"account__c":      accountSFID,
+			}
+
+			create, err := mapV1DataToCommitteeMemberCreatePayload(ctx, "committee-uid", v1Data)
+			if err != nil {
+				t.Fatalf("create mapper: %v", err)
+			}
+			update, err := mapV1DataToCommitteeMemberUpdatePayload(ctx, "committee-uid", "member-uid", v1Data)
+			if err != nil {
+				t.Fatalf("update mapper: %v", err)
+			}
+			if !reflect.DeepEqual(gotSFIDs, []string{accountSFID, accountSFID}) {
+				t.Errorf("resolver called with %v, want account__c once per mapper", gotSFIDs)
+			}
+
+			for label, org := range map[string]*struct {
+				ID      *string
+				Name    *string
+				Website *string
+			}{"create": create.Organization, "update": update.Organization} {
+				if !tt.wantOrg {
+					if org != nil {
+						t.Errorf("%s: expected nil Organization, got %+v", label, org)
+					}
+					continue
+				}
+				if org == nil {
+					t.Fatalf("%s: expected Organization, got nil", label)
+				}
+				if org.Name == nil || *org.Name != tt.org.Name {
+					t.Errorf("%s: Name = %v, want %q", label, org.Name, tt.org.Name)
+				}
+				if got := deref(org.ID); got != tt.wantID {
+					t.Errorf("%s: ID = %q, want %q", label, got, tt.wantID)
+				}
+				if got := deref(org.Website); got != tt.wantWebsite {
+					t.Errorf("%s: Website = %q, want %q", label, got, tt.wantWebsite)
+				}
+			}
+		})
+	}
+}
+
 // TestCommitteeMembersEqualVotingNone verifies that committeeMembersEqual treats
 // a nil Voting, an empty status and "None" as the same "no voting status" value,
 // while a real status against nil is still a change.
@@ -631,6 +716,43 @@ func TestCommitteeMembersEqualVotingNone(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := committeeMembersEqual(current(tt.current), update(tt.update)); got != tt.wantEqual {
+				t.Errorf("committeeMembersEqual = %v, want %v", got, tt.wantEqual)
+			}
+		})
+	}
+}
+
+// TestCommitteeMembersEqualOrganizationID verifies that an organization ID
+// change alone (added, removed or replaced) is detected, so a resync can
+// apply it even when name and website are unchanged.
+func TestCommitteeMembersEqualOrganizationID(t *testing.T) {
+	type org = struct {
+		ID      *string
+		Name    *string
+		Website *string
+	}
+	email := "member@example.com"
+	withID := func(id *string) *org {
+		return &org{ID: id, Name: sptr("Acme"), Website: sptr("http://acme.example")}
+	}
+
+	tests := []struct {
+		name      string
+		current   *org
+		update    *org
+		wantEqual bool
+	}{
+		{"same ID", withID(sptr("001000000000001AAA")), withID(sptr("001000000000001AAA")), true},
+		{"both without ID", withID(nil), withID(nil), true},
+		{"ID added", withID(nil), withID(sptr("001000000000001AAA")), false},
+		{"ID removed", withID(sptr("001000000000001AAA")), withID(nil), false},
+		{"ID changed", withID(sptr("001000000000001AAA")), withID(sptr("001000000000002AAA")), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			current := &committeeservice.CommitteeMemberFullWithReadonlyAttributes{Email: &email, Organization: tt.current}
+			update := &committeeservice.UpdateCommitteeMemberPayload{Email: email, Organization: tt.update}
+			if got := committeeMembersEqual(current, update); got != tt.wantEqual {
 				t.Errorf("committeeMembersEqual = %v, want %v", got, tt.wantEqual)
 			}
 		})

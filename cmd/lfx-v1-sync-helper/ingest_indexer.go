@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/linuxfoundation/lfx-v1-sync-helper/internal/sfid"
@@ -740,6 +741,7 @@ func roleDateField(role map[string]any, key string) (date string, ok bool) {
 // Current V2 fields replace stale events. Durable attempts and deletion fences
 // prevent concurrent/replayed POSTs and retain known IDs for retryable cleanup.
 func syncCommitteeMemberCreateToV1(ctx context.Context, memberUID, committeeUID, projectSFID, committeeSFID string, _ map[string]any) error {
+	ctx = withOrgResolutionMemo(ctx)
 	log := logger.With("member_uid", memberUID, "committee_uid", committeeUID, "project_sfid", projectSFID, "committee_sfid", committeeSFID)
 	if result, _, err := readMemberCreateResult(ctx, memberUID); err == nil {
 		if result.ProjectSFID != projectSFID || result.CommitteeSFID != committeeSFID || result.CommitteeUID != committeeUID {
@@ -1116,11 +1118,14 @@ func syncCommitteeMemberDeleteToV1(ctx context.Context, memberUID, projectSFID, 
 	return nil
 }
 
-// resolveOrgIDFromEventData extracts and resolves an organization SFID from committee member event data.
-// Returns empty string (no error) if no organization data is present or fields are all empty.
-// Only 15- or 18-char Salesforce ID-shaped organization.id values are sent to v1 as
-// OrganizationID; any other organization.id value is ignored so sync can resolve from
-// name/website or proceed without org.
+// resolveOrgIDFromEventData extracts and resolves a v1 B2C account SFID from
+// committee member event data. Returns empty string (no error) if no
+// organization data is present or fields are all empty. A 15- or 18-char
+// Salesforce ID-shaped organization.id is sent to v1 as OrganizationID only
+// when it is a live salesforce.account row; any other organization.id value
+// is ignored so sync can resolve from name/website or proceed without org.
+// Within a context from withOrgResolutionMemo, the first successful result
+// for the same organization fields is reused.
 func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string, error) {
 	org, ok := data["organization"].(map[string]any)
 	if !ok {
@@ -1129,6 +1134,43 @@ func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string
 	orgID, _ := org["id"].(string)
 	orgName, _ := org["name"].(string)
 	orgWebsite, _ := org["website"].(string)
+	memo, _ := ctx.Value(orgResolutionMemoKey{}).(*orgResolutionMemo)
+	if memo == nil {
+		return resolveOrgID(ctx, orgID, orgName, orgWebsite)
+	}
+	key := orgResolutionKey{id: orgID, name: orgName, website: orgWebsite}
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	if accountSFID, ok := memo.ids[key]; ok {
+		return accountSFID, nil
+	}
+	accountSFID, err := resolveOrgID(ctx, orgID, orgName, orgWebsite)
+	if err == nil {
+		memo.ids[key] = accountSFID
+	}
+	return accountSFID, err
+}
+
+type orgResolutionMemoKey struct{}
+
+type orgResolutionKey struct{ id, name, website string }
+
+type orgResolutionMemo struct {
+	mu  sync.Mutex
+	ids map[orgResolutionKey]string
+}
+
+// withOrgResolutionMemo returns a context in which resolveOrgIDFromEventData
+// resolves each organization once. A sync operation resolves the same member
+// organization several times (create payload, fingerprints, recovery PATCH),
+// and a lookup that misses an org this operation just created through the
+// Organization Service, because the v1 replica has not caught up, would
+// create another one.
+func withOrgResolutionMemo(ctx context.Context) context.Context {
+	return context.WithValue(ctx, orgResolutionMemoKey{}, &orgResolutionMemo{ids: map[orgResolutionKey]string{}})
+}
+
+func resolveOrgID(ctx context.Context, orgID, orgName, orgWebsite string) (string, error) {
 	orgID = strings.TrimSpace(orgID)
 	if orgID != "" && !sfid.IsValid(orgID) {
 		logger.With("organization_id", orgID, "organization_name", orgName, "organization_website", orgWebsite).
@@ -1136,7 +1178,15 @@ func resolveOrgIDFromEventData(ctx context.Context, data map[string]any) (string
 		orgID = ""
 	}
 	if orgID != "" {
-		return orgID, nil
+		accountSFID, err := lookupLiveV1B2CAccountSFIDFn(ctx, orgID)
+		if err != nil {
+			return "", fmt.Errorf("failed to look up v1 account %s: %w", orgID, err)
+		}
+		if accountSFID != "" {
+			return accountSFID, nil
+		}
+		logger.With("organization_id", orgID, "organization_name", orgName, "organization_website", orgWebsite).
+			InfoContext(ctx, "organization id is not a live v1 account, resolving from name/website")
 	}
 	return resolveV1OrgID(ctx, orgName, orgWebsite)
 }
