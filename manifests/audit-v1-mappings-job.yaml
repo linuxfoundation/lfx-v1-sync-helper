@@ -1,0 +1,208 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+#
+# Read-only mapping audit (lfx-self-serve-ops#1649).
+# SHIPS SUSPENDED. No scan starts until explicitly unsuspended.
+#
+# Prerequisites, report retrieval, reruns and mandatory cleanup:
+#   scripts/audit-v1-mappings.md ("Run inside Kubernetes")
+#
+# Required inputs in namespace v1-sync-helper:
+# - ConfigMap audit-v1-mappings-script-92b19af: audit_v1_mappings.py from
+#   merged PR #224. The checksum below rejects changed/unexpected code.
+# - Secret audit-v1-mappings-readonly: host, port, username, password,
+#   dbname for a SELECT-only account on the target v1_mappings database.
+#   DO NOT substitute the application Secret without explicit approval.
+# - ConfigMap audit-v1-mappings-db-ca: ca.crt containing the trusted
+#   database CA bundle. TLS hostname/certificate verification is required.
+# - Set AUDIT_ENVIRONMENT (dev or prod) and the target environment's actual
+#   AUDIT_CUTOVER_AT. Verify all endpoints and the kubectl context agree.
+# - Set a fresh AUDIT_RUN_ID for each run, matching the runbook variables.
+#
+# The 50Gi PVC holds SQLite scratch data and retained reports. Verify that
+# the target storage class is encrypted. This is conservative headroom, not
+# a measured sizing requirement. Review size before applying. No TTL/owner
+# reference deletes evidence before retrieval.
+# The PVC incurs storage cost after provisioning until explicitly deleted.
+# Exit 1 means a completed audit with findings; Kubernetes marks that Failed.
+# Never rerun automatically: backoffLimit=0, one worker, one completion.
+# Review the 48h overall budget before launch. Deadline expiry makes the run
+# incomplete; it stops the pod but does NOT delete the PVC or retained data.
+#
+# Apply (still suspended):
+#   kubectl --context "$KUBE_CONTEXT" -n v1-sync-helper apply -f manifests/audit-v1-mappings-job.yaml
+# Start only after prerequisites and endpoint identity have been verified:
+#   kubectl --context "$KUBE_CONTEXT" -n v1-sync-helper patch job \
+#     audit-v1-mappings --type merge -p '{"spec":{"suspend":false}}'
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: audit-v1-mappings
+  namespace: v1-sync-helper
+  labels:
+    app.kubernetes.io/name: lfx-v1-sync-helper
+    app.kubernetes.io/component: mapping-audit
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # Select/verify an encrypted disk-backed class in the target environment.
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: audit-v1-mappings
+  namespace: v1-sync-helper
+  labels:
+    app.kubernetes.io/name: lfx-v1-sync-helper
+    app.kubernetes.io/component: mapping-audit
+spec:
+  suspend: true
+  backoffLimit: 0
+  # Generous default for large, single-worker scans; size for the actual run.
+  activeDeadlineSeconds: 172800
+  parallelism: 1
+  completions: 1
+  template:
+    metadata:
+      labels:
+        app: lfx-v1-sync-helper
+        component: mapping-audit
+        app.kubernetes.io/name: lfx-v1-sync-helper
+        app.kubernetes.io/component: mapping-audit
+    spec:
+      restartPolicy: Never
+      # The audit needs no Kubernetes API or AWS workload credentials.
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: audit
+          # Public multi-arch Python 3.12 + uv image, pinned by index digest.
+          image: ghcr.io/astral-sh/uv@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              umask 077
+              case "${AUDIT_RUN_ID:-}" in
+                ''|*[!A-Za-z0-9_-]*)
+                  echo 'AUDIT_RUN_ID must contain only letters, digits, underscores or hyphens' >&2
+                  exit 2
+                  ;;
+              esac
+              if ! printf '%s  %s\n' "$AUDIT_SCRIPT_SHA256" /opt/audit/audit_v1_mappings.py |
+                sha256sum --check --status; then
+                echo 'Audit script checksum mismatch; refusing to run' >&2
+                exit 2
+              fi
+              exec uv run --no-project --script /opt/audit/audit_v1_mappings.py \
+                --environment "$AUDIT_ENVIRONMENT" \
+                --cutover-at "$AUDIT_CUTOVER_AT" \
+                --workers 1 \
+                --output-dir "/audit/$AUDIT_RUN_ID"
+          env:
+            - name: AUDIT_ENVIRONMENT
+              value: "REPLACE_WITH_DEV_OR_PROD"
+            - name: AUDIT_RUN_ID
+              value: "run1"
+            - name: AUDIT_CUTOVER_AT
+              value: "REPLACE_WITH_POSTGRES_ONLY_CUTOVER_TIMESTAMP"
+            - name: AUDIT_SCRIPT_SHA256
+              value: "76dd34a77544c1416a3fc64994b89e8438d1471cd6e58e133f830fc70871ee0d"
+            - name: NATS_URL
+              value: "nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
+            # libpq resolves PG* defaults from the environment, so credentials
+            # never need to be assembled into a URL or command-line argument.
+            - name: V1_MAPPINGS_DATABASE_URL
+              value: "sslmode=verify-full sslrootcert=/etc/audit-db-ca/ca.crt"
+            - name: PGHOST
+              valueFrom:
+                secretKeyRef:
+                  name: audit-v1-mappings-readonly
+                  key: host
+            - name: PGPORT
+              valueFrom:
+                secretKeyRef:
+                  name: audit-v1-mappings-readonly
+                  key: port
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: audit-v1-mappings-readonly
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: audit-v1-mappings-readonly
+                  key: password
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: audit-v1-mappings-readonly
+                  key: dbname
+            - name: HOME
+              value: /tmp
+            - name: TMPDIR
+              value: /tmp
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: UV_CACHE_DIR
+              value: /tmp/uv-cache
+            - name: UV_PYTHON_DOWNLOADS
+              value: never
+            - name: UV_NO_PROGRESS
+              value: "1"
+            - name: UV_LINK_MODE
+              value: copy
+          volumeMounts:
+            - name: script
+              mountPath: /opt/audit
+              readOnly: true
+            - name: database-ca
+              mountPath: /etc/audit-db-ca
+              readOnly: true
+            - name: data
+              mountPath: /audit
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "512Mi"
+              ephemeral-storage: "128Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+              ephemeral-storage: "2Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: script
+          configMap:
+            name: audit-v1-mappings-script-92b19af
+            defaultMode: 0444
+        - name: database-ca
+          configMap:
+            name: audit-v1-mappings-db-ca
+            defaultMode: 0444
+        - name: data
+          persistentVolumeClaim:
+            claimName: audit-v1-mappings
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
