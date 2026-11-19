@@ -184,7 +184,7 @@ mappingApi:
   jwksUrl: http://lfx-platform-heimdall.lfx.svc.cluster.local:4457/.well-known/jwks
   heimdallUrl: http://lfx-platform-heimdall.lfx.svc.cluster.local:4456
   # Bare OpenFGA team ID (not the team: prefix). Required when enabled.
-  accessTeamId: v1-maping-callers
+  accessTeamId: v1-mapping-callers
   natsUrl: nats://lfx-platform-nats.lfx.svc.cluster.local:4222
   resources:
     requests:

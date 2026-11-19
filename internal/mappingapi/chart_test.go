@@ -126,7 +126,7 @@ func TestChartMappingAPIDefaultAccessTeam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render: %v: %s", err, output)
 	}
-	if !bytes.Contains(output, []byte(`object: "team:v1-maping-callers"`)) {
+	if !bytes.Contains(output, []byte(`object: "team:v1-mapping-callers"`)) {
 		t.Fatal("RuleSet must use the configured default access team")
 	}
 }

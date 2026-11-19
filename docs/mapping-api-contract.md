@@ -110,7 +110,7 @@ environment's OpenFGA store, then configure the following in the owning
 ```yaml
 mappingApi:
   enabled: true
-  accessTeamId: v1-maping-callers
+  accessTeamId: v1-mapping-callers
   audience: lfx-v1-mapping-api
   issuer: heimdall
   jwksUrl: http://lfx-platform-heimdall.lfx.svc.cluster.local:4457/.well-known/jwks
