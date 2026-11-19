@@ -13,7 +13,7 @@ This Helm chart deploys the LFX v1 Sync Helper service, which monitors NATS KV s
 
 The optional `mappingApi` component deploys a separate read-only Goa API,
 ClusterIP Service, mandatory team-membership Heimdall RuleSet, and authenticated
-HTTPRoute. It defaults off, uses the `v1-maping-callers` access team by default,
+HTTPRoute. It defaults off, uses the `v1-mapping-callers` access team by default,
 and requires a configured hostname and provisioned team memberships.
 See [the mapping API contract](../../docs/mapping-api-contract.md) for all
 configuration and the dev/staging/production rollout handoff.
