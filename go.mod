@@ -21,7 +21,7 @@ require (
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/linuxfoundation/lfx-v2-committee-service v0.4.26
 	github.com/linuxfoundation/lfx-v2-project-service v0.10.4
-	github.com/nats-io/nats-server/v2 v2.12.6
+	github.com/nats-io/nats-server/v2 v2.12.12
 	github.com/nats-io/nats.go v1.52.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/uptrace/bun v1.2.18
