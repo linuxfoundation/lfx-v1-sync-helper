@@ -63,6 +63,7 @@ func validateCommitteeCreatePayload(ctx context.Context, uid, projectSFID, expec
 		return errors.New("empty current committee settings payload")
 	} else {
 		payload.BusinessEmailRequired = &settings.BusinessEmailRequired
+		payload.MembersCanViewSocialListening = &settings.MembersCanViewSocialListening
 	}
 	if committeeCreateFingerprint(payload) != expected {
 		return fmt.Errorf("%w: current committee fields drifted from the recorded create request", errCommitteeCreateManual)

@@ -225,7 +225,9 @@ func initGoaClients(cfg *Config) error {
 			committeeHTTPClient.Readyz(),
 			committeeHTTPClient.Livez(),
 			committeeHTTPClient.CreateCommitteeMember(),
+			committeeHTTPClient.BulkCreateCommitteeMembers(),
 			committeeHTTPClient.GetCommitteeMember(),
+			committeeHTTPClient.ListCommitteeMembers(),
 			committeeHTTPClient.GetOrgCommitteeSeats(),
 			committeeHTTPClient.ReassignOrgCommitteeSeat(),
 			committeeHTTPClient.UpdateCommitteeMember(),
@@ -239,11 +241,13 @@ func initGoaClients(cfg *Config) error {
 			committeeHTTPClient.SubmitApplication(),
 			committeeHTTPClient.ApproveApplication(),
 			committeeHTTPClient.RejectApplication(),
+			committeeHTTPClient.WithdrawApplication(),
 			committeeHTTPClient.JoinCommittee(),
 			committeeHTTPClient.LeaveCommittee(),
 			committeeHTTPClient.GetCommitteeLink(),
 			committeeHTTPClient.ListCommitteeLinks(),
 			committeeHTTPClient.CreateCommitteeLink(),
+			committeeHTTPClient.UpdateCommitteeLink(),
 			committeeHTTPClient.DeleteCommitteeLink(),
 			committeeHTTPClient.GetCommitteeLinkFolder(),
 			committeeHTTPClient.ListCommitteeLinkFolders(),
@@ -255,7 +259,9 @@ func initGoaClients(cfg *Config) error {
 			committeeHTTPClient.DeleteCommitteeDocument(),
 			committeeHTTPClient.GetCurrentWeeklyBrief(),
 			committeeHTTPClient.GenerateWeeklyBrief(),
+			committeeHTTPClient.PreviewGenerateWeeklyBrief(),
 			committeeHTTPClient.UpdateCurrentWeeklyBrief(),
+			committeeHTTPClient.ShareWeeklyBriefToChat(),
 		)
 	}
 

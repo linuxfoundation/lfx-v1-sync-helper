@@ -221,7 +221,7 @@ func installCurrentCommitteeForRecovery(t *testing.T, h *syncTestHarness, base *
 }
 
 func TestCommitteeRecoverySurfacesCurrentPayloadDrift(t *testing.T) {
-	for _, field := range []string{"voting", "visibility", "description", "settings", "mailing list"} {
+	for _, field := range []string{"voting", "visibility", "description", "settings", "social listening", "mailing list"} {
 		t.Run(field, func(t *testing.T) {
 			h := setupSyncTest(t, 503, `{}`)
 			state := recoveryTestState(t)
@@ -243,6 +243,10 @@ func TestCommitteeRecoverySurfacesCurrentPayloadDrift(t *testing.T) {
 			case "settings":
 				fetchCommitteeSettings = func(context.Context, string) (*committeeservice.CommitteeSettingsWithReadonlyAttributes, string, error) {
 					return &committeeservice.CommitteeSettingsWithReadonlyAttributes{BusinessEmailRequired: true}, "etag", nil
+				}
+			case "social listening":
+				fetchCommitteeSettings = func(context.Context, string) (*committeeservice.CommitteeSettingsWithReadonlyAttributes, string, error) {
+					return &committeeservice.CommitteeSettingsWithReadonlyAttributes{MembersCanViewSocialListening: true}, "etag", nil
 				}
 			}
 			if err := lifecycleEvent(t, "committee", "updated", "committee-uid", map[string]any{"enable_voting": true}); err != nil {

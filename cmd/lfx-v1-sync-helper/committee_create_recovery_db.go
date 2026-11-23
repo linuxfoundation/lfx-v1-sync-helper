@@ -46,6 +46,7 @@ SELECT statement_timestamp() AS observed_at, NOT pg_is_in_recovery() AS is_prima
    'CommitteeID', COALESCE(c.committee_id, ''), 'EnableVoting', COALESCE(c.enable_voting__c, false),
    'SSOGroupEnabled', COALESCE(c.sso_group_enabled, false), 'SSOGroupName', COALESCE(c.sso_group_name, ''),
    'BusinessEmailRequired', COALESCE(c.business_email_required__c, false),
+   'MembersCanViewSocialListening', COALESCE(c.members_can_view_social_listening__c, false),
    'PublicEnabled', COALESCE(c.public_enabled, false), 'PublicName', COALESCE(c.public_name, ''),
    'JoinMode', COALESCE(c.join_mode, ''), 'MailingList', COALESCE(c.mailing_list_email, ''),
    'ChatChannel', COALESCE(c.chat_channel, '')

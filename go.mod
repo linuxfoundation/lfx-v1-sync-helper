@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 module github.com/linuxfoundation/lfx-v1-sync-helper
 
-go 1.27.3
+go 1.27.4
 
 tool goa.design/goa/v3/cmd/goa
 
@@ -17,11 +17,11 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.45.4
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/lestrrat-go/jwx/v2 v2.1.7
-	github.com/linuxfoundation/lfx-v2-committee-service v0.4.26
+	github.com/linuxfoundation/lfx-v2-committee-service v0.6.4-0.20261120180917-cdda69385c69
 	github.com/linuxfoundation/lfx-v2-project-service v0.10.4
-	github.com/nats-io/nats-server/v2 v2.12.6
+	github.com/nats-io/nats-server/v2 v2.12.12
 	github.com/nats-io/nats.go v1.52.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/uptrace/bun v1.2.18
@@ -48,7 +48,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.33.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.38.4 // indirect
 	github.com/aws/smithy-go v1.27.6 // indirect
-	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
 	github.com/dimfeld/httppath v0.0.0-20170720192232-ee938bf73598 // indirect
 	github.com/go-chi/chi/v5 v5.4.0 // indirect
@@ -71,13 +70,13 @@ require (
 	github.com/nats-io/jwt/v2 v2.8.2 // indirect
 	github.com/nats-io/nkeys v0.4.16 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
-	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
+	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/tmthrgd/go-hex v0.0.0-20190904060850-447a3041c3bc // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.devnw.com/structs v1.0.0 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/crypto v0.59.0 // indirect
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/sync v0.25.0 // indirect

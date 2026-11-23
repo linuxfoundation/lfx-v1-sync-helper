@@ -59,6 +59,7 @@ func TestDBReadCommitteeCreateState(t *testing.T) {
 					"LIMIT 2", "statement_timestamp()", "NOT pg_is_in_recovery()", "c.createdbyid", "c.lastmodifieddate",
 					"LOWER('Synthetic Committee') AS normalized_name",
 					"SELECT COUNT(*) FROM platform.community__c m WHERE m.collaboration_name__c = c.sfid",
+					"'MembersCanViewSocialListening', COALESCE(c.members_can_view_social_listening__c, false)",
 				} {
 					if !strings.Contains(query, fragment) {
 						t.Errorf("query lacks %q", fragment)
