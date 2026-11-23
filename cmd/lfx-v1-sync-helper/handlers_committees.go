@@ -612,6 +612,12 @@ func mapV1DataToCommitteeCreatePayload(ctx context.Context, v1Data map[string]an
 		logger.With("business_email_required", businessEmailRequired).DebugContext(ctx, "mapped committee business email required field")
 	}
 
+	// Map social listening access field.
+	if canViewSocialListening, ok := v1Data["members_can_view_social_listening__c"].(bool); ok {
+		payload.MembersCanViewSocialListening = canViewSocialListening
+		logger.With("members_can_view_social_listening", canViewSocialListening).DebugContext(ctx, "mapped committee social listening access field")
+	}
+
 	// Map governance fields (requires lfx-v2-committee-service >= v0.3.0 with PR #61 merged).
 	if joinMode, ok := v1Data["join_mode"].(string); ok && joinMode != "" {
 		payload.JoinMode = joinMode
@@ -804,8 +810,9 @@ func overlayV1CommitteeUpdatePayload(ctx context.Context, payload *committeeserv
 		logger.With("display_name", displayName).DebugContext(ctx, "mapped committee display name field for update")
 	}
 
-	// BusinessEmailRequired belongs to settings, not the base payload. The
-	// handler syncs it separately even when the base update is a no-op.
+	// BusinessEmailRequired and MembersCanViewSocialListening belong to settings,
+	// not the base payload. The handler syncs them separately even when the base
+	// update is a no-op.
 
 	// Map governance fields (requires lfx-v2-committee-service >= v0.3.0 with PR #61 merged).
 	// Note: JoinMode is not available on UpdateCommitteeBasePayload.

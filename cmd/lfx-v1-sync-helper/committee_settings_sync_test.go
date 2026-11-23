@@ -44,9 +44,14 @@ func setupSettingsClient(t *testing.T, handler http.HandlerFunc) {
 }
 
 func settingsResponse(required bool) map[string]any {
+	return settingsResponseWith(required, false)
+}
+
+func settingsResponseWith(required, socialListening bool) map[string]any {
 	return map[string]any{
 		"uid": "00000000-0000-4000-8000-000000000001", "business_email_required": required,
-		"member_visibility": "hidden", "show_meeting_attendees": true,
+		"members_can_view_social_listening": socialListening,
+		"member_visibility":                 "hidden", "show_meeting_attendees": true,
 		"last_reviewed_at": "2026-01-01T00:00:00Z", "last_reviewed_by": "test-reviewer",
 		"writers":  []any{map[string]any{"username": "test-writer"}},
 		"auditors": []any{map[string]any{"username": "test-auditor"}},
@@ -55,14 +60,15 @@ func settingsResponse(required bool) map[string]any {
 
 func TestCommitteeSettingsFromV1(t *testing.T) {
 	for _, tt := range []struct {
-		name      string
-		data      map[string]any
-		current   bool
-		getStatus int
-		putStatus int
-		noETag    bool
-		wantPut   bool
-		wantErr   bool
+		name          string
+		data          map[string]any
+		current       bool
+		currentSocial bool
+		getStatus     int
+		putStatus     int
+		noETag        bool
+		wantPut       bool
+		wantErr       bool
 	}{
 		{name: "enable", data: map[string]any{"business_email_required__c": true}, wantPut: true},
 		{name: "disable", data: map[string]any{"business_email_required__c": false}, current: true, wantPut: true},
@@ -74,6 +80,14 @@ func TestCommitteeSettingsFromV1(t *testing.T) {
 		{name: "settings missing", data: map[string]any{"business_email_required__c": true}, getStatus: 404},
 		{name: "conflict", data: map[string]any{"business_email_required__c": true}, putStatus: 409, wantPut: true, wantErr: true},
 		{name: "missing ETag", data: map[string]any{"business_email_required__c": true}, noETag: true, wantErr: true},
+		{name: "enable social listening", data: map[string]any{"members_can_view_social_listening__c": true}, wantPut: true},
+		{name: "disable social listening", data: map[string]any{"members_can_view_social_listening__c": false}, currentSocial: true, wantPut: true},
+		{name: "business email change preserves social listening", data: map[string]any{"business_email_required__c": true}, currentSocial: true, wantPut: true},
+		{name: "social listening change preserves business email", data: map[string]any{"members_can_view_social_listening__c": true}, current: true, wantPut: true},
+		{name: "both changed", data: map[string]any{"business_email_required__c": true, "members_can_view_social_listening__c": true}, wantPut: true},
+		{name: "both unchanged", data: map[string]any{"business_email_required__c": true, "members_can_view_social_listening__c": true}, current: true, currentSocial: true},
+		{name: "null social listening", data: map[string]any{"members_can_view_social_listening__c": nil}, currentSocial: true},
+		{name: "malformed social listening keeps current", data: map[string]any{"business_email_required__c": true, "members_can_view_social_listening__c": "false"}, currentSocial: true, wantPut: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h := setupSyncTest(t, 200, `{}`)
@@ -97,7 +111,7 @@ func TestCommitteeSettingsFromV1(t *testing.T) {
 					if !tt.noETag {
 						w.Header().Set("ETag", "42")
 					}
-					_ = json.NewEncoder(w).Encode(settingsResponse(tt.current))
+					_ = json.NewEncoder(w).Encode(settingsResponseWith(tt.current, tt.currentSocial))
 					return
 				}
 				puts++
@@ -108,9 +122,18 @@ func TestCommitteeSettingsFromV1(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Error(err)
 				}
+				wantRequired, ok := tt.data["business_email_required__c"].(bool)
+				if !ok {
+					wantRequired = tt.current
+				}
+				wantSocial, ok := tt.data["members_can_view_social_listening__c"].(bool)
+				if !ok {
+					wantSocial = tt.currentSocial
+				}
 				want := map[string]any{
-					"business_email_required": tt.data["business_email_required__c"],
-					"member_visibility":       "hidden", "show_meeting_attendees": true,
+					"business_email_required":           wantRequired,
+					"members_can_view_social_listening": wantSocial,
+					"member_visibility":                 "hidden", "show_meeting_attendees": true,
 					"last_reviewed_at": "2026-01-01T00:00:00Z", "last_reviewed_by": "test-reviewer",
 				}
 				assertUpdateJSON(t, body, want)
@@ -132,8 +155,10 @@ func TestCommitteeSettingsFromV1(t *testing.T) {
 			if puts != wantPuts {
 				t.Errorf("PUTs = %d, want %d", puts, wantPuts)
 			}
-			if _, present := tt.data["business_email_required__c"].(bool); !present && gets != 0 {
-				t.Error("absent or malformed v1 flag should not fetch settings")
+			_, hasRequired := tt.data["business_email_required__c"].(bool)
+			_, hasSocial := tt.data["members_can_view_social_listening__c"].(bool)
+			if !hasRequired && !hasSocial && gets != 0 {
+				t.Error("absent or malformed v1 flags should not fetch settings")
 			}
 			key := pendingMarkerKey(markerV1ToV2, markerOpUpdate, markerResourceCommitteeSettings, "committee-uid")
 			_, markerErr := h.store.Get(t.Context(), key)
@@ -164,14 +189,15 @@ func TestCommitteeSettingsToV1(t *testing.T) {
 				h := setupSyncTest(t, 200, `{}`)
 				h.seed(t, "committee.uid.committee-uid", "project-sfid:committee-sfid")
 				fetchCommitteeSettings = func(context.Context, string) (*committeeservice.CommitteeSettingsWithReadonlyAttributes, string, error) {
-					return &committeeservice.CommitteeSettingsWithReadonlyAttributes{BusinessEmailRequired: required}, "42", nil
+					return &committeeservice.CommitteeSettingsWithReadonlyAttributes{BusinessEmailRequired: required, MembersCanViewSocialListening: !required}, "42", nil
 				}
 				// Deliberately use the opposite snapshot: retries must use current v2 state.
+				// The event omits social listening (older committee-service): both are still sent.
 				msg := dispatchSettings(t, action, map[string]any{"business_email_required": !required})
 				if !msg.acked {
 					t.Fatal("expected ACK")
 				}
-				assertSyncRequest(t, h, http.MethodPatch, "/project-service/v2/projects/project-sfid/committees/committee-sfid", map[string]any{"BusinessEmailRequired": required})
+				assertSyncRequest(t, h, http.MethodPatch, "/project-service/v2/projects/project-sfid/committees/committee-sfid", map[string]any{"BusinessEmailRequired": required, "MembersCanViewSocialListening": !required})
 			})
 		}
 	}
@@ -316,7 +342,7 @@ func TestCommitteeCreateReadsSettingsToV1(t *testing.T) {
 			h := setupSyncTest(t, 201, `{"ID":"committee-sfid"}`)
 			h.seed(t, "project.uid.project-uid", "project-sfid")
 			fetchCommitteeSettings = func(context.Context, string) (*committeeservice.CommitteeSettingsWithReadonlyAttributes, string, error) {
-				return &committeeservice.CommitteeSettingsWithReadonlyAttributes{BusinessEmailRequired: tt.required}, "42", tt.fetchErr
+				return &committeeservice.CommitteeSettingsWithReadonlyAttributes{BusinessEmailRequired: tt.required, MembersCanViewSocialListening: !tt.required}, "42", tt.fetchErr
 			}
 			msg := &fakeMsg{subject: "lfx.committee.created", data: committeeRetryEvent(t, "committee", "created", "committee-uid", map[string]any{
 				"name": "Committee", "project_uid": "project-uid", "category": "Other",
@@ -332,7 +358,7 @@ func TestCommitteeCreateReadsSettingsToV1(t *testing.T) {
 				t.Fatal("create should ACK")
 			}
 			assertSyncRequest(t, h, http.MethodPost, "/project-service/v2/projects/project-sfid/committees", map[string]any{
-				"Name": "Committee", "Category": "Other", "BusinessEmailRequired": tt.required,
+				"Name": "Committee", "Category": "Other", "BusinessEmailRequired": tt.required, "MembersCanViewSocialListening": !tt.required,
 			})
 			h.assertMapping(t, "committee.uid.committee-uid", "project-sfid:committee-sfid")
 		})
@@ -425,14 +451,14 @@ func TestCommitteeSettingsV1CreateEcho(t *testing.T) {
 	setupSettingsClient(t, func(http.ResponseWriter, *http.Request) { t.Error("v1 create echo must not call settings API") })
 	committeeClient.CreateCommitteeEndpoint = func(_ context.Context, input any) (any, error) {
 		payload := input.(*committeeservice.CreateCommitteePayload)
-		if !payload.BusinessEmailRequired {
-			t.Error("v1 create must copy the settings flag")
+		if !payload.BusinessEmailRequired || !payload.MembersCanViewSocialListening {
+			t.Error("v1 create must copy the settings flags")
 		}
 		return &committeeservice.CommitteeFullWithReadonlyAttributes{UID: sptr("committee-uid"), BusinessEmailRequired: true}, nil
 	}
 	if handleCommitteeUpdate(t.Context(), "platform-collaboration__c.committee-sfid", map[string]any{
 		"sfid": "committee-sfid", "project_name__c": "project-sfid", "mailing_list__c": "Committee", "type__c": "Other",
-		"business_email_required__c": true,
+		"business_email_required__c": true, "members_can_view_social_listening__c": true,
 	}) {
 		t.Fatal("v1 create should ACK")
 	}
@@ -452,7 +478,7 @@ func TestCommitteeSettingsUpdateDoesNotConsumeCreateMarker(t *testing.T) {
 	if !dispatchSettings(t, "updated", map[string]any{"business_email_required": false}).acked {
 		t.Fatal("genuine settings edit should ACK")
 	}
-	assertSyncRequest(t, h, http.MethodPatch, "/project-service/v2/projects/project-sfid/committees/committee-sfid", map[string]any{"BusinessEmailRequired": false})
+	assertSyncRequest(t, h, http.MethodPatch, "/project-service/v2/projects/project-sfid/committees/committee-sfid", map[string]any{"BusinessEmailRequired": false, "MembersCanViewSocialListening": false})
 	key := pendingMarkerKey(markerV1ToV2, markerOpCreate, markerResourceCommitteeSettings, "committee-uid")
 	if _, err := h.store.Get(t.Context(), key); err != nil {
 		t.Fatal("settings update consumed the create marker")

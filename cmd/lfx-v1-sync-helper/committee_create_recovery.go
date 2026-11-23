@@ -70,6 +70,8 @@ func committeeCreateHash(value []byte) string {
 // Normalize only documented v1 create semantics, never a fuzzy match score.
 // SSO names are server-generated; public names are blank when private and fall
 // back to Name when public. Omitted booleans use v1's false default.
+// MembersCanViewSocialListening is normalized to omitted when false, so attempts
+// recorded before the field existed keep the same fingerprint.
 func committeeCreateFingerprint(payload projectServiceCommitteeCreate) string {
 	boolean := func(value *bool) *bool {
 		v := value != nil && *value
@@ -79,6 +81,9 @@ func committeeCreateFingerprint(payload projectServiceCommitteeCreate) string {
 	payload.EnableVoting = boolean(payload.EnableVoting)
 	payload.PublicEnabled = boolean(payload.PublicEnabled)
 	payload.BusinessEmailRequired = boolean(payload.BusinessEmailRequired)
+	if !*boolean(payload.MembersCanViewSocialListening) {
+		payload.MembersCanViewSocialListening = nil
+	}
 	payload.SSOGroupName = ""
 	if !*payload.PublicEnabled {
 		payload.PublicName = ""

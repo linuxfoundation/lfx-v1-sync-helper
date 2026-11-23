@@ -449,6 +449,7 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 	settings, _, err := fetchCommitteeSettings(ctx, committeeUID)
 	if err == nil {
 		payload.BusinessEmailRequired = &settings.BusinessEmailRequired
+		payload.MembersCanViewSocialListening = &settings.MembersCanViewSocialListening
 	} else {
 		var notFound *committeeservice.NotFoundError
 		if !errors.As(err, &notFound) {
@@ -467,7 +468,7 @@ func syncCommitteeCreateToV1(ctx context.Context, committeeUID, projectSFID stri
 		if base == nil {
 			return fmt.Errorf("empty committee base response for %s", committeeUID)
 		}
-		log.InfoContext(ctx, "committee has no settings; using v1 default for business email requirement")
+		log.InfoContext(ctx, "committee has no settings; using v1 defaults for business email requirement and social listening access")
 	}
 
 	log.With("payload_category", payload.Category).InfoContext(ctx, "creating committee in v1")

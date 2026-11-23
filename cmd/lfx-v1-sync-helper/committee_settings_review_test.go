@@ -456,7 +456,7 @@ func TestCommitteeSettingsPATCHDoesNotSuppressPendingRename(t *testing.T) {
 	if !dispatchSettings(t, "updated", map[string]any{"business_email_required": false}).acked {
 		t.Fatal("settings PATCH should succeed")
 	}
-	assertSyncRequest(t, h, http.MethodPatch, "/project-service/v2/projects/project-sfid/committees/committee-sfid", map[string]any{"BusinessEmailRequired": false})
+	assertSyncRequest(t, h, http.MethodPatch, "/project-service/v2/projects/project-sfid/committees/committee-sfid", map[string]any{"BusinessEmailRequired": false, "MembersCanViewSocialListening": false})
 	latest := settingsWALData(false)
 	latest["mailing_list__c"] = "Pending rename"
 	latest["lastmodifiedbyid"] = "test-client@clients"

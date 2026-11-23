@@ -500,6 +500,8 @@ type projectServiceCommitteeCreate struct {
 	JoinMode              string `json:"JoinMode,omitempty"`
 	MailingList           string `json:"MailingList,omitempty"`
 	ChatChannel           string `json:"ChatChannel,omitempty"`
+	// MembersCanViewSocialListening is a v2 committee setting.
+	MembersCanViewSocialListening *bool `json:"MembersCanViewSocialListening,omitempty"`
 }
 
 // projectServiceCommitteeUpdate is the request body for PATCH /v2/projects/{projectId}/committees/{committeeID}.
@@ -518,6 +520,8 @@ type projectServiceCommitteeUpdate struct {
 	JoinMode              *string `json:"JoinMode,omitempty"`
 	MailingList           *string `json:"MailingList,omitempty"`
 	ChatChannel           *string `json:"ChatChannel,omitempty"`
+	// MembersCanViewSocialListening is a v2 committee setting.
+	MembersCanViewSocialListening *bool `json:"MembersCanViewSocialListening,omitempty"`
 }
 
 // projectServiceCommitteeResponse is the response from the project service for creating and updating committees.

@@ -292,9 +292,21 @@ func TestCommitteeCreateRecoveryFingerprintNormalization(t *testing.T) {
 	a := recoveryTestPayload()
 	b := a
 	b.SSOGroupEnabled, b.PublicEnabled, b.EnableVoting, b.BusinessEmailRequired = ptr(false), ptr(false), ptr(false), ptr(false)
+	b.MembersCanViewSocialListening = ptr(false)
 	b.SSOGroupName, b.PublicName = "server-generated-name", "ignored-while-private"
 	if committeeCreateFingerprint(a) != committeeCreateFingerprint(b) {
 		t.Fatal("documented defaults must compare equally")
+	}
+	c := a
+	c.MembersCanViewSocialListening = ptr(true)
+	if committeeCreateFingerprint(a) == committeeCreateFingerprint(c) {
+		t.Fatal("social listening access must be part of the fingerprint")
+	}
+	// Attempts recorded before MembersCanViewSocialListening existed hashed a
+	// payload without it; a false value must keep producing that same hash.
+	legacy := `{"Name":"Synthetic Committee","Category":"Other","SSOGroupEnabled":false,"BusinessEmailRequired":false,"EnableVoting":false,"PublicEnabled":false}`
+	if committeeCreateFingerprint(a) != committeeCreateHash([]byte(legacy)) {
+		t.Fatal("false social listening access must not change pre-existing attempt fingerprints")
 	}
 	data, err := json.Marshal(a)
 	if err != nil || len(data) == 0 {

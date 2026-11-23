@@ -770,6 +770,7 @@ func TestV2CommitteeSSOGroupEnabledWrittenToV1(t *testing.T) {
 						data["category"] = "Other"
 						want["Category"] = "Other"
 						want["BusinessEmailRequired"] = false
+						want["MembersCanViewSocialListening"] = false
 					}
 					if tt.present {
 						data["sso_group_enabled"] = tt.value

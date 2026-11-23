@@ -247,12 +247,19 @@ reads retry. Mapping ownership and live V2 state alone are not sufficient while
 WAL catches up. These checks detect known replacements; they do not provide an
 atomic conditional-PATCH guarantee against external v1 writers.
 
-#### Committee business-email requirement
+#### Committee settings: business-email requirement and social listening access
 
-`business_email_required` lives in v2 committee **settings**, not the base record.
+`business_email_required` and `members_can_view_social_listening` live in v2
+committee **settings**, not the base record. They map to the v1 columns
+`business_email_required__c` / `members_can_view_social_listening__c` and the
+project-service fields `BusinessEmailRequired` / `MembersCanViewSocialListening`,
+and are synced together.
 v1 updates therefore perform a separate, ETag-protected settings read/update,
-including when no committee-base field changed. Other scalar settings are
-preserved and writer/auditor lists are omitted, so the service leaves them alone.
+including when no committee-base field changed. The update runs when either v1
+flag is present and sends both; a flag that is absent/null/malformed in v1 keeps
+its current v2 value, so changing one never resets the other. Other scalar
+settings are preserved and writer/auditor lists are omitted, so the service
+leaves them alone.
 Each settings sync re-reads the current v1 replica record, rather than trusting
 an old WAL delivery. Every existing-committee update also refreshes base input
 before base work, including absent/null-flag events, so a retried base or settings
@@ -260,7 +267,7 @@ failure cannot revert a newer committee rename. Echo detection uses the original
 WAL message's editor, not the refreshed row's editor: a settings-only PATCH can
 make a pending human rename service-authored without syncing it. Normal base
 comparison skips already-completed work without discarding pending changes.
-Deleted/missing records or an absent/malformed flag do not
+Deleted/missing records or absent/malformed flags do not
 change v2 settings; replica read failures are retried. Transient base failures
 also retry instead of acknowledging the settings change without processing it.
 Successful base bookkeeping and SSO-name writeback complete before settings
@@ -271,8 +278,10 @@ missing settings record. Other settings failures continue to retry.
 For v2-created committees, current settings are read before creating the v1
 record. A missing settings record uses the v1 default only after confirming
 that the v2 base still exists; a deleted base is skipped. Later settings
-create/update events PATCH only `BusinessEmailRequired`
-in v1, using current v2 state rather than a stale event snapshot. Missing reverse
+create/update events PATCH only `BusinessEmailRequired` and
+`MembersCanViewSocialListening` in v1, using current v2 state rather than a stale
+event snapshot. Events are gated on `business_email_required` only, so events
+from older committee-service versions still sync both fields. Missing reverse
 mappings are retried with a 70-second delay (up to the existing three deliveries)
 only when the live committee's parent project has a live v1 mapping. This allows
 an in-flight base create to finish without retrying settings on proven v2-only
@@ -288,6 +297,12 @@ adds this subject; installations managing the stream separately or overriding
 its subjects must add it themselves. Existing historical drift is not replayed
 or repaired automatically. Confirm each mismatched record's intended value
 before rollout; subsequent events can now propagate changes in both directions.
+
+Social listening rollout order: v1 DB migration adding
+`members_can_view_social_listening__c`, then the project-management deploy that
+accepts `MembersCanViewSocialListening`, then this service (the create-recovery
+snapshot query reads the new column). An older v1 API that ignores the field is
+harmless; v1 simply keeps NULL/false until it is deployed.
 
 #### Committee member role and term dates
 

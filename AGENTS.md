@@ -243,6 +243,32 @@ Boot ordering (`main.go`): NATS + KV bucket handles → a KV-backed `mappingStor
   as well. This does not replay old settings or repair existing drift automatically: reconcile intentional v1/v2
   differences before rollout, since subsequent events can now propagate either side's flag.
 
+#### Committee social listening access — lfx-self-serve-ops#387
+
+- **Dependency:** `lfx-v2-committee-service` is pinned to a pseudo-version of main (`cdda6938`, PR #227), which
+  adds the `members_can_view_social_listening` setting; no release tag contained it yet. The older pinned
+  v0.4.26 client lacked the field, so every v1 → v2 business-email settings sync (a full-replace
+  `update-committee-settings`) silently reset it to `false`. Replace the pseudo-version with a release tag once
+  one is cut. The bump also adds new committee-service endpoints to the `NewClient` call (`lfx_v2_client.go`).
+- **v1 → v2:** handled exactly like `business_email_required` and in the same settings write. Create maps
+  `members_can_view_social_listening__c`. `updateCommitteeSettingsFromV1` runs when either v1 flag is a bool,
+  re-reads both from the current `v1-objects` record, and PUTs once when either differs. Each flag that is
+  absent/null/malformed in v1 keeps its current v2 value, so a business-email change never wipes social listening
+  access and vice versa.
+- **v2 → v1:** the project-service committee POST/PATCH bodies carry `MembersCanViewSocialListening`. Create
+  sends it from the pre-POST settings read (like `BusinessEmailRequired`). Settings create/update events PATCH both
+  fields from current settings. The event gate is still `business_email_required` only, so events from older
+  committee-service versions without the new field still sync both values.
+- **Create recovery:** the fingerprint includes the flag, but a `false`/absent value is normalized to omitted so
+  attempts recorded before this change keep their hash. The v1 snapshot SQL reads
+  `COALESCE(c.members_can_view_social_listening__c, false)`.
+- **Rollout order:** (1) v1 DB migration adding `platform.collaboration__c.members_can_view_social_listening__c`,
+  (2) project-management deploy accepting `MembersCanViewSocialListening`, (3) this service. The recovery
+  snapshot SQL fails until (1) is applied. An older v1 API that ignores the unknown field is harmless: the PATCH
+  still applies `BusinessEmailRequired`, and the v1 value stays NULL/false until (2) ships. The new column reaches
+  `v1-objects` via WAL; the Meltano backfill only sees it after the per-environment `tap-postgres-catalog` is
+  regenerated. Existing drift is not repaired automatically.
+
 ### Python ETL (Meltano)
 
 #### Configuration Structure

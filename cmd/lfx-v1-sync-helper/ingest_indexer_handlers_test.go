@@ -39,7 +39,7 @@ func indexerSyncCases() []indexerSyncCase {
 			resource: markerResourceCommittee, uid: "committee-uid", sfid: "committee-sfid",
 			path: "/project-service/v2/projects/project-sfid/committees", reverse: "project-sfid:committee-sfid",
 			create:   map[string]any{"project_uid": "project-uid", "name": "Committee", "category": "Other", "description": "Created"},
-			wantPost: map[string]any{"Name": "Committee", "Category": "Other", "Description": "Created", "BusinessEmailRequired": false},
+			wantPost: map[string]any{"Name": "Committee", "Category": "Other", "Description": "Created", "BusinessEmailRequired": false, "MembersCanViewSocialListening": false},
 		},
 	}
 }
