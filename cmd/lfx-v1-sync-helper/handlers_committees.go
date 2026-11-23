@@ -770,6 +770,9 @@ func seedCommitteeUpdateFromCurrentBase(payload *committeeservice.UpdateCommitte
 	payload.SsoGroupEnabled = currentBase.SsoGroupEnabled
 	payload.Public = currentBase.Public
 	payload.ParentUID = currentBase.ParentUID
+	// The service replaces external sources with the payload's list, so an
+	// omitted list would clear the committee's external group/event links.
+	payload.ExternalSources = currentBase.ExternalSources
 }
 
 // overlayV1CommitteeUpdatePayload overlays V1 values on top of payload for every

@@ -134,6 +134,9 @@ func TestSeedCommitteeUpdateFromCurrentBase_PreservesCurrentValues(t *testing.T)
 		SsoGroupEnabled: true,
 		Public:          true,
 		ParentUID:       sptr("parent-uid"),
+		ExternalSources: []*committeeservice.ExternalSource{{
+			Provider: "groupsio", EntityType: "group", Label: "Existing list", URL: "https://groups.example.org/g/existing",
+		}},
 	}
 	payload := &committeeservice.UpdateCommitteeBasePayload{
 		UID:        sptr("cmt-uid"),
@@ -171,6 +174,11 @@ func TestSeedCommitteeUpdateFromCurrentBase_PreservesCurrentValues(t *testing.T)
 	}
 	if payload.ParentUID == nil || *payload.ParentUID != "parent-uid" {
 		t.Errorf("ParentUID not preserved from current base: %v", payload.ParentUID)
+	}
+	// The service replaces external sources wholesale; an unrelated v1 edit must
+	// carry the current links rather than clear them.
+	if len(payload.ExternalSources) != 1 || payload.ExternalSources[0].URL != "https://groups.example.org/g/existing" {
+		t.Errorf("ExternalSources not preserved from current base: %v", payload.ExternalSources)
 	}
 }
 

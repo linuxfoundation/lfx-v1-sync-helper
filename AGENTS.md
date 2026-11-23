@@ -250,6 +250,9 @@ Boot ordering (`main.go`): NATS + KV bucket handles → a KV-backed `mappingStor
   v0.4.26 client lacked the field, so every v1 → v2 business-email settings sync (a full-replace
   `update-committee-settings`) silently reset it to `false`. Replace the pseudo-version with a release tag once
   one is cut. The bump also adds new committee-service endpoints to the `NewClient` call (`lfx_v2_client.go`).
+  The bumped base update payload also gains `ExternalSources`, which the service replaces wholesale, so
+  `seedCommitteeUpdateFromCurrentBase` copies the current list; otherwise an unrelated v1 base edit would clear a
+  committee's external group/event links. (`Charter` is also new but an absent charter is preserved by the service.)
 - **v1 → v2:** handled exactly like `business_email_required` and in the same settings write. Create maps
   `members_can_view_social_listening__c`. `updateCommitteeSettingsFromV1` runs when either v1 flag is a bool,
   re-reads both from the current `v1-objects` record, and PUTs once when either differs. Each flag that is
