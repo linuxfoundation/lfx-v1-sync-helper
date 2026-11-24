@@ -71,7 +71,7 @@ func TestCommitteeSettingsPermanentAndEligibleMappingMisses(t *testing.T) {
 				if msg.nacked != tt.wantRetry {
 					t.Errorf("NAK = %v, want %v", msg.nacked, tt.wantRetry)
 				}
-				if tt.projectMapping == "project-sfid" && msg.nakDelay != 30*time.Second {
+				if tt.projectMapping == "project-sfid" && msg.nakDelay != 70*time.Second {
 					t.Error("eligible mapping race must retain delayed retry")
 				}
 				if len(h.recordedRequests()) != 0 {
@@ -456,7 +456,7 @@ func TestCommitteeSettingsPATCHDoesNotSuppressPendingRename(t *testing.T) {
 	if !dispatchSettings(t, "updated", map[string]any{"business_email_required": false}).acked {
 		t.Fatal("settings PATCH should succeed")
 	}
-	assertSyncRequest(t, h, http.MethodPatch, "/project-service/v2/projects/project-sfid/committees/committee-sfid", map[string]any{"BusinessEmailRequired": false})
+	assertSyncRequest(t, h, http.MethodPatch, "/project-service/v2/projects/project-sfid/committees/committee-sfid", map[string]any{"BusinessEmailRequired": false, "MembersCanViewSocialListening": false})
 	latest := settingsWALData(false)
 	latest["mailing_list__c"] = "Pending rename"
 	latest["lastmodifiedbyid"] = "test-client@clients"

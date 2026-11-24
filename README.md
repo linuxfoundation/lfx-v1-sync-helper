@@ -42,6 +42,13 @@ Kubernetes deployment manifests for the custom app service and WAL listener comp
 - [Adding a new DynamoDB table](./research/adding-dynamodb-table.md) — step-by-step checklist for onboarding a new DynamoDB table into the Meltano pipeline and stream consumer, with a worked example.
 - [Updating the Meltano catalog ConfigMap](./research/updating-meltano-catalog.md) — how to regenerate and apply the schema cache when tables or columns change.
 
+## Mapping HTTP API
+
+The optional Goa-based `v1-mapping-api` app provides team-authorized project and
+committee V2 → V1 lookups over HTTP. See the [API contract and deployment
+handoff](docs/mapping-api-contract.md) for request/response fields, error statuses,
+authorization, and per-environment configuration.
+
 ## NATS API
 
 The v1-sync-helper service provides a NATS request/reply function for querying v1-v2 ID mappings.
@@ -67,7 +74,28 @@ Payload: <mapping_key>
 
 - **Success**: The mapped value as a string
 - **Not Found**: Empty string (`""`)
+- **Tombstoned mapping**: Exactly `"error: mapping_tombstoned"`
 - **Error**: String prefixed with `"error: "` (e.g., `"error: connection timeout"`)
+
+An absent entry and a retained deletion marker are different: `not found` does
+not establish that a mapping never existed, and a tombstone does not establish
+that the source resource is still deleted (it may have been recreated). Both KV
+(`!del`) and Postgres (`tombstoned=true`) expose the same tombstone response
+through the configured MappingStore. Native KV deletes/purges without a retained
+application-level tombstone remain indistinguishable from an absent entry.
+
+Consumers should recognize the exact `error: mapping_tombstoned` reply before
+handling other `error: ` replies, and preserve it as a distinct domain error for
+Self Serve. Store errors, timeouts, canceled requests, and no responders are not
+missing or tombstoned mappings. Never interpret any error response as a mapped ID
+or use it to grant access, recreate a resource, or restore a mapping.
+
+The subject, request payload, successful replies (including compound committee
+IDs), and missing-key replies are unchanged. Existing clients that recognize the
+`error: ` prefix continue to fail closed, but may classify tombstones as service
+failures until upgraded. Deploy the distinct-error consumers before the helper
+change when avoiding that temporary classification change is required. No
+versioned subject or JSON envelope is introduced.
 
 ### Available Lookup Patterns
 
@@ -117,6 +145,16 @@ Payload: <email>
 - Lookups query `salesforce.merged_user` and `salesforce.alternate_email__c` directly with case-insensitive, whitespace-trimmed matching
 - If a username/email does not resolve to a live (non-deleted) record, the lookup returns an empty string (miss)
 - Callers send raw UTF-8 usernames and emails; the service normalizes (trim, lowercase, NFC) internally
+
+## Legacy mapping-store audit
+
+[`scripts/audit_v1_mappings.py`](scripts/audit_v1_mappings.py) compares the
+retained NATS `v1-mappings` baseline against Postgres without writing either
+system. It distinguishes missing mappings from expected Postgres-only
+tombstones and other post-cutover divergence. See the
+[audit runbook](scripts/audit-v1-mappings.md) for credentials, protected output,
+classification policies, tests, and limitations. Do not rerun the migration
+backfill to reconcile a stale NATS bucket with the active Postgres store.
 
 ## Backfill / Reindex
 
@@ -180,6 +218,21 @@ The include-Formation pass bulk-creates checklists in `lfx-v2-formation-service`
 
 ```sh
 lfx-v1-sync-helper --backfill-projects --include-stage-prefix Formation --check-slugs [--dry-run]
+```
+
+**Mapped-project classifications backfill (`--backfill-project-classifications`):**
+
+Reconciles v1 `industry__c`, `technology__c` and `technical_activity_type__c` into the three v2 project-base arrays for already-mapped projects. Unlike `--backfill-projects`, it does not re-emit project creates: it fetches base+ETag and writes only changed classifications while round-tripping other base fields. Live writes use the v1→v2 pending marker to suppress the indexer reverse-sync echo. Missing/malformed v1 columns are preserved; an empty v1 classification never bulk-clears a populated v2-only value (`v2_only_conflicts` requires separate review). Live v1 edits and deliberate clears are handled by the normal sync path.
+
+For v2→v1 clears, the helper sends v1's `"None"` selection: the v1 PATCH repository ignores `[]` but stores an empty column for `"None"`. A v2 `null` classification means unbackfilled/unknown and is never sent as a clear. Conversely an empty or `"None"` v1 column becomes an empty v2 array. Backfill conflicts are logged by project UID and field without logging classification values.
+
+Run only **after** the project-service classification fields are merged, released and deployed, and after the sync-helper version with this job is deployed. Requires KV-authoritative `v1-mappings` (the job refuses postgres-only mapping mode), the `v1-objects` bucket, and the project's Goa/JWT client. Avoid concurrent PCC/Self Serve classification edits while running, since the v1 replica can lag; the job re-reads each v1 record before a write and skips changed values. Dry-run first; `--limit` caps successful writes, and reruns skip equal values. Review `scanned`, `mapped`, `changed`, `updated`, `v2_only_conflicts` and `errors`; verify via both APIs afterward. Do not treat the unmapped-project creation backfill as a substitute for this job.
+
+For an in-cluster one-shot, `manifests/backfill-project-classifications-job.yaml` starts in dry-run mode. Before applying it, pin the released image digest and set the target environment's Heimdall client ID and endpoints. Do not apply a manifest with its placeholder values or enable live mode until dry-run counters are reviewed.
+
+```sh
+lfx-v1-sync-helper --backfill-project-classifications --dry-run
+lfx-v1-sync-helper --backfill-project-classifications --limit 1000 --emit-rate 2
 ```
 
 **Unmapped-committee backfill (`--backfill-committees`):**
@@ -421,8 +474,15 @@ Staff-field direction coverage:
 | `executive_director` | ✅ | ✅ | Resolves through B2C `merged_user` by username, then email; v1→v2 propagates removals (GH-179) |
 | `program_manager` | ✅ | ✅ | Resolves through B2C `merged_user` by username, then email; v1→v2 propagates removals (GH-179) |
 | `opportunity_owner` | ✅ | ❌ | SFDC-owned; resolves through the B2B user store; one-way only; v1→v2 propagates removals (GH-179) |
+| `formation_lead` | ✅ | ✅ | v1 `formation_lead_name`, `formation_lead_email`, `formation_lead_avatar` are contact strings, not a Salesforce contact ID. v2 stores a separate Formation Lead contact in project settings; the reverse PATCH sends a `FormationLead` object (empty subfields to clear). v1 requires the formation-team role or admin for changes. |
+
+For already-mapped projects, run `--backfill-formation-leads --dry-run` first, review the redacted summary (`scanned`, `mapped`, `changed`, `v2_only_conflicts`, `errors`), then run `--backfill-formation-leads --limit 1000 --emit-rate 2` after the project-service API supporting `formation_lead` is deployed. The job updates only project settings using If-Match, leaves other settings intact, and is safe to rerun: identical values are skipped, and an empty v1 contact never clears a populated v2-only contact. `v2_only_conflicts` counts these skipped records for separate review; the bulk job does not resolve them. Avoid concurrent PCC/Self Serve Formation Lead edits during the run: the v1-objects replica can lag the live v1 record. `--limit` caps successful writes per invocation; dry-run reports all differences. Validate counts and spot-check via the v1 and v2 APIs after the run. The one-shot reads project mappings from NATS KV and refuses postgres-only mappings mode; verify that KV is authoritative before running it.
 
 Echo/loop guards:
+
+When a human v1 Formation Lead edit arrives while a reverse PATCH has an uncertain outcome, the human contact is stored in v2 project settings and an identifier-only `formation-lead-reconcile.<project_uid>` obligation is persisted in the active v1-mappings store. An uncertain reverse PATCH also arms this obligation even without a PCC edit, since a late response can undo a subsequent v2 write. A background pass scans obligations on startup and each minute; after the five-minute uncertainty window, it reads fresh v1 and v2 values and restores the v2 contact to v1 if a late PATCH overwrote it. It will not overwrite a different live v1 contact until the v1-objects replica's `systemmodstamp` matches the uncached v1 GET's `SystemModStamp`; cumulative per-field history determines which newer human edits may be applied to v2. Failed reads, permission denials, and writes leave the marker for retry. The marker tracks processed human revisions separately from reverse-dispatch/observed revisions; it stays active after a repair PATCH until its WAL echo catches up. Completed markers retain the highest processed human revision so an older redelivery cannot undo a later PCC edit. Markers contain project IDs, field generations and timing only, never contact details. This automatic repair runs only while `V2_TO_V1_PROJECT_STAFF_SYNC_ENABLED=true`; keep the v1-mappings store available across restarts.
+
+For project WAL inserts and updates, the v1-objects row also carries `_lfx_formation_lead_changed_fields` (field names changed in the latest save), `_lfx_formation_lead_field_versions` (cumulative, per-field human change generations), and `_lfx_formation_lead_current_human_fields` (whether the current value of each field was last changed by a human). A first row with an empty contact starts at zero; a human contact already present on that row starts with a generation and is not mistaken for an empty initial contact. **Existing legacy/Meltano rows without history stay unknown** across later saves; they must never acquire invented zero counters. Bridge PATCH echoes do not advance human generations but do invalidate provenance for fields they change; an unrelated service-authored ED/PM PATCH does not hide unprocessed human contact history. No contact values are duplicated in this metadata. Valid latest-save masks also let ordinary project-only updates preserve a queued v2 contact edit. Successful v1→v2 project creation records the initial accepted field generations; when an older contact delivery refreshes a newer different-field human edit before any marker exists, both provable values are applied to v2 before recording their processed generations. If a changed PCC contact fails to write to v2, the forward handler NAKs and retains an identifier-only repair marker with a pre-edit generation baseline: the worker can recover even after JetStream's three deliveries are exhausted or a later rename empties the latest-save mask. The marker separately tracks **processed** per-field human generations; a reverse dispatch snapshot may include an email edit still queued for v2, so dispatch generations are not proof it was applied. When a delivery's contact values must be recovered over a newer bridge echo, its *original* generations travel with those values: the newer generations remain unprocessed. Every reverse/initial Formation Lead PATCH persists a repair obligation **before dispatch** and is aborted if that write fails, closing the crash window for late PATCH completion; independent ED/PM changes still PATCH if the contact obligation cannot be saved. The worker likewise renews and persists the uncertainty window before dispatching its repair PATCH. With no trustworthy processed-field history for a nonzero generation, the worker preserves the marker for investigation instead of assuming it was processed. Successful ordinary legacy contact edits do not create a new unrepairable marker when generations are unavailable; existing obligations remain pending. While a repair marker is active, the forward handler rebuilds its eligible fields from generations beyond the processed watermark, not a stale delivery mask. The worker applies only current human-authored values; if a late bridge PATCH overwrote one, the obligation remains pending instead of marking it processed. Confirmed project deletion tombstones repair markers, including older markers discovered by the worker after a mapping tombstone. An initial v2-created project's marker without a replica baseline can be repaired if the current v1 contact is empty with zero human generations, or completed if v1 already matches v2; otherwise it stays pending. Legacy/seed rows without valid history, or rows whose generations regress, remain pending rather than overwriting either side automatically. Repeated `deferred Formation Lead reconciliation failed; retaining marker` errors for that project require operator review.
 
 - **Authenticated origin (primary).** Project-service tokens signed by this bridge carry `lfx_origin: "v1_sync_helper"` using the canonical `pkg/events` SDK constants. Project-service validates it and copies it into the settings event's optional `origin` field. The bridge drops exactly that origin **before** mapping reads, user resolution or pending-write comparisons. JWT `principal`/`sub`, event `Actor.Username` and v2 audit stamps still identify the real human when resolvable; the service fallback is unchanged. The same human editing directly in LFX One still syncs.
 - **Compare-before-write (idempotency/reversal protection).** Other events compare each changed role against `v1-objects` and the bridge's recent attempts (see above). Replica equality, username and timestamps are not reliable origin classifiers.

@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"testing"
 
+	projectservice "github.com/linuxfoundation/lfx-v2-project-service/api/project/v1/gen/project_service"
 	nats "github.com/nats-io/nats.go"
 )
 
@@ -38,7 +39,7 @@ func indexerSyncCases() []indexerSyncCase {
 			resource: markerResourceCommittee, uid: "committee-uid", sfid: "committee-sfid",
 			path: "/project-service/v2/projects/project-sfid/committees", reverse: "project-sfid:committee-sfid",
 			create:   map[string]any{"project_uid": "project-uid", "name": "Committee", "category": "Other", "description": "Created"},
-			wantPost: map[string]any{"Name": "Committee", "Category": "Other", "Description": "Created", "BusinessEmailRequired": false},
+			wantPost: map[string]any{"Name": "Committee", "Category": "Other", "Description": "Created", "BusinessEmailRequired": false, "MembersCanViewSocialListening": false},
 		},
 	}
 }
@@ -93,6 +94,13 @@ func TestIndexerSyncCreate(t *testing.T) {
 		t.Run(string(c.resource), func(t *testing.T) {
 			for _, initial := range []string{"missing", "live", "tombstoned"} {
 				t.Run(initial, func(t *testing.T) {
+					if c.resource == markerResourceProject {
+						original := fetchInitialFormationSettings
+						fetchInitialFormationSettings = func(context.Context, string) (*projectservice.ProjectSettings, string, error) {
+							return &projectservice.ProjectSettings{}, "1", nil
+						}
+						t.Cleanup(func() { fetchInitialFormationSettings = original })
+					}
 					h := setupSyncTest(t, http.StatusCreated, `{"ID":"`+c.sfid+`"}`)
 					c.seedParent(t, h)
 					reverseKey := string(c.resource) + ".uid." + c.uid
@@ -112,6 +120,13 @@ func TestIndexerSyncCreate(t *testing.T) {
 						h.assertMapping(t, reverseKey, c.reverse)
 						return
 					}
+					if initial == "tombstoned" && c.resource == markerResourceCommittee {
+						if len(h.recordedRequests()) != 0 {
+							t.Fatal("committee create must not resurrect a tombstoned identity")
+						}
+						h.assertMapping(t, reverseKey, tombstoneMarker)
+						return
+					}
 					assertSyncRequest(t, h, http.MethodPost, c.path, c.wantPost)
 					h.assertMapping(t, string(c.resource)+".sfid."+c.sfid, c.uid)
 					h.assertMapping(t, reverseKey, c.reverse)
@@ -123,6 +138,38 @@ func TestIndexerSyncCreate(t *testing.T) {
 						t.Fatal("replayed create bypassed loop guard")
 					}
 				})
+			}
+		})
+	}
+}
+
+func TestIndexerSyncCreate_FormationLeadFlag(t *testing.T) {
+	project := indexerSyncCases()[0]
+	for _, enabled := range []bool{false, true} {
+		name := "disabled"
+		if enabled {
+			name = "enabled"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := setupSyncTest(t, http.StatusCreated, `{"ID":"project-sfid"}`)
+			cfg.V2ToV1ProjectStaffSyncEnabled = enabled
+			origFetch, origPatch, origWrites := fetchInitialFormationSettings, patchInitialFormationLead, recentV1StaffWrites
+			recentV1StaffWrites = newV1StaffWriteLog()
+			t.Cleanup(func() {
+				fetchInitialFormationSettings, patchInitialFormationLead, recentV1StaffWrites = origFetch, origPatch, origWrites
+			})
+			fetches, patches := 0, 0
+			fetchInitialFormationSettings = func(context.Context, string) (*projectservice.ProjectSettings, string, error) {
+				fetches++
+				return &projectservice.ProjectSettings{FormationLead: &projectservice.FormationLead{Name: stringToStringPtr("Alice Example")}}, "1", nil
+			}
+			patchInitialFormationLead = func(context.Context, string, any) error {
+				patches++
+				return nil
+			}
+			project.dispatch(t, "created", project.create)
+			if len(h.recordedRequests()) != 1 || fetches != patches || (enabled && patches != 1) || (!enabled && patches != 0) {
+				t.Errorf("create requests=%d fetches=%d patches=%d, enabled=%t", len(h.recordedRequests()), fetches, patches, enabled)
 			}
 		})
 	}
@@ -375,6 +422,9 @@ func TestSyncCommitteeMemberCreateToV1(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := setupSyncTest(t, http.StatusOK, tt.response)
+			// These payload-mapping cases include legacy/malformed event shapes;
+			// lifecycle tests separately exercise the typed current-state reader.
+			readMemberCreateData = func(context.Context, string, string) (map[string]any, error) { return tt.data, nil }
 			if err := syncCommitteeMemberCreateToV1(t.Context(), memberUID, committeeUID, projectSFID, committeeSFID, tt.data); err != nil {
 				t.Fatalf("syncCommitteeMemberCreateToV1: %v", err)
 			}

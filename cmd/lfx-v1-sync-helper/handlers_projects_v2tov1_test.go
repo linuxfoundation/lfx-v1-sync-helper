@@ -31,12 +31,15 @@ const (
 // staffBridgeSpy records PATCH requests received by the httptest server
 // standing in for the v1 API Gateway.
 type staffBridgeSpy struct {
-	patchCalls  int
-	lastMethod  string
-	lastPath    string
-	lastBody    map[string]string
-	patchStatus int
-	onPatch     func()
+	patchCalls        int
+	lastMethod        string
+	lastPath          string
+	lastBody          map[string]string
+	lastJSON          map[string]json.RawMessage
+	patchStatus       int
+	onPatch           func()
+	liveFormationLead *events.FormationLead
+	getBypassedCache  bool
 }
 
 // setupStaffBridgeTest initialises the package-level globals and
@@ -49,11 +52,19 @@ func setupStaffBridgeTest(t *testing.T, patchStatus int) *staffBridgeSpy {
 
 	spy := &staffBridgeSpy{patchStatus: patchStatus}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			spy.getBypassedCache = r.Header.Get("X-LFX-CACHE") == "false"
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"FormationLead": spy.liveFormationLead})
+			return
+		}
 		spy.patchCalls++
 		spy.lastMethod = r.Method
 		spy.lastPath = r.URL.Path
 		spy.lastBody = map[string]string{}
-		_ = json.NewDecoder(r.Body).Decode(&spy.lastBody)
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &spy.lastBody)
+		_ = json.Unmarshal(body, &spy.lastJSON)
 		if spy.onPatch != nil {
 			spy.onPatch()
 		}
@@ -70,6 +81,7 @@ func setupStaffBridgeTest(t *testing.T, patchStatus int) *staffBridgeSpy {
 	origByEmail := resolveV1UserSFIDByEmail
 	origWrites := recentV1StaffWrites
 	origNow := staffWriteNow
+	origStore := mappingStore
 
 	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	gwURL, err := url.Parse(srv.URL + "/")
@@ -89,6 +101,7 @@ func setupStaffBridgeTest(t *testing.T, patchStatus int) *staffBridgeSpy {
 	resolveV1UserSFIDByUsername = func(context.Context, string) (string, error) { return "", nil }
 	resolveV1UserSFIDByEmail = func(context.Context, string) (string, error) { return "", nil }
 	recentV1StaffWrites = newV1StaffWriteLog()
+	mappingStore = newFakeMappingStore()
 
 	t.Cleanup(func() {
 		cfg = origCfg
@@ -100,6 +113,7 @@ func setupStaffBridgeTest(t *testing.T, patchStatus int) *staffBridgeSpy {
 		resolveV1UserSFIDByEmail = origByEmail
 		recentV1StaffWrites = origWrites
 		staffWriteNow = origNow
+		mappingStore = origStore
 	})
 
 	return spy
@@ -170,6 +184,267 @@ func TestHandleProjectSettingsUpdated_NoStaffChangeSkips(t *testing.T) {
 
 	if spy.patchCalls != 0 {
 		t.Fatalf("PATCH calls = %d, want 0 (mission-only change must not sync staff)", spy.patchCalls)
+	}
+}
+
+func TestHandleProjectSettingsUpdated_FormationLead(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	lead := &events.FormationLead{Name: "Alice Example", Email: "alice@example.com", Avatar: "https://example.com/avatar.png"}
+	msg := settingsUpdatedMsg(t, "test-actor", events.ProjectSettings{}, events.ProjectSettings{FormationLead: lead})
+	handleProjectSettingsUpdated(msg)
+	if spy.patchCalls != 1 {
+		t.Fatalf("PATCH calls = %d, want 1", spy.patchCalls)
+	}
+	var got struct{ Name, Email, Avatar string }
+	if err := json.Unmarshal(spy.lastJSON["FormationLead"], &got); err != nil {
+		t.Fatalf("decode FormationLead: %v", err)
+	}
+	if got.Name != lead.Name || got.Email != lead.Email || got.Avatar != lead.Avatar {
+		t.Errorf("FormationLead = %+v, want %+v", got, lead)
+	}
+	if _, ok := spy.lastJSON["ProgramManagerID"]; ok {
+		t.Error("unchanged program manager must be omitted")
+	}
+
+	// Clearing must send an empty object, not omit/null (which v1 preserves).
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{
+			"formation_lead_name": lead.Name, "formation_lead_email": lead.Email, "formation_lead_avatar": lead.Avatar,
+		}, revision: 2}, nil
+	}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor", events.ProjectSettings{FormationLead: lead}, events.ProjectSettings{}))
+	if spy.patchCalls != 2 {
+		t.Fatalf("PATCH calls = %d, want 2", spy.patchCalls)
+	}
+	if string(spy.lastJSON["FormationLead"]) != `{"Name":"","Email":"","Avatar":""}` {
+		t.Errorf("clear FormationLead = %s, want empty subfields", spy.lastJSON["FormationLead"])
+	}
+
+	// An echo from the v1 project record must not cause another v1 PATCH.
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{
+			"formation_lead_name": lead.Name, "formation_lead_email": lead.Email, "formation_lead_avatar": lead.Avatar,
+		}, revision: 3}, nil
+	}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor", events.ProjectSettings{}, events.ProjectSettings{FormationLead: lead}, events.OriginV1SyncHelper))
+	if spy.patchCalls != 2 {
+		t.Fatalf("PATCH calls = %d, want 2 (v1-origin event must skip)", spy.patchCalls)
+	}
+}
+
+func TestHandleProjectSettingsUpdated_FormationLeadFullWriteTracked(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusGatewayTimeout)
+	oldLead := &events.FormationLead{Name: "Alice Example", Email: "old@example.com", Avatar: "https://example.com/avatar.png"}
+	spy.liveFormationLead = oldLead
+	newLead := &events.FormationLead{Name: oldLead.Name, Email: "new@example.com", Avatar: oldLead.Avatar}
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{
+			"formation_lead_name": oldLead.Name, "formation_lead_email": oldLead.Email,
+			"formation_lead_avatar": oldLead.Avatar,
+		}, revision: 1}, nil
+	}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{FormationLead: oldLead}, events.ProjectSettings{FormationLead: newLead}))
+	if spy.patchCalls != 1 {
+		t.Fatalf("PATCH calls = %d, want 1", spy.patchCalls)
+	}
+	// Even though only the email differed, v1 received all three fields.
+	// The timed-out request might finish late, so each transmitted value must
+	// remain in the pending-write log until replication can confirm it.
+	for field, want := range map[string]string{
+		"formation_lead_name": newLead.Name, "formation_lead_email": newLead.Email,
+		"formation_lead_avatar": newLead.Avatar,
+	} {
+		writes := recentV1StaffWrites.writes[v1StaffWriteKey(bridgeTestProjectSFID, field)]
+		if len(writes) != 1 || writes[0].value != want || writes[0].confirmed {
+			t.Errorf("pending %s = %+v, want one unconfirmed write of %q", field, writes, want)
+		}
+	}
+}
+
+func TestHandleProjectSettingsUpdated_FormationLeadPreservesLiveSubfields(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	oldLead := &events.FormationLead{Name: "Alice Example", Email: "old@example.com", Avatar: "https://example.com/old.png"}
+	newLead := &events.FormationLead{Name: oldLead.Name, Email: oldLead.Email, Avatar: "https://example.com/new.png"}
+	spy.liveFormationLead = &events.FormationLead{Name: "Alice Example", Email: "newer@example.com", Avatar: oldLead.Avatar}
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{
+			"formation_lead_name": oldLead.Name, "formation_lead_email": oldLead.Email, "formation_lead_avatar": oldLead.Avatar,
+		}, revision: 1}, nil
+	}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor",
+		events.ProjectSettings{FormationLead: oldLead}, events.ProjectSettings{FormationLead: newLead}))
+	if spy.patchCalls != 1 {
+		t.Fatalf("PATCH calls = %d, want 1", spy.patchCalls)
+	}
+	if !spy.getBypassedCache {
+		t.Error("live Formation Lead GET must bypass v1 cache")
+	}
+	var got events.FormationLead
+	if err := json.Unmarshal(spy.lastJSON["FormationLead"], &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != oldLead.Name || got.Email != "newer@example.com" || got.Avatar != newLead.Avatar {
+		t.Errorf("FormationLead = %+v, want live name/email with updated avatar", got)
+	}
+}
+
+func TestHandleProjectSettingsUpdated_FormationLeadPreservesPendingIntent(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusGatewayTimeout)
+	oldLead := &events.FormationLead{Name: "Alice Example", Email: "old@example.com", Avatar: "https://example.com/old.png"}
+	newEmail := &events.FormationLead{Name: oldLead.Name, Email: "new@example.com", Avatar: oldLead.Avatar}
+	newAvatar := &events.FormationLead{Name: oldLead.Name, Email: newEmail.Email, Avatar: "https://example.com/new.png"}
+	spy.liveFormationLead = oldLead // The timed-out email PATCH has not reached v1 yet.
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{
+			"formation_lead_name": oldLead.Name, "formation_lead_email": oldLead.Email, "formation_lead_avatar": oldLead.Avatar,
+		}, revision: 1}, nil
+	}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor", events.ProjectSettings{FormationLead: oldLead}, events.ProjectSettings{FormationLead: newEmail}))
+	if spy.patchCalls != 1 {
+		t.Fatalf("email PATCH calls = %d, want 1", spy.patchCalls)
+	}
+	marker, err := mappingStore.Get(t.Context(), formationReconcilePrefix+bridgeTestProjectUID)
+	if err != nil || len(marker.Value) == 0 || bytes.Contains(marker.Value, []byte("new@example.com")) {
+		t.Fatalf("timeout must retain identifier-only repair obligation: marker=%s err=%v", marker.Value, err)
+	}
+	spy.patchStatus = http.StatusOK
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor", events.ProjectSettings{FormationLead: newEmail}, events.ProjectSettings{FormationLead: newAvatar}))
+	if spy.patchCalls != 2 {
+		t.Fatalf("PATCH calls = %d, want 2", spy.patchCalls)
+	}
+	var got events.FormationLead
+	if err := json.Unmarshal(spy.lastJSON["FormationLead"], &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Email != newEmail.Email || got.Avatar != newAvatar.Avatar {
+		t.Errorf("later PATCH = %+v, want pending email %q and new avatar %q", got, newEmail.Email, newAvatar.Avatar)
+	}
+}
+
+func TestHandleProjectSettingsUpdated_FormationLeadPreservesLiveAfterConfirmed(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	oldLead := &events.FormationLead{Name: "Alice Example", Email: "old@example.com", Avatar: "https://example.com/old.png"}
+	newEmail := &events.FormationLead{Name: oldLead.Name, Email: "new@example.com", Avatar: oldLead.Avatar}
+	newAvatar := &events.FormationLead{Name: oldLead.Name, Email: newEmail.Email, Avatar: "https://example.com/new.png"}
+	spy.liveFormationLead = oldLead
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return &v1ProjectStaffSnapshot{staff: map[string]string{
+			"formation_lead_name": oldLead.Name, "formation_lead_email": oldLead.Email, "formation_lead_avatar": oldLead.Avatar,
+		}, revision: 1}, nil
+	}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor", events.ProjectSettings{FormationLead: oldLead}, events.ProjectSettings{FormationLead: newEmail}))
+	if spy.patchCalls != 1 {
+		t.Fatalf("email PATCH calls = %d, want 1", spy.patchCalls)
+	}
+	// The completed PATCH cannot still finish late. PCC has since renamed the
+	// live contact; a later v2 avatar-only edit must preserve that new name.
+	spy.liveFormationLead = &events.FormationLead{Name: "Carol Fixture", Email: newEmail.Email, Avatar: oldLead.Avatar}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor", events.ProjectSettings{FormationLead: newEmail}, events.ProjectSettings{FormationLead: newAvatar}))
+	if spy.patchCalls != 2 {
+		t.Fatalf("PATCH calls = %d, want 2", spy.patchCalls)
+	}
+	var got events.FormationLead
+	if err := json.Unmarshal(spy.lastJSON["FormationLead"], &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "Carol Fixture" || got.Email != newEmail.Email || got.Avatar != newAvatar.Avatar {
+		t.Errorf("later PATCH = %+v, want live PCC name, confirmed email and new avatar", got)
+	}
+}
+
+func TestHandleProjectSettingsUpdated_FormationLeadComparesLiveV1(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		replica         map[string]string
+		old, next, live *events.FormationLead
+		wantName        string
+	}{
+		{
+			name:     "restore replica value after newer PCC edit",
+			replica:  map[string]string{"formation_lead_name": "Alice Example"},
+			old:      &events.FormationLead{Name: "Bob Fixture"},
+			next:     &events.FormationLead{Name: "Alice Example"},
+			live:     &events.FormationLead{Name: "Bob Fixture"},
+			wantName: "Alice Example",
+		},
+		{
+			name:     "clear contact absent in replica but present in v1",
+			replica:  map[string]string{},
+			old:      &events.FormationLead{Name: "Bob Fixture"},
+			live:     &events.FormationLead{Name: "Bob Fixture"},
+			wantName: "",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			spy := setupStaffBridgeTest(t, http.StatusOK)
+			spy.liveFormationLead = tt.live
+			readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+				return &v1ProjectStaffSnapshot{staff: tt.replica, revision: 1}, nil
+			}
+			handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor", events.ProjectSettings{FormationLead: tt.old}, events.ProjectSettings{FormationLead: tt.next}))
+			if spy.patchCalls != 1 {
+				t.Fatalf("PATCH calls = %d, want 1 even though replica matches target", spy.patchCalls)
+			}
+			var got events.FormationLead
+			if err := json.Unmarshal(spy.lastJSON["FormationLead"], &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Name != tt.wantName {
+				t.Errorf("FormationLead.Name = %q, want %q", got.Name, tt.wantName)
+			}
+		})
+	}
+}
+
+func TestHandleProjectSettingsUpdated_FormationReadFailurePreservesOtherStaff(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	origFetch := fetchLiveFormationLead
+	fetchLiveFormationLead = func(ctx context.Context, _ string) (*events.FormationLead, error) {
+		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 10*time.Second || time.Until(deadline) < 9*time.Second {
+			t.Errorf("Formation Lead GET deadline = %v, want about 10s", deadline)
+		}
+		return nil, errors.New("test v1 GET unavailable")
+	}
+	t.Cleanup(func() { fetchLiveFormationLead = origFetch })
+	resolveV1UserSFIDByUsername = func(_ context.Context, username string) (string, error) {
+		if username == "staffpm" {
+			return bridgeTestPMSFID, nil
+		}
+		return "", nil
+	}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor", events.ProjectSettings{}, events.ProjectSettings{
+		ProgramManager: &events.UserInfo{Username: "staffpm"}, FormationLead: &events.FormationLead{Name: "Alice Example"},
+	}))
+	if spy.patchCalls != 1 || spy.lastBody["ProgramManagerID"] != bridgeTestPMSFID {
+		t.Errorf("PATCH calls = %d, body = %v; want independent PM update", spy.patchCalls, spy.lastBody)
+	}
+	if _, ok := spy.lastJSON["FormationLead"]; ok {
+		t.Error("failed Formation Lead GET must omit only FormationLead")
+	}
+	marker, err := mappingStore.Get(t.Context(), formationReconcilePrefix+bridgeTestProjectUID)
+	if err != nil || len(marker.Value) == 0 {
+		t.Errorf("failed live read lost Formation Lead recovery marker: err=%v", err)
+	}
+}
+
+func TestHandleProjectSettingsUpdated_FormationBeforeReplica(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	readV1ProjectStaffSnapshot = func(context.Context, string) (*v1ProjectStaffSnapshot, error) {
+		return nil, nil // v1 create succeeded but its WAL record has not arrived.
+	}
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor", events.ProjectSettings{}, events.ProjectSettings{
+		FormationLead:  &events.FormationLead{Name: "Alice Example", Email: "alice@example.com"},
+		ProgramManager: &events.UserInfo{Username: "staffpm"},
+	}))
+	if spy.patchCalls != 1 {
+		t.Fatalf("PATCH calls = %d, want Formation Lead update against live v1", spy.patchCalls)
+	}
+	if _, ok := spy.lastJSON["FormationLead"]; !ok {
+		t.Error("FormationLead omitted before v1 replica appeared")
+	}
+	if _, ok := spy.lastJSON["ProgramManagerID"]; ok {
+		t.Error("PM cannot sync without a v1 replica of contact IDs")
 	}
 }
 
@@ -659,6 +934,54 @@ func TestHandleProjectSettingsUpdated_WALAckBeforeHTTPResponse(t *testing.T) {
 	}
 }
 
+func TestHandleProjectSettingsUpdated_FormationMarkerBeforePatch(t *testing.T) {
+	for _, failMarker := range []bool{false, true} {
+		name := "marker visible during PATCH"
+		if failMarker {
+			name = "marker failure aborts PATCH"
+		}
+		t.Run(name, func(t *testing.T) {
+			spy := setupStaffBridgeTest(t, http.StatusOK)
+			if failMarker {
+				mappingStore.(*fakeMappingStore).nextCreateErr = errors.New("test marker unavailable")
+			}
+			spy.onPatch = func() {
+				marker, found, err := formationLeadObligation(t.Context(), bridgeTestProjectUID)
+				if err != nil || !found || marker.Completed {
+					t.Errorf("reverse PATCH was sent without active durable obligation: marker=%+v found=%t err=%v", marker, found, err)
+				}
+			}
+			handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor", events.ProjectSettings{}, events.ProjectSettings{
+				FormationLead: &events.FormationLead{Email: "alice@example.com"},
+			}))
+			if failMarker && spy.patchCalls != 0 || !failMarker && spy.patchCalls != 1 {
+				t.Errorf("reverse PATCH calls=%d, failMarker=%t", spy.patchCalls, failMarker)
+			}
+		})
+	}
+}
+
+func TestHandleProjectSettingsUpdated_MarkerFailurePreservesIndependentStaff(t *testing.T) {
+	spy := setupStaffBridgeTest(t, http.StatusOK)
+	resolveV1UserSFIDByUsername = func(_ context.Context, username string) (string, error) {
+		if username == "staffpm" {
+			return bridgeTestPMSFID, nil
+		}
+		return "", nil
+	}
+	mappingStore.(*fakeMappingStore).nextCreateErr = errors.New("test marker unavailable")
+	handleProjectSettingsUpdated(settingsUpdatedMsg(t, "test-actor", events.ProjectSettings{}, events.ProjectSettings{
+		ProgramManager: &events.UserInfo{Username: "staffpm"},
+		FormationLead:  &events.FormationLead{Email: "alice@example.com"},
+	}))
+	if spy.patchCalls != 1 || spy.lastBody["ProgramManagerID"] != bridgeTestPMSFID {
+		t.Errorf("independent PM update lost after Formation Lead marker failure: calls=%d body=%v", spy.patchCalls, spy.lastBody)
+	}
+	if _, ok := spy.lastJSON["FormationLead"]; ok {
+		t.Error("Formation Lead PATCH dispatched without durable repair marker")
+	}
+}
+
 func TestHandleProjectSettingsUpdated_RejectedLaterWritePreservesPending(t *testing.T) {
 	spy := setupStaffBridgeTest(t, http.StatusOK)
 	replicatedED := "0034100001origED"
@@ -682,6 +1005,128 @@ func TestHandleProjectSettingsUpdated_RejectedLaterWritePreservesPending(t *test
 func TestV1StaffWriteLogAcknowledgements(t *testing.T) {
 	const field = "executive_director__c"
 	now := time.Now()
+	t.Run("human row at confirmed write dispatch floor is stale", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		id := l.record("test-project", map[string]string{"formation_lead_name": "Bob Fixture"}, 10, now)
+		l.confirm(id)
+		_, pending, _ := l.current("test-project", "formation_lead_name", "Alice Example", 10, now)
+		if !pending || !l.hasConfirmedWithoutNewerReplica("test-project", "formation_lead_name", 10) {
+			t.Error("human row at dispatch revision must not replace the completed v2 contact")
+		}
+		if l.hasConfirmedWithoutNewerReplica("test-project", "formation_lead_name", 11) {
+			t.Error("newer human revision must be allowed to update v2")
+		}
+	})
+	t.Run("late own echo cannot erase intervening human delivery", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		id := l.record("test-project", map[string]string{"formation_lead_email": "late@example.com"}, 10, now)
+		l.confirm(id)
+		l.observeReplication("test-project", map[string]any{"formation_lead_email": "late@example.com"}, 12)
+		if !l.humanDeliveryOverwrittenByEcho("test-project", "formation_lead_email", 11, "human@example.com") {
+			t.Error("human revision 11 after dispatch 10 and before late echo 12 must be retained")
+		}
+		if l.humanDeliveryOverwrittenByEcho("test-project", "formation_lead_email", 10, "human@example.com") ||
+			l.humanDeliveryOverwrittenByEcho("test-project", "formation_lead_email", 13, "human@example.com") {
+			t.Error("delivery outside the dispatch/echo interval is not the suppressed human edit")
+		}
+	})
+	t.Run("unrelated staff row cannot forge a lead echo", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		l.record("test-project", map[string]string{"formation_lead_email": "new@example.com"}, 10, now)
+		l.observeReplication("test-project", map[string]any{"formation_lead_email": "old@example.com"}, 11)
+		if l.humanDeliveryOverwrittenByEcho("test-project", "formation_lead_email", 9, "old@example.com") ||
+			l.humanDeliveryOverwrittenByEcho("test-project", "formation_lead_email", 10, "old@example.com") {
+			t.Error("an unrelated WAL row is not a matching Formation Lead echo")
+		}
+	})
+	t.Run("base-only human event does not become a lead edit", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		l.record("test-project", map[string]string{"formation_lead_email": "new@example.com"}, 10, now,
+			map[string]string{"formation_lead_email": "old@example.com"})
+		if l.hasUnconfirmedAfter("test-project", "formation_lead_email", 11, "old@example.com") {
+			t.Error("base-only edit with unchanged pre-dispatch email must preserve the pending v2 lead")
+		}
+		if !l.hasUnconfirmedAfter("test-project", "formation_lead_email", 11, "human@example.com") {
+			t.Error("genuine human email edit after dispatch must be reconciled")
+		}
+		if !l.staleFormationField("test-project", "formation_lead_email", "old@example.com") {
+			t.Error("stale email must be omitted from a partial contact merge")
+		}
+	})
+	t.Run("mixed stale email and valid PCC name", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		l.record("test-project", map[string]string{
+			"formation_lead_name": "Carol Fixture", "formation_lead_email": "new@example.com",
+		}, 10, now, map[string]string{
+			"formation_lead_name": "Carol Fixture", "formation_lead_email": "old@example.com",
+		})
+		if l.staleFormationField("test-project", "formation_lead_name", "Carol Fixture") ||
+			!l.staleFormationField("test-project", "formation_lead_email", "old@example.com") {
+			t.Error("PCC name must survive while pre-dispatch email is suppressed")
+		}
+	})
+	t.Run("failed human delivery retried after late echo retains stale field evidence", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		l.record("test-project", map[string]string{"formation_lead_email": "new@example.com"}, 10, now,
+			map[string]string{"formation_lead_email": "old@example.com"})
+		// A failed human name-only delivery at 11 carries the old email.
+		// Before its retry the timed-out email PATCH reaches v1 and its
+		// echo at 12 acknowledges and retires the in-memory attempt.
+		l.observeReplication("test-project", map[string]any{"formation_lead_email": "new@example.com"}, 12)
+		if !l.staleFormationField("test-project", "formation_lead_email", "old@example.com", 11) {
+			t.Error("redelivery 11 restored pre-dispatch email after echo 12")
+		}
+		if l.staleFormationField("test-project", "formation_lead_email", "old@example.com", 13) {
+			t.Error("human edit after matching echo is not stale")
+		}
+	})
+	t.Run("first unrelated WAL row cannot acknowledge unconfirmed unchanged field", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		l.record("test-project", map[string]string{"formation_lead_name": "Alice Example"}, 10, now,
+			map[string]string{"formation_lead_name": "Alice Example"})
+		l.observeReplication("test-project", map[string]any{"formation_lead_name": "Alice Example"}, 11)
+		if !l.hasUnconfirmed("test-project", "formation_lead_name") {
+			t.Error("base-only WAL row retired an in-flight unchanged name")
+		}
+		if !l.hasUnconfirmedAfter("test-project", "formation_lead_name", 12, "Carol Fixture") {
+			t.Error("later PCC name edit was not recognized while PATCH remained uncertain")
+		}
+	})
+	t.Run("repeated successful whole-object writes retire unchanged subfields", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		const sfid = "test-project"
+		first := l.record(sfid, map[string]string{
+			"formation_lead_name": "Alice Example", "formation_lead_email": "first@example.com", "formation_lead_avatar": "https://example.com/avatar.png",
+		}, 1, now)
+		l.confirm(first)
+		l.observeReplication(sfid, map[string]any{
+			"formation_lead_name": "Alice Example", "formation_lead_email": "first@example.com", "formation_lead_avatar": "https://example.com/avatar.png",
+		}, 2)
+		second := l.record(sfid, map[string]string{
+			"formation_lead_name": "Alice Example", "formation_lead_email": "second@example.com", "formation_lead_avatar": "https://example.com/avatar.png",
+		}, 2, now)
+		l.confirm(second)
+		l.observeReplication(sfid, map[string]any{
+			"formation_lead_name": "Alice Example", "formation_lead_email": "second@example.com", "formation_lead_avatar": "https://example.com/avatar.png",
+		}, 3)
+		for _, field := range []string{"formation_lead_name", "formation_lead_email", "formation_lead_avatar"} {
+			_, pending, _ := l.current(sfid, field, "human edit", 4, now)
+			if pending || l.hasUnconfirmed(sfid, field) {
+				t.Errorf("%s still pending after two successful, replicated PATCHes", field)
+			}
+		}
+	})
+	t.Run("timed-out same-value write stays uncertain", func(t *testing.T) {
+		l := newV1StaffWriteLog()
+		first := l.record("test-project", map[string]string{"formation_lead_name": "Alice Example"}, 1, now)
+		l.confirm(first)
+		l.observeReplication("test-project", map[string]any{"formation_lead_name": "Alice Example"}, 2)
+		l.record("test-project", map[string]string{"formation_lead_name": "Alice Example"}, 2, now)
+		l.observeReplication("test-project", map[string]any{"formation_lead_name": "Alice Example"}, 3)
+		if !l.hasUnconfirmed("test-project", "formation_lead_name") {
+			t.Error("unconfirmed write retired without a successful response")
+		}
+	})
 	t.Run("old and duplicate acknowledgements preserve later attempts", func(t *testing.T) {
 		l := newV1StaffWriteLog()
 		l.record("project", map[string]string{field: "B"}, 1, now)
@@ -759,7 +1204,7 @@ func TestHandleProjectSettingsUpdated_VersionedSnapshotMatchesFieldReader(t *tes
 	t.Cleanup(func() { v1KV = origKV })
 
 	key := "salesforce-project__c." + bridgeTestProjectSFID
-	kv.data[key] = []byte(`{"sfid":"` + bridgeTestProjectSFID + `","executive_director__c":" 0034100001oQRLDAA4 ","program_manager__c":"` + bridgeTestPMSFID + `"}`)
+	kv.data[key] = []byte(`{"sfid":"` + bridgeTestProjectSFID + `","executive_director__c":" 0034100001oQRLDAA4 ","program_manager__c":"` + bridgeTestPMSFID + `","formation_lead_name":" Alice Example ","formation_lead_email":" alice@example.com ","formation_lead_avatar":" https://example.com/avatar.png "}`)
 	kv.rev[key] = 12
 
 	snapshot, err := readV1ProjectStaffSnapshot(t.Context(), bridgeTestProjectSFID)
@@ -771,6 +1216,14 @@ func TestHandleProjectSettingsUpdated_VersionedSnapshotMatchesFieldReader(t *tes
 	}
 	if got := snapshot.staff["executive_director__c"]; got != "0034100001oQRLDAA4" {
 		t.Errorf("executive_director__c = %q, want trimmed value", got)
+	}
+	for field, want := range map[string]string{
+		"formation_lead_name": " Alice Example ", "formation_lead_email": " alice@example.com ",
+		"formation_lead_avatar": " https://example.com/avatar.png ",
+	} {
+		if got := snapshot.staff[field]; got != want {
+			t.Errorf("%s = %q, want exact value %q", field, got, want)
+		}
 	}
 	staff, err := getV1ProjectStaffSFIDs(t.Context(), bridgeTestProjectSFID)
 	if err != nil || staff["program_manager__c"] != bridgeTestPMSFID || staff["executive_director__c"] != "0034100001oQRLDAA4" {

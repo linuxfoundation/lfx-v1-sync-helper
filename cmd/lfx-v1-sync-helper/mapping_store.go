@@ -53,7 +53,7 @@ import (
 //
 // Delete removes the row entirely and is used for the secondary-index
 // keys where resurrection is safe (v1-user.username.*, v1-user.email.*,
-// v1_org_lock.*, workspace.uid.*). For primary mappings that must not
+// workspace.uid.*). For primary mappings that must not
 // resurrect after deletion, callers Put/Update with the tombstone
 // marker instead — this is the existing convention in handlers.go and
 // is not changed by this port.

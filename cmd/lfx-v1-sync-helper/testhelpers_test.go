@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -68,11 +69,20 @@ func setupSyncTest(t *testing.T, status int, response string) *syncTestHarness {
 	origCfg, origClient, origStore := cfg, v1HTTPClient, mappingStore
 	origFetchSettings := fetchCommitteeSettings
 	origFetchV1 := fetchV1CommitteeData
+	origCreateState, origCreateV2 := readCommitteeCreateState, checkCommitteeCreateV2
+	origCreatePayload := checkCommitteeCreatePayload
+	origFetchMember, origMemberData := fetchMemberForCreate, readMemberCreateData
+	origMemberCleanup := readMemberCleanupState
+	readCommitteeCreateState = func(_ context.Context, _, name string) (committeeCreateState, error) {
+		return committeeCreateState{Now: time.Now(), Primary: true, NormalizedName: strings.ToLower(name)}, nil
+	}
+	checkCommitteeCreateV2 = func(context.Context, string, string, string, string) error { return nil }
+	checkCommitteeCreatePayload = func(context.Context, string, string, string) error { return nil }
 	fetchCommitteeSettings = func(_ context.Context, uid string) (*committeeservice.CommitteeSettingsWithReadonlyAttributes, string, error) {
 		return &committeeservice.CommitteeSettingsWithReadonlyAttributes{UID: &uid}, "1", nil
 	}
 	origGetBackoff, origPutBackoff := mappingGetInitialBackoff, mappingPutInitialBackoff
-	cfg = &Config{LFXAPIGateway: gateway}
+	cfg = &Config{LFXAPIGateway: gateway, Auth0ClientID: "synthetic-sync-client", CommitteeScopedAdoptionEnabled: true}
 	v1HTTPClient = srv.Client()
 	v1HTTPClient.Timeout = 5 * time.Second
 	mappingStore = h.store
@@ -81,6 +91,10 @@ func setupSyncTest(t *testing.T, status int, response string) *syncTestHarness {
 		cfg, v1HTTPClient, mappingStore = origCfg, origClient, origStore
 		fetchCommitteeSettings = origFetchSettings
 		fetchV1CommitteeData = origFetchV1
+		readCommitteeCreateState, checkCommitteeCreateV2 = origCreateState, origCreateV2
+		checkCommitteeCreatePayload = origCreatePayload
+		fetchMemberForCreate, readMemberCreateData = origFetchMember, origMemberData
+		readMemberCleanupState = origMemberCleanup
 		mappingGetInitialBackoff, mappingPutInitialBackoff = origGetBackoff, origPutBackoff
 	})
 	return h

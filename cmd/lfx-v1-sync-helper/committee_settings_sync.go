@@ -40,12 +40,22 @@ func fetchCommitteeSettingsAPI(ctx context.Context, uid string) (*committeeservi
 	return result.CommitteeSettings, stringPtrToString(result.Etag), nil
 }
 
-// updateCommitteeSettingsFromV1 changes only the sync-managed setting. Copy
+// v1 columns for the sync-managed committee settings.
+const (
+	v1BusinessEmailRequiredField         = "business_email_required__c"
+	v1MembersCanViewSocialListeningField = "members_can_view_social_listening__c"
+)
+
+// updateCommitteeSettingsFromV1 changes only the sync-managed settings. Copy
 // other scalar settings from a fresh read and use its ETag to prevent a lost
-// concurrent edit. Omit writers/auditors: the service preserves absent lists,
-// and there is no reason to retransmit their identities for a boolean change.
+// concurrent edit. Settings update is a full replace, so a sync-managed flag
+// that is absent/null/malformed in v1 keeps its current v2 value. Omit
+// writers/auditors and the write-only chat webhook: the service preserves
+// absent values, and there is no reason to retransmit them for a boolean change.
 func updateCommitteeSettingsFromV1(ctx context.Context, uid string, data map[string]any, v1Principal string) error {
-	if _, present := data["business_email_required__c"].(bool); !present {
+	_, hasRequired := data[v1BusinessEmailRequiredField].(bool)
+	_, hasSocialListening := data[v1MembersCanViewSocialListeningField].(bool)
+	if !hasRequired && !hasSocialListening {
 		return nil
 	}
 	sfid, _ := data["sfid"].(string)
@@ -59,20 +69,27 @@ func updateCommitteeSettingsFromV1(ctx context.Context, uid string, data map[str
 	if !exists {
 		return nil // Deleted/tombstoned since the WAL message was published.
 	}
-	required, present := latest["business_email_required__c"].(bool)
-	if !present {
+	required, hasRequired := latest[v1BusinessEmailRequiredField].(bool)
+	socialListening, hasSocialListening := latest[v1MembersCanViewSocialListeningField].(bool)
+	if !hasRequired && !hasSocialListening {
 		return nil
 	}
 	current, etag, err := fetchCommitteeSettings(ctx, uid)
 	if err != nil {
 		var notFound *committeeservice.NotFoundError
 		if errors.As(err, &notFound) {
-			logger.With("committee_uid", uid).InfoContext(ctx, "committee has no v2 settings record; skipping business email sync")
+			logger.With("committee_uid", uid).InfoContext(ctx, "committee has no v2 settings record; skipping settings sync")
 			return nil
 		}
 		return err
 	}
-	if current.BusinessEmailRequired == required {
+	if !hasRequired {
+		required = current.BusinessEmailRequired
+	}
+	if !hasSocialListening {
+		socialListening = current.MembersCanViewSocialListening
+	}
+	if current.BusinessEmailRequired == required && current.MembersCanViewSocialListening == socialListening {
 		return nil
 	}
 	if etag == "" {
@@ -90,11 +107,12 @@ func updateCommitteeSettingsFromV1(ctx context.Context, uid string, data map[str
 	}
 	payload := &committeeservice.UpdateCommitteeSettingsPayload{
 		BearerToken: &token, UID: &uid, IfMatch: &etag,
-		BusinessEmailRequired: required,
-		ShowMeetingAttendees:  current.ShowMeetingAttendees,
-		MemberVisibility:      current.MemberVisibility,
-		LastReviewedAt:        current.LastReviewedAt,
-		LastReviewedBy:        current.LastReviewedBy,
+		BusinessEmailRequired:         required,
+		MembersCanViewSocialListening: socialListening,
+		ShowMeetingAttendees:          current.ShowMeetingAttendees,
+		MemberVisibility:              current.MemberVisibility,
+		LastReviewedAt:                current.LastReviewedAt,
+		LastReviewedBy:                current.LastReviewedBy,
 	}
 	// Settings echoes must not consume the independent committee-base marker.
 	writePendingMarker(ctx, markerV1ToV2, markerOpUpdate, markerResourceCommitteeSettings, uid)
@@ -162,7 +180,9 @@ func processCommitteeSettingsIndexingEvent(ctx context.Context, subject string, 
 		return nil
 	}
 	// Read current state rather than replaying a stale snapshot after a delayed
-	// mapping or API retry. Both true and false must be sent explicitly.
+	// mapping or API retry. Both true and false must be sent explicitly. The gate
+	// above deliberately does not require members_can_view_social_listening, so
+	// events from older committee-service versions still sync both fields.
 	current, _, err := fetchCommitteeSettings(ctx, event.ObjectID)
 	if err != nil {
 		var notFound *committeeservice.NotFoundError
@@ -172,7 +192,8 @@ func processCommitteeSettingsIndexingEvent(ctx context.Context, subject string, 
 		return err
 	}
 	return updateV1Committee(ctx, projectSFID, committeeSFID, projectServiceCommitteeUpdate{
-		BusinessEmailRequired: &current.BusinessEmailRequired,
+		BusinessEmailRequired:         &current.BusinessEmailRequired,
+		MembersCanViewSocialListening: &current.MembersCanViewSocialListening,
 	})
 }
 

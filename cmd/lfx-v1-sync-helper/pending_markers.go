@@ -66,9 +66,8 @@
 // The KV backend's underlying JetStream stream is not configured
 // with AllowMsgTTL, and the Postgres backend has no expires_at
 // column. Rather than expand the port surface mid-migration
-// (LFXV2-2985), pending markers use the same wall-clock-timestamp +
-// staleness-check pattern the v1 org lock (lfx_v1_client.go
-// acquireV1OrgLock) uses. Consumers explicitly Delete the marker
+// (LFXV2-2985), pending markers store a wall-clock timestamp and
+// apply a staleness check on read. Consumers explicitly Delete the marker
 // after reading; stale markers are cleaned up lazily on the next
 // consumer visit.
 //

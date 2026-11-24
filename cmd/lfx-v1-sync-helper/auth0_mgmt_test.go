@@ -39,6 +39,62 @@ func TestSyncProfileToAuth0Blocked(t *testing.T) {
 	}
 }
 
+func TestSyncProfileToAuth0AccountLookup(t *testing.T) {
+	const accountID = "001000000000001AAA"
+	tests := []struct {
+		name    string
+		row     *accountRow
+		err     error
+		wantErr bool
+		wantOrg string
+	}{
+		{name: "resolved account sets organization", row: testAccountRow(accountID, "Acme", "", accountLive), wantOrg: "Acme"},
+		{name: "missing account syncs without organization"},
+		{name: "soft-deleted account syncs without organization", row: testAccountRow(accountID, "Acme", "", accountDeleted)},
+		{name: "other record type syncs without organization", row: withRecordType(testAccountRow(accountID, "Acme", "", accountLive), "012000000000001AAA")},
+		{name: "empty name syncs without organization", row: testAccountRow(accountID, "", "", accountLive)},
+		{name: "database error fails the sync", err: errors.New("connection refused"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			user := &management.User{ID: auth0.String("auth0|user")}
+			fake := &fakeAuth0Users{users: map[string]*management.User{"auth0|user": user}}
+			cleanup := setupLinkTest(t, fake)
+			defer cleanup()
+			stubAccountRowLookup(t, func(context.Context, string) (*accountRow, error) { return tt.row, tt.err })
+
+			v1Data := map[string]any{"accountid": accountID, "title": "Engineer"}
+			_, err := syncProfileToAuth0(context.Background(), "auth0|user", user, v1Data, false, false)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("syncProfileToAuth0() error = nil, want error")
+				}
+				if len(fake.updated) != 0 {
+					t.Fatalf("expected no Auth0 update, got %d", len(fake.updated))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("syncProfileToAuth0() error = %v", err)
+			}
+			if len(fake.updated) != 1 || fake.updated[0].UserMetadata == nil {
+				t.Fatalf("expected one Auth0 update with user_metadata, got %d", len(fake.updated))
+			}
+			metadata := *fake.updated[0].UserMetadata
+			if got, _ := metadata["job_title"].(string); got != "Engineer" {
+				t.Errorf("job_title = %q, want %q", got, "Engineer")
+			}
+			got, present := metadata["organization"]
+			if tt.wantOrg == "" && present {
+				t.Errorf("organization = %v, want absent", got)
+			}
+			if tt.wantOrg != "" && got != tt.wantOrg {
+				t.Errorf("organization = %v, want %q", got, tt.wantOrg)
+			}
+		})
+	}
+}
+
 func TestBuildAuth0Metadata(t *testing.T) {
 	tests := []struct {
 		name            string

@@ -65,3 +65,11 @@ jobs:
             -t ${{ github.sha }} \
             -t ${{ steps.container_tag.outputs.tag }} \
             --sbom spdx
+      - name: Build v1-mapping-api for PR
+        run: |
+          ko build github.com/linuxfoundation/lfx-v1-sync-helper/cmd/v1-mapping-api \
+            -B \
+            --platform linux/amd64,linux/arm64 \
+            -t ${{ github.sha }} \
+            -t ${{ steps.container_tag.outputs.tag }} \
+            --sbom spdx

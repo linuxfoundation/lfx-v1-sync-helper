@@ -38,6 +38,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"net/http"
@@ -91,8 +92,9 @@ func (e *v1ProjectStaffStatusError) Error() string {
 // executive_director__c / program_manager__c values keyed by field name, and
 // the v1-objects KV revision they were read at.
 type v1ProjectStaffSnapshot struct {
-	staff    map[string]string
-	revision uint64
+	staff         map[string]string
+	revision      uint64
+	fieldVersions map[string]uint64
 }
 
 // v1StaffWrite is one attempted staff value. dispatchRevision is the immutable
@@ -114,11 +116,15 @@ type v1StaffWrite struct {
 // tracks delivery progress separately: a newer point read must not block
 // queued WAL records from acknowledging older attempts.
 type v1StaffReplica struct {
-	value       string
-	revision    uint64
-	ackRevision uint64
-	ackValue    string
-	at          time.Time
+	value                   string
+	revision                uint64
+	ackRevision             uint64
+	ackValue                string
+	lastDispatchRevision    uint64
+	lastMatchedEchoRevision uint64
+	lastMatchedBaseline     string
+	lastMatchedIntent       string
+	at                      time.Time
 }
 
 // v1StaffWriteLog records the bridge's recent staff PATCHes per project and v1
@@ -186,7 +192,7 @@ func (l *v1StaffWriteLog) current(sfid, field, replicated string, revision uint6
 // record runs BEFORE the HTTP request: WAL may acknowledge a successful
 // write before the HTTP response returns. The ID lets a rejected request
 // remove only its own attempt, preserving older unacknowledged writes.
-func (l *v1StaffWriteLog) record(sfid string, fields map[string]string, revision uint64, now time.Time) uint64 {
+func (l *v1StaffWriteLog) record(sfid string, fields map[string]string, revision uint64, now time.Time, baselines ...map[string]string) uint64 {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for key, writes := range l.writes {
@@ -210,6 +216,11 @@ func (l *v1StaffWriteLog) record(sfid string, fields map[string]string, revision
 		floor, baseline := revision, ""
 		if replica, ok := l.observed[key]; ok && replica.revision >= floor {
 			floor, baseline = replica.revision, replica.value
+		}
+		if len(baselines) > 0 {
+			if supplied, ok := baselines[0][field]; ok {
+				baseline = supplied // v1 live contact at dispatch, not lagging KV
+			}
 		}
 		l.writes[key] = append(l.writes[key], v1StaffWrite{
 			id: l.nextID, value: value, at: now, dispatchRevision: floor, baseline: baseline,
@@ -271,6 +282,12 @@ func (l *v1StaffWriteLog) acknowledgeLocked(key, value string, revision uint64, 
 	transition := !observed || replica.ackRevision == 0 || value != replica.ackValue
 	if len(writes) > 0 {
 		head := writes[0]
+		if !head.confirmed && value == head.baseline && head.baseline == head.value {
+			// The first unrelated WAL row repeats a whole-object PATCH's
+			// unchanged subfield. It does not prove a timed-out request
+			// completed; retain the attempt until a response or transition.
+			transition = false
+		}
 		// The first eligible row after dispatch can acknowledge the head.
 		// A newer point-read baseline can also prove an intervening value
 		// before its WAL delivery. Neither permits repeated unchanged rows
@@ -284,7 +301,16 @@ func (l *v1StaffWriteLog) acknowledgeLocked(key, value string, revision uint64, 
 	}
 	replica.ackRevision, replica.ackValue = revision, value
 	l.observed[key] = replica
-	if len(writes) > 0 && transition && revision > writes[0].dispatchRevision && value == writes[0].value {
+	if len(writes) > 0 && (transition || writes[0].confirmed) && revision > writes[0].dispatchRevision && value == writes[0].value {
+		// A confirmed full-object PATCH can repeat an unchanged subfield.
+		// Its successful HTTP response plus a newer matching WAL row is
+		// sufficient even without a value transition; unconfirmed attempts
+		// still require transition evidence because they may complete late.
+		replica.lastDispatchRevision = writes[0].dispatchRevision
+		replica.lastMatchedEchoRevision = revision
+		replica.lastMatchedBaseline = writes[0].baseline
+		replica.lastMatchedIntent = writes[0].value
+		l.observed[key] = replica
 		writes = writes[1:]
 	}
 	if len(writes) == 0 {
@@ -294,13 +320,85 @@ func (l *v1StaffWriteLog) acknowledgeLocked(key, value string, revision uint64, 
 	l.writes[key] = writes
 }
 
+func (l *v1StaffWriteLog) humanDeliveryOverwrittenByEcho(sfid, field string, deliveredRev uint64, candidate string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	replica, ok := l.observed[v1StaffWriteKey(sfid, field)]
+	return ok && replica.lastMatchedEchoRevision > 0 && deliveredRev > replica.lastDispatchRevision &&
+		deliveredRev < replica.lastMatchedEchoRevision && candidate != replica.lastMatchedBaseline &&
+		formationReconcileNow().Sub(replica.at) <= v1StaffWriteFreshness
+}
+
+func (l *v1StaffWriteLog) hasUnconfirmed(sfid, field string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, write := range l.writes[v1StaffWriteKey(sfid, field)] {
+		if !write.confirmed {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *v1StaffWriteLog) hasConfirmedWithoutNewerReplica(sfid, field string, revision uint64) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, write := range l.writes[v1StaffWriteKey(sfid, field)] {
+		if write.confirmed && revision <= write.dispatchRevision {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *v1StaffWriteLog) hasUnconfirmedAfter(sfid, field string, revision uint64, candidate string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, write := range l.writes[v1StaffWriteKey(sfid, field)] {
+		if !write.confirmed && revision > write.dispatchRevision && candidate != write.baseline {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *v1StaffWriteLog) staleFormationField(sfid, field, candidate string, deliveredRevision ...uint64) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := v1StaffWriteKey(sfid, field)
+	writes := l.writes[key]
+	if len(writes) == 0 {
+		if len(deliveredRevision) == 0 || deliveredRevision[0] == 0 {
+			return false
+		}
+		replica, ok := l.observed[key]
+		return ok && replica.lastMatchedEchoRevision > deliveredRevision[0] &&
+			replica.lastDispatchRevision < deliveredRevision[0] &&
+			candidate == replica.lastMatchedBaseline && candidate != replica.lastMatchedIntent
+	}
+	last := writes[len(writes)-1]
+	return candidate == last.baseline && candidate != last.value
+}
+
+func (l *v1StaffWriteLog) confirmedIntentBefore(sfid, field string, revision uint64) (string, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	writes := l.writes[v1StaffWriteKey(sfid, field)]
+	for i := len(writes) - 1; i >= 0; i-- {
+		if writes[i].confirmed && writes[i].dispatchRevision < revision {
+			return writes[i].value, true
+		}
+	}
+	return "", false
+}
+
 // observeReplication is called for project KV puts before echo suppression,
 // including our own service-authored WAL records. Missing/malformed fields
 // are not acknowledgements; explicit null and empty strings represent clears.
 func (l *v1StaffWriteLog) observeReplication(sfid string, data map[string]any, revision uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for _, field := range []string{"executive_director__c", "program_manager__c"} {
+	for _, field := range []string{"executive_director__c", "program_manager__c", "formation_lead_name", "formation_lead_email", "formation_lead_avatar"} {
 		value, present := data[field]
 		if !present {
 			continue
@@ -309,12 +407,29 @@ func (l *v1StaffWriteLog) observeReplication(sfid string, data map[string]any, r
 		if !ok && value != nil {
 			continue
 		}
-		l.acknowledgeLocked(v1StaffWriteKey(sfid, field), staffValueOrNone(strings.TrimSpace(text)), revision, staffWriteNow())
+		if field == "executive_director__c" || field == "program_manager__c" {
+			text = staffValueOrNone(strings.TrimSpace(text))
+		}
+		l.acknowledgeLocked(v1StaffWriteKey(sfid, field), text, revision, staffWriteNow())
 	}
 }
 
 // recentV1StaffWrites is the bridge's write log (see v1StaffWriteLog).
 var recentV1StaffWrites = newV1StaffWriteLog()
+
+// The two core-NATS subscribers (project create and settings updates) run on
+// separate goroutines. Stripe locks by project UID so an initial lead PATCH
+// cannot finish after a newer settings PATCH in this single-consumer process.
+// This does not coordinate multiple independently enabled replicas.
+var formationLeadWriteLocks [256]sync.Mutex
+
+func lockFormationLeadProject(projectUID string) func() {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(projectUID))
+	lock := &formationLeadWriteLocks[h.Sum32()%uint32(len(formationLeadWriteLocks))]
+	lock.Lock()
+	return lock.Unlock
+}
 
 // Function-variable seams for tests (pattern: fetchProjectBase in
 // client_projects.go, lookupUserByUsernameForACS in lfx_v1_client.go).
@@ -378,13 +493,17 @@ var (
 		if isDeleted, ok := v1Data["isdeleted"].(bool); ok && isDeleted {
 			return nil, nil
 		}
-		staff := make(map[string]string, 2)
-		for _, field := range []string{"executive_director__c", "program_manager__c"} {
+		staff := make(map[string]string, 5)
+		for _, field := range []string{"executive_director__c", "program_manager__c", "formation_lead_name", "formation_lead_email", "formation_lead_avatar"} {
 			if v, ok := v1Data[field].(string); ok {
-				staff[field] = strings.TrimSpace(v)
+				if field == "executive_director__c" || field == "program_manager__c" {
+					v = strings.TrimSpace(v)
+				}
+				staff[field] = v
 			}
 		}
-		return &v1ProjectStaffSnapshot{staff: staff, revision: entry.Revision()}, nil
+		versions, _ := formationLeadFieldVersions(v1Data)
+		return &v1ProjectStaffSnapshot{staff: staff, revision: entry.Revision(), fieldVersions: versions}, nil
 	}
 
 	// resolveV1UserSFIDByUsername / resolveV1UserSFIDByEmail alias the live v1
@@ -399,12 +518,7 @@ var (
 // handleProjectSettingsUpdated processes project_settings.updated events and
 // syncs executive_director / program_manager changes back to v1.
 func handleProjectSettingsUpdated(msg *nats.Msg) {
-	// Bound the whole handler: v1HTTPClient has no client-level timeout and
-	// this callback runs on the subscription's single delivery goroutine, so
-	// an unbounded gateway PATCH (or KV/PG read) would stall every later
-	// staff event assigned to this subscriber.
-	ctx, cancel := context.WithTimeout(context.Background(), v1ProjectStaffSyncTimeout)
-	defer cancel()
+	ctx := context.Background()
 
 	var event events.ProjectSettingsUpdatedMessage
 	if err := json.Unmarshal(msg.Data, &event); err != nil {
@@ -424,13 +538,21 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 	// Diff only the staff fields this bridge owns.
 	edChanged := !staffUserInfosEqual(event.OldSettings.ExecutiveDirector, event.NewSettings.ExecutiveDirector)
 	pmChanged := !staffUserInfosEqual(event.OldSettings.ProgramManager, event.NewSettings.ProgramManager)
-	if !edChanged && !pmChanged {
+	formationChanged := !formationLeadEventsEqual(event.OldSettings.FormationLead, event.NewSettings.FormationLead)
+	if !edChanged && !pmChanged && !formationChanged {
 		if !staffUserInfosEqual(event.OldSettings.OpportunityOwner, event.NewSettings.OpportunityOwner) {
 			// AC-2: opportunity_owner is SFDC-owned and syncs v1->v2 only.
 			log.DebugContext(ctx, "ignoring opportunity_owner-only settings change (SFDC-owned, v1-to-v2 only)")
 		}
 		return
 	}
+	unlock := lockFormationLeadProject(event.ProjectUID)
+	defer unlock()
+	// Start the request budget only after acquiring the project lock. Initial
+	// lead sync can hold it for up to 30s; a deadline spent waiting would drop
+	// this core-NATS event before its v1 read/PATCH even begins.
+	ctx, cancel := context.WithTimeout(ctx, v1ProjectStaffSyncTimeout)
+	defer cancel()
 
 	// Keep the legacy service-actor guard. Other M2M corrections still sync;
 	// the human actor alone cannot identify which product an edit came from.
@@ -460,8 +582,18 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 		return
 	}
 	if snapshot == nil {
-		log.WarnContext(ctx, "no live v1 project record in v1-objects, skipping staff sync")
-		return
+		if !formationChanged {
+			log.WarnContext(ctx, "no live v1 project record in v1-objects, skipping staff sync")
+			return
+		}
+		// A just-created v1 project can exist in the live API before its
+		// replica appears. Formation Lead uses the uncached live GET below;
+		// ED/PM need a replica of contact IDs and must wait for one.
+		snapshot = &v1ProjectStaffSnapshot{staff: map[string]string{}}
+		if edChanged || pmChanged {
+			log.WarnContext(ctx, "v1 replica not yet available; skipping ED/PM while syncing Formation Lead")
+		}
+		edChanged, pmChanged = false, false
 	}
 
 	// Build a partial payload carrying only the fields that changed in v2 and
@@ -509,14 +641,123 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 		payload[field.payloadKey] = target
 		written[field.v1Field] = target
 	}
+	var formationPayload *events.FormationLead
+	var formationBaseline map[string]string
+	if formationChanged {
+		// Reserve part of the handler's budget for an independent ED/PM
+		// PATCH if this live Formation Lead read stalls. The child context
+		// inherits the handler deadline, with at least 5s left for the
+		// independent staff write even if earlier mapping reads were slow.
+		readBudget := 10 * time.Second
+		if len(payload) > 0 {
+			if deadline, ok := ctx.Deadline(); ok {
+				remaining := time.Until(deadline) - 5*time.Second
+				if remaining < readBudget {
+					readBudget = remaining
+				}
+			}
+		}
+		var live *events.FormationLead
+		var readErr error
+		if readBudget <= 0 {
+			readErr = errors.New("insufficient time to read Formation Lead before independent staff write")
+		} else {
+			readCtx, cancelRead := context.WithTimeout(ctx, readBudget)
+			live, readErr = fetchLiveFormationLead(readCtx, sfid)
+			cancelRead()
+		}
+		if readErr != nil {
+			log.With(errKey, readErr).ErrorContext(ctx, "failed to read live v1 formation lead; continuing independent ED/PM PATCH only")
+			if markErr := retainUncertainFormationLeadWrite(ctx, event.ProjectUID, sfid, snapshot.revision, snapshot.fieldVersions); markErr != nil {
+				log.With(errKey, markErr).ErrorContext(ctx, "failed to retain Formation Lead edit after live v1 read failure")
+			}
+		} else {
+			formationBaseline = map[string]string{
+				"formation_lead_name": live.Name, "formation_lead_email": live.Email, "formation_lead_avatar": live.Avatar,
+			}
+			// A prior full-object PATCH may have timed out and still complete.
+			// Carry its latest intended values into fields the new event did not
+			// change; a lagging v1 GET alone would restore the old contact.
+			liveCopy := *live
+			for field, target := range map[string]*string{
+				"formation_lead_name": &liveCopy.Name, "formation_lead_email": &liveCopy.Email,
+				"formation_lead_avatar": &liveCopy.Avatar,
+			} {
+				value, pending, _ := recentV1StaffWrites.current(sfid, field, snapshot.staff[field], snapshot.revision, now)
+				if pending && recentV1StaffWrites.hasUnconfirmed(sfid, field) {
+					// Only an unconfirmed request can still finish late. A
+					// confirmed PATCH is complete; preserve a newer live PCC
+					// edit instead of overlaying its old intended value.
+					*target = value
+				}
+			}
+			formationPayload = mergeFormationLead(event.OldSettings.FormationLead, event.NewSettings.FormationLead, &liveCopy)
+			liveFields := map[string]string{
+				"formation_lead_name": live.Name, "formation_lead_email": live.Email, "formation_lead_avatar": live.Avatar,
+			}
+			formationNeedsWrite := false
+			for field, target := range map[string]string{
+				"formation_lead_name":   formationPayload.Name,
+				"formation_lead_email":  formationPayload.Email,
+				"formation_lead_avatar": formationPayload.Avatar,
+			} {
+				current, _, uncertain := recentV1StaffWrites.current(sfid, field, snapshot.staff[field], snapshot.revision, now)
+				if current != target || liveFields[field] != target || uncertain {
+					written[field] = target
+					formationNeedsWrite = true
+				}
+			}
+			if !formationNeedsWrite {
+				formationPayload = nil
+			} else {
+				// The v1 PATCH carries the entire FormationLead object. Record all
+				// three values, not just the differences: a timed-out request may
+				// complete after a later edit and overwrite any of them.
+				written["formation_lead_name"] = formationPayload.Name
+				written["formation_lead_email"] = formationPayload.Email
+				written["formation_lead_avatar"] = formationPayload.Avatar
+			}
+		}
+	}
 
-	if len(payload) == 0 {
+	if len(payload) == 0 && formationPayload == nil {
 		log.DebugContext(ctx, "no staff diff vs v1 state, skipping v1 write")
 		return
 	}
+	if formationPayload != nil {
+		// Persist the repair obligation before sending a full-object PATCH.
+		// A pod can terminate while the request is in flight, then the v1
+		// write can finish late after a newer contact update. Never dispatch
+		// a write whose uncertain outcome cannot be reconciled after restart.
+		if markErr := retainUncertainFormationLeadWrite(ctx, event.ProjectUID, sfid, snapshot.revision, snapshot.fieldVersions); markErr != nil {
+			log.With(errKey, markErr).ErrorContext(ctx, "failed to retain Formation Lead obligation before reverse PATCH; sending independent staff fields only")
+			formationPayload = nil
+			for _, field := range []string{"formation_lead_name", "formation_lead_email", "formation_lead_avatar"} {
+				delete(written, field)
+			}
+			if len(payload) == 0 {
+				return
+			}
+		}
+	}
 
-	writeID := recentV1StaffWrites.record(sfid, written, snapshot.revision, now)
-	if err := patchV1ProjectStaff(ctx, sfid, payload); err != nil {
+	writeID := recentV1StaffWrites.record(sfid, written, snapshot.revision, now, formationBaseline)
+	var patchErr error
+	if formationPayload == nil {
+		patchErr = patchV1ProjectStaff(ctx, sfid, payload)
+	} else {
+		fields := make(map[string]any, len(payload)+1)
+		for key, value := range payload {
+			fields[key] = value
+		}
+		fields["FormationLead"] = struct {
+			Name   string `json:"Name"`
+			Email  string `json:"Email"`
+			Avatar string `json:"Avatar"`
+		}{formationPayload.Name, formationPayload.Email, formationPayload.Avatar}
+		patchErr = patchV1ProjectFields(ctx, sfid, fields)
+	}
+	if err := patchErr; err != nil {
 		if errors.Is(err, errV1ProjectNotFound) {
 			recentV1StaffWrites.discard(writeID)
 			log.WarnContext(ctx, "project has no Salesforce-backed v1 record (platform-native), skipping staff sync")
@@ -528,13 +769,103 @@ func handleProjectSettingsUpdated(msg *nats.Msg) {
 		if errors.As(err, &statusErr) && statusErr.status < http.StatusInternalServerError {
 			recentV1StaffWrites.discard(writeID)
 		}
+		if formationPayload != nil && (statusErr == nil || statusErr.status >= http.StatusInternalServerError) {
+			// A timed-out full-object PATCH can finish after a subsequent
+			// successful edit even when PCC made no intervening edit. An
+			// identifier-only durable obligation reconciles the eventual v1
+			// value to current v2 settings after the uncertainty window.
+			if markErr := retainUncertainFormationLeadWrite(ctx, event.ProjectUID, sfid, snapshot.revision, snapshot.fieldVersions); markErr != nil {
+				log.With(errKey, markErr).ErrorContext(ctx, "failed to retain uncertain reverse Formation Lead write for reconciliation")
+			}
+		}
 		log.With(errKey, err).ErrorContext(ctx, "failed to patch v1 project staff")
 		return
 	}
 	recentV1StaffWrites.confirm(writeID)
 
 	// Log field names only: the values are contact SFIDs.
-	log.With("fields", staffPayloadFieldNames(payload)).InfoContext(ctx, "synced v2 project staff to v1")
+	log.With("fields", staffPayloadFieldNames(payload), "formation_lead_changed", formationPayload != nil).InfoContext(ctx, "synced v2 project staff to v1")
+}
+
+// mergeFormationLead applies only v2's deliberate field changes over the
+// live v1 contact. The v1 API requires a complete FormationLead object on
+// PATCH; re-sending unchanged values from an older v2 event would undo a
+// newer PCC edit that has not yet replicated into v2.
+func mergeFormationLead(old, next, live *events.FormationLead) *events.FormationLead {
+	if old == nil {
+		old = &events.FormationLead{}
+	}
+	if next == nil {
+		// Clearing the contact is intentional even if one of v1's subfields
+		// changed since the old v2 snapshot was published.
+		return &events.FormationLead{}
+	}
+	result := *live
+	if old.Name != next.Name {
+		result.Name = next.Name
+	}
+	if old.Email != next.Email {
+		result.Email = next.Email
+	}
+	if old.Avatar != next.Avatar {
+		result.Avatar = next.Avatar
+	}
+	return &result
+}
+
+type liveFormationLeadState struct {
+	Lead           *events.FormationLead `json:"FormationLead"`
+	SystemModStamp string                `json:"SystemModStamp"`
+}
+
+// fetchLiveFormationLeadState bypasses v1 Redis caching. The modification
+// timestamp lets the repair worker prove that the v1-objects replica has
+// caught up before it overwrites a different live contact.
+var fetchLiveFormationLeadState = func(ctx context.Context, sfid string) (*liveFormationLeadState, error) {
+	apiURL := fmt.Sprintf("%sproject-service/v1/projects/%s", cfg.LFXAPIGateway.String(), sfid)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	// The v1 project GET is Redis-cached by default. A cached contact would
+	// defeat the live merge and could overwrite a newer PCC edit.
+	req.Header.Set("X-LFX-CACHE", "false")
+	resp, err := v1HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("v1 project GET returned status %d", resp.StatusCode)
+	}
+	var result liveFormationLeadState
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding v1 FormationLead: %w", err)
+	}
+	if result.Lead == nil {
+		result.Lead = &events.FormationLead{}
+	}
+	return &result, nil
+}
+
+// fetchLiveFormationLead reads v1 directly rather than trusting a lagging
+// v1-objects replica when composing a full-object v1 PATCH.
+var fetchLiveFormationLead = func(ctx context.Context, sfid string) (*events.FormationLead, error) {
+	state, err := fetchLiveFormationLeadState(ctx, sfid)
+	if err != nil {
+		return nil, err
+	}
+	return state.Lead, nil
+}
+
+func formationLeadEventsEqual(a, b *events.FormationLead) bool {
+	if a == nil {
+		a = &events.FormationLead{}
+	}
+	if b == nil {
+		b = &events.FormationLead{}
+	}
+	return *a == *b
 }
 
 // staffUserInfosEqual compares event staff snapshots by identity fields
@@ -620,6 +951,10 @@ func resolveV1StaffSFID(ctx context.Context, log *slog.Logger, info *events.User
 // ProgramManagerID); the v1 PATCH leaves omitted fields untouched, as PCC's
 // other project dialogs (edit-legal, edit-project-details) rely on.
 func patchV1ProjectStaff(ctx context.Context, sfid string, fields map[string]string) error {
+	return patchV1ProjectFields(ctx, sfid, fields)
+}
+
+func patchV1ProjectFields(ctx context.Context, sfid string, fields any) error {
 	apiURL := fmt.Sprintf("%sproject-service/v1/projects/%s", cfg.LFXAPIGateway.String(), sfid)
 
 	body, err := json.Marshal(fields)

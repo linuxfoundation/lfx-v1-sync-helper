@@ -59,6 +59,28 @@ maxAckPending: 1000
 
 #### v2 → v1 (indexer domain events)
 
+The app reconciles the durable `v1-sync-helper-committee-events-consumer` on
+`committee_events` at startup, including existing consumers. Committee, member
+and settings events have a **65-second total processing deadline**, allowing the
+v1 API's 60-second timeout plus five seconds of overhead. The consumer's
+**90-second AckWait** leaves room to ACK/NAK after processing finishes without
+redelivering an operation still in flight. The three-delivery limit, subjects and
+durable checkpoint are unchanged; restarting does not replay historical events.
+Each replica pulls only **one message at a time**: the next event stays on the
+server rather than consuming its AckWait in a client buffer behind a slow call.
+Multiple replicas can still process different events concurrently; the shared
+consumer's `MaxAckPending` remains 100. All replicas must run the updated image
+for this per-replica delivery bound to apply throughout the deployment.
+Other consumers retain their own acknowledgement windows.
+
+Graceful shutdown allows **75 seconds** for the NATS connection to drain, followed
+by up to **5 seconds** for pending dual-store mapping writes. The Helm app's pod
+grace period defaults to **120 seconds**; update any shorter environment override
+along with the application image. The processing budget covers the whole event,
+including authentication and lookups, not a fresh 65 seconds for each HTTP call.
+Longer budgets alone cannot resolve ambiguous create success followed by 409;
+the guarded helper-side recovery below handles that case without repeating POST.
+
 |NATS Subject|Action|
 |---|---|
 |`lfx.committee.created`|Create committee in v1 via Project Service API|
@@ -74,12 +96,170 @@ Create-loop detection skips creates with a live reverse mapping. Update echoes u
 pending-operation markers; v1 WAL echoes of v2 writes are skipped by the sync
 client's `lastmodifiedbyid` identity.
 
-#### Committee business-email requirement
+#### Guarded recovery of committee creates
 
-`business_email_required` lives in v2 committee **settings**, not the base record.
+Before a new committee POST, the helper confirms the current V2 identity through
+the base API and project/name lookup, checks a primary v1 database snapshot for
+same-name records (including deleted records), and insert-only claims
+`create_attempt.committee.<v2-uid>` through the configured `MappingStore`.
+This versioned attempt stores an operation ID, resolved project/parent IDs,
+database-clock start time, and SHA-256 fingerprints of the normalized create payload and service
+creator. It does **not** retain the raw payload or creator principal.
+Parent-clearing `NONE` is normalized to no parent on create; it remains a
+clearing instruction on PATCH only.
+New attempts use version 3 with `prepared` and `dispatched` phases. Validation,
+mapping-read and snapshot failures before dispatch can retry the same prepared
+attempt. A CAS transition immediately before POST selects one dispatcher and
+refreshes the database-clock creation window. A failed/uncertain dispatch write
+never permits POST; an already-dispatched attempt is never reset. Version-1/2
+dispatched attempts remain conservative: unknown outcomes require manual review,
+not retrospective assignment of new ownership evidence. A version-2 preparation
+can acquire the new scope under CAS because it has not dispatched.
+Only the dispatch-CAS winner can send POST. The database clock defines the creation
+window; it is not compared with the V2 creation date or the current wall clock.
+If a candidate appears during the final pre-dispatch snapshot, re-read the
+attempt before rejecting it. An advanced revision for the same operation remains
+pending recovery (delayed NAK); an unchanged attempt or different identity remains
+a manual conflict. Re-read failures stay retryable rather than being ACKed.
+
+Each new attempt also insert-only claims
+`create_scope.committee.<sha256(project-id, database-normalized-name)>`, retaining
+the owning V2 UID and operation ID, not the raw name. The primary snapshot returns
+the same `LOWER(name)` normalization used in candidate selection. Different UIDs
+cannot dispatch or adopt through the same scope, even after an owner's deletion.
+Scopes never expire or transfer automatically: a delayed predecessor commit can
+otherwise pass another UID's overlapping creator/time/payload checks. Legitimate
+name reuse needs explicit manual reconciliation and a reviewed scope handoff.
+
+**Scoped-adoption rollout gate:** `COMMITTEE_SCOPED_ADOPTION_ENABLED` defaults to
+`false`. Fresh scope-fenced POSTs and known returned IDs still work, but ambiguous
+adoption stays manual until operators have upgraded every writer, reconciled all
+older unscoped outstanding attempts, and established that no older create can
+still commit. Only then enable the flag. Waiting 70 seconds or observing an empty
+snapshot alone is not that evidence. The flag is an explicit rollout attestation,
+not automatic proof; it never permits adopting a legacy unscoped unknown result.
+This avoids laundering an old unresolved request through a newly claimed scope.
+
+After a timeout, unreadable response, 409 or other ambiguous failure, the helper
+retains the attempt and NAKs with a **70-second delay**. A fresh delivery performs
+read-only recovery instead of POSTing again. Automatic adoption requires exactly
+one same-project/name candidate, created by this helper during the recorded
+65-second create window, unchanged since creation, not deleted, with **no member
+history**, and with a matching normalized original payload (including parent,
+visibility, voting and business-email fields). Known server-derived SSO/public
+name semantics and false boolean defaults are normalized, not fuzzy-scored.
+Missing/unavailable snapshots remain retryable; replica snapshots cannot authorize
+creation or recovery. A genuinely pre-existing group, competing name owner,
+changed request, unknown attempt format or unverifiable candidate requires manual
+reconciliation. Permanent decisions are ERROR-logged with the object ID and ACKed;
+exhausted retry deliveries also emit an explicit manual-reconciliation error.
+
+The returned/recovered v1 ID is CAS-recorded before mapping claims. Forward and
+reverse mappings are create-only: matching entries are accepted; conflicting
+entries and tombstones are never overwritten. Both directions are re-read before
+success. A recorded ID permits replay to complete a partial pair, including a
+missing forward key behind the normal reverse-mapping loop guard. A tombstoned
+committee is never recreated by a late create event. All attempt/mapping writes
+use the existing KV/dual/Postgres store abstraction; no v1 write endpoint or
+database schema change is required.
+
+Member-created events whose parent has a recorded attempt also use delayed retry
+within the existing three-delivery limit while the committee mapping is pending.
+Child committee creates use the same delay for a missing parent mapping with a
+valid same-project create attempt; deleted/tombstoned or conflicting parents do
+not become eligible for creation. Untracked missing parents retain ordinary retry
+behavior, and transient attempt-store failures remain retryable.
+Proven V2-only/untracked parents keep their existing permanent-skip behavior.
+Before a member POST, the helper fetches the current V2 member and uses its
+current fields, not the delayed event body. NotFound retains deletion intent
+and skips creation; transient reads retry. Member creates insert-only claim
+`create_attempt.committee_member.<v2-uid>` before POST and CAS-record only the
+resolved IDs on success (no profile fields). Replays complete partial mapping
+claims or cleanup from that result, never another POST. Unlike committees,
+ambiguous member outcomes have no automatic database-adoption path: they retry
+within the delivery budget and then require manual reconciliation.
+
+V2 committee/member deletes first retain a permanent
+`create_deleted.<resource>.<v2-uid>` fence, including when no reverse mapping
+exists yet. Completion checks it before and after mapping claims; a racing
+delete reads the recorded create result. Known results are deleted through the
+existing v1 API and their mappings tombstoned, with ownership conflicts left
+untouched for manual review. Cleanup failures retry from retained IDs. Unknown
+results remain fenced and visibly require manual cleanup on retry exhaustion;
+deletion never authorizes adopting an arbitrary same-name candidate. These
+fences and attempts must not be expired or reset to force a new POST.
+
+**Member cleanup replay:** v1 member DELETE addresses a reusable contact ID,
+not an immutable membership record. Fully tombstoned old mappings or a completed
+`cleanup_attempt.committee_member.<uid>` therefore skip DELETE. Before a first
+DELETE, a bounded primary snapshot checks the original record and active
+committee/contact memberships. An absent/deleted original or a replacement only
+requires tombstoning the old owner's mappings, not deleting the current contact.
+Duplicate or changed ownership, a missing original record ID, and legacy partial
+cleanup without a confirmed result fail closed for manual review.
+
+An insert-only cleanup record binds the resolved IDs by fingerprint and fences
+dispatch. A confirmed DELETE is CAS-recorded **before** mapping tombstones; retries
+then only finish owner-checked CAS tombstones and record completion. A failed or
+lost DELETE response, or uncertain persistence of its confirmed result, never
+authorizes another DELETE: the retained `dispatched` phase retries waiting for
+the original worker, then surfaces manual reconciliation on exhaustion. Read or
+storage failures before dispatch remain safely retryable. Do not clear cleanup
+attempts to force another DELETE. This is helper-side fencing and primary-read
+verification, not a conditional-delete guarantee against external v1 writers.
+
+This is not a historical backfill: member events
+whose deliveries were already exhausted are not automatically replayed, and old
+unmapped committees without recorded attempts are not adopted by name.
+
+**Rollout and operations:** the existing v1 database connection must be a primary
+read source and permit SELECT on `platform.collaboration__c` and
+`platform.community__c`. API `CreatedBy: System`, cached rosters and replica
+absence are not ownership evidence. The committee service must serve the existing
+`lfx.committee-api.name_to_uid` lookup. Roll every helper replica to the new image;
+older writers do not honor attempt fences. Attempts are intentionally retained,
+not expired: an unavailable/missing result, or even failure to confirm the attempt
+write, does not prove a previous POST can never commit. Do not clear an attempt to
+force another POST without first reconciling its actual v1 outcome. Recovery only
+links the verified record; it does not overwrite its fields or replace a roster.
+
+Recovery compares current normalized committee base/settings fields with the
+original request fingerprint, before dispatch/adoption and around mapping claims.
+This detects voting, visibility and other edits ACKed while the reverse mapping
+was absent. Drift is explicitly surfaced for manual reconciliation, not accepted
+as successful stale adoption or automatically PATCHed over a candidate. Recorded
+committee deletion uses owner-checked CAS tombstones after DELETE; an ownership
+change during the HTTP call is preserved and surfaced rather than overwritten.
+
+Member mapping recovery re-reads current v1-writable V2 fields after claiming
+ownership, and performs a retryable PATCH without another POST or consuming an
+indexer echo marker. Replays always reconcile, including when a previous PATCH
+response was lost. A hash of the initial update-shaped payload (no profile data)
+only avoids an unnecessary PATCH on an unchanged first create; it is not cached
+proof of v1's later state. Ownership/deletion are rechecked around reconciliation,
+and an edit during the PATCH causes another current-state retry. Cleared role and
+voting fields use the existing v1 sentinels/date-clear contract.
+Before recovery claims and before/after any reconciliation PATCH, the same bounded
+primary-record check used by cleanup must prove that the original record ID is
+the unique active membership for that committee/contact. Missing, deleted,
+replaced or ambiguous originals fail closed without PATCH; replica/unavailable
+reads retry. Mapping ownership and live V2 state alone are not sufficient while
+WAL catches up. These checks detect known replacements; they do not provide an
+atomic conditional-PATCH guarantee against external v1 writers.
+
+#### Committee settings: business-email requirement and social listening access
+
+`business_email_required` and `members_can_view_social_listening` live in v2
+committee **settings**, not the base record. They map to the v1 columns
+`business_email_required__c` / `members_can_view_social_listening__c` and the
+project-service fields `BusinessEmailRequired` / `MembersCanViewSocialListening`,
+and are synced together.
 v1 updates therefore perform a separate, ETag-protected settings read/update,
-including when no committee-base field changed. Other scalar settings are
-preserved and writer/auditor lists are omitted, so the service leaves them alone.
+including when no committee-base field changed. The update runs when either v1
+flag is present and sends both; a flag that is absent/null/malformed in v1 keeps
+its current v2 value, so changing one never resets the other. Other scalar
+settings are preserved and writer/auditor lists are omitted, so the service
+leaves them alone.
 Each settings sync re-reads the current v1 replica record, rather than trusting
 an old WAL delivery. Every existing-committee update also refreshes base input
 before base work, including absent/null-flag events, so a retried base or settings
@@ -87,7 +267,7 @@ failure cannot revert a newer committee rename. Echo detection uses the original
 WAL message's editor, not the refreshed row's editor: a settings-only PATCH can
 make a pending human rename service-authored without syncing it. Normal base
 comparison skips already-completed work without discarding pending changes.
-Deleted/missing records or an absent/malformed flag do not
+Deleted/missing records or absent/malformed flags do not
 change v2 settings; replica read failures are retried. Transient base failures
 also retry instead of acknowledging the settings change without processing it.
 Successful base bookkeeping and SSO-name writeback complete before settings
@@ -98,9 +278,11 @@ missing settings record. Other settings failures continue to retry.
 For v2-created committees, current settings are read before creating the v1
 record. A missing settings record uses the v1 default only after confirming
 that the v2 base still exists; a deleted base is skipped. Later settings
-create/update events PATCH only `BusinessEmailRequired`
-in v1, using current v2 state rather than a stale event snapshot. Missing reverse
-mappings are retried with a 30-second delay (up to the existing three deliveries)
+create/update events PATCH only `BusinessEmailRequired` and
+`MembersCanViewSocialListening` in v1, using current v2 state rather than a stale
+event snapshot. Events are gated on `business_email_required` only, so events
+from older committee-service versions still sync both fields. Missing reverse
+mappings are retried with a 70-second delay (up to the existing three deliveries)
 only when the live committee's parent project has a live v1 mapping. This allows
 an in-flight base create to finish without retrying settings on proven v2-only
 committees. Settings deletes and tombstoned mappings
@@ -115,6 +297,12 @@ adds this subject; installations managing the stream separately or overriding
 its subjects must add it themselves. Existing historical drift is not replayed
 or repaired automatically. Confirm each mismatched record's intended value
 before rollout; subsequent events can now propagate changes in both directions.
+
+Social listening rollout order: v1 DB migration adding
+`members_can_view_social_listening__c`, then the project-management deploy that
+accepts `MembersCanViewSocialListening`, then this service (the create-recovery
+snapshot query reads the new column). An older v1 API that ignores the field is
+harmless; v1 simply keeps NULL/false until it is deployed.
 
 #### Committee member role and term dates
 
@@ -163,7 +351,7 @@ since later structured snapshots overwrite v1 role dates.
 | `AUTH0_CLIENT_ID`           | Yes      | Auth0 client ID for v1 API authentication                                         |
 | `AUTH0_PRIVATE_KEY`         | Yes      | Auth0 private key (PEM format) for v1 API                                         |
 | `LFX_API_GW`                | No       | LFX API Gateway URL (default: `https://api-gw.dev.platform.linuxfoundation.org/`) |
-| `DATABASE_URL`              | Yes*     | PostgreSQL DSN for the v1 platform database (live user lookups). *Alternatively set the discrete `V1_DB_*` variables below. |
+| `DATABASE_URL`              | Yes*     | PostgreSQL DSN for the v1 platform database (live user and organization lookups). *Alternatively set the discrete `V1_DB_*` variables below. |
 | `V1_DB_HOST`                | Yes*     | v1 platform database host (used when `DATABASE_URL` is unset)                     |
 | `V1_DB_PORT`                | No       | v1 platform database port (default: `5432`)                                       |
 | `V1_DB_NAME`                | No       | v1 platform database name (default: `sfdc`)                                       |

@@ -220,6 +220,7 @@ func handleWALUpsert(ctx context.Context, walEvent *WALEvent) bool {
 
 	var shouldUpdate bool
 	var lastRevision uint64
+	var existingData map[string]interface{}
 
 	if err == jetstream.ErrKeyNotFound {
 		// Key doesn't exist, create it.
@@ -234,7 +235,6 @@ func handleWALUpsert(ctx context.Context, walEvent *WALEvent) bool {
 		// Create). This unwedges entries where a stray empty PUT has left the
 		// key in an un-readable state and would otherwise block every future
 		// update.
-		var existingData map[string]interface{}
 		if len(existing.Value()) == 0 {
 			logger.With("key", key, "revision", lastRevision).WarnContext(ctx, "existing KV entry is empty, overwriting from WAL")
 			shouldUpdate = true
@@ -264,6 +264,35 @@ func handleWALUpsert(ctx context.Context, walEvent *WALEvent) bool {
 	}
 
 	if shouldUpdate {
+		if walEvent.Schema == "salesforce" && walEvent.Table == "project__c" {
+			changed := changedFormationLeadFields(existingData, walEvent.Data)
+			walEvent.Data[formationLeadChangesKey] = changed
+			versions, ok := formationLeadFieldVersions(existingData)
+			if existingData == nil && lastRevision == 0 {
+				// A first insert has an actual empty prior row. An existing
+				// legacy, empty or unparseable row does not: its prior human
+				// edits cannot safely be recast as zero generations.
+				versions = map[string]uint64{"name": 0, "email": 0, "avatar": 0}
+				ok = true
+			}
+			if ok {
+				currentHuman, hasProvenance := formationLeadCurrentHumanFields(existingData)
+				if !hasProvenance {
+					currentHuman = map[string]bool{"name": false, "email": false, "avatar": false}
+				}
+				// The latest-row mask describes every WAL change, but cumulative
+				// generations are evidence of human contact edits only.
+				isHuman := !shouldSkipSync(ctx, walEvent.Data)
+				for _, field := range changed {
+					currentHuman[field] = isHuman
+					if isHuman {
+						versions[field]++
+					}
+				}
+				walEvent.Data[formationLeadVersionsKey] = versions
+				walEvent.Data[formationLeadCurrentHumanKey] = currentHuman
+			}
+		}
 		// Add metadata fields.
 		walEvent.Data["_sdc_extracted_at"] = walEvent.CommitTime
 		walEvent.Data["_sdc_received_at"] = time.Now().UTC().Format(time.RFC3339)

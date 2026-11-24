@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -133,6 +134,9 @@ func TestSeedCommitteeUpdateFromCurrentBase_PreservesCurrentValues(t *testing.T)
 		SsoGroupEnabled: true,
 		Public:          true,
 		ParentUID:       sptr("parent-uid"),
+		ExternalSources: []*committeeservice.ExternalSource{{
+			Provider: "groupsio", EntityType: "group", Label: "Existing list", URL: "https://groups.example.org/g/existing",
+		}},
 	}
 	payload := &committeeservice.UpdateCommitteeBasePayload{
 		UID:        sptr("cmt-uid"),
@@ -170,6 +174,11 @@ func TestSeedCommitteeUpdateFromCurrentBase_PreservesCurrentValues(t *testing.T)
 	}
 	if payload.ParentUID == nil || *payload.ParentUID != "parent-uid" {
 		t.Errorf("ParentUID not preserved from current base: %v", payload.ParentUID)
+	}
+	// The service replaces external sources wholesale; an unrelated v1 edit must
+	// carry the current links rather than clear them.
+	if len(payload.ExternalSources) != 1 || payload.ExternalSources[0].URL != "https://groups.example.org/g/existing" {
+		t.Errorf("ExternalSources not preserved from current base: %v", payload.ExternalSources)
 	}
 }
 
@@ -590,6 +599,63 @@ func TestMapV1DataToCommitteeMemberVotingNone(t *testing.T) {
 			}
 			if update.Voting == nil || update.Voting.Status != tt.wantStatus {
 				t.Errorf("update: expected Voting.Status %q, got %+v", tt.wantStatus, update.Voting)
+			}
+		})
+	}
+}
+
+// TestMapV1DataToCommitteeMemberOrganization verifies that both member mappers
+// build the organization from account__c as before: the raw account__c as
+// the ID, the account name, and a website from account_domain__c only. An
+// unresolvable account leaves the organization unset.
+func TestMapV1DataToCommitteeMemberOrganization(t *testing.T) {
+	const accountSFID = "001000000000001AAA"
+	tests := []struct {
+		name        string
+		row         *accountRow
+		err         error
+		wantOrg     bool
+		wantWebsite string
+	}{
+		{name: "account with domain", row: testAccountRow(accountSFID, "Acme", "acme.example", accountLive), wantOrg: true, wantWebsite: "http://acme.example"},
+		{name: "account without domain", row: testAccountRow(accountSFID, "Acme", "", accountLive), wantOrg: true},
+		{name: "missing account", wantOrg: false},
+		{name: "soft-deleted account", row: testAccountRow(accountSFID, "Acme", "acme.example", accountDeleted), wantOrg: false},
+		{name: "account with empty name", row: testAccountRow(accountSFID, "", "", accountLive), wantOrg: false},
+		{name: "database error", err: errors.New("connection refused"), wantOrg: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubAccountRowLookup(t, func(context.Context, string) (*accountRow, error) { return tt.row, tt.err })
+			v1Data := map[string]any{"contactemail__c": "member@example.com", "account__c": accountSFID}
+
+			create, err := mapV1DataToCommitteeMemberCreatePayload(context.Background(), "committee-uid", v1Data)
+			if err != nil {
+				t.Fatalf("create mapper: %v", err)
+			}
+			update, err := mapV1DataToCommitteeMemberUpdatePayload(context.Background(), "committee-uid", "member-uid", v1Data)
+			if err != nil {
+				t.Fatalf("update mapper: %v", err)
+			}
+			for label, org := range map[string]*struct {
+				ID      *string
+				Name    *string
+				Website *string
+			}{"create": create.Organization, "update": update.Organization} {
+				if !tt.wantOrg {
+					if org != nil {
+						t.Errorf("%s: Organization = %+v, want nil", label, org)
+					}
+					continue
+				}
+				if org == nil {
+					t.Fatalf("%s: Organization = nil, want set", label)
+				}
+				if stringPtrToString(org.ID) != accountSFID || stringPtrToString(org.Name) != "Acme" || stringPtrToString(org.Website) != tt.wantWebsite {
+					t.Errorf("%s: Organization = {ID:%q Name:%q Website:%q}, want {ID:%q Name:%q Website:%q}", label,
+						stringPtrToString(org.ID), stringPtrToString(org.Name), stringPtrToString(org.Website),
+						accountSFID, "Acme", tt.wantWebsite)
+				}
 			}
 		})
 	}
