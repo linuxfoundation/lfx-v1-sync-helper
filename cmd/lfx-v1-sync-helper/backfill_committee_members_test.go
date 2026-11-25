@@ -1081,7 +1081,7 @@ func TestMemberMapperRetriesOrgLookupErrorsWhileHeld(t *testing.T) {
 			if tt.hold {
 				seedSettingsHold(t, h.store, committeeSettingsHold{CommitteeUID: "cmt-uid", State: holdStateRelaxed, RelaxedFields: []string{holdFieldEnableVoting}})
 			}
-			stubAccountRowLookup(t, func(_ context.Context, sfid string) (*accountRow, error) {
+			stubAccountRowLookup(t, func(context.Context, string) (*accountRow, error) {
 				if tt.lookupErr != nil {
 					return nil, tt.lookupErr
 				}
