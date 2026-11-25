@@ -245,39 +245,6 @@ func backfillCommitteeMembers(ctx context.Context, opts backfillCommitteeMembers
 		opTimeout = defaultNATSFetchMaxWait
 	}
 
-	objects, err := scanSubjectDataFn(ctx, jsContext, kvObjectsStream, committeeMemberObjectSubject, opTimeout)
-	if err != nil {
-		return res, fmt.Errorf("failed to scan v1 committee member objects: %w", err)
-	}
-	memberMappings, err := listMappingsWithPrefixFn(ctx, committeeMemberSFIDMappingPrefix)
-	if err != nil {
-		return res, fmt.Errorf("failed to list committee member mappings: %w", err)
-	}
-	committeeMappings, err := listMappingsWithPrefixFn(ctx, committeeSFIDMappingKeyPrefix)
-	if err != nil {
-		return res, fmt.Errorf("failed to list committee mappings: %w", err)
-	}
-	committeeLive, committeeTombstoned := splitCommitteeMappings(committeeMappings)
-
-	rows := selectMemberCandidates(ctx, objects, memberMappings, &res)
-	committees := groupMemberCandidates(rows, committeeLive, committeeTombstoned, &res)
-	committees = filterMemberCommittees(committees, opts, &res)
-	classifyMemberCommittees(ctx, committees, &res)
-	for _, c := range committees {
-		counts := c.causeCounts()
-		fields := []any{
-			"committee_sfid", c.sfid, "committee_uid", c.uid, "project_sfid", c.projectSFID,
-			"enable_voting", c.enableVoting, "business_email_required", c.businessEmailRequired,
-			"members", len(c.members),
-		}
-		for _, cause := range memberCauseOrder {
-			if counts[cause] > 0 {
-				fields = append(fields, "cause_"+cause, counts[cause])
-			}
-		}
-		logger.With(fields...).InfoContext(ctx, "committee with unmapped v1 members")
-	}
-
 	// Only one live run at a time: resume below assumes every unrestored hold
 	// was abandoned. The lease is taken before the holds are listed, so no
 	// other run can add a hold this run does not see. Losing the lease cancels
@@ -315,41 +282,79 @@ func backfillCommitteeMembers(ctx context.Context, opts backfillCommitteeMembers
 		}
 	}
 
+	if !opts.dryRun {
+		// Resume: restore every hold an interrupted run left behind before
+		// starting anything new, and before members are classified: a
+		// committee still relaxed by an interrupted run would otherwise read
+		// as not requiring an org, and its members would be re-emitted without
+		// relaxing. Each restore runs on a detached, bounded context like the
+		// per-committee restore, so a SIGTERM or lost lease cannot cut it
+		// short. One failure does not stop the others from being restored, but
+		// the run does not start new committees while any hold is unrestored.
+		var resumeFailures []string
+		for _, h := range holds {
+			if h.hold.State == holdStateRestored {
+				continue
+			}
+			restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), committeeRestoreTimeout)
+			err := restoreCommitteeSettings(restoreCtx, h.hold.CommitteeUID)
+			cancel()
+			if err != nil {
+				res.restoreFailures++
+				resumeFailures = append(resumeFailures, h.hold.CommitteeUID)
+				logger.With(errKey, err, "committee_uid", h.hold.CommitteeUID, "committee_sfid", h.hold.CommitteeSFID).
+					ErrorContext(ctx, "failed to restore committee settings from an earlier run")
+				continue
+			}
+			res.holdsResumed++
+		}
+		if len(resumeFailures) > 0 {
+			return res, fmt.Errorf("%w for %d committee(s) from an earlier run: %s", errCommitteeRestoreFailed, len(resumeFailures), strings.Join(resumeFailures, ", "))
+		}
+		if ctx.Err() != nil {
+			return res, ctx.Err()
+		}
+	}
+
+	objects, err := scanSubjectDataFn(ctx, jsContext, kvObjectsStream, committeeMemberObjectSubject, opTimeout)
+	if err != nil {
+		return res, fmt.Errorf("failed to scan v1 committee member objects: %w", err)
+	}
+	memberMappings, err := listMappingsWithPrefixFn(ctx, committeeMemberSFIDMappingPrefix)
+	if err != nil {
+		return res, fmt.Errorf("failed to list committee member mappings: %w", err)
+	}
+	committeeMappings, err := listMappingsWithPrefixFn(ctx, committeeSFIDMappingKeyPrefix)
+	if err != nil {
+		return res, fmt.Errorf("failed to list committee mappings: %w", err)
+	}
+	committeeLive, committeeTombstoned := splitCommitteeMappings(committeeMappings)
+
+	rows := selectMemberCandidates(ctx, objects, memberMappings, &res)
+	committees := groupMemberCandidates(rows, committeeLive, committeeTombstoned, &res)
+	committees = filterMemberCommittees(committees, opts, &res)
+	classifyMemberCommittees(ctx, committees, &res)
+	for _, c := range committees {
+		counts := c.causeCounts()
+		fields := []any{
+			"committee_sfid", c.sfid, "committee_uid", c.uid, "project_sfid", c.projectSFID,
+			"enable_voting", c.enableVoting, "business_email_required", c.businessEmailRequired,
+			"members", len(c.members),
+		}
+		for _, cause := range memberCauseOrder {
+			if counts[cause] > 0 {
+				fields = append(fields, "cause_"+cause, counts[cause])
+			}
+		}
+		logger.With(fields...).InfoContext(ctx, "committee with unmapped v1 members")
+	}
+
 	if opts.dryRun {
 		logger.With(res.logFields()...).InfoContext(ctx, "committee member backfill dry run")
 		if res.errors > 0 {
 			return res, fmt.Errorf("dry run found %d errors", res.errors)
 		}
 		return res, nil
-	}
-
-	// Resume: restore every hold an interrupted run left behind before
-	// starting anything new. Each restore runs on a detached, bounded context
-	// like the per-committee restore, so a SIGTERM or lost lease cannot cut
-	// it short. One failure does not stop the others from being restored, but
-	// the run does not start new committees while any hold is unrestored.
-	var resumeFailures []string
-	for _, h := range holds {
-		if h.hold.State == holdStateRestored {
-			continue
-		}
-		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), committeeRestoreTimeout)
-		err := restoreCommitteeSettings(restoreCtx, h.hold.CommitteeUID)
-		cancel()
-		if err != nil {
-			res.restoreFailures++
-			resumeFailures = append(resumeFailures, h.hold.CommitteeUID)
-			logger.With(errKey, err, "committee_uid", h.hold.CommitteeUID, "committee_sfid", h.hold.CommitteeSFID).
-				ErrorContext(ctx, "failed to restore committee settings from an earlier run")
-			continue
-		}
-		res.holdsResumed++
-	}
-	if len(resumeFailures) > 0 {
-		return res, fmt.Errorf("%w for %d committee(s) from an earlier run: %s", errCommitteeRestoreFailed, len(resumeFailures), strings.Join(resumeFailures, ", "))
-	}
-	if ctx.Err() != nil {
-		return res, ctx.Err()
 	}
 
 	limiter := rate.NewLimiter(rate.Limit(opts.emitRate), 1)

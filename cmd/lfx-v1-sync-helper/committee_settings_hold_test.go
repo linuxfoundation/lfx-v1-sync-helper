@@ -135,9 +135,15 @@ func TestSettingsHoldV1SettingsSyncKeepsOtherSettings(t *testing.T) {
 	}
 
 	t.Run("hold lookup failure is retried", func(t *testing.T) {
-		h := setupSyncTest(t, 200, `{}`)
-		h.store.nextGetErr = errors.New("nats down")
-		err := updateCommitteeSettingsFromV1(t.Context(), "committee-uid", map[string]any{"sfid": "committee-sfid", "business_email_required__c": true}, "")
+		setupSyncTest(t, 200, `{}`)
+		v1 := map[string]any{"sfid": "committee-sfid", "business_email_required__c": true}
+		fetchV1CommitteeData = func(context.Context, string) (map[string]any, bool, error) { return v1, true, nil }
+		orig := committeeSettingHeld
+		committeeSettingHeld = func(context.Context, string, string) (bool, error) {
+			return false, wrapTransientStoreErr(errors.New("nats down"))
+		}
+		t.Cleanup(func() { committeeSettingHeld = orig })
+		err := updateCommitteeSettingsFromV1(t.Context(), "committee-uid", v1, "")
 		if err == nil || !isTransientStoreErr(err) {
 			t.Errorf("err = %v, want a transient error", err)
 		}
@@ -204,6 +210,7 @@ func TestSettingsHoldOmitsEnableVotingFromV1Update(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h := setupSyncTest(t, 200, `{}`)
+			stubSettingsBase(t, "project-uid", nil)
 			if tt.hold != nil {
 				seedSettingsHold(t, h.store, *tt.hold)
 			}
@@ -226,12 +233,12 @@ func TestSettingsHoldOmitsEnableVotingFromV1Update(t *testing.T) {
 
 	t.Run("hold lookup failure is retried", func(t *testing.T) {
 		h := setupSyncTest(t, 200, `{}`)
-		orig := committeeSettingHeld
-		committeeSettingHeld = func(context.Context, string, string) (bool, error) {
+		orig := committeeHasSettingsHold
+		committeeHasSettingsHold = func(context.Context, string) (bool, error) {
 			return false, wrapTransientStoreErr(errors.New("nats down"))
 		}
-		t.Cleanup(func() { committeeSettingHeld = orig })
-		if err := syncCommitteeUpdateToV1(t.Context(), "committee-uid", "project-a", "committee-sfid", map[string]any{"name": "Committee"}); err == nil {
+		t.Cleanup(func() { committeeHasSettingsHold = orig })
+		if err := syncCommitteeUpdateToV1(t.Context(), "committee-uid", "project-a", "committee-sfid", map[string]any{"name": "Committee", "enable_voting": false}); err == nil {
 			t.Error("expected an error for redelivery")
 		}
 		if requests := h.recordedRequests(); len(requests) != 0 {
@@ -317,3 +324,89 @@ func TestSettingsHoldRequestShapes(t *testing.T) {
 	}
 	_ = h
 }
+
+func TestSettingsHoldRecheckedAfterSettingsRead(t *testing.T) {
+	// The backfill writes its hold and relaxes business_email_required between
+	// a sync's first look and its settings read. The read sees the relaxed
+	// value, so the hold must be checked after it.
+	relaxDuringRead := func(t *testing.T, h *syncTestHarness) {
+		fetchCommitteeSettings = func(context.Context, string) (*committeeservice.CommitteeSettingsWithReadonlyAttributes, string, error) {
+			seedSettingsHold(t, h.store, heldBusinessEmail)
+			return &committeeservice.CommitteeSettingsWithReadonlyAttributes{MembersCanViewSocialListening: true, MemberVisibility: "hidden"}, "42", nil
+		}
+	}
+
+	t.Run("v1 to v2", func(t *testing.T) {
+		h := setupSyncTest(t, 200, `{}`)
+		v1 := map[string]any{"sfid": "committee-sfid", "business_email_required__c": true, "members_can_view_social_listening__c": true}
+		fetchV1CommitteeData = func(context.Context, string) (map[string]any, bool, error) { return v1, true, nil }
+		relaxDuringRead(t, h)
+		origClient := committeeClient
+		t.Cleanup(func() { committeeClient = origClient })
+		committeeClient = &committeeservice.Client{UpdateCommitteeSettingsEndpoint: func(context.Context, any) (any, error) {
+			t.Error("v1's business_email_required must not overwrite the relaxed value")
+			return nil, nil
+		}}
+		if err := updateCommitteeSettingsFromV1(t.Context(), "committee-uid", v1, ""); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("v2 to v1", func(t *testing.T) {
+		h := setupSyncTest(t, 200, `{}`)
+		h.seed(t, "committee.uid.committee-uid", "project-sfid:committee-sfid")
+		relaxDuringRead(t, h)
+		if msg := dispatchSettings(t, "updated", map[string]any{"business_email_required": false}); !msg.acked {
+			t.Fatal("expected ACK")
+		}
+		assertSyncRequest(t, h, http.MethodPatch, "/project-service/v2/projects/project-sfid/committees/committee-sfid",
+			map[string]any{"MembersCanViewSocialListening": true})
+	})
+}
+
+func TestSettingsHoldDelayedEnableVotingEvent(t *testing.T) {
+	// The stream retains events for weeks: a committee the backfill ever held
+	// sends its current v2 enable_voting, not the event snapshot.
+	old := time.Now().Add(-24 * time.Hour)
+	for _, tt := range []struct {
+		name    string
+		hold    *committeeSettingsHold
+		current *bool // nil: the committee was deleted from v2
+		want    any   // nil: EnableVoting omitted
+	}{
+		{name: "never held sends the snapshot", want: false},
+		{name: "restored long ago sends current v2", hold: &committeeSettingsHold{State: holdStateRestored, RestoredAt: &old, RelaxedFields: []string{holdFieldEnableVoting}}, current: ptrBool(true), want: true},
+		{name: "deleted committee omits it", hold: &committeeSettingsHold{State: holdStateRestored, RestoredAt: &old, RelaxedFields: []string{holdFieldEnableVoting}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := setupSyncTest(t, 200, `{}`)
+			if tt.hold != nil {
+				seedSettingsHold(t, h.store, *tt.hold)
+			}
+			orig := fetchCommitteeBase
+			t.Cleanup(func() { fetchCommitteeBase = orig })
+			fetchCommitteeBase = func(context.Context, string) (*committeeservice.CommitteeBaseWithReadonlyAttributes, string, error) {
+				if tt.hold == nil {
+					t.Error("a never-held committee must not read v2")
+				}
+				if tt.current == nil {
+					return nil, "", &committeeservice.NotFoundError{Message: "gone"}
+				}
+				return &committeeservice.CommitteeBaseWithReadonlyAttributes{EnableVoting: *tt.current}, "etag", nil
+			}
+			data := map[string]any{"name": "Committee", "enable_voting": false} // the backfill's old "off" snapshot
+			if err := syncCommitteeUpdateToV1(t.Context(), "committee-uid", "project-a", "committee-sfid", data); err != nil {
+				t.Fatal(err)
+			}
+			requests := h.recordedRequests()
+			if len(requests) != 1 {
+				t.Fatalf("v1 update requests = %+v", requests)
+			}
+			if got := requests[0].Body["EnableVoting"]; got != tt.want {
+				t.Errorf("EnableVoting = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func ptrBool(v bool) *bool { return &v }

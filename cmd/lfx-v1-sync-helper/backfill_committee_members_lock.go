@@ -120,7 +120,11 @@ func (l *memberBackfillLease) heartbeat(ctx context.Context, revision uint64, lo
 	}
 }
 
-// Release stops the heartbeat and deletes the lock if this run still owns it.
+// Release stops the heartbeat and expires the lock if this run still owns it.
+// It writes a zero heartbeat with a revision check instead of deleting the key:
+// the MappingStore has no conditional delete, and a read-then-delete could
+// remove a lock another run took over in between. An expired lock is taken
+// over by the next run at once.
 func (l *memberBackfillLease) Release(ctx context.Context) {
 	close(l.stop)
 	l.done.Wait()
@@ -132,7 +136,11 @@ func (l *memberBackfillLease) Release(ctx context.Context) {
 	if json.Unmarshal(entry.Value, &current) != nil || current.Owner != l.owner {
 		return
 	}
-	if err := mappingStore.Delete(ctx, memberBackfillLockKey); err != nil {
+	value, err := json.Marshal(memberBackfillLock{Owner: l.owner})
+	if err != nil {
+		return
+	}
+	if _, err := mappingStore.Update(ctx, memberBackfillLockKey, value, entry.Revision); err != nil && !errors.Is(err, ErrRevisionMismatch) {
 		logger.With(errKey, err).WarnContext(ctx, "failed to release committee member backfill lock; it goes stale on its own")
 	}
 }

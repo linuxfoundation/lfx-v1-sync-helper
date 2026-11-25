@@ -122,3 +122,20 @@ var committeeSettingHeld = func(ctx context.Context, committeeUID, field string)
 	known := hold.State == holdStateCaptured || hold.State == holdStateRelaxed || hold.State == holdStateRestored
 	return !known || len(hold.RelaxedFields) == 0 || hold.relaxes(field), nil
 }
+
+// committeeHasSettingsHold reports whether the member backfill has ever held
+// committeeUID (restored holds are kept as an audit trail). A store or decode
+// error is returned so the caller retries.
+var committeeHasSettingsHold = func(ctx context.Context, committeeUID string) (bool, error) {
+	if committeeUID == "" {
+		return false, nil
+	}
+	_, err := mappingStore.Get(ctx, committeeSettingsHoldKey(committeeUID))
+	if errors.Is(err, ErrKeyNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, wrapTransientStoreErr(err)
+	}
+	return true, nil
+}

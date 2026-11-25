@@ -58,13 +58,6 @@ func updateCommitteeSettingsFromV1(ctx context.Context, uid string, data map[str
 	if !hasRequired && !hasSocialListening {
 		return nil
 	}
-	// The member backfill may have turned business_email_required off in v2
-	// for this committee and will restore it; a v1 edit must not turn it back
-	// on before members land. Other settings keep syncing.
-	requiredHeld, err := committeeSettingHeld(ctx, uid, holdFieldBusinessEmailRequired)
-	if err != nil {
-		return err
-	}
 	sfid, _ := data["sfid"].(string)
 	if sfid == "" {
 		return fmt.Errorf("missing v1 committee SFID for settings sync")
@@ -78,12 +71,6 @@ func updateCommitteeSettingsFromV1(ctx context.Context, uid string, data map[str
 	}
 	required, hasRequired := latest[v1BusinessEmailRequiredField].(bool)
 	socialListening, hasSocialListening := latest[v1MembersCanViewSocialListeningField].(bool)
-	if requiredHeld && hasRequired {
-		// Treated like an absent flag: v2 keeps its current value. The backfill's
-		// post-run check reports a v1 edit made during the hold.
-		logger.With("committee_uid", uid).InfoContext(ctx, "business_email_required held by member backfill; not syncing it from v1")
-		hasRequired = false
-	}
 	if !hasRequired && !hasSocialListening {
 		return nil
 	}
@@ -95,6 +82,25 @@ func updateCommitteeSettingsFromV1(ctx context.Context, uid string, data map[str
 			return nil
 		}
 		return err
+	}
+	// The member backfill may have turned business_email_required off in v2
+	// for this committee and will restore it; a v1 edit must not turn it back
+	// on before members land. Other settings keep syncing. The hold is checked
+	// after the settings read: the backfill writes its hold before it relaxes
+	// anything, so a read that saw the relaxed value also sees the hold, and a
+	// read from before the relax carries an ETag the relax has invalidated.
+	requiredHeld, err := committeeSettingHeld(ctx, uid, holdFieldBusinessEmailRequired)
+	if err != nil {
+		return err
+	}
+	if requiredHeld && hasRequired {
+		// Treated like an absent flag: v2 keeps its current value. The backfill's
+		// post-run check reports a v1 edit made during the hold.
+		logger.With("committee_uid", uid).InfoContext(ctx, "business_email_required held by member backfill; not syncing it from v1")
+		hasRequired = false
+		if !hasSocialListening {
+			return nil
+		}
 	}
 	if !hasRequired {
 		required = current.BusinessEmailRequired
@@ -163,13 +169,6 @@ func processCommitteeSettingsIndexingEvent(ctx context.Context, subject string, 
 	if consumePendingMarker(ctx, markerV1ToV2, op, markerResourceCommitteeSettings, event.ObjectID) {
 		return nil
 	}
-	// Checked after the marker consume so the backfill's own echo still clears
-	// its marker. While held, v2's business_email_required is the backfill's
-	// temporary value, so it is left out; the other setting still syncs.
-	requiredHeld, err := committeeSettingHeld(ctx, event.ObjectID, holdFieldBusinessEmailRequired)
-	if err != nil {
-		return err
-	}
 	entry, err := getMappingEntryWithRetry(ctx, "committee.uid."+event.ObjectID)
 	if err != nil {
 		if errors.Is(err, ErrKeyNotFound) {
@@ -209,6 +208,15 @@ func processCommitteeSettingsIndexingEvent(ctx context.Context, subject string, 
 		if errors.As(err, &notFound) {
 			return nil // Deleted since publication.
 		}
+		return err
+	}
+	// While held, v2's business_email_required is the backfill's temporary
+	// value, so it is left out; the other setting still syncs. Checked after the
+	// marker consume, so the backfill's own echo still clears its marker, and
+	// after the settings read, so a read that saw the relaxed value also sees
+	// the hold the backfill wrote before relaxing.
+	requiredHeld, err := committeeSettingHeld(ctx, event.ObjectID, holdFieldBusinessEmailRequired)
+	if err != nil {
 		return err
 	}
 	update := projectServiceCommitteeUpdate{

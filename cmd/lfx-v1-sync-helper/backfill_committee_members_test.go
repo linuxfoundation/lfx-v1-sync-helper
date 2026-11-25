@@ -677,9 +677,13 @@ func TestMemberBackfillLock(t *testing.T) {
 		t.Error("the heartbeat did not refresh the lock")
 	}
 	lease.Release(ctx)
-	if _, err := h.store.Get(ctx, memberBackfillLockKey); !errors.Is(err, ErrKeyNotFound) {
-		t.Errorf("release must delete the lock: %v", err)
+	assertLockReleased(t, h)
+	// A released lock is taken over at once by the next run.
+	next, err := acquireMemberBackfillLock(ctx)
+	if err != nil {
+		t.Fatalf("a released lock must be acquirable: %v", err)
 	}
+	next.Release(ctx)
 
 	// A stale lock is taken over.
 	h.seed(t, memberBackfillLockKey, lockJSON(t, memberBackfillLock{Owner: "dead-run", HeartbeatAt: time.Now().Add(-2 * time.Minute)}))
@@ -863,9 +867,7 @@ func TestBackfillCommitteeMembersTakesLeaseBeforeListingHolds(t *testing.T) {
 	if !listed {
 		t.Error("holds were never listed")
 	}
-	if _, err := h.store.Get(t.Context(), memberBackfillLockKey); !errors.Is(err, ErrKeyNotFound) {
-		t.Errorf("the lease must be released: %v", err)
-	}
+	assertLockReleased(t, h)
 }
 
 func TestBackfillCommitteeMembersResumeSurvivesCancellation(t *testing.T) {
@@ -896,5 +898,86 @@ func TestBackfillCommitteeMembersResumeSurvivesCancellation(t *testing.T) {
 	}
 	if res.holdsResumed != 1 || !v2.enableVoting {
 		t.Errorf("resume must finish restoring: res = %+v, v2 = %+v", res, v2)
+	}
+}
+
+// assertLockReleased checks that the lock was expired (zero heartbeat), not
+// left fresh: release never deletes the key.
+func assertLockReleased(t *testing.T, h *syncTestHarness) {
+	t.Helper()
+	entry, err := h.store.Get(t.Context(), memberBackfillLockKey)
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	var lock memberBackfillLock
+	if err := json.Unmarshal(entry.Value, &lock); err != nil || !lock.HeartbeatAt.IsZero() {
+		t.Errorf("released lock = %q, err %v; want a zero heartbeat", entry.Value, err)
+	}
+}
+
+func TestMemberBackfillLockReleaseLosesRace(t *testing.T) {
+	// A takeover between Release's read and write must survive: the write is
+	// revision-checked.
+	h := setupMemberBackfillTest(t)
+	lease, err := acquireMemberBackfillLock(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := mappingStore
+	mappingStore = &takeoverOnGetStore{fakeMappingStore: h.store, t: t}
+	t.Cleanup(func() { mappingStore = orig })
+	lease.Release(t.Context())
+	entry, _ := h.store.Get(t.Context(), memberBackfillLockKey)
+	if !strings.Contains(string(entry.Value), "new-owner") {
+		t.Errorf("release overwrote the new owner's lock: %q", entry.Value)
+	}
+}
+
+// takeoverOnGetStore lets another run take the lock right after Release reads it.
+type takeoverOnGetStore struct {
+	*fakeMappingStore
+	t    *testing.T
+	done bool
+}
+
+func (s *takeoverOnGetStore) Get(ctx context.Context, key string) (MappingEntry, error) {
+	entry, err := s.fakeMappingStore.Get(ctx, key)
+	if key == memberBackfillLockKey && !s.done {
+		s.done = true
+		if _, putErr := s.fakeMappingStore.Put(ctx, key, []byte(lockJSON(s.t, memberBackfillLock{Owner: "new-owner", HeartbeatAt: time.Now()}))); putErr != nil {
+			s.t.Fatal(putErr)
+		}
+	}
+	return entry, err
+}
+
+func TestBackfillCommitteeMembersClassifiesAfterResume(t *testing.T) {
+	// An interrupted run left the committee relaxed. Its members must be
+	// classified against the restored settings, so the committee is relaxed
+	// again before they are re-emitted.
+	h := setupMemberBackfillTest(t)
+	memberRunObjects(t, h)
+	v2 := &fakeV2Committee{} // still relaxed
+	v2.install(t)
+	original := true
+	seedSettingsHold(t, h.store, committeeSettingsHold{
+		CommitteeSFID: "committee-sfid", State: holdStateRelaxed, OriginalEnableVoting: true,
+		OriginalV1EnableVoting: &original, OriginalV1BusinessEmailRequired: &original, RelaxedFields: []string{holdFieldEnableVoting},
+	})
+	emitted := 0
+	reEmitCommitteeMemberV1ObjectFn = func(context.Context, string, string) (string, error) {
+		if v2.enableVoting {
+			t.Error("the blocked member was re-emitted with enable_voting on")
+		}
+		emitted++
+		return "", nil
+	}
+	lookupCommitteeMemberMappingFn = func(context.Context, string) bool { return true }
+	res, err := backfillCommitteeMembers(t.Context(), backfillCommitteeMembersOptions{relaxSettings: true, emitRate: 1000, settleTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.holdsResumed != 1 || res.committeesRelaxed != 1 || res.causes[memberCauseOrgMissing] != 1 || emitted != 1 || !v2.enableVoting {
+		t.Errorf("res = %+v, emitted = %d, v2 = %+v", res, emitted, v2)
 	}
 }
