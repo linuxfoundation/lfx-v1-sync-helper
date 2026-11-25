@@ -139,3 +139,25 @@ var committeeHasSettingsHold = func(ctx context.Context, committeeUID string) (b
 	}
 	return true, nil
 }
+
+// memberOrgLookupRetry decides whether a member mapper retries a failed v1
+// organization lookup instead of leaving the organization empty. While the
+// member backfill holds the committee, its org requirement is relaxed, so a
+// member created without an org would be accepted, mapped, and never
+// revisited; a transient failure (anything but errV1OrgUnresolved) is then
+// returned as retryable. Outside a hold the existing behaviour is kept.
+func memberOrgLookupRetry(ctx context.Context, committeeUID string, lookupErr error) error {
+	if errors.Is(lookupErr, errV1OrgUnresolved) {
+		return nil
+	}
+	for _, field := range []string{holdFieldEnableVoting, holdFieldBusinessEmailRequired} {
+		held, err := committeeSettingHeld(ctx, committeeUID, field)
+		if err != nil {
+			return err
+		}
+		if held {
+			return &errTransientStore{err: fmt.Errorf("v1 organization lookup failed while the member backfill holds committee %s: %w", committeeUID, lookupErr)}
+		}
+	}
+	return nil
+}

@@ -627,6 +627,11 @@ func TestMapV1DataToCommitteeMemberOrganization(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			stubAccountRowLookup(t, func(context.Context, string) (*accountRow, error) { return tt.row, tt.err })
+			// A lookup error consults the member backfill's settings hold; with
+			// no hold the organization is left empty as before.
+			origStore := mappingStore
+			mappingStore = newFakeMappingStore()
+			t.Cleanup(func() { mappingStore = origStore })
 			v1Data := map[string]any{"contactemail__c": "member@example.com", "account__c": accountSFID}
 
 			create, err := mapV1DataToCommitteeMemberCreatePayload(context.Background(), "committee-uid", v1Data)

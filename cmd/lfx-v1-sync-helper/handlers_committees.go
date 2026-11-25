@@ -1193,6 +1193,9 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 		// Look up organization information from v1 Organization Service.
 		org, err := lookupV1Org(ctx, accountSFID)
 		if err != nil {
+			if retryErr := memberOrgLookupRetry(ctx, committeeUID, err); retryErr != nil {
+				return nil, retryErr
+			}
 			logger.With(errKey, err, "account_sfid", accountSFID).WarnContext(ctx, "failed to lookup organization, leaving empty")
 			// Organization lookup failed, leave Organization field nil.
 		} else if org.Name == "" {
@@ -1384,6 +1387,9 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID s
 		// Look up organization information from v1 Organization Service.
 		org, err := lookupV1Org(ctx, accountSFID)
 		if err != nil {
+			if retryErr := memberOrgLookupRetry(ctx, committeeUID, err); retryErr != nil {
+				return nil, retryErr
+			}
 			logger.With(errKey, err, "account_sfid", accountSFID).WarnContext(ctx, "failed to lookup organization, leaving empty")
 			// Organization lookup failed, leave Organization field nil.
 		} else if org.Name == "" {

@@ -227,10 +227,17 @@ func TestClassifyMemberCommittees(t *testing.T) {
 			return nil, errors.New("connection refused")
 		case "with-domain":
 			return &V1Organization{ID: sfid, Name: "Org", Domain: "example.org"}, nil
+		case "bad-domain":
+			// Non-blank, but parseWebsiteURL rejects it, so the live mapper
+			// sends no website.
+			return &V1Organization{ID: sfid, Name: "Org", Domain: "example .org"}, nil
 		}
 		return &V1Organization{ID: sfid, Name: "Org"}, nil
 	}
 	memberBackfillIsB2BOrgFn = func(_ context.Context, sfid string) (bool, error) {
+		if sfid == "bad-domain" {
+			return false, nil
+		}
 		if sfid == "b2b-error" {
 			return false, errors.New("nats down")
 		}
@@ -239,7 +246,7 @@ func TestClassifyMemberCommittees(t *testing.T) {
 
 	committees := []*memberCommittee{
 		{uid: "voting", members: []memberRow{{sfid: "a"}, {sfid: "b", accountSFID: "unresolved"}, {sfid: "c", accountSFID: "db-error"}}},
-		{uid: "email", members: []memberRow{{sfid: "d", accountSFID: "non-b2b"}, {sfid: "e", accountSFID: "b2b"}, {sfid: "f", accountSFID: "with-domain"}, {sfid: "j", accountSFID: "b2b-error"}}},
+		{uid: "email", members: []memberRow{{sfid: "d", accountSFID: "non-b2b"}, {sfid: "e", accountSFID: "b2b"}, {sfid: "f", accountSFID: "with-domain"}, {sfid: "j", accountSFID: "b2b-error"}, {sfid: "k", accountSFID: "bad-domain"}}},
 		{uid: "open", members: []memberRow{{sfid: "g"}}},
 		{uid: "missing", members: []memberRow{{sfid: "h"}}},
 		{uid: "broken", members: []memberRow{{sfid: "i"}}},
@@ -248,7 +255,7 @@ func TestClassifyMemberCommittees(t *testing.T) {
 	classifyMemberCommittees(t.Context(), committees, &res)
 
 	want := map[string]string{
-		"a": memberCauseOrgMissing, "b": memberCauseOrgLookupFailed, "c": memberCauseOrgLookupError, "j": memberCauseOrgLookupError,
+		"a": memberCauseOrgMissing, "b": memberCauseOrgLookupFailed, "c": memberCauseOrgLookupError, "j": memberCauseOrgLookupError, "k": memberCauseOrgNotB2BNoDomain,
 		"d": memberCauseOrgNotB2BNoDomain, "e": memberCauseNotBlocked, "f": memberCauseNotBlocked,
 		"g": memberCauseNotBlocked, "h": memberCauseCommitteeNotInV2, "i": memberCauseCommitteeNotInV2,
 	}
@@ -627,7 +634,8 @@ func TestBackfillCommitteeMembersResumesCapturedHold(t *testing.T) {
 		return map[string][]byte{}, nil
 	}
 	res, err := backfillCommitteeMembers(t.Context(), backfillCommitteeMembersOptions{emitRate: 1, settleTimeout: time.Second})
-	if err != nil || res.holdsResumed != 1 || v2.baseWrites != 0 {
+	// The restore always writes (once), even though v2 already has the value.
+	if err != nil || res.holdsResumed != 1 || v2.baseWrites != 1 || !v2.enableVoting {
 		t.Fatalf("res = %+v, err = %v, v2 = %+v", res, err, v2)
 	}
 	if hold, _, _ := getCommitteeSettingsHold(t.Context(), "committee-uid"); hold.State != holdStateRestored {
@@ -979,5 +987,117 @@ func TestBackfillCommitteeMembersClassifiesAfterResume(t *testing.T) {
 	}
 	if res.holdsResumed != 1 || res.committeesRelaxed != 1 || res.causes[memberCauseOrgMissing] != 1 || emitted != 1 || !v2.enableVoting {
 		t.Errorf("res = %+v, emitted = %d, v2 = %+v", res, emitted, v2)
+	}
+}
+
+func TestRestoreInvalidatesOutstandingRelaxWrite(t *testing.T) {
+	// A relax write that was cancelled on the client may still commit later
+	// with the ETag it read. The restore must advance the revision even when
+	// v2 still shows the original value, so the late write is rejected.
+	h := setupMemberBackfillTest(t)
+	enableVoting, revision := true, 0
+	etag := func() string { return fmt.Sprintf("rev-%d", revision) }
+	origBase, origUpdate := fetchCommitteeBase, updateCommitteeBaseFn
+	t.Cleanup(func() { fetchCommitteeBase, updateCommitteeBaseFn = origBase, origUpdate })
+	fetchCommitteeBase = func(_ context.Context, uid string) (*committeeservice.CommitteeBaseWithReadonlyAttributes, string, error) {
+		return &committeeservice.CommitteeBaseWithReadonlyAttributes{UID: &uid, ProjectUID: sptr("p"), Name: sptr("C"), EnableVoting: enableVoting}, etag(), nil
+	}
+	apply := func(p *committeeservice.UpdateCommitteeBasePayload) error {
+		if p.IfMatch == nil || *p.IfMatch != etag() {
+			return &committeeservice.ConflictError{Message: "revision mismatch"}
+		}
+		enableVoting = p.EnableVoting
+		revision++
+		return nil
+	}
+	var outstanding *committeeservice.UpdateCommitteeBasePayload
+	updateCommitteeBaseFn = func(_ context.Context, p *committeeservice.UpdateCommitteeBasePayload) error {
+		if !p.EnableVoting && outstanding == nil {
+			outstanding = p // the server has it, the client gave up
+			return context.DeadlineExceeded
+		}
+		return apply(p)
+	}
+	seedSettingsHold(t, h.store, committeeSettingsHold{State: holdStateCaptured, OriginalEnableVoting: true, RelaxedFields: []string{holdFieldEnableVoting}})
+	if err := setCommitteeSetting(t.Context(), "committee-uid", holdFieldEnableVoting, false); err == nil {
+		t.Fatal("the relax write should have timed out")
+	}
+	if err := restoreCommitteeSettings(t.Context(), "committee-uid"); err != nil {
+		t.Fatal(err)
+	}
+	if revision != 1 {
+		t.Fatalf("restore must write even when the value matches; revision = %d", revision)
+	}
+	// The outstanding relax write now commits on the server.
+	if err := apply(outstanding); err == nil {
+		t.Fatal("the late relax write must fail its revision check")
+	}
+	if !enableVoting {
+		t.Error("enable_voting must stay restored")
+	}
+}
+
+func TestBackfillCommitteeMembersResumeStopsWhenCancelled(t *testing.T) {
+	h := setupMemberBackfillTest(t)
+	memberRunObjects(t, h)
+	v2 := &fakeV2Committee{}
+	v2.install(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	installed := updateCommitteeBaseFn
+	restored := 0
+	updateCommitteeBaseFn = func(writeCtx context.Context, p *committeeservice.UpdateCommitteeBasePayload) error {
+		restored++
+		cancel() // SIGTERM while the first restore is in progress
+		return installed(writeCtx, p)
+	}
+	for _, uid := range []string{"a-uid", "b-uid"} {
+		seedSettingsHold(t, h.store, committeeSettingsHold{CommitteeUID: uid, State: holdStateRelaxed, OriginalEnableVoting: true, RelaxedFields: []string{holdFieldEnableVoting}})
+	}
+	res, err := backfillCommitteeMembers(ctx, backfillCommitteeMembersOptions{relaxSettings: true, emitRate: 1, settleTimeout: time.Second})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	if restored != 1 || res.holdsResumed != 1 {
+		t.Errorf("only the restore in progress may finish: writes = %d, res = %+v", restored, res)
+	}
+	if hold, _, _ := getCommitteeSettingsHold(t.Context(), "b-uid"); hold.State != holdStateRelaxed {
+		t.Errorf("the second hold must be left for the next run: %+v", hold)
+	}
+}
+
+func TestMemberMapperRetriesOrgLookupErrorsWhileHeld(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		hold      bool
+		lookupErr error
+		wantRetry bool
+	}{
+		{name: "database error while held", hold: true, lookupErr: errors.New("connection refused"), wantRetry: true},
+		{name: "unresolved org while held", hold: true, lookupErr: nil},
+		{name: "database error, not held", lookupErr: errors.New("connection refused")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := setupSyncTest(t, 200, `{}`)
+			if tt.hold {
+				seedSettingsHold(t, h.store, committeeSettingsHold{CommitteeUID: "cmt-uid", State: holdStateRelaxed, RelaxedFields: []string{holdFieldEnableVoting}})
+			}
+			stubAccountRowLookup(t, func(_ context.Context, sfid string) (*accountRow, error) {
+				if tt.lookupErr != nil {
+					return nil, tt.lookupErr
+				}
+				return nil, nil // not found: errV1OrgUnresolved
+			})
+			v1Data := map[string]any{"account__c": "001000000000001AAA"}
+			_, createErr := mapV1DataToCommitteeMemberCreatePayload(t.Context(), "cmt-uid", v1Data)
+			_, updateErr := mapV1DataToCommitteeMemberUpdatePayload(t.Context(), "cmt-uid", "member-uid", v1Data)
+			for name, err := range map[string]error{"create": createErr, "update": updateErr} {
+				if isTransientStoreErr(err) != tt.wantRetry {
+					t.Errorf("%s: err = %v, want retry %v", name, err, tt.wantRetry)
+				}
+				if !tt.wantRetry && err != nil {
+					t.Errorf("%s: unexpected error %v", name, err)
+				}
+			}
+		})
 	}
 }

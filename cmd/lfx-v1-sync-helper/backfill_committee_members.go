@@ -296,6 +296,12 @@ func backfillCommitteeMembers(ctx context.Context, opts backfillCommitteeMembers
 			if h.hold.State == holdStateRestored {
 				continue
 			}
+			// Finish the restore in progress, but start no more once the run
+			// is cancelled (SIGTERM or a lost lease): the remaining holds are
+			// durable and the next run restores them.
+			if ctx.Err() != nil {
+				break
+			}
 			restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), committeeRestoreTimeout)
 			err := restoreCommitteeSettings(restoreCtx, h.hold.CommitteeUID)
 			cancel()
@@ -663,7 +669,9 @@ func classifyMemberOrg(ctx context.Context, row memberRow, requiresOrg bool, res
 		}
 		return memberCauseOrgLookupFailed
 	}
-	if strings.TrimSpace(org.Domain) != "" {
+	// Same conversion as the live mapper: a domain it cannot turn into a
+	// website is sent as no website.
+	if parseWebsiteURL(org.Domain) != "" {
 		return memberCauseNotBlocked
 	}
 	isB2B, err := memberBackfillIsB2BOrgFn(ctx, row.accountSFID)
@@ -1005,7 +1013,7 @@ func restoreCommitteeSettings(ctx context.Context, committeeUID string) error {
 		holdFieldBusinessEmailRequired: hold.OriginalBusinessEmailRequired,
 	}
 	for _, field := range hold.RelaxedFields {
-		if err := setCommitteeSetting(ctx, committeeUID, field, originals[field]); err != nil {
+		if err := restoreCommitteeSetting(ctx, committeeUID, field, originals[field]); err != nil {
 			if errors.As(err, &notFound) {
 				break // Confirmed by the read below.
 			}
@@ -1036,13 +1044,25 @@ func restoreCommitteeSettings(ctx context.Context, committeeUID string) error {
 // v1→v2 pending marker first so the indexer echo is not sent to v1 (the hold
 // also blocks it) and removes the marker when the write fails.
 func setCommitteeSetting(ctx context.Context, uid, field string, value bool) error {
+	return writeCommitteeSetting(ctx, uid, field, value, false)
+}
+
+// restoreCommitteeSetting writes value even when v2 already has it. A relax
+// request that was cancelled or timed out may still commit later; it carries
+// the ETag it read, so this write, which advances the revision, makes it fail
+// instead of turning the setting off again after the hold is restored.
+func restoreCommitteeSetting(ctx context.Context, uid, field string, value bool) error {
+	return writeCommitteeSetting(ctx, uid, field, value, true)
+}
+
+func writeCommitteeSetting(ctx context.Context, uid, field string, value, force bool) error {
 	var err error
 	for attempt := 0; attempt < committeeSettingMaxAttempts; attempt++ {
 		switch field {
 		case holdFieldEnableVoting:
-			err = setCommitteeEnableVoting(ctx, uid, value)
+			err = setCommitteeEnableVoting(ctx, uid, value, force)
 		case holdFieldBusinessEmailRequired:
-			err = setCommitteeBusinessEmailRequired(ctx, uid, value)
+			err = setCommitteeBusinessEmailRequired(ctx, uid, value, force)
 		default:
 			return fmt.Errorf("unknown committee setting %q", field)
 		}
@@ -1054,7 +1074,7 @@ func setCommitteeSetting(ctx context.Context, uid, field string, value bool) err
 	return err
 }
 
-func setCommitteeEnableVoting(ctx context.Context, uid string, value bool) error {
+func setCommitteeEnableVoting(ctx context.Context, uid string, value, force bool) error {
 	base, etag, err := fetchCommitteeBase(ctx, uid)
 	if err != nil {
 		return err
@@ -1062,7 +1082,7 @@ func setCommitteeEnableVoting(ctx context.Context, uid string, value bool) error
 	if base == nil {
 		return fmt.Errorf("empty committee base response for %s", uid)
 	}
-	if base.EnableVoting == value {
+	if base.EnableVoting == value && !force {
 		return nil
 	}
 	if etag == "" {
@@ -1079,12 +1099,12 @@ func setCommitteeEnableVoting(ctx context.Context, uid string, value bool) error
 	return nil
 }
 
-func setCommitteeBusinessEmailRequired(ctx context.Context, uid string, value bool) error {
+func setCommitteeBusinessEmailRequired(ctx context.Context, uid string, value, force bool) error {
 	current, etag, err := fetchCommitteeSettings(ctx, uid)
 	if err != nil {
 		return err
 	}
-	if current.BusinessEmailRequired == value {
+	if current.BusinessEmailRequired == value && !force {
 		return nil
 	}
 	if etag == "" {
