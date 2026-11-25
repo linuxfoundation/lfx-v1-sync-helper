@@ -490,6 +490,17 @@ func syncCommitteeUpdateToV1(ctx context.Context, committeeUID, projectSFID, com
 	}
 
 	payload := mapV2DataToV1CommitteeUpdatePayload(data)
+	// While the member backfill holds this committee, the snapshot's
+	// enable_voting is the backfill's temporary value (or a stale one from a
+	// redelivered event); keep v1's value and sync the other fields.
+	held, err := committeeSettingHeld(ctx, committeeUID, holdFieldEnableVoting)
+	if err != nil {
+		return err
+	}
+	if held && payload.EnableVoting != nil {
+		log.InfoContext(ctx, "committee settings held by member backfill; omitting enable_voting from v1 update")
+		payload.EnableVoting = nil
+	}
 	parentSFID, err := resolveV2CommitteeParentSFID(ctx, projectSFID, data, isFullCommitteeIndexerSnapshot(data))
 	if err != nil {
 		return err

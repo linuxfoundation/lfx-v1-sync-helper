@@ -92,6 +92,15 @@ func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string
 		mapV2CategoryToV1(stringPtrToString(currentBase.Category)) == typeVal {
 		payload.Category = stringPtrToString(currentBase.Category)
 	}
+	// While the member backfill holds this committee's enable_voting, keep
+	// v2's (temporarily relaxed) value; other v1 base edits still sync.
+	held, err := committeeSettingHeld(ctx, committeeUID, holdFieldEnableVoting)
+	if err != nil {
+		return false, nil, err
+	}
+	if held {
+		payload.EnableVoting = currentBase.EnableVoting
+	}
 
 	// Snapshot the merged payload as a base struct for change detection.
 	updatedBase := committeeBaseFromUpdatePayload(currentBase.UID, payload)

@@ -318,3 +318,34 @@ func TestPGMappingStore_RevisionMonotonicAcrossDeleteRecreate(t *testing.T) {
 		t.Errorf("post-Update revision %d <= pre-Update revision %d", rev3, rev2)
 	}
 }
+
+func TestPGMappingStore_ListPrefix(t *testing.T) {
+	// "_" and "%" are LIKE wildcards, so committee_member.* must not match a
+	// key that differs only at that position, nor the upper bound itself. The
+	// same rows must come back under either collation path.
+	pool := openTestPool(t)
+	defer pool.Close()
+	store, cleanup := newTestPGMappingStore(t, pool)
+	defer cleanup()
+
+	ctx := context.Background()
+	for key, value := range map[string]string{
+		"committee_member.sfid.m1": "c:m1",
+		"committee_member.sfid.m2": tombstoneMarker,
+		"committeeXmember.sfid.m3": "c:m3",
+		"committee%member.sfid.m4": "c:m4",
+		"committee_member.sfid/":   "past the upper bound",
+		"committee.sfid.c1":        "c",
+	} {
+		if _, err := store.Put(ctx, key, []byte(value)); err != nil {
+			t.Fatalf("Put %s: %v", key, err)
+		}
+	}
+	got, err := store.ListPrefix(ctx, "committee_member.sfid.")
+	if err != nil {
+		t.Fatalf("ListPrefix: %v", err)
+	}
+	if len(got) != 2 || string(got["committee_member.sfid.m1"]) != "c:m1" || !isTombstonedMapping(got["committee_member.sfid.m2"]) {
+		t.Errorf("ListPrefix = %q", got)
+	}
+}

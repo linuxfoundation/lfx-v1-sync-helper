@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -130,6 +131,106 @@ func (s *pgMappingStore) Get(ctx context.Context, key string) (MappingEntry, err
 		entry.Value = []byte(val)
 	}
 	return entry, nil
+}
+
+// ListPrefix returns every row whose key starts with prefix, keyed by
+// mapping key, with tombstoned rows as the tombstone sentinel. It is not part
+// of the MappingStore port: one-shot jobs use it to enumerate a key family the
+// way they would scan a KV subject. It is bounded by the caller's context
+// rather than the per-op timeout.
+//
+// The match is a half-open key range [prefix, prefixUpperBound(prefix)). When
+// mapping_key sorts byte-wise (C, POSIX or C.UTF-8) the primary-key index
+// serves that range directly; under a linguistic collation the range would
+// not match prefixes, so the comparison is forced to "C", which is correct but
+// scans the table.
+func (s *pgMappingStore) ListPrefix(ctx context.Context, prefix string) (map[string][]byte, error) {
+	upper, ok := prefixUpperBound(prefix)
+	var (
+		q    string
+		args []any
+	)
+	switch {
+	case !ok:
+		q, args = `SELECT mapping_key, mapping_value, tombstoned FROM `+s.table+` WHERE left(mapping_key, length($1)) = $1`, []any{prefix}
+	case s.keyCollationBytewise(ctx):
+		q, args = `SELECT mapping_key, mapping_value, tombstoned FROM `+s.table+` WHERE mapping_key >= $1 AND mapping_key < $2`, []any{prefix, upper}
+	default:
+		q, args = `SELECT mapping_key, mapping_value, tombstoned FROM `+s.table+` WHERE mapping_key COLLATE "C" >= $1 AND mapping_key COLLATE "C" < $2`, []any{prefix, upper}
+	}
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("pgMappingStore.ListPrefix %q: %w", prefix, err)
+	}
+	defer rows.Close()
+	result := map[string][]byte{}
+	for rows.Next() {
+		var (
+			key, val   string
+			tombstoned bool
+		)
+		if err := rows.Scan(&key, &val, &tombstoned); err != nil {
+			return nil, fmt.Errorf("pgMappingStore.ListPrefix %q: %w", prefix, err)
+		}
+		if tombstoned {
+			result[key] = []byte(tombstoneMarker)
+		} else {
+			result[key] = []byte(val)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pgMappingStore.ListPrefix %q: %w", prefix, err)
+	}
+	return result, nil
+}
+
+// prefixUpperBound returns the smallest string greater than every string
+// starting with prefix, in byte order: prefix with its last byte incremented.
+// It is only defined for a non-empty ASCII prefix (the key families are
+// ASCII), so the result stays valid UTF-8.
+func prefixUpperBound(prefix string) (string, bool) {
+	if prefix == "" {
+		return "", false
+	}
+	for i := 0; i < len(prefix); i++ {
+		if prefix[i] >= 0x7f {
+			return "", false
+		}
+	}
+	last := len(prefix) - 1
+	return prefix[:last] + string(prefix[last]+1), true
+}
+
+// keyCollationBytewise reports whether mapping_key's effective collation
+// orders strings byte-wise. Any lookup failure (including a server older than
+// PostgreSQL 15, which lacks datlocprovider) answers false, which only costs
+// the index.
+func (s *pgMappingStore) keyCollationBytewise(ctx context.Context) bool {
+	const q = `
+		SELECT CASE WHEN a.attcollation = 100 THEN d.datlocprovider::text ELSE c.collprovider::text END,
+		       CASE WHEN a.attcollation = 100 THEN d.datcollate ELSE c.collcollate END
+		FROM pg_attribute a
+		JOIN pg_collation c ON c.oid = a.attcollation
+		JOIN pg_database d ON d.datname = current_database()
+		WHERE a.attrelid = $1::regclass AND a.attname = 'mapping_key'`
+	var provider, collate *string
+	if err := s.pool.QueryRow(ctx, q, s.table).Scan(&provider, &collate); err != nil {
+		logger.With(errKey, err).DebugContext(ctx, "could not determine v1_mappings key collation; prefix scans will not use the index")
+		return false
+	}
+	return provider != nil && collate != nil && isBytewiseCollation(*provider, *collate)
+}
+
+// isBytewiseCollation reports whether a provider/collation pair sorts by byte
+// (libc C/POSIX/C.UTF-8, or the builtin provider's code-point order).
+func isBytewiseCollation(provider, collate string) bool {
+	switch provider {
+	case "b":
+		return true
+	case "c":
+		return collate == "C" || collate == "POSIX" || strings.HasPrefix(collate, "C.")
+	}
+	return false
 }
 
 // Put unconditionally upserts value at key and returns the new

@@ -87,13 +87,18 @@ func main() {
 	var doBackfillFormationLeads = flag.Bool("backfill-formation-leads", false, "reconcile Formation Lead in v2 settings for mapped v1 projects, then exit")
 	var doBackfillProjectClassifications = flag.Bool("backfill-project-classifications", false, "reconcile v1 industry, technology and technical activity type on mapped v2 projects, then exit")
 	var doBackfillCommittees = flag.Bool("backfill-committees", false, "re-emit v1 committees that have no v2 mapping so the running deployment creates them, then exit")
+	var doBackfillCommitteeMembers = flag.Bool("backfill-committee-members", false, "re-emit v1 committee members that have no v2 mapping on mapped committees so the running deployment creates them, then exit (lfx-self-serve-ops#2100)")
+	var relaxCommitteeSettings = flag.Bool("relax-committee-settings", false, "turn off enable_voting/business_email_required on a committee while its blocked members are re-emitted, then restore them (applicable with --backfill-committee-members)")
+	var committeeFilter = flag.String("committee", "", "comma-separated committee SFIDs or v2 UIDs to process exclusively (applicable with --backfill-committee-members)")
+	var excludeProject = flag.String("exclude-project", "", "comma-separated project SFIDs whose committees are skipped (applicable with --backfill-committee-members)")
+	var settleTimeout = flag.Duration("settle-timeout", defaultMemberSettleTimeout, "how long to wait for each committee's re-emitted members to get a mapping (applicable with --backfill-committee-members)")
 	var excludeStagePrefix = flag.String("exclude-stage-prefix", "", "comma-separated, case-insensitive project_status__c prefixes to exclude (applicable with --backfill-projects)")
 	var includeStagePrefix = flag.String("include-stage-prefix", "", "comma-separated, case-insensitive project_status__c prefixes to include exclusively (applicable with --backfill-projects)")
 	var reconcileProjectStaffFile = flag.String("reconcile-project-staff-file", "", "compare executive director / program manager between v2 and v1 for the project UIDs listed in a file (one per line, at most 1000), then exit; report-only unless --apply-project-staff")
 	var projectStaffReportPath = flag.String("project-staff-report", "", "new file (must not exist, created 0600) for the identity-redacted project staff report; required for a report-only run (applicable with --reconcile-project-staff-file)")
 	var applyProjectStaff = flag.Bool("apply-project-staff", false, "PATCH v1 for the roles approved in --project-staff-approved-plan (applicable with --reconcile-project-staff-file)")
 	var projectStaffApprovedPlan = flag.String("project-staff-approved-plan", "", "reviewed project staff report with per-role approvals; required with --apply-project-staff")
-	var emitRate = flag.Float64("emit-rate", 2.0, "maximum record re-emits (or v1 PATCHes) per second (applicable with --backfill-projects, --backfill-committees, --reconcile-committee-member-voting, and --apply-project-staff)")
+	var emitRate = flag.Float64("emit-rate", 2.0, "maximum record re-emits (or v1 PATCHes) per second (applicable with --backfill-projects, --backfill-committees, --backfill-committee-members, --reconcile-committee-member-voting, and --apply-project-staff)")
 	var allowFormation = flag.Bool("allow-formation", false, "allow formation-staged projects in the same run as non-formation projects (applicable with --backfill-projects)")
 	var checkSlugs = flag.Bool("check-slugs", false, "skip candidates whose slug already resolves to a v2 project (applicable with --backfill-projects)")
 	var checkCommitteeNames = flag.Bool("check-committee-names", false, "skip candidates whose project UID + name already resolves to a v2 committee via lfx.committee-api.name_to_uid (applicable with --backfill-committees)")
@@ -101,7 +106,7 @@ func main() {
 	var syncUser = flag.String("sync-user", "", "sync profile and alternate emails for a single user by username, then exit")
 	var syncUsersFile = flag.String("sync-users-file", "", "sync profile and alternate emails for each username listed in a file (one per line), then exit")
 	var dryRun = flag.Bool("dry-run", false, "log changes without writing them (applicable with --backfill-*, --reconcile-committee-member-voting, --sync-user, and --sync-users-file; rejected with --apply-project-staff)")
-	var backfillLimit = flag.Int("limit", 1000, "maximum number of records (projects or committees) to process per backfill run (applicable with --backfill-projects and --backfill-committees; 0 = unlimited)")
+	var backfillLimit = flag.Int("limit", 1000, "maximum number of records (projects or committees) to process per backfill run (applicable with --backfill-projects, --backfill-committees and --backfill-committee-members; 0 = unlimited)")
 	var auth0Rate = flag.Float64("auth0-rate", defaultAuth0RateLimit, "users per second to pace the --sync-users-file loop")
 
 	flag.Usage = func() {
@@ -138,7 +143,7 @@ func main() {
 		dryRun:           *dryRun,
 		emitRate:         *emitRate,
 	}
-	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *syncUser != "", *syncUsersFile != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doReconcileCommitteeMemberVoting, *doBackfillV1MappingsToPG, *doBackfillProjects, *doBackfillFormationLeads, *doBackfillProjectClassifications, *doBackfillCommittees, staffOpts.requested()} {
+	for _, b := range []bool{*doBackfillACSProject, *doBackfillACSOrg, *doBackfillWorkspaces, *syncUser != "", *syncUsersFile != "", *doBackfillCommitteeMemberMappings, *doBackfillCommitteeMemberNames, *doReconcileCommitteeMemberVoting, *doBackfillV1MappingsToPG, *doBackfillProjects, *doBackfillFormationLeads, *doBackfillProjectClassifications, *doBackfillCommittees, *doBackfillCommitteeMembers, staffOpts.requested()} {
 		if b {
 			oneShotCount++
 		}
@@ -174,6 +179,9 @@ func main() {
 	// --reconcile-committee-member-voting never reads the v1 platform database
 	// or calls the Auth0 Management API, so it skips those two clients and the
 	// Job pod does not need their credentials.
+	// --backfill-committee-members reads v2 committee settings and v1
+	// organizations from the v1 platform database, but never calls the v1 API
+	// or the Auth0 Management API, so it skips those two clients.
 	// --reconcile-project-staff-file resolves staff contacts in the v1
 	// platform database but never calls the Auth0 Management API, so it skips
 	// only that client.
@@ -208,13 +216,13 @@ func main() {
 			logger.With(errKey, err).Error("error initializing Goa clients")
 			os.Exit(1)
 		}
-		if !*doBackfillFormationLeads && !*doBackfillProjectClassifications {
+		if !*doBackfillFormationLeads && !*doBackfillProjectClassifications && !*doBackfillCommitteeMembers {
 			if err := initV1Client(cfg); err != nil {
 				logger.With(errKey, err).Error("error initializing v1 client")
 				os.Exit(1)
 			}
 		}
-		if !*doReconcileCommitteeMemberVoting && staffInput == nil && !*doBackfillFormationLeads && !*doBackfillProjectClassifications {
+		if !*doReconcileCommitteeMemberVoting && staffInput == nil && !*doBackfillFormationLeads && !*doBackfillProjectClassifications && !*doBackfillCommitteeMembers {
 			if err := initAuth0MgmtClient(cfg); err != nil {
 				logger.With(errKey, err).Error("error initializing Auth0 Management API client")
 				os.Exit(1)
@@ -475,6 +483,56 @@ func main() {
 			os.Exit(1)
 		}
 		logger.With(res.logFields()...).Info("committee backfill completed successfully")
+		os.Exit(0)
+	}
+
+	// Handle --backfill-committee-members flag: re-emit unmapped v1 members of
+	// mapped committees, relaxing blocking committee settings if asked, then exit.
+	if *doBackfillCommitteeMembers {
+		memberLimit := *backfillLimit
+		if !limitExplicitlySet {
+			memberLimit = 0
+		}
+		opts := backfillCommitteeMembersOptions{
+			dryRun:          *dryRun,
+			relaxSettings:   *relaxCommitteeSettings,
+			committees:      parseStagePrefixList(*committeeFilter),
+			excludeProjects: parseStagePrefixList(*excludeProject),
+			limit:           memberLimit,
+			emitRate:        *emitRate,
+			settleTimeout:   *settleTimeout,
+		}
+		// Unlike the other one-shots, this backfill reads and writes the
+		// mappings the live service uses (member mappings it waits for, and
+		// the settings holds its guards read), so it opens the mode-configured
+		// store: in postgres mode the KV bucket is no longer written.
+		memberStore, err := initMappingStore(ctx, cfg, mappingsKV)
+		if err != nil {
+			logger.With(errKey, err).Error("error initializing v1-mappings store")
+			os.Exit(1)
+		}
+		mappingStore = memberStore
+		closeMemberStore := func() {
+			if closer, ok := mappingStore.(interface{ Close() error }); ok {
+				if err := closer.Close(); err != nil {
+					logger.With(errKey, err).Warn("error draining mapping store")
+				}
+			}
+			if pgPool != nil {
+				pgPool.Close()
+			}
+		}
+		logger.With(
+			"dry_run", *dryRun, "relax_committee_settings", *relaxCommitteeSettings, "committees", opts.committees,
+			"exclude_projects", opts.excludeProjects, "limit", memberLimit, "emit_rate", *emitRate, "settle_timeout", *settleTimeout,
+			"v1_mappings_store_mode", cfg.V1MappingsStoreMode,
+		).Info("starting committee member backfill")
+		_, err = backfillCommitteeMembers(ctx, opts)
+		closeMemberStore()
+		if err != nil {
+			logger.With(errKey, err).Error("error during committee member backfill")
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 

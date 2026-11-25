@@ -35,8 +35,8 @@ package main
 // committee — the existing --backfill-committee-member-mappings flag only
 // repairs reverse mappings that already exist, it cannot recreate members
 // that were never created. Restored committees can therefore come back
-// empty; a member-level re-emission pass analogous to this one is tracked
-// separately rather than added here.
+// empty until --backfill-committee-members (backfill_committee_members.go)
+// re-emits their members.
 import (
 	"context"
 	"encoding/json"
@@ -640,7 +640,7 @@ func collectCommitteeSFIDMappingStates(ctx context.Context) (map[string]string, 
 		opTimeout = defaultNATSFetchMaxWait
 	}
 
-	subjectData, err := ScanSubjectData(ctx, jsContext, kvMappingsStream, committeeSFIDSubject, opTimeout)
+	subjectData, err := scanSubjectDataFn(ctx, jsContext, kvMappingsStream, committeeSFIDSubject, opTimeout)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to scan committee SFID mappings: %w", err)
 	}
