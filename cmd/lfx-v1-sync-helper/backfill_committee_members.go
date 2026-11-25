@@ -79,6 +79,9 @@ type backfillCommitteeMembersOptions struct {
 	limit           int      // committees; 0 = unlimited
 	emitRate        float64
 	settleTimeout   time.Duration
+	// runOwner is the lease owner of a live run, recorded in every hold it
+	// writes so its own restore never touches a hold another run replaced.
+	runOwner string
 }
 
 // memberRow is a platform-community__c row that passed the live handler's pre-filters.
@@ -256,6 +259,7 @@ func backfillCommitteeMembers(ctx context.Context, opts backfillCommitteeMembers
 			return res, err
 		}
 		defer lease.Release(context.WithoutCancel(ctx))
+		opts.runOwner = lease.owner
 		runCtx, cancelRun := context.WithCancel(ctx)
 		defer cancelRun()
 		go func() {
@@ -303,7 +307,8 @@ func backfillCommitteeMembers(ctx context.Context, opts backfillCommitteeMembers
 				break
 			}
 			restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), committeeRestoreTimeout)
-			err := restoreCommitteeSettings(restoreCtx, h.hold.CommitteeUID)
+			// The lease owner recovers holds from any earlier run.
+			err := restoreCommitteeSettings(restoreCtx, h.hold.CommitteeUID, "")
 			cancel()
 			if err != nil {
 				res.restoreFailures++
@@ -741,7 +746,7 @@ func processMemberCommittee(ctx context.Context, c *memberCommittee, opts backfi
 
 	if blocked > 0 && opts.relaxSettings {
 		log := logger.With("committee_uid", c.uid, "committee_sfid", c.sfid)
-		hold, relaxErr := relaxCommitteeSettings(ctx, c)
+		hold, relaxErr := relaxCommitteeSettings(ctx, c, opts.runOwner)
 		if hold != nil {
 			relaxed = true
 			res.committeesRelaxed++
@@ -751,7 +756,15 @@ func processMemberCommittee(ctx context.Context, c *memberCommittee, opts backfi
 			defer func() {
 				restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), committeeRestoreTimeout)
 				defer cancel()
-				if restoreErr := restoreCommitteeSettings(restoreCtx, c.uid); restoreErr != nil {
+				// Only this run's own hold: if this run stalled long enough for
+				// its lease to go stale, the new owner has already restored it
+				// and may have replaced it with a hold of its own.
+				restoreErr := restoreCommitteeSettings(restoreCtx, c.uid, opts.runOwner)
+				if errors.Is(restoreErr, errHoldOwnedByAnotherRun) {
+					log.With(errKey, restoreErr).WarnContext(ctx, "committee settings hold now belongs to another run; leaving it to that run")
+					return
+				}
+				if restoreErr != nil {
 					if err != nil {
 						err = fmt.Errorf("%w: %w (after: %v)", errCommitteeRestoreFailed, restoreErr, err)
 					} else {
@@ -884,7 +897,7 @@ func settleCommitteeMemberPoll(ctx context.Context, sfids []string, timeout time
 // relaxCommitteeSettings records the committee's current settings in a hold,
 // then turns off each one that is on. It returns the hold once it is stored,
 // even with an error, so the caller restores it.
-func relaxCommitteeSettings(ctx context.Context, c *memberCommittee) (*committeeSettingsHold, error) {
+func relaxCommitteeSettings(ctx context.Context, c *memberCommittee, owner string) (*committeeSettingsHold, error) {
 	base, baseETag, err := fetchCommitteeBase(ctx, c.uid)
 	if err != nil {
 		return nil, err
@@ -912,6 +925,7 @@ func relaxCommitteeSettings(ctx context.Context, c *memberCommittee) (*committee
 		BaseETag:                      baseETag,
 		SettingsETag:                  settingsETag,
 		State:                         holdStateCaptured,
+		Owner:                         owner,
 		CreatedAt:                     time.Now().UTC(),
 	}
 	if v1Data, exists, err := fetchV1CommitteeData(ctx, c.sfid); err != nil {
@@ -987,10 +1001,20 @@ func putCommitteeSettingsHold(ctx context.Context, hold *committeeSettingsHold, 
 
 // restoreCommitteeSettings writes the hold's original values back, confirms
 // them with a fresh read, and marks the hold restored. It is safe to repeat.
-func restoreCommitteeSettings(ctx context.Context, committeeUID string) error {
+// errHoldOwnedByAnotherRun is returned when a run's own restore finds that
+// the committee's hold was written by a different run.
+var errHoldOwnedByAnotherRun = errors.New("committee settings hold belongs to another run")
+
+// restoreCommitteeSettings restores the committee's hold. A non-empty
+// expectedOwner restricts it to a hold that run wrote (errHoldOwnedByAnotherRun
+// otherwise); resume passes "" because the lease owner recovers any run's hold.
+func restoreCommitteeSettings(ctx context.Context, committeeUID, expectedOwner string) error {
 	hold, revision, err := getCommitteeSettingsHold(ctx, committeeUID)
 	if err != nil {
 		return err
+	}
+	if expectedOwner != "" && hold.Owner != expectedOwner {
+		return fmt.Errorf("%w (hold owner %q, this run %q)", errHoldOwnedByAnotherRun, hold.Owner, expectedOwner)
 	}
 	if hold.State == holdStateRestored {
 		return nil

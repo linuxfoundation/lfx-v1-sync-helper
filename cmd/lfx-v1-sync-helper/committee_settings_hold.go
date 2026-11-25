@@ -41,9 +41,11 @@ var settingsHoldGrace = 10 * time.Minute
 // committeeSettingsHold is stored as JSON at committeeSettingsHoldKey(uid).
 // Restored records are kept as an audit trail for post-run verification.
 type committeeSettingsHold struct {
-	CommitteeUID                    string     `json:"committee_uid"`
-	CommitteeSFID                   string     `json:"committee_sfid"`
-	ProjectSFID                     string     `json:"project_sfid"`
+	CommitteeUID  string `json:"committee_uid"`
+	CommitteeSFID string `json:"committee_sfid"`
+	ProjectSFID   string `json:"project_sfid"`
+	// Owner is the lease owner of the run that wrote the hold.
+	Owner                           string     `json:"owner,omitempty"`
 	OriginalEnableVoting            bool       `json:"original_enable_voting"`
 	OriginalBusinessEmailRequired   bool       `json:"original_business_email_required"`
 	OriginalV1EnableVoting          *bool      `json:"original_v1_enable_voting,omitempty"`

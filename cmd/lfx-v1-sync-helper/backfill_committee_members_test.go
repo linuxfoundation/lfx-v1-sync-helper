@@ -1022,7 +1022,7 @@ func TestRestoreInvalidatesOutstandingRelaxWrite(t *testing.T) {
 	if err := setCommitteeSetting(t.Context(), "committee-uid", holdFieldEnableVoting, false); err == nil {
 		t.Fatal("the relax write should have timed out")
 	}
-	if err := restoreCommitteeSettings(t.Context(), "committee-uid"); err != nil {
+	if err := restoreCommitteeSettings(t.Context(), "committee-uid", ""); err != nil {
 		t.Fatal(err)
 	}
 	if revision != 1 {
@@ -1097,6 +1097,43 @@ func TestMemberMapperRetriesOrgLookupErrorsWhileHeld(t *testing.T) {
 				if !tt.wantRetry && err != nil {
 					t.Errorf("%s: unexpected error %v", name, err)
 				}
+			}
+		})
+	}
+}
+
+func TestProcessMemberCommitteeRestoresOnlyItsOwnHold(t *testing.T) {
+	for _, replaced := range []bool{false, true} {
+		t.Run(map[bool]string{false: "own hold", true: "hold replaced by a newer run"}[replaced], func(t *testing.T) {
+			h := setupMemberBackfillTest(t)
+			v2 := &fakeV2Committee{enableVoting: true}
+			v2.install(t)
+			reEmitCommitteeMemberV1ObjectFn = func(context.Context, string, string) (string, error) {
+				if replaced {
+					// This run stalled past the lease timeout. Run B took over,
+					// restored this run's hold and relaxed the committee again.
+					seedSettingsHold(t, h.store, committeeSettingsHold{
+						Owner: "run-b", State: holdStateRelaxed, OriginalEnableVoting: true, RelaxedFields: []string{holdFieldEnableVoting},
+					})
+					v2.enableVoting = false
+				}
+				return "", nil
+			}
+			lookupCommitteeMemberMappingFn = func(context.Context, string) bool { return true }
+			res := backfillCommitteeMembersResult{causes: map[string]int{}}
+			opts := backfillCommitteeMembersOptions{relaxSettings: true, settleTimeout: time.Second, runOwner: "run-a"}
+			if _, err := processMemberCommittee(t.Context(), blockedCommittee(), opts, rate.NewLimiter(rate.Inf, 1), &res); err != nil {
+				t.Fatal(err)
+			}
+			hold, _, _ := getCommitteeSettingsHold(t.Context(), "committee-uid")
+			if replaced {
+				if hold.Owner != "run-b" || hold.State != holdStateRelaxed || v2.enableVoting {
+					t.Errorf("a stale run must not restore the newer run's hold: hold = %+v, v2 = %+v", hold, v2)
+				}
+				return
+			}
+			if hold.Owner != "run-a" || hold.State != holdStateRestored || !v2.enableVoting {
+				t.Errorf("hold = %+v, v2 = %+v", hold, v2)
 			}
 		})
 	}
