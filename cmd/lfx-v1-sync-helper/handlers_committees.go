@@ -1192,12 +1192,13 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 	if accountSFID, ok := v1Data["account__c"].(string); ok && accountSFID != "" {
 		// Look up organization information from v1 Organization Service.
 		org, err := lookupV1Org(ctx, accountSFID)
-		if err != nil {
+		switch {
+		case err != nil:
 			logger.With(errKey, err, "account_sfid", accountSFID).WarnContext(ctx, "failed to lookup organization, leaving empty")
 			// Organization lookup failed, leave Organization field nil.
-		} else if org.Name == "" {
+		case org.Name == "":
 			logger.With("account_sfid", accountSFID).WarnContext(ctx, "organization lookup returned no name, leaving empty")
-		} else {
+		default:
 			// Successfully fetched organization data.
 			orgName := org.Name
 			orgStruct := &struct {
@@ -1381,12 +1382,13 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID s
 	if accountSFID, ok := v1Data["account__c"].(string); ok && accountSFID != "" {
 		// Look up organization information from v1 Organization Service.
 		org, err := lookupV1Org(ctx, accountSFID)
-		if err != nil {
+		switch {
+		case err != nil:
 			logger.With(errKey, err, "account_sfid", accountSFID).WarnContext(ctx, "failed to lookup organization, leaving empty")
 			// Organization lookup failed, leave Organization field nil.
-		} else if org.Name == "" {
+		case org.Name == "":
 			logger.With("account_sfid", accountSFID).WarnContext(ctx, "organization lookup returned no name, leaving empty")
-		} else {
+		default:
 			// Successfully fetched organization data.
 			orgName := org.Name
 			orgStruct := &struct {

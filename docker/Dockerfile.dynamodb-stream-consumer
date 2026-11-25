@@ -29,7 +29,7 @@ RUN go build -o /go/bin/dynamodb-stream-consumer -trimpath -ldflags="-w -s" ./cm
 FROM cgr.dev/chainguard/static:latest
 
 # Implicit with base image; setting explicitly for linters.
-USER nonroot
+USER 65532
 
 COPY --from=builder /go/bin/dynamodb-stream-consumer /dynamodb-stream-consumer
 
