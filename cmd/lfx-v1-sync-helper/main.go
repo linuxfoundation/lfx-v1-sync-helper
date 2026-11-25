@@ -354,7 +354,7 @@ func main() {
 	)
 	if err != nil {
 		logger.With(errKey, err).Error("error creating NATS client")
-		os.Exit(1)
+		os.Exit(1) //nolint:gocritic // Process exit terminates the signal context.
 	}
 
 	// Create JetStream context

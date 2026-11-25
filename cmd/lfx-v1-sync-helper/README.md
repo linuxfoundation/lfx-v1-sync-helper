@@ -420,7 +420,7 @@ This approach ensures that v1 sync operations are properly attributed to the act
 
 ### Prerequisites
 
-- Go 1.26+
+- Go 1.27.4+ (see `go.mod`).
 - NATS Server with JetStream enabled
 - Access to Heimdall JWT configuration
 

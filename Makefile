@@ -25,7 +25,10 @@ DOCKER_REGISTRY=ghcr.io/linuxfoundation/lfx-v1-sync-helper
 V1_SYNC_HELPER_IMAGE=$(DOCKER_REGISTRY)/v1-sync-helper:latest
 MELTANO_IMAGE=$(DOCKER_REGISTRY)/meltano:latest
 
-.PHONY: all build clean test test-coverage deps fmt lint vet check install-lint run run-debug debug docker-build-v1-sync-helper docker-build-meltano docker-run-v1-sync-helper docker-run-meltano docker-build-all update-deps help
+# Keep the local MegaLinter image in sync with the CI workflow.
+MEGALINTER_IMAGE := ghcr.io/oxsecurity/megalinter-cupcake@sha256:0e62d95de2e4388530579e1cdf531e3752ac70549ab78666c64429bd734dbae7  # v10.2.0
+
+.PHONY: all build clean test test-coverage deps fmt lint megalinter vet check install-lint run run-debug debug docker-build-v1-sync-helper docker-build-meltano docker-run-v1-sync-helper docker-run-meltano docker-build-all update-deps help
 
 # Default target
 all: clean deps fmt lint test build
@@ -94,8 +97,12 @@ lint:
 	@if command -v golangci-lint >/dev/null 2>&1; then \
 		golangci-lint run; \
 	else \
-		echo "golangci-lint not found. Install with: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b \$$(go env GOPATH)/bin v1.54.2"; \
+		echo "golangci-lint not found. Install with: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b \$$(go env GOPATH)/bin v2.15.0"; \
 	fi
+
+megalinter:
+	docker pull $(MEGALINTER_IMAGE)
+	docker run --rm --platform linux/amd64 -e GOTOOLCHAIN=auto -v '$(CURDIR):/tmp/lint:rw' $(MEGALINTER_IMAGE)
 
 # Run all checks
 check: fmt vet lint
@@ -103,7 +110,7 @@ check: fmt vet lint
 # Install golangci-lint
 install-lint:
 	@echo "Installing golangci-lint..."
-	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $$(go env GOPATH)/bin v1.54.2
+	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $$(go env GOPATH)/bin v2.15.0
 
 # Run the application
 run: build
@@ -164,6 +171,7 @@ help:
 	@echo "  fmt                        - Format Go code"
 	@echo "  vet                        - Run go vet"
 	@echo "  lint                       - Run golangci-lint"
+	@echo "  megalinter                 - Run MegaLinter via Docker"
 	@echo "  check                      - Run fmt, vet, and lint"
 	@echo "  install-lint               - Install golangci-lint"
 	@echo "  run                        - Build and run the application"

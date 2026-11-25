@@ -271,11 +271,12 @@ func handleProjectUpdateAtRevision(ctx context.Context, key string, v1Data map[s
 			logger.With(errKey, checkErr, "sfid", sfid).ErrorContext(ctx, "failed to compare Formation Lead human revisions; redelivering")
 			return true
 		}
-		if found && obligation.ProcessedHumanRev >= deliveredRev && obligation.ProcessedHumanRev != 0 {
+		switch {
+		case found && obligation.ProcessedHumanRev >= deliveredRev && obligation.ProcessedHumanRev != 0:
 			deferredHumanLead = false
 			formationPending = true
 			forcePreserveFormationLead = true
-		} else if found && !obligation.Completed {
+		case found && !obligation.Completed:
 			// An unfinished reverse repair survives process restart even
 			// when its in-memory write log does not. A base-only save cannot
 			// replace the pending v2 contact. Include cumulative changes
@@ -291,9 +292,10 @@ func handleProjectUpdateAtRevision(ctx context.Context, key string, v1Data map[s
 				currentHuman, hasProvenance := formationLeadCurrentHumanFields(latest)
 				for field := range formationLeadColumns {
 					processed, known := obligation.ProcessedFields[field]
-					if !known && versions[field] != 0 {
+					switch {
+					case !known && versions[field] != 0:
 						forcePreserveFormationLead = true
-					} else if versions[field] > processed {
+					case versions[field] > processed:
 						if !hasProvenance || !currentHuman[field] {
 							// A later bridge echo replaced this human value;
 							// neither the latest row nor its counters recover it.
@@ -301,7 +303,7 @@ func handleProjectUpdateAtRevision(ctx context.Context, key string, v1Data map[s
 						} else {
 							deliveredChanges[field] = true
 						}
-					} else if versions[field] < processed {
+					case versions[field] < processed:
 						forcePreserveFormationLead = true
 					}
 				}
@@ -316,7 +318,7 @@ func handleProjectUpdateAtRevision(ctx context.Context, key string, v1Data map[s
 			} else {
 				deferredHumanLead = true
 			}
-		} else if !found && !latestIsOwnWrite && hasDeliveredChanges && len(deliveredChanges) > 0 && deliveredVersions != nil {
+		case !found && !latestIsOwnWrite && hasDeliveredChanges && len(deliveredChanges) > 0 && deliveredVersions != nil:
 			// An older name delivery may refresh a row that already contains
 			// a newer queued email edit. Apply both proven human fields in
 			// this settings write before creating the first watermark.

@@ -5,35 +5,30 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
-	"time"
 )
 
-// TestMapV1CommitteeMemberOrganizationCachedFailure checks that a cached v1
-// organization lookup failure (an entry with an empty name, which lookupV1Org
-// returns with a nil error) leaves the organization empty and logs a warning,
-// rather than being dropped silently. Not safe for t.Parallel: it swaps
-// package globals, restored on Cleanup.
-func TestMapV1CommitteeMemberOrganizationCachedFailure(t *testing.T) {
+// TestMapV1CommitteeMemberOrganizationLookup checks unresolved and valid organization lookups.
+func TestMapV1CommitteeMemberOrganizationLookup(t *testing.T) {
 	const accountSFID = "001000000000001AAA"
 
 	tests := []struct {
 		name     string
-		cached   V1Organization
+		row      *accountRow
 		wantOrg  bool
 		wantWarn bool
 	}{
 		{
-			name:     "cached failure leaves organization empty and warns",
-			cached:   V1Organization{ID: accountSFID},
+			name:     "empty name leaves organization empty and warns",
+			row:      testAccountRow(accountSFID, "", "example.org", accountLive),
 			wantWarn: true,
 		},
 		{
-			name:    "cached organization is mapped",
-			cached:  V1Organization{ID: accountSFID, Name: "Example Org", Domain: "example.org"},
+			name:    "organization is mapped",
+			row:     testAccountRow(accountSFID, "Example Org", "example.org", accountLive),
 			wantOrg: true,
 		},
 	}
@@ -41,22 +36,13 @@ func TestMapV1CommitteeMemberOrganizationCachedFailure(t *testing.T) {
 	for _, tc := range tests {
 		for _, op := range []string{"create", "update"} {
 			t.Run(tc.name+"/"+op, func(t *testing.T) {
-				store := newFakeMappingStore()
 				var logs bytes.Buffer
-				origStore, origLogger := mappingStore, logger
-				mappingStore = store
+				origLookup, origLogger := lookupB2CAccountBySFIDFn, logger
+				lookupB2CAccountBySFIDFn = func(_ context.Context, _ string) (*accountRow, error) {
+					return tc.row, nil
+				}
 				logger = slog.New(slog.NewTextHandler(&logs, nil))
-				t.Cleanup(func() { mappingStore, logger = origStore, origLogger })
-
-				cached := tc.cached
-				cached.LastFetched = time.Now().UTC()
-				data, err := json.Marshal(cached)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := store.Put(t.Context(), orgCacheKeyPrefix+accountSFID, data); err != nil {
-					t.Fatal(err)
-				}
+				t.Cleanup(func() { lookupB2CAccountBySFIDFn, logger = origLookup, origLogger })
 
 				v1Data := map[string]any{"account__c": accountSFID}
 				var hasOrg bool
@@ -78,9 +64,9 @@ func TestMapV1CommitteeMemberOrganizationCachedFailure(t *testing.T) {
 				if hasOrg != tc.wantOrg {
 					t.Errorf("Organization set = %v, want %v", hasOrg, tc.wantOrg)
 				}
-				gotWarn := strings.Contains(logs.String(), "cached lookup failure")
+				gotWarn := strings.Contains(logs.String(), "failed to lookup organization")
 				if gotWarn != tc.wantWarn {
-					t.Errorf("cached-failure warning logged = %v, want %v; logs: %s", gotWarn, tc.wantWarn, logs.String())
+					t.Errorf("lookup-failure warning logged = %v, want %v; logs: %s", gotWarn, tc.wantWarn, logs.String())
 				}
 			})
 		}

@@ -29,7 +29,7 @@ RUN go build -o /go/bin/lfx-v1-sync-helper -trimpath -ldflags="-w -s" ./cmd/lfx-
 FROM cgr.dev/chainguard/static:latest
 
 # Implicit with base image; setting explicitly for linters.
-USER nonroot
+USER 65532
 
 COPY --from=builder /go/bin/lfx-v1-sync-helper /lfx-v1-sync-helper
 

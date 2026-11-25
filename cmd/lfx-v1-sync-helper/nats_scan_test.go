@@ -134,7 +134,9 @@ func TestScanSubjectDataStreamRange_AdjacentRangesCoverExactlyOnce(t *testing.T)
 	if _, _, err := scanSubjectDataStreamRangeWith(context.Background(), fs.get, "S", "", 3, 6, time.Second, captureCB(&second)); err != nil {
 		t.Fatalf("second scan: %v", err)
 	}
-	all := append(first, second...)
+	all := make([]visit, 0, len(first)+len(second))
+	all = append(all, first...)
+	all = append(all, second...)
 	if len(all) != 5 {
 		t.Fatalf("total visits = %d; want 5 (no gap, no overlap)", len(all))
 	}

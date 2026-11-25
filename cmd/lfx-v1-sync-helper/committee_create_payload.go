@@ -54,14 +54,15 @@ func validateCommitteeCreatePayload(ctx context.Context, uid, projectSFID, expec
 		payload.CommitteeID = *parent
 	}
 	settings, _, err := fetchCommitteeSettings(ctx, uid)
-	if err != nil {
+	switch {
+	case err != nil:
 		var missing *committeeservice.NotFoundError
 		if !errors.As(err, &missing) {
 			return err
 		}
-	} else if settings == nil {
+	case settings == nil:
 		return errors.New("empty current committee settings payload")
-	} else {
+	default:
 		payload.BusinessEmailRequired = &settings.BusinessEmailRequired
 		payload.MembersCanViewSocialListening = &settings.MembersCanViewSocialListening
 	}

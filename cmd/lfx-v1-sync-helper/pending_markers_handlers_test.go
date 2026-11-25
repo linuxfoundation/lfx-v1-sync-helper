@@ -210,19 +210,20 @@ func TestHandleProjectUpdate_RefreshBeforeMapping(t *testing.T) {
 				return nil, "", errors.New("test stopped after reaching unrelated project update")
 			}
 			var got bool
-			if tt.activeMarker {
+			switch {
+			case tt.activeMarker:
 				got = handleProjectUpdateAtRevision(t.Context(), "salesforce-project__c."+sfid,
 					map[string]any{"sfid": sfid, "lastmodifiedbyid": "0050M000009AbcDEQ", formationLeadChangesKey: []any{}}, 2)
-			} else if tt.observedHuman || tt.historicalMask {
+			case tt.observedHuman || tt.historicalMask:
 				email := "human@example.com"
 				if tt.historicalMask {
 					email = "stale@example.com"
 				}
 				got = handleProjectUpdateAtRevision(t.Context(), "salesforce-project__c."+sfid,
 					map[string]any{"sfid": sfid, "lastmodifiedbyid": "human-editor", "formation_lead_email": email, formationLeadChangesKey: []any{"email"}}, 11)
-			} else if tt.olderDelivery {
+			case tt.olderDelivery:
 				got = handleProjectUpdateAtRevision(t.Context(), "salesforce-project__c."+sfid, map[string]any{"sfid": sfid, "lastmodifiedbyid": "0050M000009AbcDEQ", "formation_lead_email": "older@example.com"}, 11)
-			} else {
+			default:
 				got = handleProjectUpdate(t.Context(), "salesforce-project__c."+sfid, map[string]any{"sfid": sfid, "lastmodifiedbyid": "0050M000009AbcDEQ"})
 			}
 			if got != tt.wantRetry {
