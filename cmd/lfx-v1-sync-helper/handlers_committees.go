@@ -1196,9 +1196,7 @@ func mapV1DataToCommitteeMemberCreatePayload(ctx context.Context, committeeUID s
 			logger.With(errKey, err, "account_sfid", accountSFID).WarnContext(ctx, "failed to lookup organization, leaving empty")
 			// Organization lookup failed, leave Organization field nil.
 		} else if org.Name == "" {
-			// lookupV1Org reports a cached error/invalid entry as an org with an
-			// empty name and a nil error.
-			logger.With("account_sfid", accountSFID).WarnContext(ctx, "organization lookup returned no name (cached lookup failure), leaving empty")
+			logger.With("account_sfid", accountSFID).WarnContext(ctx, "organization lookup returned no name, leaving empty")
 		} else {
 			// Successfully fetched organization data.
 			orgName := org.Name
@@ -1387,9 +1385,7 @@ func mapV1DataToCommitteeMemberUpdatePayload(ctx context.Context, committeeUID s
 			logger.With(errKey, err, "account_sfid", accountSFID).WarnContext(ctx, "failed to lookup organization, leaving empty")
 			// Organization lookup failed, leave Organization field nil.
 		} else if org.Name == "" {
-			// lookupV1Org reports a cached error/invalid entry as an org with an
-			// empty name and a nil error.
-			logger.With("account_sfid", accountSFID).WarnContext(ctx, "organization lookup returned no name (cached lookup failure), leaving empty")
+			logger.With("account_sfid", accountSFID).WarnContext(ctx, "organization lookup returned no name, leaving empty")
 		} else {
 			// Successfully fetched organization data.
 			orgName := org.Name

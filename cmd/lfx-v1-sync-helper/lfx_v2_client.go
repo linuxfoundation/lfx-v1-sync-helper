@@ -366,16 +366,17 @@ func generateJWTToken(ctx context.Context, audience string, v1Principal string) 
 	default:
 		// User principal - attempt lookup.
 		user, err := lookupMergedUser(ctx, v1Principal)
-		if err != nil {
+		switch {
+		case err != nil:
 			logger.With(errKey, err, "platform_id", v1Principal).WarnContext(ctx, "failed to lookup user from v1 API, falling back to service account")
 			principal = jwtClientID + "@clients"
-		} else if user.Username == "" {
+		case user.Username == "":
 			logger.With("platform_id", v1Principal).WarnContext(ctx, "user has empty username, falling back to service account")
 			principal = jwtClientID + "@clients"
-		} else if !safeNameRE.MatchString(user.Username) || hexUserRE.MatchString(user.Username) {
+		case !safeNameRE.MatchString(user.Username) || hexUserRE.MatchString(user.Username):
 			logger.With("username", user.Username).WarnContext(ctx, "username not in safe format, falling back to service account")
 			principal = jwtClientID + "@clients"
-		} else {
+		default:
 			principal = user.Username
 			email = user.Email
 			logger.With("username", user.Username, "principal", principal, "email", email, "audience", audience).Debug("generating JWT token with user impersonation")

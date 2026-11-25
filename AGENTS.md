@@ -326,18 +326,14 @@ Boot ordering (`main.go`): NATS + KV bucket handles → a KV-backed `mappingStor
 
 ### Go Toolchain Version
 
-This repo targets Go 1.27.x (currently 1.27.4, the latest patch). This
-supersedes the Go version policy in the `lfx-megalinter` skill, which targets
-the latest stable minor minus one: do not move `go.mod` back to Go 1.26. Take
-every 1.27.x patch release and keep `go.mod` and build configuration aligned.
-Release images are built with the `go.mod` version (`setup-go` reads it).
+Follow the `lfx-megalinter` skill's Go version policy: use the latest patch of
+the previous stable Go minor, capped at the minor bundled by MegaLinter.
+This importable module declares the minor in `go` and pins the patch in
+`toolchain` when its dependencies allow it.
 
-MegaLinter v10.2.0 runs Go 1.26.10 in its image, so the workflow and local
-`megalinter` target set `GOTOOLCHAIN=auto` to download the `go.mod` toolchain.
-Its bundled golangci-lint supports Go 1.27 and lints this module. The
-osv-scanner govulncheck call analysis is built with Go 1.26 and cannot load
-it, so osv-scanner falls back to matching vulnerabilities by version: known
-vulnerabilities in dependency versions fail the check, reachable or not.
+The current committee-service and project-service clients require Go 1.27;
+their Go 1.26-compatible versions lack APIs used by this service. The module
+remains on Go 1.27.4 until compatible client versions are available.
 
 ### Python Code Standards
 - Use `uv` for dependency management

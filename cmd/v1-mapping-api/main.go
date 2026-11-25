@@ -21,8 +21,9 @@ import (
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	if err := run(ctx); err != nil {
+	err := run(ctx)
+	cancel()
+	if err != nil {
 		slog.Error("mapping API stopped", "error", err)
 		os.Exit(1)
 	}

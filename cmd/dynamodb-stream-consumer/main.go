@@ -114,7 +114,6 @@ func main() {
 
 	gracefulCloseWG := sync.WaitGroup{}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 

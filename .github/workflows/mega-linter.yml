@@ -44,8 +44,3 @@ jobs:
           # https://megalinter.io/latest/configuration/
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GOTOOLCHAIN: auto
-          # Allow GITHUB_TOKEN for working around rate limits (aquasecurity/trivy#7668).
-          REPOSITORY_TRIVY_UNSECURED_ENV_VARIABLES: GITHUB_TOKEN
-          # zizmor's "artipacked" audit needs the GitHub API (to verify
-          # SHA-pinned action tags), which requires GITHUB_TOKEN.
-          ACTION_ZIZMOR_UNSECURED_ENV_VARIABLES: GITHUB_TOKEN

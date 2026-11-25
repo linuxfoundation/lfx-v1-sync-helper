@@ -334,15 +334,16 @@ func TestHydrateSettingsPayload(t *testing.T) {
 			if stringPtrToString(tt.payload.AnnouncementDate) != stringPtrToString(tt.current.AnnouncementDate) {
 				t.Errorf("AnnouncementDate = %v, want %v", stringPtrToString(tt.payload.AnnouncementDate), stringPtrToString(tt.current.AnnouncementDate))
 			}
-			if tt.wantEDNil {
+			switch {
+			case tt.wantEDNil:
 				if tt.payload.ExecutiveDirector != nil {
 					t.Errorf("ExecutiveDirector = %v, want nil (deliberate clear)", tt.payload.ExecutiveDirector)
 				}
-			} else if setED != nil {
+			case setED != nil:
 				if tt.payload.ExecutiveDirector != setED {
 					t.Errorf("ExecutiveDirector overwritten, want original")
 				}
-			} else if !userInfoPtrsEqual(tt.payload.ExecutiveDirector, tt.current.ExecutiveDirector) {
+			case !userInfoPtrsEqual(tt.payload.ExecutiveDirector, tt.current.ExecutiveDirector):
 				t.Errorf("ExecutiveDirector not hydrated from current")
 			}
 			if tt.wantPMNil {
