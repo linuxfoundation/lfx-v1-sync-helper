@@ -3,3 +3,6 @@
 
 title = "betterleaks config"
 
+[extend]
+useDefault = true
+
