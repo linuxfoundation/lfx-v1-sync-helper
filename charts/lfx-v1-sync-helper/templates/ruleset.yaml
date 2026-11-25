@@ -1,0 +1,34 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+{{- if .Values.mappingApi.enabled }}
+{{- $team := required "mappingApi.accessTeamId is required when mappingApi.enabled=true" .Values.mappingApi.accessTeamId }}
+{{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9_-]*$" $team) }}
+{{- fail "mappingApi.accessTeamId must be a bare team ID containing only letters, digits, underscores or hyphens" }}
+{{- end }}
+---
+apiVersion: heimdall.dadrus.github.com/v1alpha4
+kind: RuleSet
+metadata:
+  name: {{ .Chart.Name }}-mapping-api
+  namespace: {{ .Release.Namespace }}
+spec:
+  rules:
+    - id: "rule:lfx-v1-mapping-api:lookup"
+      allow_encoded_slashes: "off"
+      match:
+        methods:
+          - GET
+        routes:
+          - path: /v1-sync-helper/mappings/:resource_type/:uid
+      execute:
+        - authenticator: oidc
+        - authorizer: openfga_check
+          config:
+            values:
+              relation: member
+              object: {{ printf "team:%s" $team | quote }}
+        - finalizer: create_jwt
+          config:
+            values:
+              aud: {{ required "mappingApi.audience is required" .Values.mappingApi.audience | quote }}
+{{- end }}

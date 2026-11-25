@@ -1,0 +1,33 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+{{- if .Values.mappingApi.enabled }}
+{{- $api := .Values.mappingApi }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Chart.Name }}-mapping-api
+  namespace: {{ .Release.Namespace }}
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ required "mappingApi.gateway.name is required" $api.gateway.name }}
+      namespace: {{ $api.gateway.namespace }}
+  hostnames:
+    - {{ required "mappingApi.gateway.hostname is required" $api.gateway.hostname | quote }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1-sync-helper/mappings/
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: {{ .Chart.Name }}-mapping-api-heimdall
+      backendRefs:
+        - name: {{ .Chart.Name }}-mapping-api
+          port: 8080
+{{- end }}

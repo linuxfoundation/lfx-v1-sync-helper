@@ -152,6 +152,126 @@ Boot ordering (`main.go`): NATS + KV bucket handles → a KV-backed `mappingStor
 
 **Chart wiring.** The Postgres cluster is provisioned by `charts/lfx-v1-sync-helper/templates/database.yaml`, selected via `.Values.database.mode` (`external` | `database` | `cluster+database`). The app deployment forwards CNPG operator-managed `<clusterName>-app` Secret keys (or external Secret keys, or a single-key `V1_MAPPINGS_DATABASE_URL`) as `V1_MAPPINGS_*` env vars (distinct from `V1_DB_*`, which addresses the read-only Salesforce replica) and the service composes the libpq DSN in-process via `Config.ResolveV1MappingsDatabaseURL` — never as a literal env-var value, to avoid leaking the password through `kubectl describe pod`. When `database.mode=external` with no `secretName`, the deployment injects `V1_MAPPINGS_STORE_MODE=kv` automatically so a chart install without Postgres wiring still boots. Setting `.Values.app.environment.V1_MAPPINGS_STORE_MODE.value` overrides that safety fallback.
 
+#### v1 Organization Lookup by Account SFID (`lfx_v1_client.go`, `v1db.go`) — lfx-self-serve-ops#1513
+
+- `lookupV1Org` (committee member create/update mapping and Auth0 profile sync) reads `salesforce.account` from the v1 platform Postgres replica (`V1_DB_*`) via `dbLookupB2CAccountBySFID`; there is no org cache. It keeps the results of the Organization Service `GET /v1/orgs/{sfid}` it replaced: an exact `sfid` match, found only when `isdeleted` is false and the record type is in `v1OrgServiceRecordTypeIDs`, returning `name` and `account_domain__c` as `Domain`.
+- `v1OrgServiceRecordTypeIDs` (Company Account, Project Account) is the Organization Service's `ORG_SERVICE_RECORD_TYPE_ID` Lambda setting, identical in dev, staging, and prod. If that setting changes, change the constant with it.
+- A missing, soft-deleted, or other-record-type account and an empty name return an error wrapping `errV1OrgUnresolved`. The committee member mappers leave `organization` unset on any error. Auth0 profile sync treats `errV1OrgUnresolved` as no organization (the existing Auth0 `organization` is left untouched and the other fields sync) and fails only on a database error.
+- Committee member `organization` is the raw `account__c` as `id`, the account name, and a website from `account_domain__c` only. The individual placeholder accounts resolve like any other account; committee-service clears an `id` that does not resolve to a `b2b_org` (on create, and on update when the `id` changes) and keeps the name and website.
+- v2→v1 org resolution (`resolveV1OrgID`) still uses the Organization Service: `GET /v1/orgs/search`, then `POST /v1/orgs` when nothing matches.
+- `v1_org.*` and `v1_org_lock.*` rows left in the mapping store are no longer read or written.
+
+#### Committee create recovery — lfx-self-serve-ops#1482
+
+- `committee_create_recovery.go` fences each new v1 POST with a versioned `create_attempt.committee.<uid>` record in the online `MappingStore`. Retain payload/creator hashes, not raw payloads or principals. Never expire/reset an unresolved attempt automatically or repeat POST after an ambiguous response.
+- `committee_create_recovery_db.go` uses bounded, read-only primary-database snapshots. The v1 API's generic `System` creator and cached/replicated empty rosters cannot prove ownership. Recovery requires one same-project/name row created by this helper in the original database-clock processing window, no later edit/deletion/member history, and a normalization-aware match to the original create payload.
+- A fresh delivery after the 70s delay recovers a known v1 ID, or fails closed to manual reconciliation; it never uses the expired POST context. Record the ID with CAS before create-only forward/reverse mapping claims, and verify both directions. Preserve conflicts and tombstones, including late create events for deleted committees. A recorded successful ID can complete partial mappings behind the reverse loop guard.
+- Member-created events wait when their missing parent mapping has a recorded create attempt; untracked/V2-only parents keep their skip behavior. Permanent manual decisions are ERROR-logged and ACKed; exhausted retries are explicitly ERROR-logged. This does not replay historical exhausted events or automatically adopt old same-name groups.
+- Empty/null/whitespace parents normalize to no parent on create only; `NONE` retains its PATCH-clearing meaning. Member POSTs use fresh V2 fields and skip NotFound. A versioned `create_attempt.committee_member.<uid>` insert-only fence retains only resolved IDs; a successful result can complete mappings or retry deletion, while ambiguous member outcomes require manual reconciliation rather than another POST.
+- V2 deletes retain permanent `create_deleted.<resource>.<uid>` intent before looking up mappings. Create completion checks intent before/after mapping claims and cleans up known recorded results via the existing v1 DELETE; cleanup errors retry. Conflicts and tombstones are preserved, and unknown outcomes never authorize same-name adoption. Do not expire/reset deletion fences or either kind of create attempt to force a retry.
+- Member DELETE uses a reusable contact ID. Recorded cleanup skips completed/all-tombstoned results; before first dispatch, a bounded primary snapshot verifies the original record and unique active committee/contact membership. Absent/replaced originals only tombstone the old owner's keys. `cleanup_attempt.committee_member.<uid>` fences one DELETE, records confirmed deletion before CAS tombstones, and retains completion. Lost responses or uncertain result persistence never authorize a repeated DELETE; legacy partial cleanup, missing record IDs and ownership conflicts fail closed/manual. Pre-dispatch read/storage failures and confirmed-result tombstone writes can retry. No conditional-delete guarantee is possible against external v1 writers without a v1 API change.
+- Child committee creates with a missing parent mapping and valid same-project parent attempt use the same 70s delayed NAK as members. Deleted/tombstoned/cross-project parents do not become eligible; untracked missing parents and transient store errors retain ordinary retries.
+- New committee attempts are version 3: `prepared` can retry pre-POST validation/read failures; one CAS dispatcher transitions to `dispatched` with a fresh primary-database clock immediately before POST. An insert-only `create_scope.committee.<hash>` owns the database-canonical project/name for one UID/operation and is never expired or automatically handed off, including on deletion. Legacy v1/v2 unknown dispatched outcomes stay manual; a v2 preparation can acquire scope under CAS. `COMMITTEE_SCOPED_ADOPTION_ENABLED` defaults false: enable ambiguous adoption only after every writer is upgraded and all old unscoped in-flight/unknown outcomes are reconciled (an empty snapshot or elapsed timeout is not proof). Fresh scoped POSTs/known IDs do not require the gate. Current normalized committee base/settings payloads must match the original fingerprint before dispatch/adoption and around mapping claims; drift is surfaced for manual reconciliation, never silently accepted or automatically PATCHed over a candidate.
+- Recorded committee cleanup uses owner-checked CAS tombstones after DELETE, preserving mappings reassigned during the request. Member create replay claims/verifies ownership and PATCHes fresh v1-writable fields without another POST or echo-marker suppression; failures retry current state. The original update-payload hash only avoids an unnecessary first-create PATCH, never certifies later v1 state. Recheck ownership/deletion around reconciliation and retry if fields changed during PATCH.
+- Member recovery requires primary proof before claims and before/after PATCH that the original record ID is the unique active committee/contact membership. Missing/deleted/replaced/ambiguous records fail closed, while unavailable/replica snapshots retry without PATCH. KV/WAL mappings and old V2 state do not prove the reusable contact still addresses the original row. No atomic conditional-PATCH guarantee exists against external v1 writers.
+- Rollout needs the existing database read connection routed to a primary and every helper writer upgraded. No new v1 feature or SQL migration. See `cmd/lfx-v1-sync-helper/README.md` for the acceptance checks and manual cleanup cautions.
+
+#### Committee member voting status — lfx-self-serve#4079
+
+- **"No voting status" is normalized at both sync boundaries** (`voting_status.go`). v2 represents it as an empty status. v1 may hold `""` or a legacy `"None"`, but v1 project-service POST/PATCH only accept `Alternate Voting Rep | Observer | Voting Rep | Emeritus` (`"None"` → 422) and cannot clear the field. An omitted status gets a v1-side default.
+- **v2 → v1** (`syncCommitteeMemberCreateToV1` / `syncCommitteeMemberUpdateToV1` via `v1VotingFromV2EventData`): an empty, `null` or `"None"` v2 status is sent as an explicit `VotingStatus: "Observer"` (`v1NoVotingStatus`), the only non-eligible value v1 accepts. An indexer event without a `voting` key leaves `VotingStatus` unset.
+- **v1 → v2** (`mapV1DataToCommitteeMember{Create,Update}Payload`): `"None"` (case-insensitive) or empty maps to a nil `Voting`. `"Observer"` stays `"Observer"`, because it is a real v2 status. `committeeMembersEqual` compares voting status through `normalizeVotingStatus`, so nil, `""` and `"None"` are equal.
+  - Exception: `updateCommitteeMember` calls `preserveUnsetVotingStatus` first. An incoming `"Observer"` against a v2 member with no voting status is dropped (nil `Voting`), because it is the `v1NoVotingStatus` that the v2 → v1 path wrote. Otherwise any later v1 edit of the member would set v2 to `"Observer"`. A v1 admin explicitly setting `"Observer"` on such a member therefore does not reach v2, which matches the reconcile classifier.
+- **Forward mapping for members created in Self Serve:** `syncCommitteeMemberCreateToV1` keys `committee_member.sfid.<sfid>` on the create response's `ID` (the `platform-community__c` record SFID, the sfid the WAL emits), not on `MemberID` (the contact SFID). It records the v1 result before create-only claims of the forward/reverse mappings and `committee_member.record_sfid.<uid>` companion. Later v1 edits and deletes of the member therefore resolve to the v2 member.
+  - An empty `ID` falls back to the contact-SFID forward key. A failed mapping/companion write now retries from the recorded result rather than falling back to another key or repeating POST. The reverse mapping remains `projectSFID:committeeSFID:contactSFID`.
+  - The v1 PATCH/DELETE member endpoints take the contact SFID (`MemberID`) as the path id, not `ID`.
+  - Members created before this change are repaired by `--reconcile-committee-member-voting`.
+
+#### Committee public visibility — lfx-self-serve-ops#945
+
+- **v2 → v1** (`syncCommitteeCreateToV1` / `mapV2DataToV1CommitteeUpdatePayload`): v2 `public` is sent as `PublicEnabled` and v2 `display_name` as `PublicName`. v1 project-service defaults `public_enabled` to `false` when it is omitted, so a v2-created public committee was previously stored as private in v1.
+  - On update, `PublicEnabled` is sent only when the event carries `public`, so a partial or legacy event cannot flip visibility. `PublicName` is sent only when non-empty, because v1 PATCH treats an empty name as unchanged and cannot clear it. v1 clears `public_name` itself when `PublicEnabled` is `false`, and fills it with the committee name when `PublicEnabled` is `true` and no name is sent.
+  - This only affects future writes. Committees already out of sync need a separate, per-record repair that decides the source of truth from the last deliberate edit, not from timestamps (the sync client rewrites `lastmodifieddate` on both sides).
+
+#### Committee update payload: empty `MailingList` and `JoinMode` — lfx-self-serve-ops#945
+
+- **An empty `MailingList` or `JoinMode` is never sent to v1** (`mapV2DataToV1CommitteeUpdatePayload`). The v1 committee PATCH validates both before the handler runs, and one invalid field rejects the whole request. `MailingList` must be an email (422 code 601), and `JoinMode` must be one of `open | invite_only | application | closed` (422 code 606). v2 omits `mailing_list` for a committee that has none, and older committees have no `join_mode`, so each hit this. v1 reports one validation error at a time, so fixing one field can reveal the next.
+  - The other empty committee text fields (`Description`, `CommitteeWebsite`, `ChatChannel`) pass v1 validation but are ignored (it only writes non-empty strings), so a v2 clear of those does not reach v1. A cleared mailing list or join mode also stays in v1.
+
+#### Committee voting enabled — lfx-self-serve-ops#946
+
+- **v2 → v1** (`syncCommitteeCreateToV1` / `mapV2DataToV1CommitteeUpdatePayload`): v2 `enable_voting` is sent as `EnableVoting`, on create and on update. Before this, v2 → v1 never sent it, so a committee created or edited in v2 kept v1's default `false`. v1 → v2 already maps `enable_voting__c` (`handlers_committees.go`).
+  - On update, `EnableVoting` is sent only when the event carries `enable_voting`, like `PublicEnabled`, so a partial or legacy event cannot flip voting. v2 serializes it without `omitempty`, so every full committee snapshot carries it.
+  - Because v2 is now authoritative on every update, a committee whose v1 value was changed in v1 and never reached v2 would be overwritten by the next v2 edit. Reconcile such committees first (`committee-cli sync committee-fields --from=v1 --field=enable_voting`) before deploying a change that sends the field.
+
+#### Committee SSO group enabled — lfx-self-serve-ops#1251
+
+- **v2 → v1** (`syncCommitteeCreateToV1` / `mapV2DataToV1CommitteeUpdatePayload`): v2 `sso_group_enabled` is sent as `SSOGroupEnabled` on create and update. Previously both paths omitted it, leaving v1 at its default `false` on create and unchanged on later updates. v1 → v2 already maps the flag (`handlers_committees.go`).
+  - Explicit `true` and `false` are preserved. Absent, null, or malformed values are omitted so partial/legacy events cannot change the v1 setting. Full committee snapshots always carry the boolean.
+  - This does not automatically repair existing drift. Confirm the last deliberate edit and intended setting before reconciliation; timestamps alone are not a source-of-truth signal because sync writes update them. Reconcile v1-authoritative mismatches before deploying, since subsequent v2 updates will now send the flag.
+
+#### Committee business email required — lfx-self-serve-ops#1253
+
+- **v1 → v2:** create maps `business_email_required__c` as before; existing committees also call
+  `updateCommitteeSettingsFromV1`, even when the base is unchanged. The setting and editor are re-read from the
+  current `v1-objects` record so an old WAL redelivery cannot reuse a superseded payload; deleted/missing records
+  and absent/null/malformed flags do nothing. KV failures retry. The v2 settings update uses a fresh read and ETag,
+  preserves other scalar settings, and omits writer/auditor lists (the service preserves absent lists).
+  All updates to existing committees refresh base fields before any base API call too, including events with an
+  absent/null flag, preventing base or settings retries from reverting a newer rename. Echo suppression uses the
+  original WAL message's editor only: a refreshed service-authored row may retain a pending human rename after a
+  settings-only PATCH. Normal base comparison determines completed work; a matching base is a no-op while pending
+  settings work still completes (e.g. after SSO-name writeback).
+  Transient base read/update failures NACK the WAL event instead of losing the pending settings change.
+  Successful base mapping and SSO-name writeback complete before the independently retryable settings update.
+  A v2 settings NotFound is logged at INFO and skipped rather than retried; creating a missing settings record is
+  separate repair work. Other settings errors still retry.
+- **v2 → v1:** create fetches current v2 settings before the v1 POST and sends explicit `BusinessEmailRequired`.
+  A settings NotFound falls back to the v1 default only after confirming the committee base still exists; deleted
+  bases are skipped and transient failures retry. Settings create/update events on `lfx.committee_settings.>` in
+  `committee_events` PATCH only that field, using current settings rather than a stale event snapshot.
+  Deleted/tombstoned committees are skipped. Missing reverse mappings retry only when the live base's parent
+  project has a live v1 mapping; proven v2-only committees are ACKed without warning/retry churn.
+  Eligible mapping races use a 70-second delayed NAK within the existing three-delivery limit, including updates
+  that arrive while a base create is still in flight.
+- **Echo suppression:** v1 settings writes use `pending.v1_to_v2.update.committee_settings.<uid>` and v1 creates
+  use the separate `create` operation, so a settings update cannot consume a create or committee-base marker.
+  Failed settings writes remove their marker. v2→v1 WAL echoes use the existing `shouldSkipSync` service-identity
+  guard. Pending-marker concurrency/freshness caveats still apply.
+- **Rollout:** update the chart-owned stream subjects to include `lfx.committee_settings.>` before the new
+  consumer starts. If stream creation is disabled or subjects are overridden, update the externally managed stream
+  as well. This does not replay old settings or repair existing drift automatically: reconcile intentional v1/v2
+  differences before rollout, since subsequent events can now propagate either side's flag.
+
+#### Committee social listening access — lfx-self-serve-ops#387
+
+- **Dependency:** `lfx-v2-committee-service` is pinned to a pseudo-version of main (`cdda6938`, PR #227), which
+  adds the `members_can_view_social_listening` setting; no release tag contained it yet. The older pinned
+  v0.4.26 client lacked the field, so every v1 → v2 business-email settings sync (a full-replace
+  `update-committee-settings`) silently reset it to `false`. Replace the pseudo-version with a release tag once
+  one is cut. The bump also adds new committee-service endpoints to the `NewClient` call (`lfx_v2_client.go`).
+  The bumped base update payload also gains `ExternalSources`, which the service replaces wholesale, so
+  `seedCommitteeUpdateFromCurrentBase` copies the current list; otherwise an unrelated v1 base edit would clear a
+  committee's external group/event links. (`Charter` is also new but an absent charter is preserved by the service.)
+- **v1 → v2:** handled exactly like `business_email_required` and in the same settings write. Create maps
+  `members_can_view_social_listening__c`. `updateCommitteeSettingsFromV1` runs when either v1 flag is a bool,
+  re-reads both from the current `v1-objects` record, and PUTs once when either differs. Each flag that is
+  absent/null/malformed in v1 keeps its current v2 value, so a business-email change never wipes social listening
+  access and vice versa.
+- **v2 → v1:** the project-service committee POST/PATCH bodies carry `MembersCanViewSocialListening`. Create
+  sends it from the pre-POST settings read (like `BusinessEmailRequired`). Settings create/update events PATCH both
+  fields from current settings. The event gate is still `business_email_required` only, so events from older
+  committee-service versions without the new field still sync both values.
+- **Create recovery:** the fingerprint includes the flag, but a `false`/absent value is normalized to omitted so
+  attempts recorded before this change keep their hash. The v1 snapshot SQL reads
+  `COALESCE(c.members_can_view_social_listening__c, false)`.
+- **Rollout order:** (1) v1 DB migration adding `platform.collaboration__c.members_can_view_social_listening__c`,
+  (2) project-management deploy accepting `MembersCanViewSocialListening`, (3) this service. The recovery
+  snapshot SQL fails until (1) is applied. An older v1 API that ignores the unknown field is harmless: the PATCH
+  still applies `BusinessEmailRequired`, and the v1 value stays NULL/false until (2) ships. The new column reaches
+  `v1-objects` via WAL; the Meltano backfill only sees it after the per-environment `tap-postgres-catalog` is
+  regenerated. Existing drift is not repaired automatically.
+
 ### Python ETL (Meltano)
 
 #### Configuration Structure
@@ -454,7 +574,10 @@ Re-emits v1 `salesforce-project__c` rows that have no live `project.sfid.*` v1-m
 
 Re-emits v1 `platform-collaboration__c` rows that have no live `committee.sfid.*` v1-mappings entry. Mechanism: re-**PUT** the existing `v1-objects` value; no create logic is duplicated here — the running deployment's durable KV consumer (`handleKVPut` → `handleCommitteeUpdate`) does the actual create.
 
-**Why no depth ordering is needed here** (unlike `--backfill-projects`): `handleCommitteeUpdate`'s only create-path dependency is the committee's parent project (`project_name__c` → `project.sfid.*` mapping) — committees do not depend on other committees. `handleCommitteeUpdate` unconditionally returns `false` (ACK, no redelivery) on a missing parent-project mapping, which is the same permanent-drop bug pattern as projects, but with a single dependency level rather than a project's parent-project/legal-parent pair. This flag is meant to run *after* `--backfill-projects` has been run and settled, so candidates are expected to already have a live parent mapping; a candidate whose parent is still unmapped is reported via `skipped_parent_unmapped`, not resolved level by level.
+**Hierarchy limitation:** This command only checks that the owning project (`project_name__c` → `project.sfid.*`) is mapped; it does **not** depth-order committees by their `committee_id` parent.
+Live committee creation also requires a mapped parent committee, so a child emitted before its parent is skipped (ACK, no redelivery).
+Do not use this command to repair parent links on mapped committees or assume it can create an unmapped hierarchy in one pass.
+`scripts/detect_committee_parent_drift.py` compares exported v1/v2/mapping snapshots without writing either system; conflicts require an explicit source-of-truth decision before reconciliation.
 
 - **Candidate source**: `ScanSubjectData` on `KV_v1-objects` (`$KV.v1-objects.platform-collaboration__c.*`) minus live and tombstoned `committee.sfid.*` mappings (`KV_v1-mappings`), further filtered to candidates whose parent `project.sfid.<project_name__c>` mapping is already live.
 - **Pre-filters** mirror `handleKVPut`'s exact order (empty value, decode failure, soft-delete, `shouldSkipSync`, missing `mailing_list__c`/`project_name__c`) so the pass never counts or emits a row the live consumer would drop.
@@ -467,6 +590,29 @@ Re-emits v1 `platform-collaboration__c` rows that have no live `committee.sfid.*
 - **Dry-run**: validates candidate selection only; it cannot observe the downstream create. Reports the full candidate/skip counters, including `name_conflicts` when `--check-committee-names` is passed and `duplicate_names`.
 - **Summary log fields**: `scanned`, `mappings_live`, `mappings_tombstoned`, `low_mappings_count`, `candidates`, `emitted`, `remaining_unmapped`, `errors`, plus the `skipped_*` breakdown (`skipped_already_mapped`, `skipped_tombstoned`, `skipped_soft_deleted`, `skipped_empty_value`, `skipped_undecodable`, `skipped_no_sfid`, `skipped_missing_required`, `skipped_v2_authored`, `skipped_parent_unmapped`, `skipped_revision_race`, `skipped_limit`, `skipped_missing`, `skipped_settle_timeout`, `skipped_name_conflict`), `name_conflicts` (count of `res.nameConflicts`), and `duplicate_names` (count of `res.duplicateNames`) (shared via `backfillCommitteesResult.logFields()`). `remaining_unmapped` is recomputed from final settle state at the end of a live run.
 - **Manifest**: `manifests/backfill-committees-job.yaml`, shipped dry-run by default with `--check-committee-names`. `--check-committee-names` is always on in the shipped Job for the same reason `--check-slugs` is always on for projects: a committee created successfully but whose mapping write then silently fails would look unmapped to a rerun and be re-emitted as a duplicate create. **Deployment-order prerequisite**: since `--check-committee-names` is always on, this manifest must not be applied until `lfx-v2-committee-service` PR #209 (which adds the `lfx.committee-api.name_to_uid` subject the check depends on) is merged and deployed to the target environment — otherwise every lookup gets "no responders" and the job (including a dry run) hard-errors before reporting any counters. This is an operational ordering note, not a code gate.
+
+### `--reconcile-committee-member-voting [--dry-run]` (`reconcile_committee_member_voting.go`)
+
+Reconciles committee member voting status between v2 (Self Serve) and v1 (lfx-self-serve#4079). Vote eligibility is decided from the v1 roster: itx-service-voting's default filter is "Voting Rep" only. So a member whose v1 status drifted from the Self Serve roster can be invited to, or left out of, votes. **v2 wins.**
+
+- **Sources:** five `ScanSubjectData` scans across three KV streams, each with `cfg.NATSFetchMaxWait`:
+  - `KV_committee-members` (`$KV.committee-members.*`, skipping `lookup/` keys);
+  - `KV_v1-mappings` for `committee_member.uid.*` (reverse), `committee_member.record_sfid.*` (companion) and `committee_member.sfid.*` (forward);
+  - `KV_v1-objects` (`$KV.v1-objects.platform-community__c.*`, soft-deleted rows excluded).
+- **Join:** member UID → reverse mapping → `collaboration_name__c + ":" + contact_name__c`. Legacy reverse mappings that store the record SFID join on the record key instead. More than one live v1 record for the same committee + contact is counted as `ambiguous_v1_record` and skipped, on both join paths, because the PATCH takes the contact SFID and cannot target one of the duplicates. A member whose `committee_member.record_sfid.<uid>` companion names a different record than the one the join resolved (e.g. the v1 row was recreated) is counted as `companion_mismatch`, logged with both record SFIDs, and skipped: claiming the joined record's forward key would split it from the companion, so a later v2 delete would tombstone the wrong key. These members need a manual mapping repair.
+- **Classifier** (`classifyVotingReconcile`): an empty v2 status matches a v1 `""`, `"None"` or `"Observer"`; any other v1 value is a mismatch with target `"Observer"`. A non-empty v2 status must equal v1 (case-insensitive), otherwise the target is the v2 status.
+- **Live run:** each mismatch is paced by `--emit-rate` (default 2/s). Each member's mapping backfill, re-reads and PATCH share one `reconcileMemberTimeout` (2m) context, so a hung gateway call counts as `errored` and the run moves on.
+  - Only the v2 member that owns the v1 record is PATCHed. Before the PATCH, the live record-keyed forward mapping `committee_member.sfid.<recordSFID>` must name this member: `committeeUID:memberUID`, or the legacy bare `memberUID` that `handleCommitteeMemberUpdate` still accepts (left as is, never upgraded here). A key owned by another member or tombstoned counts as `mapping_conflicts`, an absent key counts as `no_mapping`, and nothing is written. If the mapping backfill could not claim the forward key, the PATCH is skipped as well. Otherwise a member with no voting status that joins to another member's record would set that member's `"Voting Rep"` to `"Observer"`.
+  - Before writing, the live v2 member (`fetchCommitteeMember`) and v1 record (`getV1ObjectData`) are re-read. If they now agree, the write is skipped and counted as `skipped_now_equal`.
+  - Otherwise v1 gets `PATCH {VotingStatus: target}` on the contact-SFID path. The WAL echo is dropped by `shouldSkipSync`.
+- **Mapping backfill (live run only):** a member is selected (`mappings_missing`) when its `committee_member.record_sfid.<uid>` companion is missing, or when the companion is present but the record-keyed forward mapping `committee_member.sfid.<recordSFID>` is absent (a partial write). A tombstoned forward key is left alone.
+  - The live reverse mapping is re-read first. If it was removed or changed since the scan (e.g. the member was deleted in v2), nothing is written and the member counts as `no_mapping`.
+  - The forward mapping (`committeeUID:memberUID`) is written first, then the companion if missing. Writes use `mappingStore.Create`, so an existing key is never overwritten. An existing forward key that already names this member (including the legacy bare `memberUID`) counts as claimed; any other value counts as `mapping_conflicts`. Create on the forward key is the ownership claim: if it conflicts or fails, no companion is written, so a later v2 delete cannot tombstone another member's forward mapping. A failed companion write is retried by the next run. A conflicting or failed forward write also skips that member's voting PATCH.
+  - A pre-#4079 contact-SFID forward key is left in place.
+- **Exit status:** the Job exits 1 when `errored > 0` (dry or live run), even though per-member failures do not stop the run. An undecodable `platform-community__c` value counts in both `v1_objects_undecodable` and `errored` and logs its record SFID, because the member it belongs to would otherwise be reported as `no_v1_record` without being checked.
+- **Dry-run:** reports every mismatch and missing mapping, logging member UID, record SFID, both statuses and the target. It writes nothing.
+- **Summary log fields** (`reconcileCommitteeMemberVotingResult.logFields()`): `dry_run`, `inspected`, `no_mapping`, `poisoned_mapping`, `no_v1_record`, `ambiguous_v1_record`, `companion_mismatch`, `v1_objects_undecodable`, `matched`, `mismatched`, `patched`, `skipped_now_equal`, `mappings_missing`, `mappings_backfilled` (mapping keys created), `mapping_conflicts`, `errored`.
+- **Manifest:** `manifests/reconcile-committee-member-voting-job.yaml`, shipped with `--dry-run`. It sets `LFX_API_GW` explicitly, because the default is the dev gateway. The job loads the full config and the JWT, Goa and v1 API clients, but skips the v1 platform database and Auth0 Management clients (`main.go`), so the manifest carries no `V1_DB_*` credentials. Expected sequence: dry run, live run, then a second dry run that should report `mismatched=0`.
 
 ### `--sync-user <username> [--dry-run]` (`backfill_email_profile.go`)
 

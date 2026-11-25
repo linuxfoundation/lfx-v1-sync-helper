@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	committeeservice "github.com/linuxfoundation/lfx-v2-committee-service/gen/committee_service"
 )
@@ -81,6 +82,16 @@ func updateCommittee(ctx context.Context, committeeUID string, v1Data map[string
 	if err != nil {
 		return false, nil, err
 	}
+	// V1 collapses both technical committee categories into one value. A
+	// refreshed replica row may be our own reverse-sync PATCH, whose name is
+	// not evidence that the category changed. Keep the current V2 distinction
+	// whenever it still has the same V1 representation; other V1 categories
+	// continue to override V2 normally.
+	if typeVal, ok := v1Data["type__c"].(string); ok &&
+		typeVal == "Technical Oversight Committee/Technical Advisory Committee" &&
+		mapV2CategoryToV1(stringPtrToString(currentBase.Category)) == typeVal {
+		payload.Category = stringPtrToString(currentBase.Category)
+	}
 
 	// Snapshot the merged payload as a base struct for change detection.
 	updatedBase := committeeBaseFromUpdatePayload(currentBase.UID, payload)
@@ -123,12 +134,13 @@ func committeeBaseFromUpdatePayload(uid *string, payload *committeeservice.Updat
 		EnableVoting:    payload.EnableVoting,
 		SsoGroupEnabled: payload.SsoGroupEnabled,
 		Public:          payload.Public,
+		ParentUID:       payload.ParentUID,
 	}
 }
 
 // committeeBasesEqual compares two CommitteeBaseWithReadonlyAttributes objects across
 // every field the V1→V2 sync writes. Fields not managed by the sync (e.g. RequiresReview,
-// ParentUID, JoinMode, Repository, Scope, Deliverables, KeyDates, Calendar) are ignored
+// JoinMode, Repository, Scope, Deliverables, KeyDates, Calendar) are ignored
 // so that admin edits made in V2 do not force redundant updates.
 func committeeBasesEqual(a, b *committeeservice.CommitteeBaseWithReadonlyAttributes) bool {
 	return stringPtrToString(a.Name) == stringPtrToString(b.Name) &&
@@ -139,6 +151,7 @@ func committeeBasesEqual(a, b *committeeservice.CommitteeBaseWithReadonlyAttribu
 		stringPtrToString(a.MailingList) == stringPtrToString(b.MailingList) &&
 		stringPtrToString(a.ChatChannel) == stringPtrToString(b.ChatChannel) &&
 		stringPtrToString(a.DisplayName) == stringPtrToString(b.DisplayName) &&
+		stringPtrToString(a.ParentUID) == stringPtrToString(b.ParentUID) &&
 		a.EnableVoting == b.EnableVoting &&
 		a.SsoGroupEnabled == b.SsoGroupEnabled &&
 		a.Public == b.Public
@@ -200,6 +213,8 @@ func updateCommitteeMember(ctx context.Context, payload *committeeservice.Update
 	if err != nil {
 		return false, wrapCommitteeServiceError("failed to fetch current committee member", err)
 	}
+
+	preserveUnsetVotingStatus(currentMember, payload)
 
 	// Check if member has changes (basic comparison).
 	memberChanged := !committeeMembersEqual(currentMember, payload)
@@ -281,6 +296,25 @@ func deleteCommitteeMember(ctx context.Context, committeeUID, memberUID string, 
 	return nil
 }
 
+// preserveUnsetVotingStatus drops an incoming v1NoVotingStatus from update when
+// the current v2 member has no voting status. The v2→v1 sync writes
+// v1NoVotingStatus for such a member because v1 cannot store an empty status,
+// so a later v1 edit of any other field re-emits it; without this the v2
+// member would be set to "Observer" (lfx-self-serve#4079). A nil Voting is how
+// the v1→v2 mappers already express "no voting status".
+func preserveUnsetVotingStatus(current *committeeservice.CommitteeMemberFullWithReadonlyAttributes, update *committeeservice.UpdateCommitteeMemberPayload) {
+	if update.Voting == nil || !strings.EqualFold(strings.TrimSpace(update.Voting.Status), v1NoVotingStatus) {
+		return
+	}
+	var currentStatus string
+	if current != nil && current.Voting != nil {
+		currentStatus = current.Voting.Status
+	}
+	if normalizeVotingStatus(currentStatus) == "" {
+		update.Voting = nil
+	}
+}
+
 // committeeMembersEqual compares a committee member with an update payload for equality.
 func committeeMembersEqual(current *committeeservice.CommitteeMemberFullWithReadonlyAttributes, update *committeeservice.UpdateCommitteeMemberPayload) bool {
 	// Compare basic fields.
@@ -305,15 +339,24 @@ func committeeMembersEqual(current *committeeservice.CommitteeMemberFullWithRead
 		return false
 	}
 
-	// Compare voting information.
+	// Compare voting information. A nil Voting, an empty status and "None" all
+	// mean "no voting status", so a legacy v2 "None" against an incoming nil is
+	// not a change. Dates are compared only when both sides carry voting info.
+	var currentVotingStatus, updateVotingStatus string
+	if current.Voting != nil {
+		currentVotingStatus = current.Voting.Status
+	}
+	if update.Voting != nil {
+		updateVotingStatus = update.Voting.Status
+	}
+	if normalizeVotingStatus(currentVotingStatus) != normalizeVotingStatus(updateVotingStatus) {
+		return false
+	}
 	if current.Voting != nil && update.Voting != nil {
-		if current.Voting.Status != update.Voting.Status ||
-			stringPtrToString(current.Voting.StartDate) != stringPtrToString(update.Voting.StartDate) ||
+		if stringPtrToString(current.Voting.StartDate) != stringPtrToString(update.Voting.StartDate) ||
 			stringPtrToString(current.Voting.EndDate) != stringPtrToString(update.Voting.EndDate) {
 			return false
 		}
-	} else if current.Voting != update.Voting {
-		return false
 	}
 
 	// Compare organization information.

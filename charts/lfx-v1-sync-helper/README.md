@@ -9,6 +9,31 @@ This Helm chart deploys the LFX v1 Sync Helper service, which monitors NATS KV s
 - LFX v2 platform deployed (with NATS and required APIs)
 - Access to LFX v1 data sources via Meltano pipeline
 
+## Mapping API (optional)
+
+The optional `mappingApi` component deploys a separate read-only Goa API,
+ClusterIP Service, mandatory team-membership Heimdall RuleSet, and authenticated
+HTTPRoute. It defaults off, uses the `v1-mapping-callers` access team by default,
+and requires a configured hostname and provisioned team memberships.
+See [the mapping API contract](../../docs/mapping-api-contract.md) for all
+configuration and the dev/staging/production rollout handoff.
+
+Its image uses `mappingApi.image.tag`, falling back to the packaged chart's
+`appVersion`, just like other service charts. The source chart has no
+`appVersion`: when enabling the API from a local chart, also supply
+`--set mappingApi.image.tag=<published-image-tag>`. Setting only `app.image.tag`
+does not set the mapping API image tag.
+
+Like the other API charts, resources are split by responsibility under `templates/`:
+
+- `mapping-api-deployment.yaml` — API workload, environment, and probes.
+- `mapping-api-service.yaml` — internal ClusterIP Service.
+- `httproute.yaml` — gateway routing and mandatory ForwardAuth attachment.
+- `heimdall-middleware.yaml` — namespace-local ForwardAuth middleware.
+- `ruleset.yaml` — authentication, access-team membership check, and JWT finalizer.
+
+All five templates are gated by `mappingApi.enabled`.
+
 ## Installing the chart
 
 ### Installing from local chart
@@ -114,6 +139,12 @@ The chart requires the following secrets to be created before installation (if t
    ```
 
 ### App Component
+
+`app.terminationGracePeriodSeconds` defaults to **120 seconds**. This covers
+the app's **75-second NATS drain** and **5-second mapping mirror drain**, with
+headroom for teardown. The NATS drain allows a **65-second committee-event
+handler** to finish before its connection closes. Review any environment override
+when upgrading; the old 60-second pod grace period is too short for that handler.
 
 The following environment variables for the custom app component have defaults configured in the chart's `app.environment` section:
 

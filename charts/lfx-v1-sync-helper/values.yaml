@@ -112,7 +112,7 @@ natsResources:
     compression: s2
 
   # stream_committee_events is the configuration for the JetStream stream that captures
-  # lfx.committee.* and lfx.committee_member.* events published by the indexer service.
+  # lfx.committee.*, lfx.committee_member.* and lfx.committee_settings.* indexer events.
   # Owned here (v1-sync-helper chart) until the indexer service chart declares it.
   stream_committee_events:
     # creation is a boolean to determine if the JetStream stream should be created via the helm chart.
@@ -125,6 +125,7 @@ natsResources:
     subjects:
       - lfx.committee.>
       - lfx.committee_member.>
+      - lfx.committee_settings.>
     # storage is the storage type for the stream
     storage: file
     # retention is the retention policy type
@@ -168,10 +169,42 @@ natsResources:
     # compression can be "s2" or "none" (s2 is default)
     compression: s2
 
-# app is the configuration for the application
+# mappingApi is the optional read-only HTTP mapping facade
+mappingApi:
+  # Opt in only after provisioning the access team and environment configuration.
+  enabled: false
+  replicas: 2
+  image:
+    repository: ghcr.io/linuxfoundation/lfx-v1-sync-helper/v1-mapping-api
+    # Falls back to Chart.appVersion; set explicitly for local source installs.
+    tag: ""
+    pullPolicy: IfNotPresent
+  audience: lfx-v1-mapping-api
+  issuer: heimdall
+  jwksUrl: http://lfx-platform-heimdall.lfx.svc.cluster.local:4457/.well-known/jwks
+  heimdallUrl: http://lfx-platform-heimdall.lfx.svc.cluster.local:4456
+  # Bare OpenFGA team ID (not the team: prefix). Required when enabled.
+  accessTeamId: v1-mapping-callers
+  natsUrl: nats://lfx-platform-nats.lfx.svc.cluster.local:4222
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # Auth is mandatory on this route; there is deliberately no auth-disable flag.
+  gateway:
+    name: lfx-platform-gateway
+    namespace: lfx
+    hostname: ""
+
+# app is the configuration for the sync helper application
 app:
   # replicas is the number of service instances to run for horizontal scaling
   replicas: 1
+  # Cover the 75-second NATS drain and 5-second mapping mirror drain, plus teardown.
+  terminationGracePeriodSeconds: 120
   # image is the configuration for the container images
   image:
     # repository is the container image repository

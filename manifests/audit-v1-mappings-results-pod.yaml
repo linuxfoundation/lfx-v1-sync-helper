@@ -1,0 +1,57 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+#
+# Apply ONLY AFTER saving logs, confirming the audit pod has terminated
+# (success OR failure), and deleting the completed Job to release the PVC.
+# The RWO volume may need to detach from the old node before this pod starts.
+# Do not use this reader against a live audit, or retrieve raw SQLite scratch.
+#
+# This pod has no database credentials or API token. It mounts the audit PVC
+# read-only as the same UID that wrote mode-0600 reports in a mode-0700 dir.
+# Use kubectl cp to retrieve reports; delete the pod and PVC after review.
+# See scripts/audit-v1-mappings.md for retrieval and mandatory cleanup.
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: audit-v1-mappings-results
+  namespace: v1-sync-helper
+  labels:
+    app.kubernetes.io/name: lfx-v1-sync-helper
+    app.kubernetes.io/component: mapping-audit-results
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: results
+      # Same pinned image as the Job; includes tar for kubectl cp.
+      image: ghcr.io/astral-sh/uv@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58
+      imagePullPolicy: IfNotPresent
+      command: ["python", "-c", "import time; time.sleep(86400)"]
+      resources:
+        requests:
+          cpu: "10m"
+          memory: "32Mi"
+        limits:
+          cpu: "100m"
+          memory: "128Mi"
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: data
+          mountPath: /audit
+          readOnly: true
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: audit-v1-mappings
+        readOnly: true

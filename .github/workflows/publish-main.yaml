@@ -43,3 +43,11 @@ jobs:
             -t "${GITHUB_SHA}" \
             -t development \
             --sbom spdx
+      - name: Build and publish v1-mapping-api image
+        run: |
+          ko build github.com/linuxfoundation/lfx-v1-sync-helper/cmd/v1-mapping-api \
+            -B \
+            --platform linux/amd64,linux/arm64 \
+            -t ${{ github.sha }} \
+            -t development \
+            --sbom spdx

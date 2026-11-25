@@ -1,6 +1,9 @@
 # Ignore local Kubernetes paths.
 ^(https?|nats)://[a-zA-Z0-9.-]+\.svc\.cluster\.local
 
+# Goa-generated OpenAPI server placeholders do not represent a running CI server.
+^https?://localhost(:[0-9]+)?(/|$)
+
 # Meltano Hub links referenced by this repo; external and intermittently unreachable from CI.
 https://hub\.meltano\.com/extractors/tap-postgres--meltanolabs
 https://hub\.meltano\.com/extractors/tap-dynamodb--meltanolabs
@@ -10,3 +13,6 @@ https://hub\.meltano\.com/assets/logos/extractors/postgres\.png
 https://hub\.meltano\.com/assets/logos/extractors/dynamodb\.png
 https://hub\.meltano\.com/assets/logos/loaders/jsonl\.png
 https://hub\.meltano\.com/assets/logos/files/docker\.png
+
+# This production-rollout issue exists in a private repository; CI cannot access it.
+^https://github\.com/linuxfoundation/lfx-v2-argocd/issues/1995$

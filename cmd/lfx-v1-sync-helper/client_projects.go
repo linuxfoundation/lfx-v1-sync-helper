@@ -91,6 +91,8 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 		return false, fmt.Errorf("failed to fetch current project base: %w", err)
 	}
 
+	preserveV2OnlyBaseFields(basePayload, currentBase)
+
 	// Create updated base for comparison.
 	updatedBase := &projectservice.ProjectBase{
 		UID:                        currentBase.UID,
@@ -104,6 +106,9 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 		Category:                   basePayload.Category,
 		Funding:                    basePayload.Funding,
 		FundingModel:               basePayload.FundingModel,
+		Industry:                   basePayload.Industry,
+		Technology:                 basePayload.Technology,
+		TechnicalActivityType:      basePayload.TechnicalActivityType,
 		CharterURL:                 basePayload.CharterURL,
 		LegalEntityType:            basePayload.LegalEntityType,
 		LegalEntityName:            basePayload.LegalEntityName,
@@ -115,6 +120,7 @@ func updateProject(ctx context.Context, basePayload *projectservice.UpdateProjec
 		LogoURL:                    basePayload.LogoURL,
 		RepositoryURL:              basePayload.RepositoryURL,
 		WebsiteURL:                 basePayload.WebsiteURL,
+		ContactEmail:               basePayload.ContactEmail,
 		CreatedAt:                  currentBase.CreatedAt, // Preserve system-managed fields.
 		UpdatedAt:                  currentBase.UpdatedAt,
 	}
@@ -187,9 +193,11 @@ func projectSettingsWriteMayBeNeeded(settingsPayload *projectservice.UpdateProje
 		settingsPayload.ExecutiveDirector != nil ||
 		settingsPayload.ProgramManager != nil ||
 		settingsPayload.OpportunityOwner != nil ||
+		settingsPayload.FormationLead != nil ||
 		clears.ExecutiveDirector ||
 		clears.ProgramManager ||
-		clears.OpportunityOwner
+		clears.OpportunityOwner ||
+		clears.FormationLead
 }
 
 // hydrateSettingsPayload round-trips every field the update is not changing
@@ -214,6 +222,31 @@ func hydrateSettingsPayload(settingsPayload *projectservice.UpdateProjectSetting
 	}
 	if settingsPayload.OpportunityOwner == nil && !clears.OpportunityOwner {
 		settingsPayload.OpportunityOwner = currentSettings.OpportunityOwner
+	}
+	if settingsPayload.FormationLead == nil && !clears.FormationLead {
+		settingsPayload.FormationLead = currentSettings.FormationLead
+	}
+	if clears.FormationLeadPartial && settingsPayload.FormationLead != nil {
+		// Only the changed subfields may be copied from a v1 WAL row while
+		// another reverse PATCH is in flight. Fill the rest from v2 so a
+		// stale email cannot erase a genuine PCC name change (or vice versa).
+		merged := &projectservice.FormationLead{}
+		if currentSettings.FormationLead != nil {
+			*merged = *currentSettings.FormationLead
+		}
+		if settingsPayload.FormationLead.Name != nil {
+			merged.Name = settingsPayload.FormationLead.Name
+		}
+		if settingsPayload.FormationLead.Email != nil {
+			merged.Email = settingsPayload.FormationLead.Email
+		}
+		if settingsPayload.FormationLead.Avatar != nil {
+			merged.Avatar = settingsPayload.FormationLead.Avatar
+		}
+		settingsPayload.FormationLead = merged
+	}
+	if clears.FormationLead {
+		settingsPayload.FormationLead = &projectservice.FormationLead{}
 	}
 	if settingsPayload.Writers == nil {
 		settingsPayload.Writers = currentSettings.Writers
@@ -262,7 +295,25 @@ func projectSettingsUpdateNeeded(settingsPayload *projectservice.UpdateProjectSe
 	if clears.OpportunityOwner && !userInfoPtrsEqual(nil, currentSettings.OpportunityOwner) {
 		return true
 	}
+	if settingsPayload.FormationLead != nil && !formationLeadsEqual(settingsPayload.FormationLead, currentSettings.FormationLead) {
+		return true
+	}
+	if clears.FormationLead && !formationLeadsEqual(nil, currentSettings.FormationLead) {
+		return true
+	}
 	return false
+}
+
+func formationLeadsEqual(a, b *projectservice.FormationLead) bool {
+	if a == nil {
+		a = &projectservice.FormationLead{}
+	}
+	if b == nil {
+		b = &projectservice.FormationLead{}
+	}
+	return stringPtrToString(a.Name) == stringPtrToString(b.Name) &&
+		stringPtrToString(a.Email) == stringPtrToString(b.Email) &&
+		stringPtrToString(a.Avatar) == stringPtrToString(b.Avatar)
 }
 
 // deleteProject deletes a project by UID.
@@ -303,6 +354,9 @@ func projectBasesEqual(a, b *projectservice.ProjectBase) bool {
 		stringPtrToString(a.Category) == stringPtrToString(b.Category) &&
 		stringPtrToString(a.Funding) == stringPtrToString(b.Funding) &&
 		stringSliceEqual(a.FundingModel, b.FundingModel) &&
+		stringSliceEqual(a.Industry, b.Industry) &&
+		stringSliceEqual(a.Technology, b.Technology) &&
+		stringSliceEqual(a.TechnicalActivityType, b.TechnicalActivityType) &&
 		stringPtrToString(a.CharterURL) == stringPtrToString(b.CharterURL) &&
 		stringPtrToString(a.LegalEntityType) == stringPtrToString(b.LegalEntityType) &&
 		stringPtrToString(a.LegalEntityName) == stringPtrToString(b.LegalEntityName) &&
@@ -313,7 +367,28 @@ func projectBasesEqual(a, b *projectservice.ProjectBase) bool {
 		stringPtrToString(a.FormationDate) == stringPtrToString(b.FormationDate) &&
 		stringPtrToString(a.LogoURL) == stringPtrToString(b.LogoURL) &&
 		stringPtrToString(a.RepositoryURL) == stringPtrToString(b.RepositoryURL) &&
-		stringPtrToString(a.WebsiteURL) == stringPtrToString(b.WebsiteURL)
+		stringPtrToString(a.WebsiteURL) == stringPtrToString(b.WebsiteURL) &&
+		stringPtrToString(a.ContactEmail) == stringPtrToString(b.ContactEmail)
+}
+
+// preserveV2OnlyBaseFields copies base fields that v1 does not sync from the
+// current v2 project into an outgoing update. UpdateProjectBase replaces the
+// whole base document, so a field left nil here would be cleared by any
+// unrelated v1 edit.
+func preserveV2OnlyBaseFields(basePayload *projectservice.UpdateProjectBasePayload, currentBase *projectservice.ProjectBase) {
+	// An absent or malformed v1 column must not clear a v2 classification.
+	if basePayload.Industry == nil {
+		basePayload.Industry = currentBase.Industry
+	}
+	if basePayload.Technology == nil {
+		basePayload.Technology = currentBase.Technology
+	}
+	if basePayload.TechnicalActivityType == nil {
+		basePayload.TechnicalActivityType = currentBase.TechnicalActivityType
+	}
+	if basePayload.ContactEmail == nil {
+		basePayload.ContactEmail = currentBase.ContactEmail
+	}
 }
 
 // stringSliceEqual compares two string slices for equality.
