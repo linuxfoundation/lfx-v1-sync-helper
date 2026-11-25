@@ -23,48 +23,8 @@ with the Phase 2 review.
 
 ### Step 1.1 — Upgrade the Go toolchain version
 
-Compare the local toolchain version against the `go` directive in `go.mod` and
-update if the local toolchain is newer:
-
-```bash
-LOCAL=$(go version | awk '{print $3}')         # e.g. go1.26.0
-GOMOD=$(grep '^go ' go.mod | awk '{print $2}') # e.g. 1.26.0
-
-echo "Local toolchain: $LOCAL"
-echo "go.mod go directive: $GOMOD"
-```
-
-If the local toolchain is newer:
-
-```bash
-go mod tidy -go=${LOCAL#go}
-```
-
-Also check other files that could pin the Go version:
-
-- `docker/Dockerfile.v1-sync-helper` / `docker/Dockerfile.dynamodb-stream-consumer`
-  — these build from `cgr.dev/chainguard/go:latest`, not a pinned version, so
-  no update is needed here.
-- `.github/workflows/*.yml` and `*.yaml` — `publish-main.yaml`,
-  `publish-branch.yaml`, and `publish-release.yaml` all use
-  `actions/setup-go` with `go-version-file: go.mod`, so these already follow
-  `go.mod` automatically and need no manual edit here. Confirm this is still
-  true (`grep -n 'setup-go\|go-version' .github/workflows/*.y*ml`); treat any
-  hardcoded `go-version: 'X.Y'` found during this check as a bug to fix
-  (switch it to `go-version-file: go.mod`), not a version to bump.
-- `Makefile` — any hardcoded Go version variable (none currently).
-
-**MegaLinter constraint**: MegaLinter ships its own bundled Go toolchain and
-several linters (e.g. `golangci-lint`) run against that bundled version, not
-`go.mod`'s. If `go.mod`'s `go` directive is newer than MegaLinter's bundled
-Go, those checks fail. Pinning to the exact same patch version as MegaLinter
-is not reliable either, since that patch can itself be flagged as vulnerable
-by dependency/vulnerability scanners. The safest policy: keep `go.mod` **one
-minor version behind** MegaLinter's bundled Go (e.g. if MegaLinter bundles
-1.25.x, pin `go.mod` to `1.24.x`), and freely bump the *patch* within that
-minor version to pick up security fixes. Check MegaLinter's bundled Go
-version in its release notes / Dockerfile before deciding whether a toolchain
-bump in this step is actually safe to take.
+Follow the Go toolchain version override in `AGENTS.md`. Keep the `go.mod`
+directive and build configuration aligned with that policy.
 
 ### Step 1.2 — Upgrade Go module dependencies
 

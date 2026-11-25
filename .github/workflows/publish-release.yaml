@@ -36,9 +36,9 @@ jobs:
         id: prepare
         run: |
           set -euo pipefail
-          APP_VERSION="${GITHUB_REF_NAME//v/}"
+          APP_VERSION="${GITHUB_REF_NAME#v}"
           CHART_NAME="$(yq '.name' charts/*/Chart.yaml)"
-          CHART_VERSION="${GITHUB_REF_NAME//v/}"
+          CHART_VERSION="${GITHUB_REF_NAME#v}"
           {
             echo "app_version=$APP_VERSION"
             echo "chart_name=$CHART_NAME"
@@ -80,12 +80,14 @@ jobs:
           STEPS_PREPARE_OUTPUTS_APP_VERSION: ${{ steps.prepare.outputs.app_version }}
 
       - name: Build and publish v1-mapping-api image
+        env:
+          APP_VERSION: ${{ steps.prepare.outputs.app_version }}
         run: |
           ko build github.com/linuxfoundation/lfx-v1-sync-helper/cmd/v1-mapping-api \
             -B \
             --platform linux/amd64,linux/arm64 \
-            -t ${{ github.ref_name }} \
-            -t ${{ steps.prepare.outputs.app_version }} \
+            -t "${GITHUB_REF_NAME}" \
+            -t "${APP_VERSION}" \
             -t latest \
             --sbom spdx
 
@@ -111,7 +113,7 @@ jobs:
         id: prepare
         run: |
           set -euo pipefail
-          APP_VERSION="${GITHUB_REF_NAME//v/}"
+          APP_VERSION="${GITHUB_REF_NAME#v}"
           {
             echo "app_version=$APP_VERSION"
             echo "image_name=${DOCKER_REGISTRY}/meltano"

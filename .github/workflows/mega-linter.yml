@@ -34,7 +34,7 @@ jobs:
       - name: MegaLinter
         id: ml
         # Use the Cupcake flavor (Go and Python).
-        uses: oxsecurity/megalinter/flavors/cupcake@ef3e84b8b836d76db562d0f3ed7da61e8fd538bc  # v9.6.0
+        uses: oxsecurity/megalinter/flavors/cupcake@f2fe8c1cba37091848df3e524066c8c23ef353ed  # v10.2.0
         env:
           # Only Actions-specific values (secrets, runner behavior) belong
           # here. Generic MegaLinter/repo config belongs in .mega-linter.yml
@@ -43,6 +43,7 @@ jobs:
           # All available variables are described in documentation
           # https://megalinter.io/latest/configuration/
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOTOOLCHAIN: auto
           # Allow GITHUB_TOKEN for working around rate limits (aquasecurity/trivy#7668).
           REPOSITORY_TRIVY_UNSECURED_ENV_VARIABLES: GITHUB_TOKEN
           # zizmor's "artipacked" audit needs the GitHub API (to verify
