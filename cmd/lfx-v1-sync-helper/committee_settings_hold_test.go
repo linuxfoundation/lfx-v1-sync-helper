@@ -308,7 +308,7 @@ func TestSettingsHoldRequestShapes(t *testing.T) {
 	updateCommitteeSettingsFn = updateCommitteeSettingsAPI
 	t.Cleanup(func() { updateCommitteeSettingsFn = origUpdate })
 
-	if err := setCommitteeSetting(t.Context(), "committee-uid", holdFieldBusinessEmailRequired, false); err != nil {
+	if err := writeCommitteeSetting(t.Context(), "committee-uid", holdFieldBusinessEmailRequired, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if body["business_email_required"] != false || body["members_can_view_social_listening"] != true {

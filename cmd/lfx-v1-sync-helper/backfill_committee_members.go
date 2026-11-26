@@ -948,8 +948,12 @@ func relaxCommitteeSettings(ctx context.Context, c *memberCommittee, owner strin
 	if err != nil {
 		return nil, err
 	}
+	originals := map[string]bool{
+		holdFieldEnableVoting:          hold.OriginalEnableVoting,
+		holdFieldBusinessEmailRequired: hold.OriginalBusinessEmailRequired,
+	}
 	for _, field := range hold.RelaxedFields {
-		if err := setCommitteeSetting(ctx, c.uid, field, false); err != nil {
+		if err := relaxCommitteeSetting(ctx, c.uid, field, originals[field], owner); err != nil {
 			return hold, err
 		}
 	}
@@ -1063,14 +1067,6 @@ func restoreCommitteeSettings(ctx context.Context, committeeUID, expectedOwner s
 	return markRestored("")
 }
 
-// setCommitteeSetting sets one org-requiring setting with a fresh read and its
-// ETag, as the service principal, retrying a lost ETag race. It writes the
-// v1→v2 pending marker first so the indexer echo is not sent to v1 (the hold
-// also blocks it) and removes the marker when the write fails.
-func setCommitteeSetting(ctx context.Context, uid, field string, value bool) error {
-	return writeCommitteeSetting(ctx, uid, field, value, false)
-}
-
 // restoreCommitteeSetting writes value even when v2 already has it. A relax
 // request that was cancelled or timed out may still commit later; it carries
 // the ETag it read, so this write, which advances the revision, makes it fail
@@ -1079,6 +1075,63 @@ func restoreCommitteeSetting(ctx context.Context, uid, field string, value bool)
 	return writeCommitteeSetting(ctx, uid, field, value, true)
 }
 
+// errHoldNoLongerActive stops a relax write once the committee's hold has been
+// restored, or taken over by another run, since this run wrote it.
+var errHoldNoLongerActive = errors.New("committee settings hold is no longer this run's active hold")
+
+// relaxCommitteeSetting turns one setting off for this run's hold. A run that
+// stalls past the lease timeout can wake after the new lease owner has already
+// restored its hold; a plain retrying write would then turn the setting off
+// again with nothing left to restore it. So every attempt first checks that the
+// hold is still this run's and not restored, and after a successful write the
+// hold is checked again: if it was restored meanwhile, the original value is
+// written back at once.
+func relaxCommitteeSetting(ctx context.Context, uid, field string, original bool, owner string) error {
+	var err error
+	for attempt := 0; attempt < committeeSettingMaxAttempts; attempt++ {
+		hold, _, holdErr := getCommitteeSettingsHold(ctx, uid)
+		if holdErr != nil {
+			return holdErr
+		}
+		if hold.State == holdStateRestored || (owner != "" && hold.Owner != owner) {
+			return fmt.Errorf("%w (state %s, owner %q)", errHoldNoLongerActive, hold.State, hold.Owner)
+		}
+		switch field {
+		case holdFieldEnableVoting:
+			err = setCommitteeEnableVoting(ctx, uid, false, false)
+		case holdFieldBusinessEmailRequired:
+			err = setCommitteeBusinessEmailRequired(ctx, uid, false, false)
+		default:
+			return fmt.Errorf("unknown committee setting %q", field)
+		}
+		var conflict *committeeservice.ConflictError
+		if !errors.As(err, &conflict) {
+			break
+		}
+	}
+	if err != nil {
+		return err
+	}
+	hold, _, err := getCommitteeSettingsHold(ctx, uid)
+	if err != nil {
+		return err
+	}
+	if hold.State == holdStateRestored {
+		// Restored while this write was in flight. Another run's active hold
+		// (a new owner, not restored) wants the setting off, so it is left.
+		if undoErr := restoreCommitteeSetting(ctx, uid, field, original); undoErr != nil {
+			return fmt.Errorf("%w; undoing the relax of %s: %w", errHoldNoLongerActive, field, undoErr)
+		}
+		return fmt.Errorf("%w (restored during the relax of %s; undone)", errHoldNoLongerActive, field)
+	}
+	return nil
+}
+
+// writeCommitteeSetting sets one org-requiring setting with a fresh read and
+// its ETag, as the service principal, retrying a lost ETag race. Without force
+// it skips a write that would not change the value. Each write records the
+// v1→v2 pending marker first so the indexer echo is not sent to v1 (the hold
+// also blocks it) and removes the marker when the write fails.
 func writeCommitteeSetting(ctx context.Context, uid, field string, value, force bool) error {
 	var err error
 	for attempt := 0; attempt < committeeSettingMaxAttempts; attempt++ {

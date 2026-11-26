@@ -1019,7 +1019,7 @@ func TestRestoreInvalidatesOutstandingRelaxWrite(t *testing.T) {
 		return apply(p)
 	}
 	seedSettingsHold(t, h.store, committeeSettingsHold{State: holdStateCaptured, OriginalEnableVoting: true, RelaxedFields: []string{holdFieldEnableVoting}})
-	if err := setCommitteeSetting(t.Context(), "committee-uid", holdFieldEnableVoting, false); err == nil {
+	if err := writeCommitteeSetting(t.Context(), "committee-uid", holdFieldEnableVoting, false, false); err == nil {
 		t.Fatal("the relax write should have timed out")
 	}
 	if err := restoreCommitteeSettings(t.Context(), "committee-uid", ""); err != nil {
@@ -1136,5 +1136,120 @@ func TestProcessMemberCommitteeRestoresOnlyItsOwnHold(t *testing.T) {
 				t.Errorf("hold = %+v, v2 = %+v", hold, v2)
 			}
 		})
+	}
+}
+
+func TestRelaxCommitteeSettingAfterStall(t *testing.T) {
+	// Run A stalls in its relax write past the lease timeout. Run B takes
+	// over and restores A's hold (forced write + mark restored), or replaces
+	// it with its own. A must not leave enable_voting off with no hold to
+	// restore it.
+	for _, tt := range []struct {
+		name string
+		// during runs inside A's first write, before (stale) or after it commits.
+		during      func(t *testing.T, h *syncTestHarness, v *revisionedVoting)
+		commitFirst bool
+		wantErr     bool
+		wantVoting  bool
+	}{
+		{
+			name:       "restored before A retries",
+			during:     func(t *testing.T, h *syncTestHarness, v *revisionedVoting) { v.restoreBy(t, h, "run-a") },
+			wantErr:    true,
+			wantVoting: true,
+		},
+		{
+			name:        "restored after A's write commits",
+			during:      func(t *testing.T, h *syncTestHarness, v *revisionedVoting) { v.markRestored(t, h, "run-a") },
+			commitFirst: true,
+			wantErr:     true,
+			wantVoting:  true,
+		},
+		{
+			name: "replaced by a newer run's active hold",
+			during: func(t *testing.T, h *syncTestHarness, _ *revisionedVoting) {
+				seedSettingsHold(t, h.store, committeeSettingsHold{Owner: "run-b", State: holdStateRelaxed, OriginalEnableVoting: true, RelaxedFields: []string{holdFieldEnableVoting}})
+			},
+			commitFirst: true,
+			wantVoting:  false, // run B wants it off; A leaves it
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := setupMemberBackfillTest(t)
+			v := &revisionedVoting{enabled: true}
+			v.install(t)
+			seedSettingsHold(t, h.store, committeeSettingsHold{Owner: "run-a", State: holdStateCaptured, OriginalEnableVoting: true, RelaxedFields: []string{holdFieldEnableVoting}})
+			first := true
+			v.beforeWrite = func(p *committeeservice.UpdateCommitteeBasePayload) (bool, error) {
+				if !first {
+					return false, nil
+				}
+				first = false
+				if tt.commitFirst {
+					err := v.apply(p)
+					tt.during(t, h, v)
+					return true, err
+				}
+				tt.during(t, h, v)
+				return false, nil // A's stale write now fails its ETag check
+			}
+			err := relaxCommitteeSetting(t.Context(), "committee-uid", holdFieldEnableVoting, true, "run-a")
+			if (err != nil) != tt.wantErr || (err != nil && !errors.Is(err, errHoldNoLongerActive)) {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if v.enabled != tt.wantVoting {
+				t.Errorf("enable_voting = %v, want %v", v.enabled, tt.wantVoting)
+			}
+		})
+	}
+}
+
+// revisionedVoting is a committee base whose writes are checked against its
+// revision, like committee-service's If-Match handling.
+type revisionedVoting struct {
+	enabled     bool
+	revision    int
+	beforeWrite func(*committeeservice.UpdateCommitteeBasePayload) (handled bool, err error)
+}
+
+func (v *revisionedVoting) etag() string { return fmt.Sprintf("rev-%d", v.revision) }
+
+func (v *revisionedVoting) apply(p *committeeservice.UpdateCommitteeBasePayload) error {
+	if p.IfMatch == nil || *p.IfMatch != v.etag() {
+		return &committeeservice.ConflictError{Message: "revision mismatch"}
+	}
+	v.enabled = p.EnableVoting
+	v.revision++
+	return nil
+}
+
+// restoreBy simulates another run's forced restore write, then marks the hold restored.
+func (v *revisionedVoting) restoreBy(t *testing.T, h *syncTestHarness, owner string) {
+	t.Helper()
+	v.enabled = true
+	v.revision++
+	v.markRestored(t, h, owner)
+}
+
+func (v *revisionedVoting) markRestored(t *testing.T, h *syncTestHarness, owner string) {
+	t.Helper()
+	now := time.Now()
+	seedSettingsHold(t, h.store, committeeSettingsHold{Owner: owner, State: holdStateRestored, RestoredAt: &now, OriginalEnableVoting: true, RelaxedFields: []string{holdFieldEnableVoting}})
+}
+
+func (v *revisionedVoting) install(t *testing.T) {
+	t.Helper()
+	origBase, origUpdate := fetchCommitteeBase, updateCommitteeBaseFn
+	t.Cleanup(func() { fetchCommitteeBase, updateCommitteeBaseFn = origBase, origUpdate })
+	fetchCommitteeBase = func(_ context.Context, uid string) (*committeeservice.CommitteeBaseWithReadonlyAttributes, string, error) {
+		return &committeeservice.CommitteeBaseWithReadonlyAttributes{UID: &uid, ProjectUID: sptr("p"), Name: sptr("C"), EnableVoting: v.enabled}, v.etag(), nil
+	}
+	updateCommitteeBaseFn = func(_ context.Context, p *committeeservice.UpdateCommitteeBasePayload) error {
+		if v.beforeWrite != nil {
+			if handled, err := v.beforeWrite(p); handled {
+				return err
+			}
+		}
+		return v.apply(p)
 	}
 }
