@@ -490,6 +490,16 @@ func syncCommitteeUpdateToV1(ctx context.Context, committeeUID, projectSFID, com
 	}
 
 	payload := mapV2DataToV1CommitteeUpdatePayload(data)
+	if payload.EnableVoting != nil {
+		enableVoting, err := v1EnableVotingForCommittee(ctx, committeeUID, *payload.EnableVoting)
+		if err != nil {
+			return err
+		}
+		if enableVoting == nil {
+			log.InfoContext(ctx, "committee settings held by member backfill; omitting enable_voting from v1 update")
+		}
+		payload.EnableVoting = enableVoting
+	}
 	parentSFID, err := resolveV2CommitteeParentSFID(ctx, projectSFID, data, isFullCommitteeIndexerSnapshot(data))
 	if err != nil {
 		return err
@@ -502,6 +512,43 @@ func syncCommitteeUpdateToV1(ctx context.Context, committeeUID, projectSFID, com
 
 	log.InfoContext(ctx, "successfully updated committee in v1 from indexer event")
 	return nil
+}
+
+// v1EnableVotingForCommittee returns the enable_voting value to send to v1 for
+// a committee update event, or nil to leave v1's value alone.
+//
+// A committee the member backfill has never held sends the snapshot as is. For
+// one it has held (in any state), the snapshot may be the backfill's temporary
+// false from an event delivered long after the restore, past both the hold's
+// grace window and the pending marker (the stream retains events for weeks),
+// so the current v2 value is read instead. The hold is checked after that
+// read: the backfill writes its hold before relaxing, so a read that saw a
+// relaxed value also sees the hold.
+func v1EnableVotingForCommittee(ctx context.Context, committeeUID string, snapshot bool) (*bool, error) {
+	everHeld, err := committeeHasSettingsHold(ctx, committeeUID)
+	if err != nil {
+		return nil, err
+	}
+	if !everHeld {
+		return &snapshot, nil
+	}
+	base, _, err := fetchCommitteeBase(ctx, committeeUID)
+	if err != nil {
+		var notFound *committeeservice.NotFoundError
+		if errors.As(err, &notFound) {
+			return nil, nil // Deleted since the event; nothing current to send.
+		}
+		return nil, err
+	}
+	if base == nil {
+		return nil, fmt.Errorf("empty committee base response for %s", committeeUID)
+	}
+	held, err := committeeSettingHeld(ctx, committeeUID, holdFieldEnableVoting)
+	if err != nil || held {
+		return nil, err
+	}
+	current := base.EnableVoting
+	return &current, nil
 }
 
 // resolveV2CommitteeParentSFID maps a parent UID to the v1 project-service
